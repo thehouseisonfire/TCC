@@ -1,0 +1,18 @@
+# Rust build artifacts
+/mqtt-auth-biscuit/target/
+
+# Token files (if they are sensitive/temporary)
+/mqtt-auth-biscuit/*.txt
+
+# Mosquitto build artifacts
+/mosquitto-src/build/
+/mosquitto-src/config.h
+/mosquitto-src/config.mk
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/

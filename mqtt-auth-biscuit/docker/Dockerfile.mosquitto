@@ -1,0 +1,4 @@
+FROM eclipse-mosquitto:2.0.14
+RUN apk add --no-cache libgcc libstdc++
+COPY target/release/libmosquitto_auth_biscuit.so /mosquitto/plugins/
+# We might need to copy mosquitto.conf as well

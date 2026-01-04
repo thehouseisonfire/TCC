@@ -1,0 +1,1 @@
+{"rustc":7480487221693460596,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[13940516424042038181,"build_script_build",false,17775518371694954280]],"local":[{"RerunIfChanged":{"output":"debug/build/biscuit-auth-da0fd28a7bd3cfe0/output","paths":["src/format/schema.proto"]}}],"rustflags":[],"config":0,"compile_kind":0}

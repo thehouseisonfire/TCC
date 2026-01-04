@@ -1,0 +1,25 @@
+version: '3.9'
+services:
+  mosquitto:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.mosquitto
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
+    cpuset: "0-1"
+    mem_limit: 512m
+    networks:
+      - mqtt-net
+
+  metrics-collector:
+    image: prom/prometheus
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - mqtt-net
+
+networks:
+  mqtt-net:
+    driver: bridge

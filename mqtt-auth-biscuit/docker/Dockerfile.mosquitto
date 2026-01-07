@@ -1,4 +1,8 @@
-FROM eclipse-mosquitto:2.0.14
-RUN apk add --no-cache libgcc libstdc++
+FROM eclipse-mosquitto:2.0.15
+# Install dependencies from local context
+COPY docker/packages/*.apk /tmp/
+RUN apk add --allow-untrusted /tmp/*.apk && \
+    rm /tmp/*.apk
+
 COPY target/release/libmosquitto_auth_biscuit.so /mosquitto/plugins/
-# We might need to copy mosquitto.conf as well
+# mosquitto.conf is already mounted via docker-compose

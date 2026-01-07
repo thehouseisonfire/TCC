@@ -10,21 +10,18 @@ pub fn verify_biscuit_token(
     // Deserialize token
     let biscuit = Biscuit::from(token_bytes, root_public_key)?;
     
-    // Create authorizer with context
-    let mut authorizer = biscuit.authorizer()
-        .map_err(|_| biscuit_auth::error::Token::InternalError)?;
-    
-    authorizer.add_code(format!(
+    use biscuit_auth::macros::authorizer;
+    let mut authorizer = authorizer!(
         r#"
-        resource("{}");
-        operation("{}");
-        time({});
+        resource({topic});
+        operation({operation});
+        time({time});
         allow if true;
         "#,
-        topic,
-        operation,
-        Utc::now().timestamp()
-    )).map_err(|_| biscuit_auth::error::Token::InternalError)?;
+        topic = topic,
+        operation = operation,
+        time = Utc::now().timestamp()
+    ).build(&biscuit).map_err(|_| biscuit_auth::error::Token::InternalError)?;
     
     // Authorize
     authorizer.authorize().map(|_| true).map_err(|e| e)

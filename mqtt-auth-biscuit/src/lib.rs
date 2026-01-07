@@ -110,7 +110,7 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
     
     // Biscuit root key
     let biscuit_root_key_bytes = [0u8; 32];
-    let biscuit_root_key = BiscuitPublicKey::from_bytes(&biscuit_root_key_bytes).unwrap();
+    let biscuit_root_key = BiscuitPublicKey::from_bytes(&biscuit_root_key_bytes, biscuit_auth::Algorithm::Ed25519).unwrap();
 
     let state = Box::new(PluginState {
         auth_engine: Arc::new(AuthEngine::new(jwt_key, biscuit_root_key)),

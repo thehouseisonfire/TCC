@@ -15,7 +15,7 @@ pub fn verify_jwt_token(
     token: &str,
     public_key: &DecodingKey,
 ) -> Result<Claims, jsonwebtoken::errors::Error> {
-    let validation = Validation::new(Algorithm::RS256);
+    let validation = Validation::new(Algorithm::HS256);
     // You can customize validation here, e.g., set expected audience
     let token_data = decode::<Claims>(token, public_key, &validation)?;
     Ok(token_data.claims)

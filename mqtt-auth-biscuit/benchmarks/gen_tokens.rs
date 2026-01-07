@@ -25,7 +25,7 @@ fn main() {
 
     // Biscuit
     let root_bytes = [0u8; 32];
-    let root_keypair = KeyPair::from(&PrivateKey::from_bytes(&root_bytes).unwrap());
+    let root_keypair = KeyPair::from(&PrivateKey::from_bytes(&root_bytes, biscuit_auth::Algorithm::Ed25519).unwrap());
     
     let biscuit = Biscuit::builder()
         .build(&root_keypair).unwrap();
@@ -38,4 +38,5 @@ fn main() {
     let mut f_biscuit = File::create("biscuit_token.txt").unwrap();
     f_biscuit.write_all(biscuit_b64.as_bytes()).unwrap();
     println!("Generated Biscuit (Base64): {}", biscuit_b64);
+    println!("Public Key Bytes: {:?}", root_keypair.public().to_bytes());
 }

@@ -20,6 +20,7 @@ impl AuthEngine {
     }
 
     pub fn authenticate(&self, token: &str) -> Result<TokenType, String> {
+        let token = token.trim_matches('\0').trim();
         if token.starts_with("eyJ") {
             // Likely JWT
             verify_jwt_token(token, &self.jwt_key)
@@ -29,7 +30,7 @@ impl AuthEngine {
             // Try Biscuit (assuming it's base64 encoded if string)
             use base64::{Engine as _, engine::general_purpose};
             let bytes = general_purpose::STANDARD.decode(token)
-                .map_err(|_| "Invalid token format".to_string())?;
+                .map_err(|e| format!("Invalid token format (base64 error: {})", e))?;
             
             // We just return the bytes for now, authorization will happen per topic
             Ok(TokenType::Biscuit(bytes))

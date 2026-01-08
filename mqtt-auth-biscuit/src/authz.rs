@@ -1,31 +1,45 @@
 use crate::auth::TokenType;
 use crate::biscuit_handler::verify_biscuit_token;
+use crate::http_policy;
+use crate::policy::PolicyMode;
+use crate::sqlite_policy::SqlitePolicy;
 use biscuit_auth::PublicKey as BiscuitPublicKey;
 
 pub fn check_authorization(
     token_type: &TokenType,
+    client_id: &str,
     topic: &str,
     access: i32,
     biscuit_root_key: &BiscuitPublicKey,
+    policy_mode: PolicyMode,
+    sqlite_policy: Option<&SqlitePolicy>,
+    http_url: Option<&str>,
 ) -> bool {
     match token_type {
-        TokenType::JWT(claims) => {
-            let roles = claims.roles.as_ref();
-            if let Some(roles) = roles {
-                if roles.iter().any(|r| r.trim() == "admin") {
-                    return true;
+        TokenType::JWT { claims, raw } => {
+            match policy_mode {
+                PolicyMode::TokenOnly => {
+                    let roles = claims.roles.as_ref();
+                    if let Some(roles) = roles {
+                        if roles.iter().any(|r| r.trim() == "admin") {
+                            return true;
+                        }
+                    }
+
+                    let subject = claims.sub.trim();
+                    let prefix = format!("sensors/{}", subject);
+                    let topic = topic.trim();
+                    topic.contains(&prefix) || topic.contains(subject)
+                }
+                PolicyMode::Sqlite => {
+                    let Some(sqlite_policy) = sqlite_policy else { return false };
+                    sqlite_policy.check(client_id, topic, access).unwrap_or(false)
+                }
+                PolicyMode::Http => {
+                    let Some(url) = http_url else { return false };
+                    http_policy::check_http(url, client_id, topic, access, Some(raw)).unwrap_or(false)
                 }
             }
-            
-            let client_id = claims.sub.trim();
-            let prefix = format!("sensors/{}", client_id);
-            let topic = topic.trim();
-            
-            if topic.contains(&prefix) || topic.contains(client_id) {
-                return true;
-            }
-            
-            false
         }
         TokenType::Biscuit(token_bytes) => {
             let operation = if (access & 0x02) != 0 {
@@ -36,7 +50,17 @@ pub fn check_authorization(
                 "read"
             };
 
-            verify_biscuit_token(token_bytes, biscuit_root_key, topic, operation).unwrap_or(true) // Permissive for testing
+            match policy_mode {
+                PolicyMode::TokenOnly => verify_biscuit_token(token_bytes, biscuit_root_key, topic, operation).unwrap_or(false),
+                PolicyMode::Sqlite => {
+                    let Some(sqlite_policy) = sqlite_policy else { return false };
+                    sqlite_policy.check(client_id, topic, access).unwrap_or(false)
+                }
+                PolicyMode::Http => {
+                    let Some(url) = http_url else { return false };
+                    http_policy::check_http(url, client_id, topic, access, None).unwrap_or(false)
+                }
+            }
         }
     }
 }

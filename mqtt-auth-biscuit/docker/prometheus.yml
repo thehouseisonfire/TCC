@@ -1,8 +1,8 @@
 global:
   scrape_interval: 5s
 scrape_configs:
-  - job_name: "mosquitto"
+  - job_name: "cadvisor"
     static_configs:
       - targets: [
-          "mosquitto:1883",
-        ] # Mosquitto doesn't expose prometheus natively easily without exporter
+          "cadvisor:8080",
+        ]

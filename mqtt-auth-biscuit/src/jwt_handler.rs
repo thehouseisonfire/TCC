@@ -1,4 +1,4 @@
-use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{decode, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -14,9 +14,8 @@ pub struct Claims {
 pub fn verify_jwt_token(
     token: &str,
     public_key: &DecodingKey,
+    validation: &Validation,
 ) -> Result<Claims, jsonwebtoken::errors::Error> {
-    let validation = Validation::new(Algorithm::HS256);
-    // You can customize validation here, e.g., set expected audience
-    let token_data = decode::<Claims>(token, public_key, &validation)?;
+    let token_data = decode::<Claims>(token, public_key, validation)?;
     Ok(token_data.claims)
 }

@@ -6,9 +6,6 @@ import json
 def run_benchmark(host, port, username, password, topic, message_count=1000):
     latencies = []
     
-    def on_publish(client, userdata, mid):
-        latencies.append(time.time() - userdata['start_time'])
-
     def on_connect(client, userdata, flags, rc, properties=None):
         if rc != 0:
             print(f"      Connection failed with code {rc}")

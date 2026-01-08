@@ -24,6 +24,7 @@ base64 = "0.22"
 chrono = "0.4"
 lru = "0.16"
 dashmap = "6.1"
+hex = "0.4"
 
 [profile.release]
 panic = "abort"

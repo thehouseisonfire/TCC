@@ -30,6 +30,9 @@ cargo run --bin gen-tokens
 
 This will create/update `benchmarks/tokens.json`.
 
+The Docker Mosquitto configuration is pre-wired to the deterministic keys used
+by `gen-tokens` (see `docker/mosquitto.conf`).
+
 ## Step 3: Start the Environment
 
 Start the Mosquitto broker and metrics collector (Prometheus) using Docker

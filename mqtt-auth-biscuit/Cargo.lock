@@ -747,6 +747,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "env_logger",
+ "hex",
  "jsonwebtoken",
  "libc",
  "log",

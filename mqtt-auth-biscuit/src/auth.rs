@@ -1,21 +1,23 @@
 use crate::jwt_handler::{verify_jwt_token, Claims};
-use biscuit_auth::PublicKey as BiscuitPublicKey;
 use jsonwebtoken::DecodingKey;
+use jsonwebtoken::Validation;
 
 #[derive(Clone)]
 pub enum TokenType {
-    JWT(Claims),
+    JWT { claims: Claims, raw: String },
     Biscuit(Vec<u8>),
 }
 
 pub struct AuthEngine {
     jwt_key: DecodingKey,
+    jwt_validation: Validation,
 }
 
 impl AuthEngine {
-    pub fn new(jwt_key: DecodingKey, _biscuit_root_key: BiscuitPublicKey) -> Self {
+    pub fn new(jwt_key: DecodingKey, jwt_validation: Validation) -> Self {
         Self {
             jwt_key,
+            jwt_validation,
         }
     }
 
@@ -23,8 +25,11 @@ impl AuthEngine {
         let token = token.trim_matches('\0').trim();
         if token.starts_with("eyJ") {
             // Likely JWT
-            verify_jwt_token(token, &self.jwt_key)
-                .map(TokenType::JWT)
+            verify_jwt_token(token, &self.jwt_key, &self.jwt_validation)
+                .map(|claims| TokenType::JWT {
+                    claims,
+                    raw: token.to_string(),
+                })
                 .map_err(|e| format!("JWT verification failed: {}", e))
         } else {
             // Try Biscuit (assuming it's base64 encoded if string)

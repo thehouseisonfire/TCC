@@ -1,7 +1,7 @@
 # Mosquitto Auth Biscuit Plugin
 
-A production-grade Rust plugin for the Eclipse Mosquitto MQTT broker that
-natively supports both JWT and Biscuit tokens.
+A Rust plugin for the Eclipse Mosquitto MQTT broker that natively supports
+both JWT and Biscuit tokens, intended as a reproducible research prototype.
 
 ## Features
 
@@ -30,8 +30,7 @@ The plugin will be generated at `target/release/libmosquitto_auth_biscuit.so`.
 ### Running with Docker
 
 ```bash
-cd docker
-docker-compose up --build
+docker-compose -f docker/docker-compose.yml up --build
 ```
 
 ### Generating Tokens

@@ -16,7 +16,7 @@ pub fn verify_biscuit_token(
         resource({topic});
         operation({operation});
         time({time});
-        allow if true;
+        allow if right($op, $res), operation($op), resource($res);
         "#,
         topic = topic,
         operation = operation,

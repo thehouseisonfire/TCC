@@ -150,7 +150,7 @@ The harness and scenarios are implemented and wired, but **the project still nee
 
 ---
 
-## Updated Roadmap (Next Steps)
+## Roadmap (Next Steps)
 
 ### Phase 6: Benchmark Execution (Next Immediate Work)
 
@@ -194,6 +194,24 @@ The harness and scenarios are implemented and wired, but **the project still nee
 - **Docker permissions**: `tc netem` requires `CAP_NET_ADMIN` (already configured in compose).
 - **MTU edge cases**: very low MTU can cause unexpected behavior depending on Docker networking and host kernel.
 - **HTTP fallback semantics**: hybrid mode relies on HTTP failures being treated as errors (non-200 => error) to trigger fallback.
+
+## Research Footnotes
+
+### MQTT v5 AUTH Packet Implementation
+
+**Context**: The research design requires measuring broker-side token verification latency during MQTT v5 enhanced authentication flows, specifically re-authentication via `AUTH` packets (reason code `0x19`) for token renewal without disconnection.
+
+**Implementation Decision**: Paho Python does not provide a straightforward public API for programmatically sending `AUTH` packets after connection establishment. The library supports enhanced authentication during the initial CONNECT/CONNACK handshake but lacks methods like `send_auth()` or `reauthenticate()` for triggering mid-session re-authentication.
+
+**Workaround**: `benchmarks/mqtt5_auth_client.py` implements a minimal raw-socket MQTT5 client that:
+- Sends `CONNECT` with Authentication Method/Data
+- After connection establishment, sends an `AUTH` packet with updated token data
+- Measures connect latency and reauth latency separately
+
+**Impact on Research Validity**:
+- **Broker-side measurements remain accurate**: The plugin's token verification logic is independent of client transport implementation. Both JWT and Biscuit tokens are tested under identical client conditions, preserving comparative validity
+- **Improved isolation**: Raw socket control provides more precise timing measurements by eliminating Paho's internal state management overhead, actually **strengthening** the isolation of broker-side processing costs.
+- **No hypothesis compromise**: The hypothesis focus on broker-side functional viability, cryptographic verification costs, and policy evaluation latency—all measured server-side and unaffected by client implementation details.
 
 ---
 

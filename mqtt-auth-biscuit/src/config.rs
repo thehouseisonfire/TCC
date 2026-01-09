@@ -74,6 +74,7 @@ pub fn parse_options(options: *mut crate::MosquittoOpt, option_count: i32) -> Re
                     "token" => PolicyMode::TokenOnly,
                     "sqlite" => PolicyMode::Sqlite,
                     "http" => PolicyMode::Http,
+                    "hybrid" => PolicyMode::Hybrid,
                     _ => return Err(format!("Invalid policy_mode: {value}")),
                 }
             }

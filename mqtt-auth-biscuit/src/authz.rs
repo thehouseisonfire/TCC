@@ -17,20 +17,22 @@ pub fn check_authorization(
 ) -> bool {
     match token_type {
         TokenType::JWT { claims, raw } => {
-            match policy_mode {
-                PolicyMode::TokenOnly => {
-                    let roles = claims.roles.as_ref();
-                    if let Some(roles) = roles {
-                        if roles.iter().any(|r| r.trim() == "admin") {
-                            return true;
-                        }
+            let token_only = || {
+                let roles = claims.roles.as_ref();
+                if let Some(roles) = roles {
+                    if roles.iter().any(|r| r.trim() == "admin") {
+                        return true;
                     }
-
-                    let subject = claims.sub.trim();
-                    let prefix = format!("sensors/{}", subject);
-                    let topic = topic.trim();
-                    topic.contains(&prefix) || topic.contains(subject)
                 }
+
+                let subject = claims.sub.trim();
+                let prefix = format!("sensors/{}", subject);
+                let topic = topic.trim();
+                topic.contains(&prefix) || topic.contains(subject)
+            };
+
+            match policy_mode {
+                PolicyMode::TokenOnly => token_only(),
                 PolicyMode::Sqlite => {
                     let Some(sqlite_policy) = sqlite_policy else { return false };
                     sqlite_policy.check(client_id, topic, access).unwrap_or(false)
@@ -38,6 +40,16 @@ pub fn check_authorization(
                 PolicyMode::Http => {
                     let Some(url) = http_url else { return false };
                     http_policy::check_http(url, client_id, topic, access, Some(raw)).unwrap_or(false)
+                }
+                PolicyMode::Hybrid => {
+                    let Some(url) = http_url else {
+                        return token_only();
+                    };
+
+                    match http_policy::check_http(url, client_id, topic, access, Some(raw)) {
+                        Ok(allowed) => allowed,
+                        Err(_) => token_only(),
+                    }
                 }
             }
         }
@@ -50,8 +62,10 @@ pub fn check_authorization(
                 "read"
             };
 
+            let token_only = || verify_biscuit_token(token_bytes, biscuit_root_key, topic, operation).unwrap_or(false);
+
             match policy_mode {
-                PolicyMode::TokenOnly => verify_biscuit_token(token_bytes, biscuit_root_key, topic, operation).unwrap_or(false),
+                PolicyMode::TokenOnly => token_only(),
                 PolicyMode::Sqlite => {
                     let Some(sqlite_policy) = sqlite_policy else { return false };
                     sqlite_policy.check(client_id, topic, access).unwrap_or(false)
@@ -59,6 +73,16 @@ pub fn check_authorization(
                 PolicyMode::Http => {
                     let Some(url) = http_url else { return false };
                     http_policy::check_http(url, client_id, topic, access, None).unwrap_or(false)
+                }
+                PolicyMode::Hybrid => {
+                    let Some(url) = http_url else {
+                        return token_only();
+                    };
+
+                    match http_policy::check_http(url, client_id, topic, access, None) {
+                        Ok(allowed) => allowed,
+                        Err(_) => token_only(),
+                    }
                 }
             }
         }

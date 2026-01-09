@@ -8,7 +8,7 @@ authentication plugin.
 - **Rust**: For building the plugin and token generator.
 - **Docker & Docker Compose**: For running the test environment.
 - **Python 3**: For running the metrics collector.
-  - Install dependencies: `pip install paho-mqtt statistics`
+  - Install dependency: `pip install paho-mqtt`
 
 ## Step 1: Build the Plugin
 
@@ -52,6 +52,24 @@ You can run the benchmark script to measure latency and throughput:
 
 ```bash
 python3 benchmarks/metrics_collector.py
+```
+
+You can also run the full scenario battery from `ARTICLE.MD` (MTU sweep, thundering herd, policy complexity, HTTP introspection latency/loss, hybrid contingency, and MQTT5 reauthentication):
+
+```bash
+python3 benchmarks/run_scenarios.py
+```
+
+To select a different Mosquitto configuration for a run (e.g. HTTP policy or hybrid policy), set `MOSQUITTO_CONF`:
+
+```bash
+MOSQUITTO_CONF=docker/mosquitto_http.conf python3 benchmarks/run_scenarios.py
+```
+
+For the MQTT5 `AUTH` reauthentication microbenchmark only:
+
+```bash
+python3 benchmarks/mqtt5_auth_client.py --token1 "<token>" --token2 "<token>"
 ```
 
 You can also monitor resource usage via:

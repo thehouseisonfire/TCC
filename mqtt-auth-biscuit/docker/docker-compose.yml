@@ -7,11 +7,28 @@ services:
     ports:
       - "1883:1883"
     volumes:
-      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - ${MOSQUITTO_CONF:-./mosquitto.conf}:/mosquitto/config/mosquitto.conf
     cpuset: "0-1"
     mem_limit: 512m
     networks:
       - mqtt-net
+
+  netem:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.netem
+    network_mode: "service:mosquitto"
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - NETEM_IFACE=${NETEM_IFACE:-eth0}
+      - NETEM_MTU=${NETEM_MTU:-}
+      - NETEM_DELAY_MS=${NETEM_DELAY_MS:-}
+      - NETEM_LOSS_PCT=${NETEM_LOSS_PCT:-}
+      - NETEM_RATE_KBIT=${NETEM_RATE_KBIT:-}
+      - NETEM_CLEAR=${NETEM_CLEAR:-0}
+    depends_on:
+      - mosquitto
 
   metrics-collector:
     image: prom/prometheus
@@ -19,6 +36,22 @@ services:
       - "9090:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - mqtt-net
+
+  authz:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.authz
+    environment:
+      - AUTHZ_PORT=8081
+      - AUTHZ_DELAY_MS=0
+      - AUTHZ_FAIL_MODE=none
+      - AUTHZ_FAIL_RATE=0
+      - AUTHZ_ALLOW_MODE=topic_prefix
+      - AUTHZ_TOPIC_PREFIX=sensors/
+    ports:
+      - "8081:8081"
     networks:
       - mqtt-net
 

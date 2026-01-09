@@ -3,6 +3,7 @@ pub enum PolicyMode {
     TokenOnly,
     Sqlite,
     Http,
+    Hybrid,
 }
 
 #[derive(Clone, Debug)]

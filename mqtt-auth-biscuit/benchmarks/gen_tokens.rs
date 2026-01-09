@@ -1,51 +1,164 @@
-use biscuit_auth::{Biscuit, KeyPair, PrivateKey};
+use biscuit_auth::{Biscuit, BlockBuilder, KeyPair, PrivateKey};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs::File;
 use std::io::Write;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     sub: String,
     exp: usize,
     roles: Option<Vec<String>>,
+    pad: Option<String>,
 }
 
 fn main() {
     // JWT
-    let claims = Claims {
-        sub: "client_1".to_string(),
-        exp: 2000000000, // Year 2033
-        roles: Some(vec!["admin".to_string()]),
-    };
     let jwt_secret = "secret";
-    let jwt = encode(&Header::new(Algorithm::HS256), &claims, &EncodingKey::from_secret(jwt_secret.as_bytes())).unwrap();
+    let jwt_long = {
+        let claims = Claims {
+            sub: "client_1".to_string(),
+            exp: 2000000000, // Year 2033
+            roles: Some(vec!["admin".to_string()]),
+            pad: None,
+        };
+        encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(jwt_secret.as_bytes()),
+        )
+        .unwrap()
+    };
+
+    let jwt_short = {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as usize;
+        let claims = Claims {
+            sub: "client_1".to_string(),
+            exp: now + 5,
+            roles: Some(vec!["admin".to_string()]),
+            pad: None,
+        };
+        encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(jwt_secret.as_bytes()),
+        )
+        .unwrap()
+    };
+
+    let jwt_pad_2k = {
+        let claims = Claims {
+            sub: "client_1".to_string(),
+            exp: 2000000000,
+            roles: Some(vec!["admin".to_string()]),
+            pad: Some("A".repeat(2048)),
+        };
+        encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(jwt_secret.as_bytes()),
+        )
+        .unwrap()
+    };
+
+    let jwt_pad_8k = {
+        let claims = Claims {
+            sub: "client_1".to_string(),
+            exp: 2000000000,
+            roles: Some(vec!["admin".to_string()]),
+            pad: Some("A".repeat(8192)),
+        };
+        encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(jwt_secret.as_bytes()),
+        )
+        .unwrap()
+    };
 
     // Biscuit
     let root_bytes = [0u8; 32];
     let root_keypair = KeyPair::from(&PrivateKey::from_bytes(&root_bytes, biscuit_auth::Algorithm::Ed25519).unwrap());
     
-    let biscuit = Biscuit::builder()
+    let biscuit_base = Biscuit::builder()
         .fact("right(\"publish\", \"sensors/client_1/temp\")")
         .unwrap()
         .fact("right(\"subscribe\", \"sensors/client_1/temp\")")
         .unwrap()
         .build(&root_keypair)
         .unwrap();
+
+    let biscuit_short = {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let exp = now + 5;
+        let check_src = format!("check if time($t), $t < {exp}");
+        let b = BlockBuilder::new()
+            .check(check_src.as_str())
+            .unwrap();
+        biscuit_base.append(b).unwrap()
+    };
+
+    let biscuit_1_block = biscuit_base.clone();
+
+    let biscuit_5_blocks = {
+        let mut t = biscuit_base.clone();
+        for _ in 0..4 {
+            let b = BlockBuilder::new();
+            t = t.append(b).unwrap();
+        }
+        t
+    };
+
+    let biscuit_25_blocks = {
+        let mut t = biscuit_base.clone();
+        for _ in 0..24 {
+            let b = BlockBuilder::new();
+            t = t.append(b).unwrap();
+        }
+        t
+    };
+
+    let biscuit_delegated = {
+        let master = Biscuit::builder()
+            .fact("right(\"publish\", \"sensors/client_1/temp\")")
+            .unwrap()
+            .fact("right(\"publish\", \"sensors/client_1/humidity\")")
+            .unwrap()
+            .build(&root_keypair)
+            .unwrap();
+
+        let b = BlockBuilder::new()
+            .check("check if resource(\"sensors/client_1/temp\")")
+            .unwrap();
+        master.append(b).unwrap()
+    };
     
     // We want the token as base64 for the MQTT password field
-    let biscuit_bytes = biscuit.to_vec().unwrap();
+    let biscuit_bytes = biscuit_1_block.to_vec().unwrap();
     use base64::{Engine as _, engine::general_purpose};
     let biscuit_b64 = general_purpose::STANDARD.encode(&biscuit_bytes);
+
+    let biscuit_5_b64 = general_purpose::STANDARD.encode(&biscuit_5_blocks.to_vec().unwrap());
+    let biscuit_25_b64 = general_purpose::STANDARD.encode(&biscuit_25_blocks.to_vec().unwrap());
+    let biscuit_delegated_b64 = general_purpose::STANDARD.encode(&biscuit_delegated.to_vec().unwrap());
+    let biscuit_short_b64 = general_purpose::STANDARD.encode(&biscuit_short.to_vec().unwrap());
     
     let biscuit_pubkey_hex = hex::encode(root_keypair.public().to_bytes());
 
     let tokens = json!({
-        "jwt": jwt,
+        "jwt": jwt_long,
+        "jwt_short": jwt_short,
+        "jwt_pad_2k": jwt_pad_2k,
+        "jwt_pad_8k": jwt_pad_8k,
         "jwt_alg": "HS256",
         "jwt_hmac_secret": jwt_secret,
         "biscuit": biscuit_b64,
+        "biscuit_5": biscuit_5_b64,
+        "biscuit_25": biscuit_25_b64,
+        "biscuit_delegated": biscuit_delegated_b64,
+        "biscuit_short": biscuit_short_b64,
         "biscuit_root_key_hex": biscuit_pubkey_hex
     });
 

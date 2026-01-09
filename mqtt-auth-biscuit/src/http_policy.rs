@@ -64,7 +64,7 @@ pub fn check_http(
     // Very small parser: allow if HTTP 200 and body contains "allow":true or "ALLOW".
     let status_ok = resp.lines().next().map(|l| l.contains(" 200 ")).unwrap_or(false);
     if !status_ok {
-        return Ok(false);
+        return Err("http non-200 response".to_string());
     }
 
     Ok(resp.contains("\"allow\":true") || resp.to_lowercase().contains("allow"))

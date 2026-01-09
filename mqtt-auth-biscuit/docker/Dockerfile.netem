@@ -1,0 +1,8 @@
+FROM alpine:3.20
+
+RUN apk add --no-cache iproute2
+
+COPY docker/netem_entrypoint.sh /netem_entrypoint.sh
+RUN chmod +x /netem_entrypoint.sh
+
+ENTRYPOINT ["/netem_entrypoint.sh"]

@@ -1,0 +1,7 @@
+FROM python:3.12-alpine
+
+WORKDIR /app
+COPY docker/authz_server.py /app/authz_server.py
+
+EXPOSE 8081
+CMD ["python", "/app/authz_server.py"]

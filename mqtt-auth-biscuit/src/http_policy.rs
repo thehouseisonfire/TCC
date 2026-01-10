@@ -1,6 +1,7 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
+use serde_json::Value;
 
 fn split_host_port(host_port: &str) -> Result<(&str, u16), String> {
     let mut parts = host_port.split(':');
@@ -61,11 +62,21 @@ pub fn check_http(
     let mut resp = String::new();
     stream.read_to_string(&mut resp).map_err(|e| format!("http read failed: {e}"))?;
 
-    // Very small parser: allow if HTTP 200 and body contains "allow":true or "ALLOW".
-    let status_ok = resp.lines().next().map(|l| l.contains(" 200 ")).unwrap_or(false);
+    // Very small parser: allow only if HTTP 200 and JSON body contains {"allow": true}.
+    let status_ok = resp
+        .lines()
+        .next()
+        .map(|l| l.contains(" 200 "))
+        .unwrap_or(false);
     if !status_ok {
         return Err("http non-200 response".to_string());
     }
 
-    Ok(resp.contains("\"allow\":true") || resp.to_lowercase().contains("allow"))
+    let body = resp
+        .split("\r\n\r\n")
+        .nth(1)
+        .ok_or_else(|| "http missing body".to_string())?;
+
+    let json: Value = serde_json::from_str(body).map_err(|e| format!("http invalid json: {e}"))?;
+    Ok(json.get("allow").and_then(|v| v.as_bool()).unwrap_or(false))
 }

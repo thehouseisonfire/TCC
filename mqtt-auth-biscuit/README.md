@@ -41,9 +41,15 @@ cargo run --release --bin gen-tokens
 
 ## Benchmarking
 
-See [benchmarks/BENCHMARK_PLAN.md](benchmarks/BENCHMARK_PLAN.md) for detailed
-test scenarios and the Python-based metrics collector
-`benchmarks/metrics_collector.py`.
+See [benchmarks/RUNNING_BENCHMARKS.md](benchmarks/RUNNING_BENCHMARKS.md) for how
+to execute the scenario battery.
+
+The main entrypoint is:
+
+`benchmarks/run_scenarios.py`
+
+`benchmarks/metrics_collector.py` remains available as a legacy single-run
+collector.
 
 ## License
 

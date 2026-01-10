@@ -12,7 +12,7 @@ path = "benchmarks/gen_tokens.rs"
 
 [dependencies]
 biscuit-auth = "6.0"              # Biscuit v2 support (v6 API)
-jsonwebtoken = "9.3"             # JWT verification
+jsonwebtoken = "9.3"            # JWT verification
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rand = "0.8"

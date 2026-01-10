@@ -26,6 +26,8 @@ chrono = "0.4"
 lru = "0.16"
 dashmap = "6.1"
 hex = "0.4"
+p256 = { version = "0.13", features = ["arithmetic", "pkcs8", "pem"] }
+pkcs8 = { version = "0.10", features = ["pem"] }
 
 [profile.release]
 panic = "abort"

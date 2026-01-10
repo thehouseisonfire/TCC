@@ -7,7 +7,6 @@ use std::fs;
 pub struct JwtConfig {
     pub decoding_key: DecodingKey,
     pub validation: Validation,
-    pub allow_hs256_fallback: bool,
 }
 
 #[derive(Clone)]
@@ -44,9 +43,8 @@ pub fn parse_options(
     options: *mut crate::MosquittoOpt,
     option_count: i32,
 ) -> Result<PluginConfig, String> {
-    let mut jwt_alg = "HS256".to_string();
+    let mut jwt_alg = "ES256".to_string();
     let mut jwt_key_file: Option<String> = None;
-    let mut jwt_hmac_secret: Option<String> = None;
     let mut jwt_issuer: Option<String> = None;
     let mut jwt_audience: Option<String> = None;
 
@@ -69,7 +67,6 @@ pub fn parse_options(
         match key.as_str() {
             "jwt_alg" => jwt_alg = value,
             "jwt_key_file" => jwt_key_file = Some(value),
-            "jwt_hmac_secret" => jwt_hmac_secret = Some(value),
             "jwt_issuer" => jwt_issuer = Some(value),
             "jwt_audience" => jwt_audience = Some(value),
             "biscuit_root_key_hex" => biscuit_root_key_hex = Some(value),
@@ -96,18 +93,12 @@ pub fn parse_options(
     }
 
     let alg = match jwt_alg.as_str() {
-        "HS256" => Algorithm::HS256,
         "RS256" => Algorithm::RS256,
         "ES256" => Algorithm::ES256,
         _ => return Err(format!("Unsupported jwt_alg: {jwt_alg}")),
     };
 
     let decoding_key = match alg {
-        Algorithm::HS256 => {
-            let secret = jwt_hmac_secret
-                .ok_or_else(|| "jwt_hmac_secret is required for HS256".to_string())?;
-            DecodingKey::from_secret(secret.as_bytes())
-        }
         Algorithm::RS256 => {
             let path =
                 jwt_key_file.ok_or_else(|| "jwt_key_file is required for RS256".to_string())?;
@@ -173,7 +164,6 @@ pub fn parse_options(
         jwt: JwtConfig {
             decoding_key,
             validation,
-            allow_hs256_fallback: false,
         },
         biscuit: BiscuitConfig {
             root_public_key: biscuit_root_public_key,

@@ -8,6 +8,7 @@ services:
       - "1883:1883"
     volumes:
       - ${MOSQUITTO_CONF:-./mosquitto.conf}:/mosquitto/config/mosquitto.conf
+      - ./jwt_public.pem:/mosquitto/config/jwt_public.pem:ro
     cpuset: "0-1"
     mem_limit: 512m
     networks:

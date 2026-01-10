@@ -1,5 +1,7 @@
 use biscuit_auth::{Biscuit, BlockBuilder, KeyPair, PrivateKey};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use pkcs8::{EncodePublicKey, EncodePrivateKey, LineEnding};
+use p256::SecretKey;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs::File;
@@ -15,8 +17,23 @@ struct Claims {
 }
 
 fn main() {
-    // JWT
-    let jwt_secret = "secret";
+    // JWT (ES256)
+    // Deterministic private key material for reproducible tokens.
+    // This private key is held by the token issuer (this generator) and is
+    // never mounted into the Mosquitto container.
+    let jwt_sk_bytes = [1u8; 32];
+    let jwt_secret_key = SecretKey::from_slice(&jwt_sk_bytes).unwrap();
+    let jwt_private_pem = jwt_secret_key.to_pkcs8_pem(LineEnding::LF).unwrap();
+    let jwt_public_pem = jwt_secret_key
+        .public_key()
+        .to_public_key_pem(LineEnding::LF)
+        .unwrap();
+
+    // Write public key for the broker/PEP (mounted into the container).
+    std::fs::write("docker/jwt_public.pem", jwt_public_pem.as_bytes()).unwrap();
+
+    let jwt_encoding_key = EncodingKey::from_ec_pem(jwt_private_pem.as_bytes()).unwrap();
+
     let jwt_long = {
         let claims = Claims {
             sub: "client_1".to_string(),
@@ -25,9 +42,9 @@ fn main() {
             pad: None,
         };
         encode(
-            &Header::new(Algorithm::HS256),
+            &Header::new(Algorithm::ES256),
             &claims,
-            &EncodingKey::from_secret(jwt_secret.as_bytes()),
+            &jwt_encoding_key,
         )
         .unwrap()
     };
@@ -44,9 +61,9 @@ fn main() {
             pad: None,
         };
         encode(
-            &Header::new(Algorithm::HS256),
+            &Header::new(Algorithm::ES256),
             &claims,
-            &EncodingKey::from_secret(jwt_secret.as_bytes()),
+            &jwt_encoding_key,
         )
         .unwrap()
     };
@@ -59,9 +76,9 @@ fn main() {
             pad: Some("A".repeat(2048)),
         };
         encode(
-            &Header::new(Algorithm::HS256),
+            &Header::new(Algorithm::ES256),
             &claims,
-            &EncodingKey::from_secret(jwt_secret.as_bytes()),
+            &jwt_encoding_key,
         )
         .unwrap()
     };
@@ -74,9 +91,9 @@ fn main() {
             pad: Some("A".repeat(8192)),
         };
         encode(
-            &Header::new(Algorithm::HS256),
+            &Header::new(Algorithm::ES256),
             &claims,
-            &EncodingKey::from_secret(jwt_secret.as_bytes()),
+            &jwt_encoding_key,
         )
         .unwrap()
     };
@@ -159,8 +176,7 @@ fn main() {
         "jwt_short": jwt_short,
         "jwt_pad_2k": jwt_pad_2k,
         "jwt_pad_8k": jwt_pad_8k,
-        "jwt_alg": "HS256",
-        "jwt_hmac_secret": jwt_secret,
+        "jwt_alg": "ES256",
         "biscuit": biscuit_b64,
         "biscuit_5": biscuit_5_b64,
         "biscuit_25": biscuit_25_b64,

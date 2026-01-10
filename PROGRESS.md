@@ -37,6 +37,11 @@ The Docker + benchmark stack is now set up to run the experimental scenarios des
   - HTTP policy backend
   - Hybrid backend: HTTP policy when available, with token-only fallback on HTTP errors/timeouts
 
+**Notes**:
+
+- **JWT algorithm baseline**: the current deterministic benchmark token set uses **HS256** (symmetric). This is convenient for reproducibility, but it is not a perfectly fair cryptographic comparison against Biscuit (which uses asymmetric signatures).
+- **Biscuit verification per authorization check**: Biscuit authorization currently cryptographically verifies and run the Biscuit token policies during authorization checks (e.g., ACL checks / message authorization), rather than cryptographically verifying it only once per session, and only evaluating policies. In contrast, JWT is only cryptographically verified once.
+
 **Key files**:
 
 - `mqtt-auth-biscuit/src/lib.rs` (plugin init/cleanup + Mosquitto callback wiring)
@@ -167,6 +172,10 @@ The harness and scenarios are implemented and wired, but **the project still nee
   - Goal: confirm Prometheus snapshots are populated (CPU + memory for mosquitto container).
   - Deliverable: scenario outputs include non-error `resources` snapshots.
 
+- [ ] **6.3 Fairness alignment: add asymmetric JWT baseline**
+  - Goal: add a JWT test baseline using an **asymmetric** algorithm (e.g., RS256/ES256) and rerun the key scenarios to compare with Biscuit under similar cryptographic assumptions.
+  - Deliverable: updated token generation + Mosquitto config option(s) + at least one scenario run captured with the asymmetric JWT baseline.
+
 ### Phase 7: Data Analysis & Validation
 
 - [ ] **7.1 Aggregate results**
@@ -186,6 +195,14 @@ The harness and scenarios are implemented and wired, but **the project still nee
 - [ ] **8.3 Make docker-compose invocation robust across environments**
   - Some systems use `docker compose` instead of `docker-compose`.
   - If this becomes an issue, adapt runner to detect and use the available CLI.
+
+- [ ] **8.4 Add Dynamic Security module comparison**
+  - Goal: add a benchmark mode/scenario that uses Mosquitto’s Dynamic Security module as an authorization source for comparison.
+  - Deliverable: at least one scenario run captured with Dynamic Security enabled, comparable to the existing token-only/SQLite/HTTP/hybrid cases.
+
+- [ ] **8.5 Avoid per-message Biscuit re-verification (if needed for performance isolation)**
+  - Goal: avoid re-verifying/deserializing the Biscuit token on every authorization check.
+  - Deliverable: a documented change (and rerun) showing the impact on authorization latency/CPU.
 
 ---
 

@@ -103,7 +103,7 @@ For continuous authorization, the solution will optimize Biscuit performance, av
 
 \section{Proposed Environment}
 
-The experimental environment will be standardized with Docker (version 29.0.x), hosting Mosquitto (2.0.14) and clients in isolated containers. The module development will use Rust (version 1.92), integrating the \texttt{biscuit\_auth} (6.0, with support for Biscuit 3.0+) and \texttt{jsonwebtoken} (10.x.x) libraries \cite{rust_jsonwebtoken}. The SQLite database (3.51) will be used for scenarios requiring local persistence of access policies (excluding static ACLs and the \emph{Dynamic Security} module).
+The experimental environment will be standardized with Docker (version 29.0.x), hosting Mosquitto (2.0.x) and clients in isolated containers. The module development will use Rust (version 1.92.x), integrating the \texttt{biscuit\_auth} (6.x, with support for Biscuit 3.0+) and \texttt{jsonwebtoken} (10.x.x) libraries \cite{rust_jsonwebtoken}. The SQLite database (3.51.x) will be used for scenarios requiring local persistence of access policies (excluding static ACLs and the \emph{Dynamic Security} module).
 
 To ensure test integrity and minimize neighborhood noise, Docker's \texttt{--cpuset} option will be used to pin the \emph{broker} and load generator processes to distinct and consistent physical cores of the host machine.
 

@@ -4,6 +4,7 @@ use crate::http_policy;
 use crate::policy::PolicyMode;
 use crate::sqlite_policy::SqlitePolicy;
 use biscuit_auth::PublicKey as BiscuitPublicKey;
+use chrono::Utc;
 
 pub fn check_authorization(
     token_type: &TokenType,
@@ -17,6 +18,10 @@ pub fn check_authorization(
 ) -> bool {
     match token_type {
         TokenType::JWT { claims, raw } => {
+            if Utc::now().timestamp() >= claims.exp as i64 {
+                return false;
+            }
+
             let token_only = || {
                 let roles = claims.roles.as_ref();
                 if let Some(roles) = roles {

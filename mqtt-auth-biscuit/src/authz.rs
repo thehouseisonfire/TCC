@@ -34,12 +34,17 @@ pub fn check_authorization(
             match policy_mode {
                 PolicyMode::TokenOnly => token_only(),
                 PolicyMode::Sqlite => {
-                    let Some(sqlite_policy) = sqlite_policy else { return false };
-                    sqlite_policy.check(client_id, topic, access).unwrap_or(false)
+                    let Some(sqlite_policy) = sqlite_policy else {
+                        return false;
+                    };
+                    sqlite_policy
+                        .check(client_id, topic, access)
+                        .unwrap_or(false)
                 }
                 PolicyMode::Http => {
                     let Some(url) = http_url else { return false };
-                    http_policy::check_http(url, client_id, topic, access, Some(raw)).unwrap_or(false)
+                    http_policy::check_http(url, client_id, topic, access, Some(raw))
+                        .unwrap_or(false)
                 }
                 PolicyMode::Hybrid => {
                     let Some(url) = http_url else {
@@ -62,13 +67,20 @@ pub fn check_authorization(
                 "read"
             };
 
-            let token_only = || verify_biscuit_token(token_bytes, biscuit_root_key, topic, operation).unwrap_or(false);
+            let token_only = || {
+                verify_biscuit_token(token_bytes, biscuit_root_key, topic, operation)
+                    .unwrap_or(false)
+            };
 
             match policy_mode {
                 PolicyMode::TokenOnly => token_only(),
                 PolicyMode::Sqlite => {
-                    let Some(sqlite_policy) = sqlite_policy else { return false };
-                    sqlite_policy.check(client_id, topic, access).unwrap_or(false)
+                    let Some(sqlite_policy) = sqlite_policy else {
+                        return false;
+                    };
+                    sqlite_policy
+                        .check(client_id, topic, access)
+                        .unwrap_or(false)
                 }
                 PolicyMode::Http => {
                     let Some(url) = http_url else { return false };

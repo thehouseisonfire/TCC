@@ -1,7 +1,7 @@
+use serde_json::Value;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
-use serde_json::Value;
 
 fn split_host_port(host_port: &str) -> Result<(&str, u16), String> {
     let mut parts = host_port.split(':');
@@ -44,7 +44,8 @@ pub fn check_http(
         ),
     };
 
-    let mut stream = TcpStream::connect((host, port)).map_err(|e| format!("http connect failed: {e}"))?;
+    let mut stream =
+        TcpStream::connect((host, port)).map_err(|e| format!("http connect failed: {e}"))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .map_err(|e| format!("http set timeout failed: {e}"))?;
@@ -57,10 +58,14 @@ pub fn check_http(
         body
     );
 
-    stream.write_all(req.as_bytes()).map_err(|e| format!("http write failed: {e}"))?;
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| format!("http write failed: {e}"))?;
 
     let mut resp = String::new();
-    stream.read_to_string(&mut resp).map_err(|e| format!("http read failed: {e}"))?;
+    stream
+        .read_to_string(&mut resp)
+        .map_err(|e| format!("http read failed: {e}"))?;
 
     // Very small parser: allow only if HTTP 200 and JSON body contains {"allow": true}.
     let status_ok = resp

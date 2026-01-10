@@ -32,14 +32,19 @@ impl SqlitePolicy {
     pub fn check(&self, client_id: &str, topic: &str, access: i32) -> Result<bool, String> {
         let mut stmt = self
             .conn
-            .prepare("SELECT 1 FROM acl WHERE client_id = ?1 AND topic = ?2 AND access = ?3 LIMIT 1")
+            .prepare(
+                "SELECT 1 FROM acl WHERE client_id = ?1 AND topic = ?2 AND access = ?3 LIMIT 1",
+            )
             .map_err(|e| format!("sqlite prepare failed: {e}"))?;
 
         let mut rows = stmt
             .query(params![client_id, topic, access])
             .map_err(|e| format!("sqlite query failed: {e}"))?;
 
-        Ok(rows.next().map_err(|e| format!("sqlite row failed: {e}"))?.is_some())
+        Ok(rows
+            .next()
+            .map_err(|e| format!("sqlite row failed: {e}"))?
+            .is_some())
     }
 
     pub fn seed_demo_rules(&self) -> Result<(), String> {

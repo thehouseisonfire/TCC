@@ -33,7 +33,10 @@ fn main() {
     };
 
     let jwt_short = {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as usize;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as usize;
         let claims = Claims {
             sub: "client_1".to_string(),
             exp: now + 5,
@@ -80,8 +83,10 @@ fn main() {
 
     // Biscuit
     let root_bytes = [0u8; 32];
-    let root_keypair = KeyPair::from(&PrivateKey::from_bytes(&root_bytes, biscuit_auth::Algorithm::Ed25519).unwrap());
-    
+    let root_keypair = KeyPair::from(
+        &PrivateKey::from_bytes(&root_bytes, biscuit_auth::Algorithm::Ed25519).unwrap(),
+    );
+
     let biscuit_base = Biscuit::builder()
         .fact("right(\"publish\", \"sensors/client_1/temp\")")
         .unwrap()
@@ -91,12 +96,13 @@ fn main() {
         .unwrap();
 
     let biscuit_short = {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
         let exp = now + 5;
         let check_src = format!("check if time($t), $t < {exp}");
-        let b = BlockBuilder::new()
-            .check(check_src.as_str())
-            .unwrap();
+        let b = BlockBuilder::new().check(check_src.as_str()).unwrap();
         biscuit_base.append(b).unwrap()
     };
 
@@ -134,17 +140,18 @@ fn main() {
             .unwrap();
         master.append(b).unwrap()
     };
-    
+
     // We want the token as base64 for the MQTT password field
     let biscuit_bytes = biscuit_1_block.to_vec().unwrap();
-    use base64::{Engine as _, engine::general_purpose};
+    use base64::{engine::general_purpose, Engine as _};
     let biscuit_b64 = general_purpose::STANDARD.encode(&biscuit_bytes);
 
     let biscuit_5_b64 = general_purpose::STANDARD.encode(&biscuit_5_blocks.to_vec().unwrap());
     let biscuit_25_b64 = general_purpose::STANDARD.encode(&biscuit_25_blocks.to_vec().unwrap());
-    let biscuit_delegated_b64 = general_purpose::STANDARD.encode(&biscuit_delegated.to_vec().unwrap());
+    let biscuit_delegated_b64 =
+        general_purpose::STANDARD.encode(&biscuit_delegated.to_vec().unwrap());
     let biscuit_short_b64 = general_purpose::STANDARD.encode(&biscuit_short.to_vec().unwrap());
-    
+
     let biscuit_pubkey_hex = hex::encode(root_keypair.public().to_bytes());
 
     let tokens = json!({
@@ -163,6 +170,7 @@ fn main() {
     });
 
     let mut f = File::create("benchmarks/tokens.json").unwrap();
-    f.write_all(serde_json::to_string_pretty(&tokens).unwrap().as_bytes()).unwrap();
+    f.write_all(serde_json::to_string_pretty(&tokens).unwrap().as_bytes())
+        .unwrap();
     println!("Wrote benchmarks/tokens.json");
 }

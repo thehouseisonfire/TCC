@@ -33,10 +33,11 @@ impl AuthEngine {
                 .map_err(|e| format!("JWT verification failed: {}", e))
         } else {
             // Try Biscuit (assuming it's base64 encoded if string)
-            use base64::{Engine as _, engine::general_purpose};
-            let bytes = general_purpose::STANDARD.decode(token)
+            use base64::{engine::general_purpose, Engine as _};
+            let bytes = general_purpose::STANDARD
+                .decode(token)
                 .map_err(|e| format!("Invalid token format (base64 error: {})", e))?;
-            
+
             // We just return the bytes for now, authorization will happen per topic
             Ok(TokenType::Biscuit(bytes))
         }

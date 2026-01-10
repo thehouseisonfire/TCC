@@ -28,7 +28,7 @@ where
     pub fn insert(&self, key: K, value: V, ttl: Duration) {
         let expiry = Instant::now() + ttl;
         self.cache.insert(key.clone(), CacheValue { value, expiry });
-        
+
         let mut lru = self.lru.lock().unwrap();
         if lru.put(key, ()).is_some() {
             // Already in LRU, just updated

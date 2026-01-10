@@ -1,21 +1,21 @@
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::ptr;
-use std::sync::Arc;
 use crate::auth::{AuthEngine, TokenType};
 use crate::authz::check_authorization;
 use crate::cache::SessionCache;
-use std::time::Duration;
 use crate::config::{parse_options, PluginConfig};
 use crate::policy::PolicyMode;
 use crate::sqlite_policy::SqlitePolicy;
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::ptr;
+use std::sync::Arc;
+use std::time::Duration;
 
 mod auth;
 mod authz;
+mod biscuit_handler;
+mod cache;
 mod config;
 mod http_policy;
 mod jwt_handler;
-mod biscuit_handler;
-mod cache;
 mod policy;
 mod sqlite_policy;
 
@@ -159,7 +159,9 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
 
     let sqlite_policy = match config.policy.mode {
         PolicyMode::Sqlite => {
-            let Some(path) = config.policy.sqlite_path.as_deref() else { return MOSQ_ERR_INVAL };
+            let Some(path) = config.policy.sqlite_path.as_deref() else {
+                return MOSQ_ERR_INVAL;
+            };
             let policy = SqlitePolicy::open(path).ok();
             if let Some(p) = policy.as_ref() {
                 let _ = p.seed_demo_rules();
@@ -170,7 +172,10 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
     };
 
     let state = Box::new(PluginState {
-        auth_engine: Arc::new(AuthEngine::new(config.jwt.decoding_key.clone(), config.jwt.validation.clone())),
+        auth_engine: Arc::new(AuthEngine::new(
+            config.jwt.decoding_key.clone(),
+            config.jwt.validation.clone(),
+        )),
         cache: Arc::new(SessionCache::new(1000)),
         config,
         sqlite_policy,
@@ -253,11 +258,19 @@ extern "C" fn basic_auth_callback(
     }
 
     let password = unsafe { CStr::from_ptr(evt.password).to_string_lossy() };
-    
+
     match state.auth_engine.authenticate(&password) {
         Ok(token_type) => {
-            let client_id = unsafe { CStr::from_ptr(mosquitto_client_id(evt.client)).to_string_lossy().into_owned() };
-            state.cache.insert(client_id, token_type, Duration::from_secs(state.config.cache_ttl_seconds));
+            let client_id = unsafe {
+                CStr::from_ptr(mosquitto_client_id(evt.client))
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            state.cache.insert(
+                client_id,
+                token_type,
+                Duration::from_secs(state.config.cache_ttl_seconds),
+            );
             MOSQ_ERR_SUCCESS
         }
         Err(_) => MOSQ_ERR_AUTH,
@@ -292,13 +305,22 @@ extern "C" fn ext_auth_start_callback(
         return MOSQ_ERR_AUTH;
     }
 
-    let data = unsafe { std::slice::from_raw_parts(evt.data_in as *const u8, evt.data_in_len as usize) };
+    let data =
+        unsafe { std::slice::from_raw_parts(evt.data_in as *const u8, evt.data_in_len as usize) };
     let token = String::from_utf8_lossy(data);
 
     match state.auth_engine.authenticate(&token) {
         Ok(token_type) => {
-            let client_id = unsafe { CStr::from_ptr(mosquitto_client_id(evt.client)).to_string_lossy().into_owned() };
-            state.cache.insert(client_id, token_type, Duration::from_secs(state.config.cache_ttl_seconds));
+            let client_id = unsafe {
+                CStr::from_ptr(mosquitto_client_id(evt.client))
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            state.cache.insert(
+                client_id,
+                token_type,
+                Duration::from_secs(state.config.cache_ttl_seconds),
+            );
             MOSQ_ERR_SUCCESS
         }
         Err(_) => MOSQ_ERR_AUTH,
@@ -322,7 +344,11 @@ extern "C" fn acl_check_callback(
     let evt = unsafe { &*(event_data as *mut MosquittoEvtAclCheck) };
     let state = unsafe { &*(userdata as *mut PluginState) };
 
-    let client_id = unsafe { CStr::from_ptr(mosquitto_client_id(evt.client)).to_string_lossy().into_owned() };
+    let client_id = unsafe {
+        CStr::from_ptr(mosquitto_client_id(evt.client))
+            .to_string_lossy()
+            .into_owned()
+    };
     let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
 
     if let Some(token_type) = state.cache.get(&client_id) {
@@ -354,7 +380,11 @@ extern "C" fn message_callback(
         return MOSQ_ERR_INVAL;
     }
 
-    let client_id = unsafe { CStr::from_ptr(mosquitto_client_id(evt.client)).to_string_lossy().into_owned() };
+    let client_id = unsafe {
+        CStr::from_ptr(mosquitto_client_id(evt.client))
+            .to_string_lossy()
+            .into_owned()
+    };
     let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
 
     if let Some(token_type) = state.cache.get(&client_id) {
@@ -385,7 +415,11 @@ extern "C" fn control_callback(
         return MOSQ_ERR_INVAL;
     }
 
-    let client_id = unsafe { CStr::from_ptr(mosquitto_client_id(evt.client)).to_string_lossy().into_owned() };
+    let client_id = unsafe {
+        CStr::from_ptr(mosquitto_client_id(evt.client))
+            .to_string_lossy()
+            .into_owned()
+    };
     let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
 
     if let Some(token_type) = state.cache.get(&client_id) {

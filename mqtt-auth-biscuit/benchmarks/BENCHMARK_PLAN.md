@@ -31,6 +31,6 @@ plugin.
 
 ## Reproducibility
 
-- All tests run within the provided `docker-compose` environment.
+- All tests run within the provided `docker compose` environment.
 - Tokens are generated using the `gen-tokens` tool with deterministic keys.
 - Network conditions (latency/loss) emulated via `tc` on the bridge network.

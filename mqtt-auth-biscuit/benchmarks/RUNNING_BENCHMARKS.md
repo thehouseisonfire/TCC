@@ -39,7 +39,7 @@ Start the Mosquitto broker and metrics collector (Prometheus) using Docker
 Compose:
 
 ```bash
-docker-compose -f docker/docker-compose.yml up --build -d
+docker compose -f docker/docker-compose.yml up --build -d
 ```
 
 > [!NOTE]
@@ -82,5 +82,5 @@ You can also monitor resource usage via:
 When finished, stop the environment:
 
 ```bash
-docker-compose -f docker/docker-compose.yml down
+docker compose -f docker/docker-compose.yml down
 ```

@@ -24,7 +24,7 @@ impl AuthEngine {
     pub fn authenticate(&self, token: &str) -> Result<TokenType, String> {
         let token = token.trim_matches('\0').trim();
         if token.starts_with("eyJ") {
-            // Likely JWT
+            // Likely JWT (Heuristic to avoid JWT parsing if the token is a Biscuit)
             verify_jwt_token(token, &self.jwt_key, &self.jwt_validation)
                 .map(|claims| TokenType::JWT {
                     claims,

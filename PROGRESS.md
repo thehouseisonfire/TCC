@@ -193,7 +193,7 @@ machine and record the first results/known issues).
   - Command sequence:
     - `cargo build --release`
     - `cargo run --release --bin gen-tokens`
-    - `docker-compose -f docker/docker-compose.yml up --build -d`
+    - `docker compose -f docker/docker-compose.yml up --build -d`
     - `python3 benchmarks/run_scenarios.py`
   - Deliverable: results JSON files + a short log of any failures.
 
@@ -311,6 +311,30 @@ machine and record the first results/known issues).
     - Broker-side differentiation between "expired" vs "denied" outcomes
     - MQTT v5 `AUTH`-based reauthentication flow with explicit reason reporting
       (reason code / reason string) suitable for automated clients
+
+- [ ] **Issue 8: Add MIRI verification for FFI memory safety**
+  - Goal: integrate MIRI to detect undefined behavior and memory safety issues in the
+    Rust FFI layer that interfaces with Mosquitto's C API.
+  - Rationale: The plugin contains 25 unsafe blocks across `lib.rs` and `config.rs`
+    that handle pointer dereferencing, C string conversion, and memory management.
+  - Deliverable:
+    - MIRI integration in `Cargo.toml` and CI pipeline
+    - All unsafe blocks pass MIRI checks without undefined behavior
+    - Fixed memory safety issues (estimated 5-10 based on current patterns)
+    - Verification report documenting MIRI findings and fixes
+
+- [ ] **Issue 9: Add Kani formal verification for critical FFI functions**
+  - Goal: use Kani to formally verify memory safety properties of the most critical
+    FFI functions in the Mosquitto plugin interface.
+  - Rationale: Formal verification provides mathematical guarantees beyond MIRI's
+    runtime checking, strengthening the academic contribution and security posture.
+  - Deliverable:
+    - Kani specifications for critical functions (`mosquitto_plugin_init`,
+      `mosquitto_plugin_cleanup`, and all 6 callback functions)
+    - Proven properties: no null pointer dereferences, no buffer overflows,
+      proper lifetime management
+    - Formal verification report suitable for academic publication
+    - Counterexample analysis for any failed properties
 
 ---
 

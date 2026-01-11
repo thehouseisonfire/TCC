@@ -30,7 +30,7 @@ The plugin will be generated at `target/release/libmosquitto_auth_biscuit.so`.
 ### Running with Docker
 
 ```bash
-docker-compose -f docker/docker-compose.yml up --build
+docker compose -f docker/docker-compose.yml up --build
 ```
 
 ### Generating Tokens

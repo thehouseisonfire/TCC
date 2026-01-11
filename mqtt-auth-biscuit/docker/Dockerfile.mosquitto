@@ -8,4 +8,4 @@ RUN apk add --allow-untrusted /tmp/*.apk && \
 # Copy pre-built shared library from host
 COPY target/release/libmosquitto_auth_biscuit.so /mosquitto/plugins/
 
-# mosquitto.conf is already mounted via docker-compose
+# mosquitto.conf is already mounted via Docker Compose

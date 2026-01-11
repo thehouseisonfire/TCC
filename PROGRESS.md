@@ -105,6 +105,9 @@ Current limitation:
 - In `gen_tokens.rs`, the JWT private signing key exists only in the generator
   process memory at runtime; only the public verification key is written to
   `docker/jwt_public.pem` for the broker/PEP.
+- In `gen_tokens.rs`, the Biscuit root private key exists only in the generator
+  process memory at runtime; only the public verification key is written to
+  `benchmarks/tokens.json` as `biscuit_root_key_hex` for the broker/PEP.
 
 ### 4) Benchmark/Scenario Harness
 
@@ -185,7 +188,7 @@ machine and record the first results/known issues).
 
 ## Roadmap (Next Steps)
 
-### Phase 6: Benchmark Execution (Next Immediate Work)
+### Phase 6: Benchmark Execution
 
 - [ ] **6.1 Run a smoke test for the full scenario runner**
   - Goal: ensure Docker services start reliably, scenarios run, results JSON is
@@ -235,12 +238,46 @@ machine and record the first results/known issues).
 ### Phase 9: Issue Resolution 
 
 - [ ] **Issue 1: Add Dynamic Security module comparison**
-  - Goal: add a benchmark mode/scenario that uses Mosquitto's Dynamic Security
-    module as an authorization source for comparison.
-  - Deliverable: at least one scenario run captured with Dynamic Security
-    enabled, comparable to the existing token-only/SQLite/HTTP/hybrid cases.
+  - Goal: implement Mosquitto's Dynamic Security module as an authorization source
+    to provide a comprehensive comparison against token-based approaches.
+  - Current gap: ARTICLE.MD mentions "Dynamic ACLs (via the Dynamic Security module)"
+    as a policy source, but current implementation lacks this native Mosquitto
+    authorization mechanism.
+  - Rationale: Dynamic Security is Mosquitto's built-in role-based access control
+    system that provides runtime management of users, roles, and ACLs via MQTT
+    control messages or HTTP API, representing a production-grade alternative to
+    external policy backends.
+  - Deliverable:
+    - Add `DynamicSecurity` variant to `PolicyMode` enum in `src/policy.rs`
+    - Implement Dynamic Security client integration in `src/dynamic_security_policy.rs`
+      using Mosquitto's HTTP API or control message interface
+    - Update plugin configuration to support `dynamic_security_url` and
+      `dynamic_security_username/password` options
+    - Create Dynamic Security setup scripts for benchmark scenarios (user/role/ACL
+      provisioning matching test patterns)
+    - Add Dynamic Security scenarios to `benchmarks/run_scenarios.py` with
+      comparable load patterns to existing policy modes
+    - At least one scenario run captured with Dynamic Security enabled, including
+      latency measurements for authorization checks via the Dynamic Security API. The scenario should be configurable to measure the impact of runtime management of users, roles, and ACLs, perhaps with a special client pushing periodic, deterministic ACL changes.
+    - Performance comparison analysis between Dynamic Security and token-based
+      authorization modes
 
-- [ ] **Issue 2: Implement proper JWT access logic (replace demo token-only authz)**
+- [ ] **Issue 2: Add static ACLs as PDP source of truth**
+  - Goal: implement native Mosquitto static ACL file support as a policy source to
+    align with the evaluation matrix proposed in ARTICLE.MD (line 59).
+  - Current gap: ARTICLE.MD explicitly mentions testing against "static ACLs native to
+    Mosquitto" as a PDP source, but current implementation only supports
+    token-only, SQLite, HTTP, and hybrid modes.
+  - Deliverable:
+    - Add `StaticAcl` variant to `PolicyMode` enum in `src/policy.rs`
+    - Implement ACL file parsing and evaluation logic in `src/static_acl_policy.rs`
+    - Update plugin configuration to support `acl_file` option in Mosquitto config
+    - Add static ACL scenarios to `benchmarks/run_scenarios.py` comparable to
+      existing policy modes (token-only, SQLite, HTTP, hybrid)
+    - Create sample ACL files for benchmark scenarios matching the test patterns
+    - At least one scenario run captured with static ACL mode enabled
+
+- [ ] **Issue 3: Implement proper JWT access logic (replace demo token-only authz)**
   - Goal: replace the current heuristic JWT token-only authorization rules with a
     policy model that is comparable to Biscuit rights (e.g., encode topic/action
     grants as structured claims, or route JWT through SQLite/HTTP for fine-grained
@@ -250,14 +287,14 @@ machine and record the first results/known issues).
     - Updated `authz.rs` JWT enforcement that matches the chosen schema
     - At least one scenario run captured showing the new JWT mode
 
-- [ ] **Issue 3: Harden HTTP policy backend for benchmark validity**
+- [ ] **Issue 4: Harden HTTP policy backend for benchmark validity**
   - Goal: make the HTTP backend robust and well-specified for experiments.
   - Deliverable:
     - Clear request/response schema (documented) and stricter parsing
     - Configurable timeouts and error semantics (what triggers hybrid fallback)
     - Optional support for HTTPS (if required by the environment)
 
-- [ ] **Issue 4: Avoid per-message Biscuit re-verification**
+- [ ] **Issue 5: Avoid per-message Biscuit re-verification**
   - Goal: avoid re-verifying/deserializing the Biscuit token on every
     authorization check to match JWT behavior (verify once, evaluate policies only).
   - Current issue: Biscuit verification cryptographically verifies and runs policies
@@ -265,7 +302,25 @@ machine and record the first results/known issues).
   - Deliverable: a documented change (and rerun) showing the impact on
     authorization latency/CPU.
 
-- [ ] **Issue 5: Implement a long-running Token Issuer service (JWT + Biscuit)**
+- [ ] **Issue 6: Implement online attenuation capabilities for MQTT clients**
+  - Goal: enable MQTT clients to perform runtime biscuit attenuation and delegation, moving beyond pre-generated tokens to dynamic rights restriction.
+  - Current limitation: clients can only use pre-attenuated tokens from `gen_tokens.rs`; they cannot create new attenuation blocks or delegate rights at runtime.
+  - Deliverable:
+    - Client library/API for biscuit attenuation (add blocks, restrict rights, delegate)
+    - Integration with MQTT client workflows to support dynamic token modification
+    - Benchmark scenarios that test client-side attenuation performance and behavior
+    - Documentation of attenuation patterns and use cases for IoT deployments
+
+- [ ] **Issue 7: Fix delegation scenario simulation vs actual client delegation**
+  - Goal: replace the simulated delegation in `gen_tokens.rs` with true client-to-client delegation.
+  - Current issue: the "delegation" scenario uses pre-attenuated tokens created by the token generator, not actual master clients attenuating rights for worker clients.
+  - Deliverable:
+    - Real master client implementation that can attenuate and delegate tokens to workers
+    - Worker client logic to receive and use delegated tokens
+    - Updated delegation benchmark scenario with actual client-side delegation
+    - Performance comparison between simulated and real delegation flows
+
+- [ ] **Issue 8: Implement a long-running Token Issuer service (JWT + Biscuit)**
   - Goal: provide a live issuance endpoint so benchmark clients can request new
     tokens after expiry (as proposed in `ARTICLE.MD`).
 
@@ -289,10 +344,21 @@ machine and record the first results/known issues).
       - PEP (Mosquitto + plugin, public keys only)
     - Scenario runner/client support to request new tokens on expiry and retry
       failed operations.
-    - **Configurable TLS support** for Token Issuer to client communication and
-      client to broker communication (allow running scenarios with and without TLS).
 
-- [ ] **Issue 6: Document and analyze scenario policies**
+- [ ] **Issue 8.1: Implement comprehensive TLS support for all network communications**
+  - Goal: provide configurable TLS support for all network paths in the system to enable
+    testing TLS overhead impact on JWT vs Biscuit performance comparison.
+  - Deliverable:
+    - TLS configuration flags for all scenarios to enable/disable secure communications
+    - MQTT over TLS support for client to broker communications (port 8883)
+    - HTTPS support for Token Issuer to client communications
+    - HTTPS support for plugin to authorization PDP communications  
+    - HTTPS support for benchmark/control communications (Prometheus, metrics)
+    - Docker compose configurations for TLS-enabled scenarios
+    - Certificate generation and management scripts for testing
+    - At least one scenario run captured with TLS enabled across all communications
+
+- [ ] **Issue 9: Document and analyze scenario policies**
   - Goal: create comprehensive documentation of all Biscuit and JWT policies used
     across test scenarios to ensure fair comparison and research validity.
   - Current issue: Biscuit uses production-grade Datalog policies while JWT uses
@@ -303,7 +369,7 @@ machine and record the first results/known issues).
     - Recommendations for policy alignment to ensure valid benchmark comparisons
     - Mapping of each scenario to its specific policy rules and expected behaviors
 
-- [ ] **Issue 7: Expiry-aware client signaling via MQTT v5 enhanced auth**
+- [ ] **Issue 10: Expiry-aware client signaling via MQTT v5 enhanced auth**
   - Goal: when access fails due to token expiry, make the broker/PEP signal this
     distinctly from generic policy denial, enabling clients to trigger a token
     refresh + reauthentication flow.
@@ -312,7 +378,7 @@ machine and record the first results/known issues).
     - MQTT v5 `AUTH`-based reauthentication flow with explicit reason reporting
       (reason code / reason string) suitable for automated clients
 
-- [ ] **Issue 8: Add MIRI verification for FFI memory safety**
+- [ ] **Issue 11: Add MIRI verification for FFI memory safety**
   - Goal: integrate MIRI to detect undefined behavior and memory safety issues in the
     Rust FFI layer that interfaces with Mosquitto's C API.
   - Rationale: The plugin contains 25 unsafe blocks across `lib.rs` and `config.rs`
@@ -323,7 +389,7 @@ machine and record the first results/known issues).
     - Fixed memory safety issues (estimated 5-10 based on current patterns)
     - Verification report documenting MIRI findings and fixes
 
-- [ ] **Issue 9: Add Kani formal verification for critical FFI functions**
+- [ ] **Issue 12: Add Kani formal verification for critical FFI functions**
   - Goal: use Kani to formally verify memory safety properties of the most critical
     FFI functions in the Mosquitto plugin interface.
   - Rationale: Formal verification provides mathematical guarantees beyond MIRI's
@@ -335,6 +401,7 @@ machine and record the first results/known issues).
       proper lifetime management
     - Formal verification report suitable for academic publication
     - Counterexample analysis for any failed properties
+
 
 ---
 

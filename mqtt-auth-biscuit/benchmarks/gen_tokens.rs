@@ -163,11 +163,11 @@ fn main() {
     use base64::{engine::general_purpose, Engine as _};
     let biscuit_b64 = general_purpose::STANDARD.encode(&biscuit_bytes);
 
-    let biscuit_5_b64 = general_purpose::STANDARD.encode(&biscuit_5_blocks.to_vec().unwrap());
-    let biscuit_25_b64 = general_purpose::STANDARD.encode(&biscuit_25_blocks.to_vec().unwrap());
+    let biscuit_5_b64 = general_purpose::STANDARD.encode(biscuit_5_blocks.to_vec().unwrap());
+    let biscuit_25_b64 = general_purpose::STANDARD.encode(biscuit_25_blocks.to_vec().unwrap());
     let biscuit_delegated_b64 =
-        general_purpose::STANDARD.encode(&biscuit_delegated.to_vec().unwrap());
-    let biscuit_short_b64 = general_purpose::STANDARD.encode(&biscuit_short.to_vec().unwrap());
+        general_purpose::STANDARD.encode(biscuit_delegated.to_vec().unwrap());
+    let biscuit_short_b64 = general_purpose::STANDARD.encode(biscuit_short.to_vec().unwrap());
 
     let biscuit_pubkey_hex = hex::encode(root_keypair.public().to_bytes());
 

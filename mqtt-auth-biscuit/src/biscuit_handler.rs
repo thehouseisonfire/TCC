@@ -26,5 +26,5 @@ pub fn verify_biscuit_token(
     .map_err(|_| biscuit_auth::error::Token::InternalError)?;
 
     // Authorize
-    authorizer.authorize().map(|_| true).map_err(|e| e)
+    authorizer.authorize().map(|_| true)
 }

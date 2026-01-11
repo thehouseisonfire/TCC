@@ -1,8 +1,0 @@
-Proceed with this fixes:
-
-
-- Determine if JWT using HS256, as that is not aligned with the proposed comparison since it is a symetric cryptographic algorithm, while Biscuit necessarily uses assymetric ones. If it is using HS256 or another symetric algorithm, add a simple step in `PROGRESS.md` to address this.
-- Fix `Cargo.toml` to use jsonwebtoken 10.x.x if it is a menial fix, otherwise alert me to necessary changes in code.
-- Fix `ARTICLE.md` to mention mosquitto 2.0.15.
-- Update `mqtt-auth-biscuit/README.md` properly, either removing the main entry or correctly pointing to `run_scenarios.py`, whichever would be most sensible
-- Document that the code *does* re-verify the Biscuit token per message, if that is indeed accurate, and add to `PROGRESS.md` a simple future step to address this (don't speculate on implementation specifics).

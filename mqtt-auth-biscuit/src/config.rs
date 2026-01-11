@@ -2,6 +2,49 @@ use crate::policy::{PolicyBackendConfig, PolicyMode};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use std::ffi::CStr;
 use std::fs;
+use thiserror::Error;
+
+/// Configuration errors using thiserror for better error handling
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("JWT algorithm is required")]
+    MissingJwtAlgorithm,
+    
+    #[error("JWT key file is required for algorithm {0}")]
+    MissingJwtKey(String),
+    
+    #[error("Invalid JWT algorithm: {0}")]
+    InvalidJwtAlgorithm(String),
+    
+    #[error("Failed to read JWT key file '{path}': {source}")]
+    JwtKeyFileError { path: String, #[source] source: std::io::Error },
+    
+    #[error("Invalid JWT public key PEM: {0}")]
+    InvalidJwtPem(String),
+    
+    #[error("Invalid biscuit root key hex: {0}")]
+    InvalidBiscuitKeyHex(String),
+    
+    #[error("Biscuit root key must be exactly 32 bytes, got {0}")]
+    InvalidBiscuitKeyLength(usize),
+    
+    #[error("Invalid biscuit root public key: {0}")]
+    InvalidBiscuitPublicKey(String),
+    
+    #[error("Invalid biscuit root private key: {0}")]
+    InvalidBiscuitPrivateKey(String),
+    
+    #[error("Biscuit root key (hex or private) is required")]
+    MissingBiscuitKey,
+    
+    #[allow(dead_code)]
+    #[error("Invalid policy mode: {0}")]
+    InvalidPolicyMode(String),
+    
+    #[allow(dead_code)]
+    #[error("Invalid cache TTL seconds: {0}")]
+    InvalidCacheTtl(String),
+}
 
 #[derive(Clone)]
 pub struct JwtConfig {
@@ -21,6 +64,180 @@ pub struct PluginConfig {
     pub policy: PolicyBackendConfig,
     pub cache_ttl_seconds: u64,
     pub ext_auth_method: Option<String>,
+}
+
+/// Builder for PluginConfig with fluent interface and validation
+pub struct PluginConfigBuilder {
+    jwt_alg: Option<String>,
+    jwt_key_file: Option<String>,
+    jwt_issuer: Option<String>,
+    jwt_audience: Option<String>,
+    biscuit_root_key_hex: Option<String>,
+    biscuit_root_private_key_hex: Option<String>,
+    policy_mode: Option<PolicyMode>,
+    sqlite_path: Option<String>,
+    http_url: Option<String>,
+    cache_ttl_seconds: Option<u64>,
+    ext_auth_method: Option<String>,
+}
+
+impl Default for PluginConfigBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PluginConfigBuilder {
+    pub fn new() -> Self {
+        Self {
+            jwt_alg: None,
+            jwt_key_file: None,
+            jwt_issuer: None,
+            jwt_audience: None,
+            biscuit_root_key_hex: None,
+            biscuit_root_private_key_hex: None,
+            policy_mode: None,
+            sqlite_path: None,
+            http_url: None,
+            cache_ttl_seconds: None,
+            ext_auth_method: None,
+        }
+    }
+    
+    pub fn jwt_algorithm(mut self, alg: impl Into<String>) -> Self {
+        self.jwt_alg = Some(alg.into());
+        self
+    }
+    
+    pub fn jwt_key_file(mut self, path: impl Into<String>) -> Self {
+        self.jwt_key_file = Some(path.into());
+        self
+    }
+    
+    pub fn jwt_issuer(mut self, issuer: impl Into<String>) -> Self {
+        self.jwt_issuer = Some(issuer.into());
+        self
+    }
+    
+    pub fn jwt_audience(mut self, audience: impl Into<String>) -> Self {
+        self.jwt_audience = Some(audience.into());
+        self
+    }
+    
+    pub fn biscuit_root_key_hex(mut self, key_hex: impl Into<String>) -> Self {
+        self.biscuit_root_key_hex = Some(key_hex.into());
+        self
+    }
+    
+    pub fn biscuit_root_private_key_hex(mut self, key_hex: impl Into<String>) -> Self {
+        self.biscuit_root_private_key_hex = Some(key_hex.into());
+        self
+    }
+    
+    pub fn policy_mode(mut self, mode: PolicyMode) -> Self {
+        self.policy_mode = Some(mode);
+        self
+    }
+    
+    pub fn sqlite_path(mut self, path: impl Into<String>) -> Self {
+        self.sqlite_path = Some(path.into());
+        self
+    }
+    
+    pub fn http_url(mut self, url: impl Into<String>) -> Self {
+        self.http_url = Some(url.into());
+        self
+    }
+    
+    pub fn cache_ttl_seconds(mut self, ttl: u64) -> Self {
+        self.cache_ttl_seconds = Some(ttl);
+        self
+    }
+    
+    pub fn ext_auth_method(mut self, method: impl Into<String>) -> Self {
+        self.ext_auth_method = Some(method.into());
+        self
+    }
+    
+    pub fn build(self) -> Result<PluginConfig, ConfigError> {
+        let jwt_alg = self.jwt_alg.ok_or(ConfigError::MissingJwtAlgorithm)?;
+        
+        let alg = match jwt_alg.as_str() {
+            "RS256" => Algorithm::RS256,
+            "ES256" => Algorithm::ES256,
+            _ => return Err(ConfigError::InvalidJwtAlgorithm(jwt_alg)),
+        };
+        
+        let jwt_key_file = self.jwt_key_file
+            .ok_or_else(|| ConfigError::MissingJwtKey(jwt_alg.clone()))?;
+        
+        let decoding_key = match alg {
+            Algorithm::RS256 => {
+                let pem = fs::read(&jwt_key_file)
+                    .map_err(|e| ConfigError::JwtKeyFileError { path: jwt_key_file, source: e })?;
+                DecodingKey::from_rsa_pem(&pem)
+                    .map_err(|e| ConfigError::InvalidJwtPem(e.to_string()))?
+            }
+            Algorithm::ES256 => {
+                let pem = fs::read(&jwt_key_file)
+                    .map_err(|e| ConfigError::JwtKeyFileError { path: jwt_key_file, source: e })?;
+                DecodingKey::from_ec_pem(&pem)
+                    .map_err(|e| ConfigError::InvalidJwtPem(e.to_string()))?
+            }
+            _ => return Err(ConfigError::InvalidJwtAlgorithm(jwt_alg)),
+        };
+        
+        let mut validation = Validation::new(alg);
+        if let Some(iss) = self.jwt_issuer {
+            validation.set_issuer(&[iss]);
+        }
+        if let Some(aud) = self.jwt_audience {
+            validation.set_audience(&[aud]);
+        }
+        
+        let biscuit_root_public_key = match (self.biscuit_root_key_hex, self.biscuit_root_private_key_hex) {
+            (Some(pub_hex), _) => {
+                let bytes = hex::decode(pub_hex)
+                    .map_err(|e| ConfigError::InvalidBiscuitKeyHex(e.to_string()))?;
+                if bytes.len() != 32 {
+                    return Err(ConfigError::InvalidBiscuitKeyLength(bytes.len()));
+                }
+                biscuit_auth::PublicKey::from_bytes(&bytes, biscuit_auth::Algorithm::Ed25519)
+                    .map_err(|e| ConfigError::InvalidBiscuitPublicKey(e.to_string()))?
+            }
+            (None, Some(priv_hex)) => {
+                let bytes = hex::decode(priv_hex)
+                    .map_err(|e| ConfigError::InvalidBiscuitKeyHex(e.to_string()))?;
+                if bytes.len() != 32 {
+                    return Err(ConfigError::InvalidBiscuitKeyLength(bytes.len()));
+                }
+                let priv_key = biscuit_auth::PrivateKey::from_bytes(&bytes, biscuit_auth::Algorithm::Ed25519)
+                    .map_err(|e| ConfigError::InvalidBiscuitPrivateKey(e.to_string()))?;
+                let keypair = biscuit_auth::KeyPair::from(&priv_key);
+                keypair.public()
+            }
+            (None, None) => return Err(ConfigError::MissingBiscuitKey),
+        };
+        
+        let policy = PolicyBackendConfig {
+            mode: self.policy_mode.unwrap_or(PolicyMode::TokenOnly),
+            sqlite_path: self.sqlite_path,
+            http_url: self.http_url,
+        };
+        
+        Ok(PluginConfig {
+            jwt: JwtConfig {
+                decoding_key,
+                validation,
+            },
+            biscuit: BiscuitConfig {
+                root_public_key: biscuit_root_public_key,
+            },
+            policy,
+            cache_ttl_seconds: self.cache_ttl_seconds.unwrap_or(3600),
+            ext_auth_method: self.ext_auth_method.or_else(|| Some("token".to_string())),
+        })
+    }
 }
 
 fn opt_kv(opt: *mut crate::MosquittoOpt) -> Option<(String, String)> {
@@ -43,133 +260,43 @@ pub fn parse_options(
     options: *mut crate::MosquittoOpt,
     option_count: i32,
 ) -> Result<PluginConfig, String> {
-    let mut jwt_alg = "ES256".to_string();
-    let mut jwt_key_file: Option<String> = None;
-    let mut jwt_issuer: Option<String> = None;
-    let mut jwt_audience: Option<String> = None;
-
-    let mut biscuit_root_key_hex: Option<String> = None;
-    let mut biscuit_root_private_key_hex: Option<String> = None;
-
-    let mut policy_mode = PolicyMode::TokenOnly;
-    let mut sqlite_path: Option<String> = None;
-    let mut http_url: Option<String> = None;
-
-    let mut cache_ttl_seconds: u64 = 3600;
-    let mut ext_auth_method: Option<String> = Some("token".to_string());
-
+    let mut builder = PluginConfigBuilder::new();
+    
     for i in 0..option_count {
         let opt_ptr = unsafe { options.add(i as usize) };
         let Some((key, value)) = opt_kv(opt_ptr) else {
             continue;
         };
 
-        match key.as_str() {
-            "jwt_alg" => jwt_alg = value,
-            "jwt_key_file" => jwt_key_file = Some(value),
-            "jwt_issuer" => jwt_issuer = Some(value),
-            "jwt_audience" => jwt_audience = Some(value),
-            "biscuit_root_key_hex" => biscuit_root_key_hex = Some(value),
-            "biscuit_root_private_key_hex" => biscuit_root_private_key_hex = Some(value),
+        builder = match key.as_str() {
+            "jwt_alg" => builder.jwt_algorithm(value),
+            "jwt_key_file" => builder.jwt_key_file(value),
+            "jwt_issuer" => builder.jwt_issuer(value),
+            "jwt_audience" => builder.jwt_audience(value),
+            "biscuit_root_key_hex" => builder.biscuit_root_key_hex(value),
+            "biscuit_root_private_key_hex" => builder.biscuit_root_private_key_hex(value),
             "policy_mode" => {
-                policy_mode = match value.as_str() {
+                let mode = match value.as_str() {
                     "token" => PolicyMode::TokenOnly,
                     "sqlite" => PolicyMode::Sqlite,
                     "http" => PolicyMode::Http,
                     "hybrid" => PolicyMode::Hybrid,
                     _ => return Err(format!("Invalid policy_mode: {value}")),
-                }
+                };
+                builder.policy_mode(mode)
             }
-            "sqlite_path" => sqlite_path = Some(value),
-            "http_url" => http_url = Some(value),
+            "sqlite_path" => builder.sqlite_path(value),
+            "http_url" => builder.http_url(value),
             "cache_ttl_seconds" => {
-                cache_ttl_seconds = value
+                let ttl = value
                     .parse::<u64>()
                     .map_err(|e| format!("Invalid cache_ttl_seconds: {e}"))?;
+                builder.cache_ttl_seconds(ttl)
             }
-            "ext_auth_method" => ext_auth_method = Some(value),
-            _ => {}
-        }
+            "ext_auth_method" => builder.ext_auth_method(value),
+            _ => builder,
+        };
     }
-
-    let alg = match jwt_alg.as_str() {
-        "RS256" => Algorithm::RS256,
-        "ES256" => Algorithm::ES256,
-        _ => return Err(format!("Unsupported jwt_alg: {jwt_alg}")),
-    };
-
-    let decoding_key = match alg {
-        Algorithm::RS256 => {
-            let path =
-                jwt_key_file.ok_or_else(|| "jwt_key_file is required for RS256".to_string())?;
-            let pem = fs::read(path).map_err(|e| format!("Failed reading jwt_key_file: {e}"))?;
-            DecodingKey::from_rsa_pem(&pem)
-                .map_err(|e| format!("Invalid RSA public key PEM: {e}"))?
-        }
-        Algorithm::ES256 => {
-            let path =
-                jwt_key_file.ok_or_else(|| "jwt_key_file is required for ES256".to_string())?;
-            let pem = fs::read(path).map_err(|e| format!("Failed reading jwt_key_file: {e}"))?;
-            DecodingKey::from_ec_pem(&pem).map_err(|e| format!("Invalid EC public key PEM: {e}"))?
-        }
-        _ => return Err("Unsupported jwt_alg".to_string()),
-    };
-
-    let mut validation = Validation::new(alg);
-    if let Some(iss) = jwt_issuer {
-        validation.set_issuer(&[iss]);
-    }
-    if let Some(aud) = jwt_audience {
-        validation.set_audience(&[aud]);
-    }
-
-    let biscuit_root_public_key = match (biscuit_root_key_hex, biscuit_root_private_key_hex) {
-        (Some(pub_hex), _) => {
-            let bytes =
-                hex::decode(pub_hex).map_err(|e| format!("Invalid biscuit_root_key_hex: {e}"))?;
-            if bytes.len() != 32 {
-                return Err("biscuit_root_key_hex must decode to exactly 32 bytes".to_string());
-            }
-            biscuit_auth::PublicKey::from_bytes(&bytes, biscuit_auth::Algorithm::Ed25519)
-                .map_err(|e| format!("Invalid biscuit root public key: {e}"))?
-        }
-        (None, Some(priv_hex)) => {
-            let bytes = hex::decode(priv_hex)
-                .map_err(|e| format!("Invalid biscuit_root_private_key_hex: {e}"))?;
-            if bytes.len() != 32 {
-                return Err(
-                    "biscuit_root_private_key_hex must decode to exactly 32 bytes".to_string(),
-                );
-            }
-            let priv_key =
-                biscuit_auth::PrivateKey::from_bytes(&bytes, biscuit_auth::Algorithm::Ed25519)
-                    .map_err(|e| format!("Invalid biscuit root private key: {e}"))?;
-            let keypair = biscuit_auth::KeyPair::from(&priv_key);
-            keypair.public()
-        }
-        (None, None) => {
-            return Err(
-                "biscuit_root_key_hex or biscuit_root_private_key_hex is required".to_string(),
-            );
-        }
-    };
-
-    let policy = PolicyBackendConfig {
-        mode: policy_mode,
-        sqlite_path,
-        http_url,
-    };
-
-    Ok(PluginConfig {
-        jwt: JwtConfig {
-            decoding_key,
-            validation,
-        },
-        biscuit: BiscuitConfig {
-            root_public_key: biscuit_root_public_key,
-        },
-        policy,
-        cache_ttl_seconds,
-        ext_auth_method,
-    })
+    
+    builder.build().map_err(|e| e.to_string())
 }

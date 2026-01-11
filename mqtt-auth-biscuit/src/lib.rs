@@ -1,5 +1,5 @@
 use crate::auth::{AuthEngine, TokenType};
-use crate::authz::check_authorization;
+use crate::authz::{check_authorization, AuthzParams};
 use crate::cache::SessionCache;
 use crate::config::{parse_options, PluginConfig};
 use crate::policy::PolicyMode;
@@ -145,6 +145,14 @@ pub extern "C" fn mosquitto_plugin_version(
     5
 }
 
+/// # Safety
+/// 
+/// This function is part of the Mosquitto plugin FFI interface.
+/// - `identifier` must be a valid pointer to a MosquittoPluginId
+/// - `userdata` must be a valid pointer to a null pointer that will be set to plugin state
+/// - `options` must be valid for `option_count` iterations or null if `option_count` is 0
+/// - The caller ensures all pointers are valid and properly aligned
+/// - This function initializes global plugin state and registers callbacks
 #[no_mangle]
 pub unsafe extern "C" fn mosquitto_plugin_init(
     identifier: *mut MosquittoPluginId,
@@ -233,6 +241,13 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
     MOSQ_ERR_SUCCESS
 }
 
+/// # Safety
+/// 
+/// This function is part of the Mosquitto plugin FFI interface.
+/// - `userdata` must be a valid pointer that was previously set by mosquitto_plugin_init
+/// - `options` and `option_count` are ignored in this implementation but may be valid pointers
+/// - The caller ensures all pointers are valid and properly aligned
+/// - This function cleans up plugin state and must be called before plugin unload
 #[no_mangle]
 pub unsafe extern "C" fn mosquitto_plugin_cleanup(
     _userdata: *mut c_void,
@@ -352,16 +367,17 @@ extern "C" fn acl_check_callback(
     let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
 
     if let Some(token_type) = state.cache.get(&client_id) {
-        if check_authorization(
-            &token_type,
-            &client_id,
-            &topic,
-            evt.access,
-            &state.config.biscuit.root_public_key,
-            state.config.policy.mode,
-            state.sqlite_policy.as_ref(),
-            state.config.policy.http_url.as_deref(),
-        ) {
+        let params = AuthzParams {
+            client_id: &client_id,
+            topic: &topic,
+            access: evt.access,
+            biscuit_root_key: &state.config.biscuit.root_public_key,
+            policy_mode: state.config.policy.mode,
+            sqlite_policy: state.sqlite_policy.as_ref(),
+            http_url: state.config.policy.http_url.as_deref(),
+        };
+        
+        if check_authorization(&token_type, params) {
             return MOSQ_ERR_SUCCESS;
         }
     }
@@ -388,16 +404,17 @@ extern "C" fn message_callback(
     let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
 
     if let Some(token_type) = state.cache.get(&client_id) {
-        if check_authorization(
-            &token_type,
-            &client_id,
-            &topic,
-            2,
-            &state.config.biscuit.root_public_key,
-            state.config.policy.mode,
-            state.sqlite_policy.as_ref(),
-            state.config.policy.http_url.as_deref(),
-        ) {
+        let params = AuthzParams {
+            client_id: &client_id,
+            topic: &topic,
+            access: 2,
+            biscuit_root_key: &state.config.biscuit.root_public_key,
+            policy_mode: state.config.policy.mode,
+            sqlite_policy: state.sqlite_policy.as_ref(),
+            http_url: state.config.policy.http_url.as_deref(),
+        };
+        
+        if check_authorization(&token_type, params) {
             return MOSQ_ERR_SUCCESS;
         }
     }
@@ -423,16 +440,17 @@ extern "C" fn control_callback(
     let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
 
     if let Some(token_type) = state.cache.get(&client_id) {
-        if check_authorization(
-            &token_type,
-            &client_id,
-            &topic,
-            2,
-            &state.config.biscuit.root_public_key,
-            state.config.policy.mode,
-            state.sqlite_policy.as_ref(),
-            state.config.policy.http_url.as_deref(),
-        ) {
+        let params = AuthzParams {
+            client_id: &client_id,
+            topic: &topic,
+            access: 2,
+            biscuit_root_key: &state.config.biscuit.root_public_key,
+            policy_mode: state.config.policy.mode,
+            sqlite_policy: state.sqlite_policy.as_ref(),
+            http_url: state.config.policy.http_url.as_deref(),
+        };
+        
+        if check_authorization(&token_type, params) {
             return MOSQ_ERR_SUCCESS;
         }
     }

@@ -4,7 +4,7 @@ use jsonwebtoken::Validation;
 
 #[derive(Clone)]
 pub enum TokenType {
-    JWT { claims: Claims, raw: String },
+    Jwt { claims: Claims, raw: String },
     Biscuit(Vec<u8>),
 }
 
@@ -26,7 +26,7 @@ impl AuthEngine {
         if token.starts_with("eyJ") {
             // Likely JWT (Heuristic to avoid JWT parsing if the token is a Biscuit)
             verify_jwt_token(token, &self.jwt_key, &self.jwt_validation)
-                .map(|claims| TokenType::JWT {
+                .map(|claims| TokenType::Jwt {
                     claims,
                     raw: token.to_string(),
                 })

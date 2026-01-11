@@ -1,0 +1,450 @@
+\chapter{Fundamentos Teóricos}
+
+\section{Protocolo MQTT}
+
+O MQTT é um protocolo de mensagens do tipo \emph{publish-subscribe} (publicar-assinar) concebido para ser leve e eficiente. Criado em 1999 por Andy Stanford-Clark, da IBM, e Arlen Nipper, da Eurotech, sob a denominação \emph{Message Queue Telemetry Transport}, o protocolo foi desenvolvido originalmente para o setor de energia, visando ao monitoramento de oleodutos por meio de conexões via satélite \cite{hivemq_origin,wikipedia_mqtt}. Em 2010, a IBM lançou o protocolo como padrão aberto na versão 3.1 \cite{ibm_v31}. Subsequentemente, em 2013, ele foi oficialmente endossado pela \emph{Organization for the Advancement of Structured Information Standards} (OASIS), tornando-se a norma ISO/IEC 20922:2016 \cite{oasis_2013,iso_20922}. Apesar da nomenclatura original, o protocolo não implementa filas de mensagens no sentido tradicional, e o prefixo "MQ" é um legado de sua tecnologia predecessora, a IBM MQSeries \cite{wikipedia_mqtt,hivemq_origin}.
+
+A \emph{raison d'être} do MQTT reside na sua capacidade de operar de forma robusta em ambientes com restrições de recursos, proporcionando baixo uso de largura de banda, consumo de energia mínimo e comunicação confiável em redes instáveis ou de alta latência. Tais características o tornam uma escolha atraente para conectar uma vasta gama de dispositivos, como sensores, aplicações móveis, sistemas de controle industrial e eletrodomésticos inteligentes, bem como para redes implantadas em ambientes remotos ou de difícil acesso, como estações de monitoramento subaquático ou sensores agrícolas \cite{influx_mqtt_use_cases,emqx_mqtt_use_cases,ibm_v31,oasis_v311,hivemq_essentials}.
+
+Em sua essência, o MQTT opera sobre um modelo cliente-intermediário, em contraste com a arquitetura cliente-servidor comum em protocolos como o \emph{Hypertext Transfer Protocol} (HTTP), em que a comunicação ocorre diretamente entre os terminais \cite{oasis_v311}. Dessa forma, sua arquitetura define três funções distintas:
+
+\begin{itemize}
+   \item \textbf{Publicador (Publisher)}: Cliente que envia (publica) mensagens ao \emph{broker}.
+   \item \textbf{Assinante (Subscriber)}: Cliente que recebe (assina) mensagens do \emph{broker}.
+   \item \textbf{Intermediário (Broker)}: Servidor central responsável por receber todas as mensagens dos publicadores, filtrá-las e roteá-las aos assinantes apropriados \cite{oasis_v311}.
+\end{itemize}
+
+Nesta topologia, os clientes não se comunicam diretamente entre si, e o \emph{broker} atua como intermediário obrigatório para todas as comunicações de rede. Para garantir a bidirecionalidade, um mesmo cliente pode atuar simultaneamente como publicador e assinante.
+
+O mecanismo empregado para o roteamento entre remetentes e receptores é denominado "tópico". Tópicos são rótulos textuais que servem como canais de endereçamento. Semelhantes a outros protocolos de rede, os tópicos são estruturados hierarquicamente, utilizando barras (/) como separadores, frequentemente referidos como caminhos ou filtros (por exemplo, 'sensores/edificio1/andar2/temperatura'). Esta estrutura em árvore permite uma separação clara de interesses, embora imponha rigidez: um tópico não pode pertencer a dois domínios lógicos simultaneamente, o que exige duplicação caso essa visibilidade seja necessária \cite{oasis_v311,hivemq_topics}.
+
+Para flexibilizar o consumo de dados, o MQTT suporta dois tipos de caracteres curinga (\emph{wildcards}) nas assinaturas: o curinga de nível único (+) e o curinga de múltiplos níveis (\#). O curinga de nível único substitui exatamente um segmento da hierarquia. Por exemplo, uma assinatura em \seqsplit{'sensores/edificio1/+/temperatura'} receberia mensagens de \seqsplit{'sensores/edificio1/andar1/temperatura'} e \seqsplit{'sensores/edificio1/andar2/temperatura'}, mas ignoraria \seqsplit{'sensores/edificio1/andar1/umidade'}. Já o curinga de múltiplos níveis corresponde a qualquer número de segmentos a partir de sua posição até o final do caminho. Uma assinatura em 'sensores/edificio1/\#' receberia todas as mensagens sob aquele domínio. É importante notar que o curinga de múltiplos níveis deve ser, obrigatoriamente, o último caractere do filtro. Estas características têm implicações diretas na implementação de políticas de autorização, pois permitem definir permissões granulares em hierarquias inteiras ou em níveis específicos de tópicos \cite{oasis_v311,hivemq_topics,emqx_acl_explanation}.
+
+O modelo do MQTT é enriquecido por recursos de estado, como mensagens retidas, sessões persistentes e Qualidade de Serviço (QoS). Quando uma mensagem é publicada com a \emph{flag} \texttt{retain} definida como verdadeira, o \emph{broker} armazena a última mensagem válida para aquele tópico. Qualquer cliente que, posteriormente, assine o tópico receberá imediatamente a mensagem retida, garantindo acesso ao último estado conhecido, sem a necessidade de aguardar uma nova publicação \cite{oasis_v311,ibm_v31}. O \emph{broker} também pode manter uma sessão persistente, armazenando assinaturas e mensagens não entregues em caso de desconexão. A gestão de sessão é controlada por parâmetros específicos: nas versões 3.1 e 3.1.1, pela \emph{flag} \emph{Clean Session}; na versão 5.0, pela combinação de \emph{Clean Start} e \emph{Session Expiry Interval}, proporcionando controle granular sobre o ciclo de vida da sessão \cite{oasis_v311,oasis_v50}.
+
+O sistema de QoS é um dos pilares do protocolo, permitindo equilibrar a confiabilidade da entrega com a largura de banda e o custo de processamento. O protocolo define três níveis:
+
+\begin{itemize}
+    \item \textbf{QoS 0 (No máximo uma vez)}: O nível mais rápido e menos confiável, operando com a lógica "atirar e esquecer". O publicador envia a mensagem uma única vez sem exigir confirmação. Não há garantia de entrega.
+    \item \textbf{QoS 1 (Pelo menos uma vez)}: Garante a entrega da mensagem, mas pode gerar duplicatas. O publicador envia um pacote \texttt{PUBLISH} e aguarda um \texttt{PUBACK}. Se a confirmação não for recebida em tempo hábil, o pacote é reenviado.
+    \item \textbf{QoS 2 (Exatamente uma vez)}: O nível mais confiável e oneroso. Utiliza um \emph{handshake} de quatro etapas para garantir que a mensagem seja entregue uma única vez, eliminando duplicidades \cite{ibm_v31,oasis_v311,oasis_v50}.
+\end{itemize}
+
+A escolha do QoS representa um \emph{trade-off} crítico. O QoS 0 é adequado para leituras periódicas de sensores, em que perdas ocasionais são toleráveis. O QoS 1 é ideal para telemetria crítica, em que a aplicação pode lidar com idempotência. O QoS 2 reserva-se a comandos de controle onde a duplicação poderia causar efeitos colaterais indesejados. Como a definição do QoS é realizada pelo cliente publicador, redes abertas podem necessitar de mecanismos de controle no \emph{broker} para evitar que clientes utilizem indiscriminadamente o QoS 2, sobrecarregando a infraestrutura.
+
+Adicionalmente, o MQTT utiliza mecanismos de monitoramento de conexões. O sistema de \emph{keep-alive} detecta conexões ociosas ou rompidas por meio da troca periódica de pacotes \texttt{PINGREQ} e \texttt{PINGRESP}. Complementarmente, o mecanismo de \emph{Last Will and Testament} (LWT) permite que um cliente registre, no ato da conexão, uma mensagem a ser publicada automaticamente pelo \emph{broker} caso a conexão seja interrompida abruptamente, servindo como notificação de falha aos demais integrantes da rede \cite{oasis_v311}.
+
+O ciclo de vida de uma conexão MQTT segue uma sequência estrita. O cliente inicia a comunicação enviando um pacote \texttt{CONNECT}, contendo identificadores, credenciais (usuário/senha) e configurações de sessão. O \emph{broker} responde com um \texttt{CONNACK}, indicando sucesso ou a causa da falha (e.g., credenciais inválidas). Após a conexão, ocorrem o envio de mensagens (\texttt{PUBLISH}, entre outros) e a inscrição em tópicos (\texttt{SUBSCRIBE}/\texttt{SUBACK}). O encerramento ordenado ocorre via pacote \texttt{DISCONNECT}, instruindo o \emph{broker} a fechar a conexão sem disparar a mensagem LWT \cite{oasis_v311}.
+
+O protocolo evoluiu significativamente desde seu desenvolvimento inicial. A versão 3.1 (2010) estabeleceu as bases fundamentais \cite{ibm_v31}, enquanto a versão 3.1.1 (2013) focou na correção de ambiguidades para padronização pela OASIS \cite{oasis_v311}. Já a versão 5.0 (2019) introduziu mudanças substanciais. Entre as inovações, destacam-se os códigos de razão (\emph{reason codes}) aprimorados para o tratamento de erros, assinaturas compartilhadas para o balanceamento de carga e, crucialmente, as propriedades de usuário (\emph{user properties}). Estas últimas permitem anexar metadados arbitrários de chave-valor aos pacotes, oferecendo um vetor padronizado para a implementação de mecanismos de autenticação estendidos conforme a especificação do protocolo \cite{oasis_v50,oasis_v50_new_features,emqx_mqtt5_new_features}.
+
+\section{Broker MQTT}
+
+\subsection{Funções do Broker}
+
+O \emph{broker} MQTT constitui o componente central e mais crítico da rede, atuando como o intermediário obrigatório para toda a comunicação entre clientes \cite{oasis_v311}. Do ponto de vista operacional, o \emph{broker} desempenha três funções essenciais para a operação de uma rede MQTT.
+
+A primeira é o roteamento de mensagens, no qual o \emph{broker} recebe pacotes \texttt{PUBLISH} dos publicadores e os distribui a todos os assinantes cujos filtros de tópico correspondam ao tópico da mensagem \cite{oasis_v311}.
+
+A segunda responsabilidade é o gerenciamento de sessões e de persistência. O \emph{broker} deve manter o estado de cada cliente conectado, incluindo suas assinaturas ativas, mensagens não entregues (a depender do nível de QoS) e configurações de sessão. Para sessões persistentes, o \emph{broker} armazena essas informações mesmo após desconexões, permitindo que os clientes restaurem seu estado ao reconectar \cite{oasis_v311,oasis_v50}. 
+
+A terceira função indispensável é a aplicação dos níveis de QoS.
+
+Além dessas funções operacionais, o \emph{broker} assume responsabilidades de segurança e de manutenção da integridade da rede. A autenticação de clientes é o primeiro ponto de controle, verificando a identidade de cada dispositivo que tenta se conectar. Embora o protocolo MQTT, em versões anteriores a 5.0, apoie nativamente a autenticação via usuário e senha, implementações mais complexas são possíveis em todas as versões recentes por meio de módulos de extensão \cite{oasis_v311,oasis_v50,eclipse_mosquitto_conf,rfc9431_section_2_2_4_1}.
+
+Consequentemente, a fiscalização da autorização emerge como uma extensão natural do papel do \emph{broker}. Um sistema de autorização robusto no MQTT define permissões para operações de publicação e assinatura em tópicos específicos. Essa verificação deve ser altamente eficiente, pois pode ser executada milhares de vezes por segundo em redes de alta carga com políticas dinâmicas.
+
+Mecanismos de limitação de taxa (\emph{rate limiting}) são essenciais para prevenir ataques de negação de serviço (DoS) e proteger os recursos do \emph{broker} e dos assinantes. O \emph{broker} pode aplicar controles, como limites de mensagens por segundo, cotas por tópico e restrições ao número de conexões ou de assinaturas por cliente. Idealmente, tais limites devem ser configuráveis por identidade e integrados ao sistema de autorização, permitindo políticas granulares \cite{emqx_rate_limit,vernemq_rate_limit,oasis_v50_5_4_8}.
+
+Por fim, o \emph{broker} é o ponto natural para a auditoria da rede, devido à sua maior capacidade de processamento e armazenamento. Ele atua como um ponto central para a coleta de eventos de relevância sistêmica, como autenticações, publicações e inscrições, registrando seus resultados e durações \cite{emqx_audit,vernemq_tracing}.
+
+Arquiteturalmente, \emph{brokers} modernos oferecem diversas opções de implantação. O modelo de \emph{broker} único é a configuração mais simples e tradicional, mas representa um ponto único de falhas e limita a escalabilidade ao crescimento vertical. Para cenários de alta disponibilidade, as arquiteturas de \emph{cluster} tornaram-se vantajosas. Nelas, múltiplas instâncias do \emph{broker} cooperam, sincronizando sessões e mensagens para que a rede opere como um serviço unificado \cite{emqx_clustering,vernemq_clustering}. O modelo mais comum é o \emph{masterless}, em que todos os nós são pares, embora introduza complexidade na sincronização de estado e no tratamento de partições de rede \cite{emqx_clustering_benefits}. Diferentemente, o \emph{bridging} conecta instâncias de \emph{brokers} distintas para encaminhar mensagens sobre tópicos específicos, sem replicar todo o estado. Essa abordagem é mais simples e pode ter vantagens de desempenho, mas não oferece a mesma garantia de disponibilidade de um \emph{cluster} \cite{emqx_bridge,vernemq_bridge,eclipse_mosquitto_conf}.
+
+\subsection{Cenário de Implementações}
+
+O ecossistema de \emph{brokers} MQTT oferece um vasto cenário de implementações ativas, refletindo diferentes casos de uso. Entre as soluções de código aberto mais consolidadas, destacam-se EMQX, VerneMQ, NanoMQ e Mosquitto \cite{emqx_compare,vernemq_docs,nanomq_site,eclipse_mosquitto_site}.
+
+O EMQX, desenvolvido em Erlang, é projetado para cenários de alta demanda, integração com outros protocolos, como CoAP, e suporte nativo para \emph{clustering} \cite{emqx_overview,emqx_coap,emqx_clustering}. Similarmente, o VerneMQ, também em Erlang, foca na escalabilidade, oferecendo \emph{clustering} e um sistema de extensões em Lua \cite{vernemq_docs,vernemq_lua_plugins}. Em contraste, o NanoMQ, escrito em C, é otimizado para dispositivos de borda, trocando funcionalidades avançadas por um consumo de recursos menor, mas mantendo a capacidade de \emph{bridging} para se conectar a \emph{brokers} maiores \cite{nanomq_site,nanomq_docs_bridge}.
+
+Adicionalmente, provedores de nuvem como Amazon Web Services (AWS) e Microsoft Azure oferecem \emph{brokers} gerenciados (IoT Core e IoT Hub, respectivamente). Tais serviços abstraem a complexidade de operação e de escala, mas suas implementações são de código fechado, o que impede modificações internas ou a implantação em infraestrutura própria \cite{aws_iot,azure_iot}.
+
+De modo geral, as implementações convergem para a compatibilidade com as especificações MQTT v3.1, v3.1.1 e v5.0 e para o suporte a \emph{Transport Layer Security} (TLS). As principais diferenças residem no modelo de implantação, no nicho de desempenho (escalabilidade vs. leveza) e nos mecanismos de extensibilidade \cite{oasis_v50_1_6,oasis_v50_5_4,emqx_compare}.
+
+\subsection{Mosquitto}
+
+Dentre as implementações analisadas, o \emph{broker} Mosquitto se destaca como uma das soluções de código aberto mais maduras, leves e amplamente adotadas. Desenvolvido por Roger Light e mantido pela Eclipse Foundation, o projeto foca na eficiência de recursos e na estrita conformidade com o protocolo \cite{eclipse_mosquitto_github,eclipse_mosquitto_site}. Implementado em C, o Mosquitto apresenta um consumo de memória e CPU baixos em comparação a \emph{brokers} como o EMQX \cite{eclipse_mosquitto_site,emqx_compare}.
+
+Essa característica o posiciona em um nicho semelhante ao do NanoMQ. Embora o NanoMQ, por ser um projeto mais recente, ofereça vantagens arquiteturais como \emph{multithreading} e suporte a MQTT-over-QUIC, o Mosquitto retém uma vantagem clara em popularidade, maturidade e estabilidade, com documentação mais exaustiva e um ecossistema de usuários mais ativo \cite{nanomq_site,emqx_compare,github_broker_topic}.
+
+Em termos de conformidade, o Mosquitto implementa integralmente as especificações MQTT v3.1, v3.1.1 e v5.0 e fornece os mecanismos de segurança essenciais, como suporte a TLS e controle de acesso via Listas de Controle de Acesso (ACLs) \cite{eclipse_mosquitto_conf,eclipse_mosquitto_auth_methods}. A característica mais relevante para este trabalho, contudo, é o suporte a módulos de extensão para autenticação e autorização. O \emph{broker} expõe um conjunto de \emph{hooks} (gatilhos) que permitem interceptar eventos críticos do ciclo de vida da conexão, delegando decisões de segurança a uma lógica customizada \cite{eclipse_mosquitto_plugin,mosquitto_auth_plug,mosquitto_go_auth}.
+
+O fato de o Mosquitto ser implementado em C facilita o uso de FFI, permitindo que a lógica de segurança seja escrita em outras linguagens.
+
+A escolha do Mosquitto como base para este trabalho foi motivada por essa combinação de fatores. Sua leveza, maturidade e ampla adoção o tornam uma plataforma confiável. Contudo, a motivação principal reside na flexibilidade de seu mecanismo de módulos e na fácil integração via FFI. Enquanto outras soluções focam em funcionalidades não essenciais ao escopo do projeto, a simplicidade operacional e a poderosa API de extensões do Mosquitto o tornam  ideal para desenvolver e validar um mecanismo de autorização customizado, com a garantia de que os resultados serão relevantes para uma comunidade de usuários mais ampla.
+
+
+\section{Segurança e Modelos de Autorização}
+
+\subsection{Autenticação (AuthN) versus Autorização (AuthZ)}
+
+A autenticação (AuthN) e a autorização (AuthZ) são pilares essenciais da segurança de sistemas e, no MQTT, representam processos distintos, porém complementares. A autenticação verifica a identidade de um sujeito por meio de credenciais, como nome de usuário e senha, certificados digitais ou tokens, com o objetivo principal de estabelecer 'quem é' o cliente que tenta se conectar ao \emph{broker} \cite{eclipse_mosquitto_conf,rfc3539_section_1_2,ibm_authn_authz,microsoft_authn_authz,freecodecamp_authn_authz}.
+
+Por outro lado, a autorização ocorre após a autenticação bem-sucedida, determinando se o sujeito possui permissão para executar determinadas ações sobre recursos específicos, como publicar ou assinar tópicos MQTT \cite{emqx_acl_explanation}. Vale destacar que a autorização também se aplica a clientes anônimos, que operam com uma lista padrão e restrita de permissões \cite{eclipse_mosquitto_conf}. Ademais, a autorização deve ser reavaliada periodicamente para permitir atualizações no nível de acesso conforme necessário \cite{owasp_auth,nist_security_80053-ac3,ibm_authn_authz,microsoft_authn_authz,freecodecamp_authn_authz}.
+
+Essa distinção clara entre AuthN e AuthZ permite a implementação de modelos de segurança dinâmicos e granulares.
+
+\subsection{Modelos de Autorização: RBAC, ABAC e DAC}
+
+Diversos modelos estruturam a autorização de entidades em sistemas; dentre os mais relevantes, destacam-se o \emph{Role-Based Access Control} (RBAC), o \emph{Attribute-Based Access Control} (ABAC) e o \emph{Discretionary Access Control} (DAC).
+
+No RBAC, as permissões são atribuídas a papéis específicos, e as entidades recebem acesso ao serem associadas a esses papéis. Esse modelo intermediário simplifica a gestão de permissões em ambientes com funções estáveis, facilitando atualizações centralizadas \cite{ferraiolo1992}. Por exemplo, se a função 'Engenheiro' precisa de uma nova permissão, basta adicioná-la ao papel correspondente para que todos os engenheiros a recebam automaticamente. Entretanto, em sistemas complexos com muitas variações de função, o número elevado de papéis pode tornar o gerenciamento oneroso \cite{ferraiolo1992,owasp_auth}.
+
+O ABAC utiliza atributos do sujeito, recurso, ação e ambiente para avaliar regras de autorização, permitindo políticas contextuais detalhadas, como a de permitir acesso a dispositivos apenas em horários comerciais \cite{nist_abac_800162}. Esse modelo oferece alta granularidade e flexibilidade, porém impõe maior complexidade na definição e na manutenção das regras, além de custos computacionais elevados devido à avaliação em tempo real \cite{nist_abac_800162}.
+
+O DAC, por sua vez, concede ao proprietário do recurso a definição das permissões de acesso para outras entidades. No contexto MQTT, em que o \emph{broker} atua como proprietário central, isso se manifesta frequentemente por meio de ACLs, que atribuem diretamente permissões de publicação e assinatura a clientes ou grupos específicos \cite{emqx_acl_guide,eclipse_mosquitto_conf}. Essa abordagem é simples e intuitiva, mas pode acarretar um custo administrativo elevado devido à necessidade de atualização individual das permissões em caso de mudanças nas políticas.
+
+\subsection{Autorização Baseada em Identidade e Autorização Baseada em Capacidade}
+
+Existem duas filosofias distintas quanto ao uso de tokens para autenticação e autorização. De um lado, a separação máxima entre autenticação e autorização, em que o token de acesso contém apenas a identidade mínima do usuário, deixando que o sistema de autorização determine suas permissões a cada nova conexão. Essa abordagem garante que mudanças nas permissões sejam refletidas imediatamente no controle de acesso, embora impossibilite o uso do token como uma licença autônoma \cite{permitio_jwt_authorization}.
+
+Do outro lado, a filosofia dos tokens de capacidade, na qual o token carrega uma lista explícita de permissões, possibilita sistemas com autorização descentralizada e uma necessidade mínima de conexão contínua. Essa abordagem também permite que redes concedam acessos exclusivamente a partir das declarações do token, sem considerar a identidade do cliente. Contudo, esse modelo atrasa a propagação de novas regras de acesso, pois tokens previamente emitidos permanecem válidos até expirarem, configurando o chamado 'Problema do Novo Inimigo' (\emph{New Enemy problem}) \cite{neil_madden_capacity_api_security,storj_capacity,wikipedia_capacity_security}.
+
+\subsection{Criptografia Simétrica e Assimétrica}
+
+A criptografia pode ser dividida em duas estratégias distintas: simétrica e assimétrica.
+
+A criptografia simétrica utiliza uma única chave compartilhada tanto para criptografar quanto para descriptografar a mensagem. É um método rápido e eficiente, ideal para grandes volumes de informação. Contundo, seus principais desafios são a distribuição segura dessa chave entre as partes, e a separação entre o direito de criptografar e descriptografar. O \emph{Advanced Encryption Standard} (AES) é um exemplo de algoritmo proeminente para esta estratégia \cite{nist_fips_197}.
+
+Em contraste, a criptografia assimétrica, ou de chave pública, utiliza um par de chaves: uma pública, que pode ser livremente distribuída, e uma privada, que deve ser mantida em segredo. A chave pública realiza uma das operações e a chave privada a reversa, dependendo do caso de uso. Para a troca de mensagens secretas, a chave pública é usada para criptografa-las. Para assinaturas digitais, ela descriptografa. O Rivest-Shamir-Adleman (RSA) é um exemplo clássico de algoritmo nesta estratégia \cite{rsa_paper}.
+
+Ambos os métodos podem ser usados de forma complementar, com muitos sistemas usando a criptografia assimétrica para trocar uma chave simétrica de forma segura, empregando-a em seguida no resto da comunicação.
+
+\subsection{Transport Layer Security (TLS)}
+
+O Transport Layer Security (TLS) é um protocolo criptográfico que estabelece canais de comunicação seguros entre máquinas por meio de um processo de \emph{handshake}, durante o qual são negociados parâmetros de segurança e realizada a autenticação de ao menos uma parte, geralmente via certificados digitais como o padrão X.509. O TLS garante três pilares da segurança da informação: confidencialidade (por meio de criptografia), integridade (prevenindo alterações não detectadas) e autenticação. 
+
+O MQTT, assim como outros protocolos como o HTTP, pode operar sobre o TLS para garantir a segurança do transporte, reduzindo os riscos de interceptação e manipulação de informações sensíveis \cite{rfc8446}.
+
+\subsection{Autenticação e Autorização no MQTT}
+
+Historicamente, a versão 3.1.1 do MQTT oferecia suporte nativo à autenticação restrita. A especificação limitava-se aos campos \texttt{username} e \texttt{password}, sem prever estruturas dedicadas a metadados adicionais \cite{ibm_v31}. Para implementar métodos baseados em tokens, desenvolvedores frequentemente recorriam a esses campos textuais para transportar as credenciais, adaptando a especificação às necessidades de segurança modernas \cite{ibm_v31,rfc9431_section_2_2_4_1}.
+
+A introdução da versão 5.0 ampliou significativamente essas capacidades. O pacote \texttt{CONNECT} passou a suportar \emph{User Properties} que permitem o transporte de tokens ou contexto adicional de forma estruturada. Além disso, o cabeçalho variável recebeu os campos \texttt{Authentication Method} e \texttt{Authentication Data}, permitindo a negociação explícita do mecanismo de segurança e o envio inicial dos dados. 
+
+Uma inovação crítica do MQTT 5.0 é o suporte a fluxos de autenticação estendidos através do pacote \texttt{AUTH}. Diferente do modelo clássico de solicitação-resposta única, o pacote \texttt{AUTH} permite que o servidor desafie o cliente, exigindo trocas sucessivas de dados até que a identidade seja confirmada. Isso viabiliza a implementação de mecanismos complexos, como desafios criptográficos (Challenge-Response) ou autenticação via SCRAM. Adicionalmente, a especificação permite a reautenticação durante uma conexão ativa: o \emph{broker} pode solicitar, a qualquer momento, que o cliente renove suas credenciais enviando um pacote \texttt{AUTH}, sem a necessidade de derrubar a conexão \emph{Transmission Control Protocol} (TCP). A Figura \ref{fig:fig1} ilustra este fluxo estendido.
+
+\begin{figure}[htb!]
+\centering\includegraphics[width=.80\textwidth]{figuras/1-auth-flow.png}
+\caption{Exemplo de fluxo de autenticação estendida no MQTT 5 utilizando o pacote \texttt{AUTH}}
+\label{fig:fig1}
+{\footnotesize Fonte: \url{https://www.codementor.io/@emqtech/leveraging-enhanced-authentication-for-mqtt-security-25opca0497}. Acesso em: 14 nov. 2025.}
+\end{figure}
+
+Apesar das melhorias nativas, a segurança robusta frequentemente depende de abordagens externas. O mTLS (\emph{Mutual TLS}) é o padrão-ouro, utilizando certificados X.509 para validar tanto o servidor quanto o cliente. Embora elimine a necessidade de senhas e ofereça garantias fortes por meio de infraestrutura de chaves públicas (PKI), sua adoção em IoT enfrenta barreiras de complexidade operacional (gestão do ciclo de vida de certificados) e de custo computacional, que pode ser proibitivo \cite{cloudflare_mtls,eclipse_mosquitto_conf,tls_mqtt_cost_evaluation}.
+
+Uma alternativa mais flexível é a autenticação baseada em tokens, frequentemente orquestrada por meio do OAuth 2.0. Neste fluxo, a responsabilidade pela autenticação é delegada a um servidor externo (Provedor de Identidade), que emite tokens de acesso (\emph{Access Tokens}) de curta duração e tokens de atualização (\emph{Refresh Tokens}) de longa duração. O cliente apresenta o token de acesso ao \emph{broker}, que o valida localmente, se for um token autossuficiente, como um JWT, ou via introspecção remota. É notável que o protocolo OAuth 2.0 não impõe um formato específico para o token de acesso, embora o JWT seja a escolha predominante \cite{rfc6749,rfc6749_section_1_4,rfc7519,rfc8725}.
+
+No âmbito da autorização, o mecanismo mais difundido baseia-se em ACLs que mapeiam identidades a padrões de tópicos. O \emph{broker} Mosquitto, por exemplo, suporta nativamente ACLs estáticas por meio de arquivos de configuração \cite{eclipse_mosquitto_conf,emqx_acl_explanation}. Para cenários dinâmicos, módulos de extensão como o \emph{Dynamic Security} permitem a implementação de modelos RBAC, gerenciáveis em tempo de execução por meio de tópicos de controle do sistema, como o \texttt{\$CONTROL} \cite{eclipse_mosquitto_dynamic}.
+
+A evolução das arquiteturas IoT tende a favorecer a integração com sistemas externos de política. A substituição de arquivos estáticos por bancos de dados ou serviços externos permite a implementação de modelos ABAC (\emph{Attribute-Based Access Control}) e RBAC granulares, centralizando a lógica de negócio fora do \emph{broker}, embora introduza latência de rede na verificação.
+
+\section{JSON Web Token}
+
+O JSON Web Token (JWT) é um padrão aberto compacto para a transmissão de declarações (\emph{claims}) entre partes, estruturado como um objeto \emph{JavaScript Object Notation} (JSON). Padronizado pela \emph{Internet Engineering Task Force} (IETF) por meio da \emph{Request for Comments} (RFC) 7519, em 2015 \cite{rfc7519}, o JWT integra o ecossistema \emph{JSON Object Signing and Encryption} (JOSE). Este conjunto de especificações (RFC 7515-7520) especifica diferentes mecanismos de assinatura e criptografia, permitindo adaptação na proteção do conteúdo e verificabilidade do token \cite{rfc7515,rfc7516,rfc7517,rfc7518,rfc7519,rfc7520}.
+
+Historicamente, o JWT surgiu para suprir a demanda por um formato leve e interoperável, capaz de autenticar e transportar identidade ou atributos entre clientes e serviços. Atualmente, a prevalência do JWT em ecossistemas modernos é evidenciada pela disponibilidade de bibliotecas em praticamente todas as linguagens de programação relevantes. A título de exemplo, o pacote JOSE no registro NPM registra milhões de downloads semanais \cite{jose_npm}.
+
+\subsection{Estrutura e Formato}
+
+Estruturalmente, o JWT consiste em uma sequência de caracteres codificados em Base64URL, compostos por segmentos delimitados por ponto ('.'). O padrão oferece duas arquiteturas principais que definem quais segmentos estarão presentes e qual o tratamento de segurança aplicado: o \emph{JSON Web Signature} (JWS), definido na RFC 7515, para tokens assinados, e o \emph{JSON Web Encryption} (JWE), definido na RFC 7516, para tokens com conteúdo confidencial \cite{rfc7515,rfc7516}.
+
+No caso do JWS, o token é composto por três partes: o cabeçalho (\emph{header}), a carga útil (\emph{payload}) e a assinatura.
+
+O \textbf{cabeçalho} é um objeto JSON que descreve as operações criptográficas aplicadas ao token. Nele, destacam-se dois pares de chave-valor: \texttt{alg}, que especifica o algoritmo de assinatura ou criptografia, e \texttt{typ}, que indica o tipo do objeto, tipicamente preenchido com "JWT", com outros tipos válidos sendo o "at+jwt", do caso em que esteja sendo usado como um token de acesso em um sistema OAuth \cite{rfc7519_section_3_1,rfc7515_section_3_3}. Entre os algoritmos de assinatura mais utilizados figuram o \emph{Hash-Based Message Authentication Code} (HMAC) com com \emph{Secure Hash Algorithm} de 256 bits (SHA-256) para esquemas simétricos, e o RSA ou \emph{Elliptic Curve Digital Signature Algorithm} (ECDSA) de 256 bits para esquemas assimétricos \cite{rfc7515,rfc7518,rsa_paper,rfc9068_section_2_1}.
+
+A \textbf{carga útil} transporta o conjunto de declarações. No JWS, este conteúdo é apenas codificado, não criptografado, permanecendo legível a qualquer entidade que possua o token. As declarações reservadas mais comuns incluem: \texttt{iss} (emissor), \texttt{sub} (sujeito), \texttt{aud} (audiência/destinatário), \texttt{exp} (expiração), \texttt{nbf} (\emph{not before}, o tempo antes do qual o token não deve ser aceito), \texttt{iat} (momento da emissão) e \texttt{jti} (ID único do token, utilizado para evitar ataques de repetição) \cite{rfc7519_section_4_1}.
+
+A \textbf{assinatura} é o resultado criptográfico gerado pelo algoritmo definido em \texttt{alg}, aplicado à concatenação do cabeçalho e da carga codificados. Ao validar a assinatura, utilizando a chave pública em esquemas assimétricos, o receptor garante a integridade e a autenticidade do token, assegurando que foi gerado por um emissor confiável e não sofreu adulteração \cite{rfc7515}.
+
+A \autoref{fig:fig2} ilustra a composição dessas partes.
+
+\begin{figure}[htb!]
+\centering\includegraphics[width=.85\textwidth]{figuras/2-example-jwt-jws.png}
+\caption{Estrutura de um JWT implementando JWS}
+\label{fig:fig2}
+{\footnotesize Fonte: \url{https://logto.io/jwt-decoder}. Acesso em: 14 nov. 2025.}
+\end{figure}
+
+Por outro lado, o JWE possui uma estrutura de cinco partes: o cabeçalho, a chave criptografada, o vetor de inicialização, o texto cifrado e a tag de autenticação \cite{rfc7516}.
+
+O cabeçalho do JWE é um objeto JSON que, assim como no JWS, descreve os algoritmos utilizados. No entanto, ele contém campos adicionais. O campo "alg" especifica o algoritmo de gerenciamento de chave, ou seja, como a chave de criptografia do conteúdo foi protegida. Algoritmos como o RSA com \emph{Optimal Asymmetric Encryption Padding} (RSA-OAEP) e o \emph{Elliptic Curve Diffie-Hellman Ephemeral Static} (ECDH-ES) são considerados os mais recomendados para esse propósito pela RFC. Outras opções, como o AES Key Wrap (128 e 256 bits) e a opção \texttt{dir} (chave direta), também são listadas como recomendadas para implementação, apesar de nenhum algoritmo ser mandatório. O campo "enc" indica o algoritmo de criptografia da carga, podendo ser o AES com HMAC ou o \emph{AES Galois/Counter Mode} (GCM), com entre 128 e 256 bits para o AES e 256 a 512 bits para o HMAC \cite{rfc7516,rfc7518,rfc8037_section_3_2}.
+
+A chave criptografada do JWE contém a Chave de Criptografia de Conteúdo (CEK), que é o segredo utilizado para cifrar o conteúdo do token. Isso faz com que parte do JWE seja um segredo que está, ele mesmo, encriptado. Por definição, a carga é sempre simetricamente criptografada, independentemente do algoritmo escolhido para encriptar a CEK \cite{rfc7516}.
+
+O vetor de inicialização, ou o campo \texttt{iv} do JWE, é um valor, tipicamente aleatório, utilizado para garantir que a criptografia do mesmo conteúdo em momentos distintos resulte em textos cifrados distintos. Ele é usado pelo algoritmo de criptografia, junto ao CEK, para cifrar a carga, visto que algoritmos de criptografia simétrica modernos, como o AES-GCM, necessitam desses valores para prevenir padrões exploráveis na cifra (conhecidos como \emph{nonce reuse}) \cite{rfc8452}.
+
+O texto cifrado do JWE é apenas a carga cifrada com a CEK e o vetor de inicialização. Para consegui-lo, é necessário que o token seja descriptografado para que a CEK seja utilizável.
+
+Por fim, a tag de autenticação é um valor gerado por algoritmos de criptografia autenticada, como o AES-GCM. Sua função é a mesma da assinatura do JWS: garantir a integridade e a autenticidade dos dados. Ao decriptar o token, o receptor pode recalcular essa tag e comparar o resultado com a recebida, sabendo assim se o token foi manipulado caso os valores não sejam iguais.
+
+\subsection{Análise de Vantagens e Limitações}
+
+Devido à sua natureza, ambas as versões do JWT são consideradas \emph{stateless} (sem estado). A verificação depende apenas da chave, dispensando a consulta a um banco de dados centralizado para validar cada requisição \cite{wikipedia_jwt,okta_auth0_jwt_myths}. Essa simplicidade impulsionou a adoção em massa do JWT. Dados da plataforma TheirStack indicam que milhares de empresas utilizam JWT e OAuth em suas pilhas tecnológicas \cite{theirstack_jwt,theirstack_oauth}.
+
+Entretanto, o modelo apresenta limitações arquiteturais. A característica \emph{stateless} dificulta a revogação imediata: uma vez emitido, um token permanece válido até sua expiração, mesmo que as permissões do usuário sejam alteradas no servidor. Isso exige um equilíbrio delicado na definição do Tempo de Vida (TTL) do token. Adicionalmente, o uso de codificação Base64URL resulta em um aumento de aproximadamente 33\% no tamanho dos dados em comparação ao binário original \cite{rfc4648_section_4}.
+
+Outra desvantagem crítica é a rigidez das declarações. O conteúdo do JWT é fixado na emissão, o que impossibilita que o cliente adicione restrições ou atenue suas próprias permissões sem solicitar um novo token ao emissor.
+
+Historicamente, vulnerabilidades de implementação também afetaram a reputação do JWT, como a aceitação indevida do algoritmo \texttt{none} (permitindo tokens não assinados) e a confusão entre chaves simétricas e assimétricas. Tais falhas motivaram o surgimento de alternativas como o PASETO (\emph{Platform-Agnostic Security Tokens}), que visa eliminar escolhas inseguras por padrão \cite{paseto_io,paragonie_paseto}.
+
+\section{Token Biscuit}
+
+O Biscuit é um formato de token de autorização desenvolvido originalmente por Geoffroy Couprie em 2018 e adotado oficialmente pela Eclipse Foundation em 2025 \cite{biscuit_site,eclipse_website_biscuit}. Concebido como resposta às limitações dos tokens tradicionais em arquiteturas de microsserviços, o Biscuit prioriza a redução de chamadas de rede e a descentralização da autorização.
+
+O design do Biscuit foi fortemente influenciado pelos tokens Macaroons da Google. Assim como os Macaroons, o Biscuit suporta a atenuação offline, permitindo que um portador derive um novo token com privilégios iguais ou inferiores aos do original, sem interagir com o emissor. A principal evolução reside na base criptográfica: enquanto Macaroons utilizam HMAC (simétrico), o Biscuit emprega criptografia com algoritmos como Ed25519 ou ECDSA na curva secp256r1 (assimétricos) \cite{rfc8032_section_5_1,p-256}, segregando emissão e verificação. Além disso, o Biscuit formaliza uma linguagem para a expressão de políticas baseado em Datalog \cite{biscuit_cryptography,biscuit_v2}.
+
+Estruturalmente, um token Biscuit é uma cadeia de blocos assinados criptograficamente. O primeiro bloco, denominado \emph{Authority Block}, é criado pelo emissor e define os direitos fundamentais. Blocos subsequentes, chamados de blocos de atenuação, podem ser anexados por outros portadores. A integridade é garantida por um esquema de assinaturas encadeadas: cada bloco contém as instruções em Datalog e a chave pública correspondente à chave privada que criptografará o próximo bloco, ambas criptografadas. Neste sistema:
+\begin{enumerate}
+    \item O atenuador conhece a chave privada correspondente à chave pública do bloco anterior (necessária para assinar o novo bloco);
+    \item O atenuador gera um novo par de chaves efêmeras, inserindo a chave pública no bloco e repassando a privada ao próximo portador.
+\end{enumerate}
+Para impedir novas atenuações (selar o token), basta não transmitir a última chave privada \cite{biscuit_cryptography}.
+
+\subsection{Linguagem de Políticas: Datalog}
+
+O uso de Datalog permite expressar políticas de segurança complexas através de três elementos: fatos, regras e verificações.
+\begin{itemize}
+    \item \textbf{Fatos:} Declaram informações ou privilégios (e.g.,  \texttt{right("file1", "read")}).
+    \item \textbf{Regras:} Permitem inferir novos fatos a partir de outros, seguindo a forma \texttt{cabeça <- corpo}. Por exemplo, para conceder leitura se o recurso pertencer a "alice":
+    \begin{verbatim}
+    right($res, "read") <- resource($res), owner("alice", $res)
+    \end{verbatim}
+    \item \textbf{Verificações (Checks):} Consultas que devem ser satisfeitas para validar o token. O autorizador combina os dados do token com o contexto da requisição (horário, IP, recurso) e avalia as cláusulas \texttt{check if} ou as políticas \texttt{allow/deny}.
+\end{itemize}
+
+Por questões de segurança, o escopo dos fatos é controlado: regras de um bloco atenuado operam apenas sobre fatos gerados naquele mesmo bloco, no bloco de autoridade ou pelo autorizador, prevenindo a injeção de fatos falsos em blocos intermediários. A \autoref{fig:fig3} demonstra o encadeamento e a visibilidade dos fatos.
+
+\begin{figure}[htb!]
+\centering\includegraphics[width=.80\textwidth]{figuras/3-biscuit-blocks.png}
+\caption{Encadeamento de blocos no token Biscuit e escopo de visibilidade dos fatos}
+\label{fig:fig3}
+{\footnotesize Fonte: \url{https://doc.biscuitsec.org}. Acesso em: 14 nov. 2025.}
+\end{figure}
+
+\subsection{Vantagens Comparativas e Adoção}
+
+A arquitetura do Biscuit viabiliza cenários avançados de delegação. Um usuário pode receber um token "raiz" e gerar tokens derivados específicos para diferentes serviços, restringindo o acesso apenas ao necessário (princípio do menor privilégio) sem sobrecarregar o servidor de autenticação. A partir da versão 3.0, o suporte a \emph{Third-party Blocks} permite incorporar autorizações de entidades externas, facilitando a federação de identidades \cite{biscuit_v3}.
+
+Comparado ao JWT, o Biscuit destaca-se pela flexibilidade em sistemas de ABAC (\emph{Attribute-Based Access Control}). Enquanto o JWT é estático, o Biscuit carrega lógica executável, adaptável ao contexto atual do verificador. Em termos de desempenho, utiliza \emph{Protocol Buffers} para serialização, o que tende a ser mais eficiente no \emph{parsing} do que o JSON e não sofre da inflação causada pelo Base64URL, embora o tamanho final do token dependa da complexidade e quantidade dos blocos encadeados \cite{biscuit_spec}. A \autoref{fig:fig5} resume as diferenças fundamentais.
+
+\begin{figure}[htb!]
+\centering\includegraphics[width=.80\textwidth]{figuras/5-biscuit-vs-jwt.png}
+  \caption{Quadro comparativo: JWT vs. Biscuit}
+\label{fig:fig5}
+{\footnotesize Fonte: Elaboração própria.}
+\end{figure}
+
+No que tange à revogação, o Biscuit herda os desafios de sistemas \emph{stateless}, mas mitiga o problema através de identificadores únicos de assinatura em cada bloco, de modo que a revogação de um token 'raiz'  revoga automaticamente todos os seus derivados. Além disso, o suporte a \emph{Snapshots} permite auditoria detalhada, possibilitando reproduzir o processo de decisão de autorização para fins de depuração, ou até mesmo para delegá-lo em parte \cite{biscuit_snapshots}.
+
+Em termos de maturidade e adoção industrial, o Biscuit conta com o patrocínio e uso em produção de empresas como a Clever Cloud (no serviço Pulsar) e a 3DS Outscale, que utiliza o token em seu sistema de Gerenciamento de Identidade e Acesso (IAM) \cite{biscuit_contributors,eclipse_website_biscuit_proposal}. O ecossistema possui implementações oficiais em Rust, Haskell, Python, C\# e JavaScript (via WebAssembly), conforme detalhado na \autoref{fig:fig4}.
+
+\begin{figure}[htb!]
+\centering\includegraphics[width=.80\textwidth]{figuras/4-biscuit-implementation-feature-map.png}
+\caption{Matriz de funcionalidades das implementações do Biscuit (Nov. 2025)}
+\label{fig:fig4}
+{\footnotesize Fonte: \url{https://github.com/eclipse-biscuit/biscuit}. Acesso em: 14 nov. 2025.}
+\end{figure}
+
+\section{Foreign Function Interface}
+
+A \emph{Foreign Function Interface} constitui um mecanismo que permite a um programa escrito em determinada linguagem de programação invocar funções ou utilizar serviços desenvolvidos em outra linguagem \cite{ffi_wikipedia}. Esta interface é fundamental em ecossistemas de software heterogêneos, onde diferentes linguagens são selecionadas com base em suas vantagens intrínsecas. O cenário mais comum envolve a interação entre linguagens de alto nível (como Rust, Go ou Java) e softwares de sistema de baixo nível, tipicamente escritos em C, que atua como uma \textit{lingua franca} computacional \cite{ffi_wikipedia}. A FFI abstrai a complexidade inerente à conversão de chamadas de função, como a tradução de tipos de dados e o gerenciamento de memória entre ambientes de execução, cujos paradigmas podem divergir significativamente.
+
+Linguagens modernas frequentemente oferecem ferramentas para facilitar esse padrão de interoperabilidade. O \texttt{cgo}, por exemplo, é a ferramenta da linguagem Go que viabiliza a invocação mútua de códigos em C e Go \cite{cgo_doc}, sendo utilizada em projetos como o \texttt{mosquitto-go-auth} \cite{mosquitto_go_auth}. No ecossistema Rust, ferramentas como o \texttt{cbindgen} automatizam a geração de cabeçalhos C a partir de código Rust \cite{cbindgen_docs}, enquanto o \texttt{bindgen} realiza o processo inverso \cite{bindgen_docs}. No contexto deste trabalho, a FFI é o elemento arquitetural que viabiliza a integração entre o módulo de autorização proposto, escrito em Rust para alavancar a segurança de memória e as bibliotecas do token Biscuit, e o \emph{broker} Mosquitto, desenvolvido em C.
+
+\section{Docker e Containerização}
+
+A containerização é uma tecnologia de virtualização em nível de sistema operacional que permite o empacotamento de uma aplicação, juntamente com suas dependências e bibliotecas, em uma unidade isolada denominada contêiner \cite{docker_container, docker_what_it_is}. Diferentemente das máquinas virtuais tradicionais, que exigem a virtualização completa do hardware e de um sistema operacional convidado (\textit{guest OS}), os contêineres compartilham o \textit{kernel} do sistema operacional hospedeiro. Esta característica arquitetural resulta em instâncias significativamente mais leves e eficientes \cite{docker_container}. A principal utilidade da containerização reside na garantia de consistência ambiental: assegura que o software execute de maneira idêntica tanto em ambientes de desenvolvimento quanto em servidores de produção.
+
+Lançado em 2013, o Docker popularizou essa tecnologia ao fornecer um ecossistema padronizado para a construção, implantação e gerenciamento de contêineres \cite{docker_11_years}. Para os experimentos propostos neste trabalho, os recursos de isolamento e controle de recursos do Docker são essenciais para a validação científica dos cenários de teste. A plataforma permite a alocação determinística de recursos de hardware por meio de parâmetros de execução. Opções como \texttt{--memory} e \texttt{--cpus} permitem limitar a memória RAM e o número de ciclos de processamento disponíveis para o \emph{broker} ou para clientes emulados \cite{docker_controls_memory, docker_controls_cpu}. Adicionalmente, a opção \texttt{--cpuset-cpus} permite restringir a execução a núcleos específicos da CPU, útil em sistemas com núcleos heterogêneos, enquanto o controlador \texttt{blkio} gerencia a largura de banda de entrada e saída de disco (\emph{disk} I/O) \cite{docker_controls_io}.
+
+No âmbito da simulação de redes, o Docker oferece abstrações robustas. O modo \texttt{bridge} isola o contêiner em sua própria sub-rede \cite{docker_bridge_driver}, facilitando o gerenciamento de portas e da \emph{Network Address Translation} (NAT), o que permite a coexistência de múltiplas instâncias do \emph{broker} no mesmo hospedeiro sem conflitos \cite{docker_networking_overview}. Para replicar as condições adversas típicas de redes IoT, ferramentas como o \texttt{tc} (\textit{Traffic Control}) e seu módulo \texttt{netem} podem ser integradas aos contêineres para injetar latência artificial, perda de pacotes e reordenação \cite{tc_utility, netem_utility}.
+
+A reprodutibilidade experimental é garantida pelo sistema de imagens do Docker. Por meio do arquivo \textit{Dockerfile}, especifica-se a versão exata do software necessário (por exemplo, \texttt{FROM eclipse-mosquitto:2.0.15}), assegurando que todas as baterias de testes utilizem o mesmo ambiente \cite{docker_dockerfile}. O orquestrador \texttt{docker-compose} complementa essa funcionalidade, permitindo a definição de toda a topologia do teste (clientes, brokers e redes) como código, executável com um único comando \cite{docker_compose}.
+
+Apesar de sua versatilidade, deve-se notar que o Docker apresenta limitações para a medição direta do consumo energético dos contêineres, uma métrica relevante para a análise de impacto em dispositivos embarcados.
+
+\section{Extensibilidade do Mosquitto}
+
+O Mosquitto disponibiliza uma API para o desenvolvimento de módulos de extensão, definida nos cabeçalhos \texttt{mosquitto\_plugin.h} e, a partir da versão 2.0 do \emph{broker}, no arquivo \texttt{mosquitto\_broker.h}, que introduz a versão 5.0 da API como complemento. Esta arquitetura baseia-se no registro de funções de \emph{callback} (chamada de retorno), que são invocadas pelo \emph{broker} na ocorrência de eventos-chave. Tal modelo permite que desenvolvedores interceptem o fluxo de execução para modificar comportamentos ou validar operações sem a necessidade de alterar o código-fonte do \emph{broker} \cite{eclipse_mosquitto_plugin, eclipse_mosquitto_plugin_callback_options}.
+
+O ciclo de vida de um módulo inicia-se quando o \emph{broker} o carrega e invoca a função mandatória \texttt{mosquitto\_plugin\_version} para verificar a compatibilidade da API. Em seguida, executa-se a função \texttt{mosquitto\_plugin\_init}, responsável pela inicialização. Nesta etapa, o módulo recebe um identificador, opções de configuração e um ponteiro para a memória de usuário, que o Mosquitto preservará e retornará em cada chamada subsequente. Após a inicialização, o módulo utiliza as funções \texttt{mosquitto\_callback\_register} e \texttt{mosquitto\_callback\_unregister} para gerenciar os eventos de interesse.
+
+Dentre os eventos disponíveis na API, destacam-se aqueles críticos para a implementação de mecanismos de segurança:
+
+\begin{itemize}
+  \item \texttt{MOSQ\_EVT\_Basic\_AUTH}: Acionado por uma requisição de conexão contendo credenciais tradicionais (usuário e senha).
+  \item \texttt{MOSQ\_EVT\_EXT\_AUTH\_START}: Invocado no início de um fluxo de autenticação estendida.
+  \item \texttt{MOSQ\_EVT\_EXT\_AUTH\_CONTINUE}: Chamado durante as etapas intermediárias de uma autenticação estendida (troca de pacotes \texttt{AUTH}).
+  \item \texttt{MOSQ\_EVT\_ACL\_CHECK}: Disparado sempre que ocorre uma requisição de inscrição ou de publicação em um tópico, para verificar permissões.
+  \item \texttt{MOSQ\_EVT\_MESSAGE}: Ocorre durante o processamento de mensagens. É relevante notar que, no fluxo de saída, este evento é acionado individualmente para cada assinante que receberá a mensagem, o que permite uma filtragem granular.
+  \item \texttt{MOSQ\_EVT\_CONTROL}: Relacionado a eventos de publicação no tópico \texttt{\$CONTROL}, utilizado pela extensão oficial \emph{Dynamic Security} para gestão dinâmica de ACLs.
+\end{itemize}
+
+A API também fornece funções utilitárias para o gerenciamento de sessões, como \texttt{mosquitto\_kick\_client\_by\_clientid} e \texttt{mosquitto\_kick\_client\_by\_username}, que permitem a desconexão forçada de clientes \cite{eclipse_mosquitto_plugin_callback_options}.
+
+Exemplos consolidados na comunidade demonstram a eficácia deste modelo. O projeto \texttt{mosquitto-go-auth} utiliza essa interface para criar uma ponte em Go, mapeando as funções do \emph{broker} para diversos \emph{backends} de autenticação, como bancos de dados. Similarmente, o \texttt{mosquitto-auth-plug} implementa funcionalidades análogas, utilizando a versão 4.0 da API \cite{eclipse_mosquitto_plugin}.
+
+\chapter{Trabalhos Relacionados}
+
+O \texttt{mosquitto-go-auth} é um módulo de autenticação e autorização para o Mosquitto que se destacava por suportar diversos \emph{backends}, incluindo Redis, MongoDB e JWT, e por utilizar a linguagem Go por meio de FFI. Contudo, o repositório foi arquivado em junho de 2025 e não oferece suporte nativo ao Biscuit, o que deixa uma lacuna para tokens de capacidade mais expressivos. O \texttt{mosquitto-auth-plug}, a solução mais antiga, arquivada em 2019, também não contempla essa funcionalidade. Além desses módulos comunitários, o módulo oficial \emph{Dynamic Security} do Mosquitto capacita o \emph{broker} com ACLs dinâmicas, mas não expande os mecanismos de autenticação e autorização para o uso de tokens \cite{mosquitto_go_auth,mosquitto_auth_plug,eclipse_mosquitto_dynamic}. A ausência de implementações ativas que integrem Biscuit ao Mosquitto reforça a relevância prática deste trabalho.
+
+Trabalhos como \citeonline{philipp2023_daxiot} propõem esquemas de autenticação e autorização descentralizados para redes IoT, demonstrando como identificadores descentralizados e \emph{Verifiable Credentials} (VCs) podem ser aplicados ao MQTT. Essa abordagem indica a viabilidade de paradigmas em que o Biscuit apresenta vantagens arquiteturais, devido ao seu suporte nativo à atenuação de privilégios e à delegação offline, características não exploradas diretamente no trabalho de \citeonline{philipp2023_daxiot}.
+
+\citeonline{anantharaman2019} demonstram o uso de Macaroons em arquiteturas \emph{publish-subscribe}, evidenciando ganhos na delegação offline e apontando desafios na gestão de chaves distribuídas. Embora os Macaroons compartilhem com o Biscuit a capacidade de atenuação de permissões, o trabalho não quantifica o impacto computacional dessas operações em \emph{brokers} com restrições de recursos. \citeonline{cochak2024} discutem um modelo de tokens encadeados (\emph{nested tokens}) e técnicas de agregação de assinaturas para reduzir o custo de verificação, oferecendo alternativas arquiteturais úteis para avaliar o Biscuit. No entanto, a aplicação prática dessas técnicas no contexto do MQTT permanece inexplorada na literatura.
+
+\citeonline{fossen2022exploring} menciona, em sua exploração de segurança baseada em capacidades em Rust, que o Biscuit tem potencial para suprir limitações em implementações de controle de acesso, destacando sua aplicação como trabalho futuro. \citeonline{identity_management_for_agents} identificam, em seu estudo sobre gerenciamento de identidades e segurança de agentes de inteligência artificial, a necessidade de atenuar permissões para que esses agentes possam delegar tarefas de maneira segura a subagentes especializados, citando Biscuit e Macaroons como soluções viáveis. Ambos os trabalhos sublinham a relevância teórica do Biscuit, mas não fornecem dados empíricos sobre sua viabilidade em ambientes MQTT.
+
+Um sistema de produção notável é a implantação do Apache Pulsar pela Clever Cloud, uma plataforma \emph{publish-subscribe}, na qual a empresa utiliza o Biscuit e disponibiliza seu módulo de integração, evidenciando a aplicabilidade prática do formato em sistemas distribuídos de mensageria \cite{clever_cloud_pulsar}. No entanto, a arquitetura do Pulsar, voltada para alta capacidade computacional e armazenamento persistente, difere significativamente da do Mosquitto, um \emph{broker} projetado para leveza e operação em dispositivos com restrições de recursos, o que torna necessária uma avaliação específica para o ecossistema MQTT.
+
+Apesar desses avanços, não existem, atualmente, comparações sistemáticas entre Biscuit e JWT no ecossistema MQTT, tampouco estudos que quantifiquem a viabilidade técnica do Biscuit nas operações de autenticação e autorização de um \emph{broker} leve, como o Mosquitto. Além disso, o arquivamento dos principais módulos comunitários abre espaço para uma solução moderna que incorpore o Biscuit e possibilite experimentos controlados com métricas de desempenho, consumo de recursos e escalabilidade. Este trabalho preenche essa lacuna ao fornecer tanto uma implementação funcional quanto uma análise empírica das implicações arquiteturais da adoção dete novo token de capacidade em infraestruturas IoT.
+
+\chapter{Metodologia}
+
+\section{Abordagem}
+
+Esta pesquisa adota uma abordagem predominantemente quantitativa, complementada por documentação qualitativa sobre aspectos de engenharia de software envolvidos no desenvolvimento da solução. Para a avaliação experimental, definem-se três hipóteses principais:
+
+\begin{itemize}
+  \item $\mathbf{H}_1$: O uso do token Biscuit é funcionalmente viável no ecossistema MQTT, cobrindo a totalidade dos casos de uso de autenticação e autorização que o JWT pode apoiar no broker Mosquitto.
+  \item $\mathbf{H}_2$: O token Biscuit apresenta desempenho equivalente ao JWT em cenários onde ambos possuem apoio nativo à funcionalidade (e.g., autenticação de identidade e verificações de integridade).
+  \item $\mathbf{H}_3$: Em cenários de autorização complexos, em que a arquitetura baseada em JWT exige introspecção externa ou consulta a sistemas adicionais, o Biscuit demonstra desempenho superior em termos de latência e vazão.
+\end{itemize}
+
+Entre as variáveis independentes, a primária é o \textbf{tipo de token}, cruzada com diferentes fontes de políticas: ACLs estáticas nativas do Mosquitto, ACLs dinâmicas (via módulo \emph{Dynamic Security}), verificação em banco de dados local (na mesma instância do \emph{broker}) e chamadas a serviços externos de autorização via HTTP.
+
+Adicionalmente, haverá variação nos parâmetros do protocolo MQTT, especificamente nos níveis de Qualidade de Serviço (QoS), na carga imposta ao sistema (número de conexões simultâneas e tamanho das mensagens) e na complexidade das políticas de acesso (variando de regras simples a condicionais baseadas em tempo e em atributos).
+
+As variáveis dependentes concentram-se em métricas de desempenho. Serão coletadas as latências de autenticação e autorização (tempo de processamento durante as ações de publicação e inscrição), distinguindo-se o tempo de processamento criptográfico do de avaliação lógica. Monitorar-se-á também a vazão (mensagens por segundo), a relação de carga entre o plano de controle e o plano de dados, e o consumo de recursos do sistema (CPU e memória), isolando o impacto do tamanho dos tokens e da frequência de chamadas externas. O tempo de estabelecimento da conexão (do pacote \texttt{SYN} do TCP até a primeira publicação efetiva) será avaliado como uma variável composta.
+
+Como variáveis de controle, o hardware, a versão do sistema operacional e a topologia física da rede permanecerão constantes em todas as baterias de testes.
+
+\subsection{Entidades e Fluxos}
+
+O experimento envolve cinco entidades lógicas distintas:
+
+\begin{itemize}
+ \item \textbf{Emissor de Tokens:} Entidade detentora das chaves privadas, responsável pela emissão de tokens contendo credenciais e permissões iniciais.
+ \item \textbf{Fonte de Políticas (PIP):} Entidade que detém a "verdade" sobre as regras de acesso (ACLs, bancos de dados ou serviços externos).
+ \item \textbf{Avaliador de Políticas (PDP):} O módulo de extensão do Mosquitto a ser desenvolvido, responsável pelo processamento das regras.
+ \item \textbf{Ponto de Aplicação (PEP):} O servidor Mosquitto equipado com o módulo. Verifica a assinatura dos tokens (via chave pública estática) e consulta o PDP para permitir ou negar as solicitações.
+ \item \textbf{Cliente:} Dispositivo que solicita acesso a tópicos. Requisita, armazena e apresenta o token ao PEP. No caso específico do Biscuit, pode anexar blocos de atenuação aos tokens que detêm.
+\end{itemize}
+
+Devido às características arquiteturais de cada tecnologia, o fluxo de consulta ao PIP varia significativamente:
+
+\textbf{Fluxo Biscuit:} Visto que o Biscuit suporta atenuação (mas não expansão) de direitos, o Emissor deve conhecer as permissões máximas no momento da criação do token. A consulta ao PIP primário ocorre majoritariamente na emissão. A partir deste ponto, o próprio token atua como um PIP portável até sua invalidação, reduzindo a necessidade de consultas externas.
+
+\textbf{Fluxo JWT:} Como o JWT padrão não atua como um token de capacidade efetivo (apenas carrega declarações de identidade ou papéis), o PDP frequentemente precisa consultar o PIP em tempo real a cada solicitação para validar permissões complexas ou granulares.
+
+Para garantir a paridade dos testes e evitar vieses, os cenários comuns ao uso de JWT, em que o token desempenha apenas o papel de identificação e o PDP busca permissões detalhadas no momento do acesso, também serão replicados na arquitetura do Biscuit para fins de comparação direta.
+
+\section{Proposta de Solução}
+
+A solução proposta consiste no desenvolvimento de um módulo de extensão para o Mosquitto, desenvolvido em Rust. A escolha justifica-se pelas garantias de segurança de memória e de desempenho do Rust, além da disponibilidade nativa da implementação de referência do Biscuit. O artefato final será uma biblioteca dinâmica (\emph{Shared Object} - \texttt{.so}) carregada em tempo de execução pelo Mosquitto.
+
+Utilizando a ferramenta \texttt{cbindgen}, serão gerados os cabeçalhos C (\texttt{.h}) que expõem as funções Rust para a API de plugins do Mosquitto (focada na versão 2.0+ e protocolo MQTT 5.0). As funções exportadas interceptarão eventos do \emph{broker}, especificamente: \texttt{MOSQ\_EVT\_BASIC\_AUTH} e \texttt{MOSQ\_EVT\_EXT\_AUTH} para autenticação; e \texttt{MOSQ\_EVT\_ACL\_CHECK}, \texttt{MOSQ\_EVT\_MESSAGE} e \texttt{MOSQ\_EVT\_CONTROL} para autorização de publicação, assinatura e controle.
+
+Para emissão e verificação, o módulo integrará as bibliotecas \texttt{jsonwebtoken} e \texttt{biscuit\_auth}. Por padrão, assume-se que os clientes requisitarão tokens a uma autoridade externa antes de contatar o \emph{broker}. O servidor terá a chave pública raiz configurada previamente \cite{rust_jsonwebtoken}.
+
+O fluxo de conexão seguirá as especificações do MQTT 5.0:
+\begin{enumerate}
+    \item Os clientes enviarão seus tokens através do campo \texttt{password} do pacote \texttt{CONNECT}. O limite de 65kB (definido pelo protocolo) é suficiente para acomodar ambos os tipos de token.
+    \item O \emph{broker} iniciará a sessão após validar a assinatura criptográfica.
+    \item Para gerenciar a expiração sem desconectar o cliente, será implementado um fluxo de reautenticação via pacotes \texttt{AUTH}. Ao expirar, o cliente requisitará um novo token e o enviará ao Mosquitto via outro pacote \texttt{AUTH}, permitindo a renovação transparente da sessão.
+\end{enumerate}
+
+Para a autorização contínua, a solução otimizará o desempenho do Biscuit, evitando a reverificação criptográfica completa a cada mensagem e realizando apenas a avaliação de políticas (Datalog). Se viável, será empregado \emph{caching} para regras estáticas, reavaliando apenas as regras contextuais a cada mensagem. O uso de pacotes \texttt{AUTH} também permitirá informar motivos específicos de rejeição, facilitando a depuração.
+
+\section{Proposta de Ambiente}
+
+O ambiente experimental será padronizado com Docker (versão 29.0.x), hospedando o Mosquitto (2.0.15) e os clientes em contêineres isolados. O desenvolvimento do módulo utilizará Rust (versão 1.92), integrando as bibliotecas \texttt{biscuit\_auth} (6.0, com apoio ao Biscuit 3.0+) e \texttt{jsonwebtoken} (10.x.x) \cite{rust_jsonwebtoken}. O banco de dados SQLite (3.51) será utilizado para cenários que exijam persistência local de políticas de acesso (excluindo ACLs estáticas e o módulo \emph{Dynamic Security}).
+
+Para assegurar a integridade dos testes e minimizar ruídos de vizinhança, a opção \texttt{--cpuset} do Docker será utilizada para fixar os processos do \emph{broker} e dos geradores de carga em núcleos físicos distintos e consistentes da máquina hospedeira.
+
+A emulação de rede utilizará o \texttt{iperf3} para aferir a capacidade nominal do canal, enquanto o \texttt{tc} (com o módulo \texttt{netem}) introduzirá latência, perda de pacotes e limitação de banda de forma controlada \cite{iperf3}. Os testes de carga utilizarão ferramentas especializadas como \texttt{mqtt-stresser} e \texttt{emqtt-bench} \cite{mqtt-stresser,emqtt-bench}. Topologias mais complexas serão orquestradas via Mininet ou Containernet \cite{mininet,containernet}.
+
+\section{Cenários de Teste}
+
+A bateria de testes divide-se em quatro categorias: isolados (microbenchmarks), integrados (cargas de trabalho pub/sub), em escala (sustentada e rajadas) e de falhas (recuperação e latência).
+
+Inicialmente, serão estabelecidos casos-base para definir a latência mínima e a vazão máxima do ambiente (sem autenticação e com autenticação nativa). Em seguida, avalia-se o uso de tokens apenas para autenticação de identidade, o que representa o "melhor caso" teórico para o JWT.
+
+Os cenários de destaque incluem:
+
+\textbf{Fragmentação e MTU (\emph{Maximum Transmission Unit}):} Manipulação do MTU via \texttt{tc} (200B, 500B, 1500B, 9000B) para identificar o ponto de inflexão em que o tamanho do token (especialmente Biscuits atenuados com múltiplos blocos) provoca fragmentação TCP excessiva e degrada o desempenho.
+
+\textbf{Problema da Manada (\emph{Thundering Herd}):} Simulação da reinicialização do \emph{broker} com a reconexão simultânea de um grande número de clientes. O objetivo é avaliar se o custo computacional da verificação de assinatura do Biscuit impede a recuperação rápida do sistema em comparação com o JWT.
+
+\textbf{Complexidade de Políticas:} Aumento progressivo de blocos e de regras lógicas no Biscuit (1, 5, 25 blocos) diante de solicitações constantes do mecanismo JWT a serviços externos para obter novos tokens. Busca-se validar a eficiência da verificação local do Biscuit diante da latência de múltiplas chamadas.
+
+\textbf{Latência Externa:} Introdução de degradação na rede de gerenciamento (200ms a 1s, 1\% a 5\% de perda). Espera-se que o Biscuit mantenha desempenho estável (por ser autocontido), enquanto o modelo JWT, dependente de introspecção, sofra degradação na vazão.
+
+\textbf{Arquitetura Híbrida e Contingência:} Teste em que Biscuits são avaliados como JWTs (apenas identidade) com autorização externa em operação normal, mas carregam políticas latentes para avaliação local (com acesso reduzido/seguro) caso o serviço externo falhe.
+
+\textbf{Revogação e Ciclo de Vida:} Comparação entre verificação em lista de revogação (tokens de longa duração) \emph{versus} tokens de curta validade (5, 15, 60 min) com renovação frequente via fluxo \texttt{AUTH}.
+
+\textbf{Delegação:} Simulação de fluxo em que clientes "mestres" emitem tokens atenuados para clientes "trabalhadores" com permissões estritamente limitadas à tarefa, explorando as capacidades de descentralização exclusivas do Biscuit, como especulado por \citeonline{identity_management_for_agents}.
+
+\section{Coleta e Análise de Dados}
+
+A coleta de dados será automatizada por meio de telemetria em tempo real, extraindo métricas do módulo Mosquitto, dos clientes simulados e de ferramentas do sistema (\texttt{perf}, \texttt{tcpdump}). Um componente exportador persistirá as séries temporais em bancos de dados adequados, como InfluxDB ou Prometheus \cite{influxdb,prometheus}.
+
+O tratamento estatístico incluirá o cálculo da mediana, do desvio padrão e dos percentis de cauda ($p50, p95, p99$) para identificar picos de latência (\emph{tail latency}) que as médias simples ocultariam.
+
+A interpretação dos dados focará na validação de $\mathbf{H}_2$ e $\mathbf{H}_3$, quantificando se o custo computacional adicional (CPU/Memória) do Biscuit é compensado pela economia de recursos de rede (latência/banda) em comparação à introspecção e tráfego externo exigidos por arquiteturas JWT complexas.
+
+Por fim, métricas de engenharia de software, como linhas de código e complexidade ciclomática, serão utilizadas para discutir a ergonomia da solução, complementando a validação de $\mathbf{H}_1$ (viabilidade funcional) demonstrada pela execução bem-sucedida dos cenários de teste.
+
+
+\chapter{Cronograma}
+
+\begin{table}[h]
+\centering
+\caption{Cronograma de Atividades}
+\label{tab:cronograma}
+\begin{tabularx}{\textwidth}{|X|c|c|c|c|c|c|}
+\hline
+\textbf{Atividades} & \textbf{M1} & \textbf{M2} & \textbf{M3} & \textbf{M4} & \textbf{M5} \\ \hline
+Especificações Formais dos Testes & X & X & & & \\ \hline
+Definição Final e Configuração do Ambiente & X & X & & & \\ \hline
+Implementação do Módulo &  & X & X & & \\ \hline
+Execução dos Cenários de Teste & &  & X & X & \\ \hline
+Análise dos Dados & & & X & X & \\ \hline
+Escrita dos Resultados e Discussão & & & & X & X \\ \hline
+Revisão Final e Formatação & & & & & X \\ \hline
+Entrega e Defesa do Trabalho & & & & & X \\ \hline
+\end{tabularx}
+\end{table}
+
+\section*{Descrição das Atividades}
+
+\begin{itemize}
+    \item \textbf{Especificações Formais dos Testes:} Detalhamento rigoroso dos experimentos a serem executados, incluindo justificativas teóricas e a parametrização quantitativa (por exemplo, número de clientes simultâneos, duração das sessões e volume de carga de processamento).
+    \item \textbf{Definição Final e Configuração do Ambiente:} Preparação da infraestrutura de contêineres, orquestração das ferramentas de monitoramento e configuração da máquina hospedeira.
+    \item \textbf{Implementação do Módulo:} Desenvolvimento do código-fonte do módulo e sua integração ao Mosquitto.
+    \item \textbf{Execução dos Cenários de Teste:} Realização das baterias de experimentos e coleta sistemática de métricas.
+    \item \textbf{Análise dos Dados:} Processamento estatístico das métricas coletadas e geração de visualizações comparativas entre as abordagens.
+    \item \textbf{Escrita dos Resultados e Discussão:} Redação final da análise experimental, consolidando as conclusões obtidas.
+\end{itemize}
+
+\chapter{Trabalhos Futuros}
+
+Este trabalho abre diversas frentes para pesquisas subsequentes.
+
+A transposição dos testes do ambiente virtualizado para dispositivos de hardware real pode revelar gargalos de processamento e nuances de hardware que não são observáveis na virtualização. Fundamentalmente, isso possibilitaria a avaliação precisa do consumo energético comparativo entre as soluções de token, uma métrica crítica para dispositivos operados a bateria.
+
+Além do Biscuit, existem outros tokens emergentes com arquiteturas promissoras, como Macaroons e PASETO. Expandir a avaliação comparativa para incluir essas tecnologias ofereceria uma visão mais abrangente das alternativas modernas ao JWT.
+
+Similarmente, o desenvolvimento de módulos de extensão para outros \emph{brokers} MQTT, como EMQX, VerneMQ e NanoMQ, seria de grande valia.
+
+Por fim, uma análise formal de segurança do módulo desenvolvido, incluindo testes de intrusão e verificação formal do código em Rust, seria um passo essencial para validar a robustez da solução.

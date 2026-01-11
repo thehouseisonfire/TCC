@@ -1,0 +1,7 @@
+All tests are apparently running in 1 docker always
+ - Evaluate if that compromisses the isolation suggested for the research
+ - Current isolation measures (if any)
+
+Biscuit Policies - make some for the tests
+
+Check if you really need to compile aws_rc_ls and have a c compiler on the target machine/docker

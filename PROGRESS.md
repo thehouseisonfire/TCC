@@ -60,20 +60,13 @@ Important architectural note (matches `ARTICLE.MD` terminology):
   `benchmarks/gen_tokens.rs`, and only the **public key** is mounted into the
   Mosquitto container (`docker/jwt_public.pem`).
 - **Cryptographic Backend**:
-  - JWT verification uses `jsonwebtoken` with the `aws_lc_rs` backend (C/Assembly
-    optimized via AWS-LC), representing a production-grade baseline.
-  - Biscuit verification uses `biscuit-auth` (Ed25519). The underlying signature
-    verification is pure-Rust (via `ed25519-dalek` in the Biscuit stack).
- 
+  - JWT verification uses `jsonwebtoken` with the `aws_lc_rs` backend (C/Assembly optimized via AWS-LC), representing a production-grade baseline. Given it requires a C compiler, the plugin shared library is pre-built on host and copied to container, eliminating need for the tools in Docker.
+  - Biscuit verification uses `biscuit-auth` (Ed25519). The underlying signature verification is pure-Rust (via `ed25519-dalek` in the Biscuit stack).
   This asymmetry (optimized JWT backend vs pure-Rust Biscuit backend) is
   intentional to test Biscuit against an industry-standard optimized
   implementation.
-- **Biscuit verification per authorization check**: Biscuit authorization
-  currently cryptographically verifies and runs the Biscuit token policies
-  during authorization checks (e.g., ACL checks / message authorization), rather
-  than cryptographically verifying it only once per session, and only evaluating
-  policies. In contrast, JWT is only cryptographically verified once.
-- **JWT expiration enforcement**: JWT `exp` is now verified on each authorization
+
+- **JWT expiration enforcement**: JWT `exp` is verified on each authorization
   decision (ACL/message/control), even when using cached session state.
 
 **Key files**:
@@ -254,20 +247,16 @@ machine and record the first results/known issues).
   - Some systems use `docker compose` instead of `docker-compose`.
   - If this becomes an issue, adapt runner to detect and use the available CLI.
 
-- [ ] **8.4 Add Dynamic Security module comparison**
-  - Goal: add a benchmark mode/scenario that uses Mosquitto’s Dynamic Security
+
+### Phase 9: Issue Resolution 
+
+- [ ] **Issue 1: Add Dynamic Security module comparison**
+  - Goal: add a benchmark mode/scenario that uses Mosquitto's Dynamic Security
     module as an authorization source for comparison.
   - Deliverable: at least one scenario run captured with Dynamic Security
     enabled, comparable to the existing token-only/SQLite/HTTP/hybrid cases.
 
-- [ ] **8.5 Avoid per-message Biscuit re-verification (if needed for performance
-      isolation)**
-  - Goal: avoid re-verifying/deserializing the Biscuit token on every
-    authorization check.
-  - Deliverable: a documented change (and rerun) showing the impact on
-    authorization latency/CPU.
-
-- [ ] **Issue 4: Implement proper JWT access logic (replace demo token-only authz)**
+- [ ] **Issue 2: Implement proper JWT access logic (replace demo token-only authz)**
   - Goal: replace the current heuristic JWT token-only authorization rules with a
     policy model that is comparable to Biscuit rights (e.g., encode topic/action
     grants as structured claims, or route JWT through SQLite/HTTP for fine-grained
@@ -277,14 +266,22 @@ machine and record the first results/known issues).
     - Updated `authz.rs` JWT enforcement that matches the chosen schema
     - At least one scenario run captured showing the new JWT mode
 
-- [ ] **Issue 5: Harden HTTP policy backend for benchmark validity**
+- [ ] **Issue 3: Harden HTTP policy backend for benchmark validity**
   - Goal: make the HTTP backend robust and well-specified for experiments.
   - Deliverable:
     - Clear request/response schema (documented) and stricter parsing
     - Configurable timeouts and error semantics (what triggers hybrid fallback)
     - Optional support for HTTPS (if required by the environment)
 
-- [ ] **Issue 6: Implement a long-running Token Issuer service (JWT + Biscuit)**
+- [ ] **Issue 4: Avoid per-message Biscuit re-verification**
+  - Goal: avoid re-verifying/deserializing the Biscuit token on every
+    authorization check to match JWT behavior (verify once, evaluate policies only).
+  - Current issue: Biscuit verification cryptographically verifies and runs policies
+    during each authorization check, while JWT is only verified once per session.
+  - Deliverable: a documented change (and rerun) showing the impact on
+    authorization latency/CPU.
+
+- [ ] **Issue 5: Implement a long-running Token Issuer service (JWT + Biscuit)**
   - Goal: provide a live issuance endpoint so benchmark clients can request new
     tokens after expiry (as proposed in `ARTICLE.MD`).
 
@@ -310,6 +307,17 @@ machine and record the first results/known issues).
       failed operations.
     - **Configurable TLS support** for Token Issuer to client communication and
       client to broker communication (allow running scenarios with and without TLS).
+
+- [ ] **Issue 6: Document and analyze scenario policies**
+  - Goal: create comprehensive documentation of all Biscuit and JWT policies used
+    across test scenarios to ensure fair comparison and research validity.
+  - Current issue: Biscuit uses production-grade Datalog policies while JWT uses
+    demo-like string matching, creating an unfair comparison.
+  - Deliverable:
+    - `SCENARIO_POLICIES.md` documenting all authorization policies per scenario
+    - Analysis of policy complexity and fairness between JWT and Biscuit implementations
+    - Recommendations for policy alignment to ensure valid benchmark comparisons
+    - Mapping of each scenario to its specific policy rules and expected behaviors
 
 - [ ] **Issue 7: Expiry-aware client signaling via MQTT v5 enhanced auth**
   - Goal: when access fails due to token expiry, make the broker/PEP signal this
@@ -365,12 +373,3 @@ raw-socket MQTT5 client that:
 - **No hypothesis compromise**: The hypothesis focus on broker-side functional
   viability, cryptographic verification costs, and policy evaluation latency—all
   measured server-side and unaffected by client implementation details.
-
----
-
-## Session Notes (2026-01-09)
-
-- Implemented scenario harness and docker stack additions required by
-  `ARTICLE.MD`.
-- Added MQTT5 reauthentication microbenchmark client.
-- Updated benchmark docs to cover the new entrypoints.

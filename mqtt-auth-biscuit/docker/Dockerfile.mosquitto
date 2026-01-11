@@ -1,8 +1,11 @@
 FROM eclipse-mosquitto:2.0.15
-# Install dependencies from local context
+
+# Install runtime dependencies only (no build tools)
 COPY docker/packages/*.apk /tmp/
 RUN apk add --allow-untrusted /tmp/*.apk && \
     rm /tmp/*.apk
 
+# Copy pre-built shared library from host
 COPY target/release/libmosquitto_auth_biscuit.so /mosquitto/plugins/
+
 # mosquitto.conf is already mounted via docker-compose

@@ -358,6 +358,21 @@ machine and record the first results/known issues).
     - Certificate generation and management scripts for testing
     - At least one scenario run captured with TLS enabled across all communications
 
+- [ ] **Issue 8.2: Containerized benchmark topology (client-per-container + service separation)**
+  - Goal: strengthen experimental isolation and fidelity by running benchmark clients in containers (optionally one container per client) and ensuring each major logical component is separated into the appropriate container(s) for the scenario.
+  - Rationale: the current load generator runs as a host process with many threads/clients, which is acceptable for many comparisons but can introduce host scheduling noise and makes it harder to claim “N independent IoT nodes” when discussing external validity.
+  - Notes / scope:
+    - This should be implemented as an optional benchmark mode (not mandatory for all runs), so results can be compared between “host loadgen” and “containerized clients”.
+    - This issue is about benchmark topology only; Token Issuer separation is handled by Issue 8, and external authorization PDP separation is already modeled by the `authz` container.
+  - Deliverable:
+    - A containerized load generator image (Python + paho-mqtt) that can be invoked by the scenario runner
+    - Support for two benchmark client modes:
+      - single loadgen container simulating N clients (baseline)
+      - one container per client (high-fidelity topology) with deterministic naming (e.g., `client_1..client_N`)
+    - Docker resource controls for client containers (cpuset, cpu/memory limits) to prevent benchmark noise from affecting Mosquitto measurements
+    - Scenario runner support to launch/teardown client containers per scenario and collect client-side outputs deterministically
+    - Documentation of the measurement trade-offs between the modes and guidance for which scenarios require client-per-container to improve realism
+
 - [ ] **Issue 9: Document and analyze scenario policies**
   - Goal: create comprehensive documentation of all Biscuit and JWT policies used
     across test scenarios to ensure fair comparison and research validity.
@@ -416,6 +431,17 @@ machine and record the first results/known issues).
   as errors (non-200 => error) to trigger fallback.
 
 ## Research Footnotes
+
+### Why `netem` runs in a separate container with `network_mode: service:mosquitto`
+- **Least privilege**: Traffic shaping needs `CAP_NET_ADMIN`. By running `netem` in a separate container that joins the Mosquitto network namespace, we avoid granting the broker container elevated capabilities.
+- **Clean separation**: The broker image stays minimal (no `iproute2` or shaping scripts). Impairments are toggled via environment variables without rebuilding the broker.
+- **Precise targeting**: `network_mode: service:mosquitto` ensures `tc qdisc` commands affect the broker’s interfaces directly, not a dummy NIC.
+
+### Why `cadvisor` is separate from Prometheus
+- **Isolation of failure domains**: If cAdvisor or Prometheus restarts/crashes, the other remains available.
+- **Security boundary**: cAdvisor requires sensitive host mounts (`/sys`, `/var/lib/docker`); Prometheus does not. Combining them expands the container’s attack surface unnecessarily.
+- **Clarity and reproducibility**: Explicit services make the measurement pipeline easier to reason about and match common deployment patterns.
+- **Operational simplicity**: Both tools are maintained as upstream images; merging would require a custom image and adds operational overhead.
 
 ### MQTT v5 AUTH Packet Implementation
 

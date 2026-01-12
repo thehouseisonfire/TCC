@@ -43,6 +43,46 @@ The investigation of alternatives to JWT is crucial for the maturation of IoT se
 
 Academically, this work fills a gap in the literature on distributed systems by providing a cost-benefit analysis of a new token architecture for the MQTT protocol. In practice, the availability of an open-source module for Mosquitto contributes to the Mosquitto ecosystem, offering a concrete tool for engineers seeking to implement decentralized security and authorization models, modernizing the \emph{broker}'s technology stack.
 
+\chapter{Research Notes}
+
+This chapter exists to prevent coding LLMs from filling in gaps with assumptions that would change the implementation semantics or invalidate the experimental comparison.
+All points below are \textbf{hard constraints} for implementation and must be treated as non-negotiable.
+
+\section{Mosquitto Plugin API Constraints (FFI + Callbacks)}
+\begin{itemize}
+  \item The plugin lifecycle is defined by Mosquitto calling \texttt{mosquitto\_plugin\_version} to verify API compatibility and then \texttt{mosquitto\_plugin\_init} to initialize the module.
+  \item \texttt{mosquitto\_plugin\_init} provides configuration and a pointer to user memory (\texttt{user\_data}) that Mosquitto will preserve and pass back to subsequent callback invocations, so long-lived Rust state must be anchored through this mechanism rather than invented global state.
+  \item Security-relevant events that must be treated as ground truth are: \texttt{MOSQ\_EVT\_Basic\_AUTH}, \texttt{MOSQ\_EVT\_EXT\_AUTH\_START}, \texttt{MOSQ\_EVT\_EXT\_AUTH\_CONTINUE}, \texttt{MOSQ\_EVT\_ACL\_CHECK}, \texttt{MOSQ\_EVT\_MESSAGE}, and \texttt{MOSQ\_EVT\_CONTROL}.
+  \item \texttt{MOSQ\_EVT\_MESSAGE} is triggered during message processing and, in the outbound flow, is invoked individually for each subscriber that will receive the message (fan-out), which means per-message authorization cost can scale with subscriber count and must not be optimized away by relocating checks to publish-only paths.
+  \item The \texttt{\$CONTROL} topic is relevant because it is used by Mosquitto's Dynamic Security extension for runtime ACL/RBAC management, so any evaluation scenario involving dynamic ACLs must align to this control-plane behavior rather than an invented interface.
+  \item Mosquitto provides utilities like `mosquitto_kick_client_by_clientid` / `mosquitto_kick_client_by_username` for forced disconnection.
+
+\end{itemize}
+
+\section{JWT Correctness Guardrails (Do Not Be Permissive)}
+\begin{itemize}
+  \item JWTs are structurally Base64URL-encoded, and Base64URL introduces an approximate 33\% size increase compared to the original binary representation, which must be preserved as-is when studying MTU/fragmentation behavior (no ``binary JWT'' shortcuts).
+  \item Historical JWT implementation failures include accepting the \texttt{none} algorithm (unsigned tokens) and confusion between symmetric and asymmetric key usage, so the implementation must enforce strict validation rules rather than best-effort compatibility.
+\end{itemize}
+
+\section{Biscuit Correctness Guardrails (Do Not Simplify Semantics)}
+\begin{itemize}
+  \item Biscuit tokens are a chain of cryptographically signed blocks: an issuer-created Authority Block plus holder-appended attenuation blocks, and the implementation must preserve this model (holders can restrict, not expand, rights).
+  \item During Datalog evaluation, the authorizer combines token data with request context (e.g., time, IP, resource), so request context must be injected via the authorizer rather than encoded as mutable client-controlled facts.
+  \item For security, fact scope is controlled: rules from an attenuated block can operate only on facts generated in that same block, the authority block, or authorizer-provided facts, which prevents intermediate-block fact injection and must not be broken by alternate evaluation strategies.
+  \item Biscuit mitigates stateless revocation limitations via unique signature identifiers in each block such that revoking a ``root'' token revokes all derived tokens, which should be respected when designing revocation/lifecycle checks (no ad-hoc revocation semantics).
+  \item Biscuit supports Snapshots for detailed auditing and reproduction of authorization decisions, which may be used as an optional artifact for debugging/reproducibility. 
+  \item Biscuit v3 introduces “third-party blocks” to incorporate authorizations from external entities (identity federation). A scenario could possibly explore this cost.
+
+\end{itemize}
+
+\section{Experimental Reproducibility Guardrails (Docker)}
+\begin{itemize}
+  \item The experimental harness must use Docker resource controls to reduce run-to-run variance by deterministic allocation of compute and memory resources (e.g., \texttt{--memory}, \texttt{--cpus}).
+  \item CPU pinning must be supported/used where applicable (e.g., \texttt{--cpuset-cpus}) to keep broker and load generator on stable cores across scenarios.
+  \item If disk I/O becomes a confounder, the Docker \texttt{blkio} controller is the normative mechanism to constrain disk I/O bandwidth for controlled experiments.
+  \item Known limitation: Docker has limitations for direct measurement of container energy consumption, so energy metrics are out-of-scope for this harness unless external measurement is added.
+\end{itemize}
 
 \chapter{Methodology}
 

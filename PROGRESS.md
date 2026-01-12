@@ -133,6 +133,41 @@ MQTT v5 reauthentication microbenchmark:
 
 ---
 
+## Benchmark Design (Formerly BENCHMARK_PLAN.md)
+
+### Objectives
+
+1. Compare latency of connection establishment (CONNECT/CONNACK) between JWT and
+   Biscuit.
+2. Evaluate authorization latency for PUBLISH/SUBSCRIBE operations.
+3. Measure CPU and memory consumption of the Mosquitto broker under various
+   loads.
+4. Assess the impact of token size on network throughput.
+
+### Test Matrix (Planned vs Implemented)
+
+| Scenario ID | Token Type | Operation | Clients | Planned QoS | Implemented QoS | Status |
+| ----------- | ---------- | --------- | ------- | ----------- | --------------- | ------ |
+| BASE-01     | None       | Pub/Sub   | 100     | 0           | 1              | ❌ Mismatch |
+| JWT-01      | JWT        | Pub/Sub   | 100     | 1           | 1              | ✅ Implemented |
+| JWT-02      | JWT        | Pub/Sub   | 1000    | 1           | 1              | ✅ Implemented |
+| BIS-01      | Biscuit    | Pub/Sub   | 100     | 1           | 1              | ✅ Implemented |
+| BIS-02      | Biscuit    | Pub/Sub   | 100     | 1           | 1              | ✅ Implemented |
+
+### Metrics Collection
+
+- **Latency**: Measured from client-side using `paho-mqtt`.
+- **Resource Usage**: Tracked via `docker stats` and Prometheus.
+- **Throughput**: Measured in messages per second (mps).
+
+### Reproducibility
+
+- All tests run within the provided `docker compose` environment.
+- Tokens are generated using the `gen-tokens` tool with deterministic keys.
+- Network conditions (latency/loss) emulated via `tc` on the bridge network.
+
+---
+
 ## Scenario Coverage (Implemented)
 
 The harness includes scenarios aligned to the proposal themes:
@@ -474,6 +509,26 @@ machine and record the first results/known issues).
     - Performance profiling data included in scenario results
     - Analysis correlating perf data with token type and policy complexity
     - Documentation of profiling methodology for reproducibility
+
+- [ ] **Issue 17: Implement comprehensive QoS configuration and mixing features**
+  - Goal: Add support for different QoS levels (0, 1, 2) and mixed QoS workloads
+    to enable comprehensive performance analysis across quality of service levels.
+  - Current gap: All scenarios currently use QoS 1 exclusively, despite BENCHMARK_PLAN.md
+    specifying QoS 0 for BASE-01 and missing QoS 2 testing entirely.
+  - Rationale: QoS levels significantly impact MQTT broker behavior and token verification
+    overhead:
+    - QoS 0: Fire-and-forget, minimal broker state
+    - QoS 1: At-least-once delivery with acknowledgments
+    - QoS 2: Exactly-once delivery with four-step handshake
+  - Deliverable:
+    - Update `loadgen.py` to support QoS distribution configuration (e.g., 60% QoS 0, 30% QoS 1, 10% QoS 2)
+    - Add scenario-specific QoS configuration in `run_scenarios.py`
+    - Fix BASE-01 scenario to use QoS 0 as planned
+    - Add dedicated QoS 2 scenarios for both JWT and Biscuit
+    - Add mixed QoS workload scenarios to test realistic IoT traffic patterns
+    - Update `metrics_collector.py` to support configurable QoS
+    - Add QoS-specific performance analysis and reporting
+    - At least one scenario run captured for each QoS level and mixed configurations
 
 
 ---

@@ -418,6 +418,63 @@ machine and record the first results/known issues).
     - Formal verification report suitable for academic publication
     - Counterexample analysis for any failed properties
 
+- [ ] **Issue 13: Add emqtt-bench as container orchestrating load generator**
+  - Goal: integrate `emqtt-bench` as an alternative to custom Python implementation,
+    designed to orchestrate multiple client containers for better isolation.
+  - Rationale: The ARTICLE.MD methodology specifically mentions industry-standard
+    MQTT benchmarking tools, and `emqtt-bench` provides comprehensive capabilities
+    while aligning with Issue 8.2's client-per-container architecture.
+  - Deliverable:
+    - Add `--loadgen` flag to `benchmarks/run_scenarios.py` to select between:
+      - `custom` (current Python implementation)
+      - `emqtt-bench` (orchestrating multiple client containers)
+    - Docker service definition for `emqtt-bench` orchestrator container
+    - Client container template that can be spawned by emqtt-bench
+    - Parameter mapping from scenario configuration to emqtt-bench command-line interface
+    - Output parsing to normalize results format for consistent JSON output
+    - At least one scenario run captured with emqtt-bench orchestrating N client containers
+    - Comparison analysis between custom single-host and emqtt-bench containerized approaches
+
+- [ ] **Issue 14: Add network baseline capacity measurement with iperf3**
+  - Goal: implement `iperf3` integration to measure nominal channel capacity as
+    specified in ARTICLE.MD methodology.
+  - Rationale: Establishing baseline network capacity before experiments is
+    essential for interpreting throughput results and ensuring fair comparisons.
+  - Deliverable:
+    - Add `iperf3` service to docker-compose.yml for network capacity measurement
+    - Automated baseline measurement step in scenario runner before each test batch
+    - Network capacity data included in scenario results JSON
+    - Ability to detect and report when network constraints affect test validity
+
+- [ ] **Issue 15: Add packet-level analysis with tcpdump for fragmentation studies**
+  - Goal: integrate `tcpdump` capture capabilities to analyze TCP fragmentation
+    behavior during MTU stress tests.
+  - Rationale: ARTICLE.MD specifically mentions fragmentation analysis, and
+    packet-level data is essential for understanding how token size affects
+    network behavior under MTU constraints.
+  - Deliverable:
+    - Add `tcpdump` service to docker-compose.yml with appropriate capabilities
+    - Packet capture integration for MTU scenarios (200B, 500B, 1500B, 9000B)
+    - Automated packet analysis to count fragments, retransmissions, and delays
+    - Packet analysis results included in scenario outputs
+    - Correlation of fragmentation data with latency/throughput metrics
+
+- [ ] **Issue 16: Add host-targeted kernel-level performance profiling with perf**
+  - Goal: integrate `perf` for detailed CPU performance analysis of containerized
+    Mosquitto process during token verification and policy evaluation.
+  - Rationale: Container-level metrics may miss important CPU performance
+    characteristics; host-targeted `perf` provides instruction-level profiling needed
+    for understanding computational costs of JWT vs Biscuit verification while maintaining
+    container isolation.
+  - Deliverable:
+    - Host-level `perf` installation and configuration script
+    - Container PID discovery mechanism to find Mosquitto process within container
+    - Performance profiling integration for key scenarios (baseline, policy complexity)
+    - CPU cycle, instruction, and cache miss data collection targeting containerized process
+    - Performance profiling data included in scenario results
+    - Analysis correlating perf data with token type and policy complexity
+    - Documentation of profiling methodology for reproducibility
+
 
 ---
 
@@ -429,6 +486,15 @@ machine and record the first results/known issues).
   Docker networking and host kernel.
 - **HTTP fallback semantics**: hybrid mode relies on HTTP failures being treated
   as errors (non-200 => error) to trigger fallback.
+
+## Dependency Optimization Note
+
+Optimize dependency features in `Cargo.toml` by disabling unused default features to ensure accurate performance measurements. This should be done **before** running benchmarks to:
+
+- Measure realistic binary sizes for production deployments
+- Avoid performance overhead from unused features  
+- Ensure fair JWT vs Biscuit comparison with optimal configurations
+- Document any features needed for specific benchmark scenarios
 
 ## Research Footnotes
 

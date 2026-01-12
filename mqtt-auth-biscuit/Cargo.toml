@@ -35,3 +35,13 @@ panic = "abort"
 strip = true
 lto = true
 codegen-units = 1
+opt-level = "z"
+overflow-checks = false
+
+[profile.release-maxperf]
+inherits = "release"
+lto = "fat"
+panic = "abort"
+codegen-units = 1
+strip = true
+overflow-checks = false

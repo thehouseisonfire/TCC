@@ -1,1 +1,0 @@
-- Use `Kani` or `MIRI` to verify Rust unsafe code blocks in FFI layer

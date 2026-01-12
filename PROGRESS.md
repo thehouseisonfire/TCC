@@ -363,6 +363,7 @@ machine and record the first results/known issues).
     across test scenarios to ensure fair comparison and research validity.
   - Current issue: Biscuit uses production-grade Datalog policies while JWT uses
     demo-like string matching, creating an unfair comparison.
+  - More advanced and intricate policies should be proposed for biscuit, and JWT should be tested as both holding intricate policies and basic role affirmations, of which the PDP will derive permissions at each request
   - Deliverable:
     - `SCENARIO_POLICIES.md` documenting all authorization policies per scenario
     - Analysis of policy complexity and fairness between JWT and Biscuit implementations

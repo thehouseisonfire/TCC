@@ -429,16 +429,31 @@ machine and record the first results/known issues).
     - MQTT v5 `AUTH`-based reauthentication flow with explicit reason reporting
       (reason code / reason string) suitable for automated clients
 
-- [ ] **Issue 11: Add MIRI verification for FFI memory safety**
+- [x] **Issue 11: Add MIRI verification for FFI memory safety**
   - Goal: integrate MIRI to detect undefined behavior and memory safety issues in the
     Rust FFI layer that interfaces with Mosquitto's C API.
   - Rationale: The plugin contains 25 unsafe blocks across `lib.rs` and `config.rs`
     that handle pointer dereferencing, C string conversion, and memory management.
   - Deliverable:
-    - MIRI integration in `Cargo.toml` and CI pipeline
-    - All unsafe blocks pass MIRI checks without undefined behavior
-    - Fixed memory safety issues (estimated 5-10 based on current patterns)
-    - Verification report documenting MIRI findings and fixes
+    - MIRI integration in `Cargo.toml` and CI pipeline ✅
+    - All unsafe blocks pass MIRI checks without undefined behavior ✅
+    - Fixed memory safety issues ✅
+    - Verification report documenting MIRI findings and fixes ✅
+  - Status: **Completed** (2026-01-13)
+  - Artifacts:
+    - `.github/workflows/miri.yml` - CI integration
+    - `MIRI_REPORT.md` - comprehensive verification report
+    - Extended test coverage in `src/lib.rs`:
+      - `ffi_init_and_cleanup_are_miri_safe`
+      - `acl_check_callback_handles_null_pointers`
+      - `acl_check_callback_handles_null_topic`
+      - `acl_check_callback_handles_valid_pointers`
+      - `message_callback_handles_null_pointers`
+      - `message_callback_handles_null_topic`
+      - `message_callback_handles_valid_pointers`
+      - `control_callback_handles_null_pointers`
+      - `control_callback_handles_null_topic`
+      - `control_callback_handles_valid_pointers`
 
 - [ ] **Issue 12: Add Kani formal verification for critical FFI functions**
   - Goal: use Kani to formally verify memory safety properties of the most critical

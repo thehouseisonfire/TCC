@@ -461,8 +461,7 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
-    #[test]
-    fn ffi_init_and_cleanup_are_miri_safe() {
+    fn setup_plugin_with_config() -> (*mut c_void, MosquittoPluginId) {
         let jwt_pub_pem = format!("{}/docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
         let biscuit_root_key_hex = "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29";
 
@@ -505,8 +504,293 @@ mod tests {
         assert_eq!(rc, MOSQ_ERR_SUCCESS);
         assert!(!userdata.is_null());
 
+        (userdata, identifier)
+    }
+
+    fn teardown_plugin(userdata: *mut c_void) {
         let rc = unsafe { mosquitto_plugin_cleanup(userdata, ptr::null_mut(), 0) };
         assert_eq!(rc, MOSQ_ERR_SUCCESS);
+    }
+
+    #[test]
+    fn ffi_init_and_cleanup_are_miri_safe() {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn basic_auth_callback_handles_null_pointers() {
+        let rc = basic_auth_callback(MOSQ_EVT_BASIC_AUTH, ptr::null_mut(), ptr::null_mut());
+        assert_eq!(rc, MOSQ_ERR_INVAL);
+    }
+
+    #[test]
+    fn basic_auth_callback_handles_null_password() {
+        let (userdata, _identifier) = setup_plugin_with_config();
+
+        let mut evt = MosquittoEvtBasicAuth {
+            future: ptr::null_mut(),
+            client: ptr::null_mut(),
+            username: ptr::null_mut(),
+            password: ptr::null_mut(),
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = basic_auth_callback(MOSQ_EVT_BASIC_AUTH, &mut evt as *mut _ as *mut c_void, userdata);
+        assert_eq!(rc, MOSQ_ERR_AUTH);
+
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn basic_auth_callback_handles_valid_pointers() {
+        let (userdata, _identifier) = setup_plugin_with_config();
+
+        let username = CString::new("test_user").unwrap();
+        let password = CString::new("invalid_token").unwrap();
+        let mut evt = MosquittoEvtBasicAuth {
+            future: ptr::null_mut(),
+            client: ptr::null_mut(),
+            username: username.as_ptr() as *mut c_char,
+            password: password.as_ptr() as *mut c_char,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = basic_auth_callback(MOSQ_EVT_BASIC_AUTH, &mut evt as *mut _ as *mut c_void, userdata);
+        assert_eq!(rc, MOSQ_ERR_AUTH);
+
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn ext_auth_start_callback_handles_null_pointers() {
+        let rc = ext_auth_start_callback(MOSQ_EVT_EXT_AUTH_START, ptr::null_mut(), ptr::null_mut());
+        assert_eq!(rc, MOSQ_ERR_INVAL);
+    }
+
+    #[test]
+    fn ext_auth_start_callback_handles_null_data() {
+        let (userdata, _identifier) = setup_plugin_with_config();
+
+        let auth_method = CString::new("token").unwrap();
+        let mut evt = MosquittoEvtExtendedAuth {
+            future: ptr::null_mut(),
+            client: ptr::null_mut(),
+            data_in: ptr::null(),
+            data_out: ptr::null_mut(),
+            data_in_len: 0,
+            data_out_len: 0,
+            auth_method: auth_method.as_ptr() as *const c_char,
+            future2: [ptr::null_mut(); 3],
+        };
+
+        let rc = ext_auth_start_callback(MOSQ_EVT_EXT_AUTH_START, &mut evt as *mut _ as *mut c_void, userdata);
+        assert_eq!(rc, MOSQ_ERR_AUTH);
+
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn ext_auth_start_callback_handles_valid_pointers() {
+        let (userdata, _identifier) = setup_plugin_with_config();
+
+        let auth_method = CString::new("token").unwrap();
+        let token_data = b"invalid_token";
+        let mut evt = MosquittoEvtExtendedAuth {
+            future: ptr::null_mut(),
+            client: ptr::null_mut(),
+            data_in: token_data.as_ptr() as *const c_void,
+            data_out: ptr::null_mut(),
+            data_in_len: token_data.len() as u16,
+            data_out_len: 0,
+            auth_method: auth_method.as_ptr() as *const c_char,
+            future2: [ptr::null_mut(); 3],
+        };
+
+        let rc = ext_auth_start_callback(MOSQ_EVT_EXT_AUTH_START, &mut evt as *mut _ as *mut c_void, userdata);
+        assert_eq!(rc, MOSQ_ERR_AUTH);
+
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn ext_auth_continue_callback_handles_null_pointers() {
+        let rc = ext_auth_continue_callback(MOSQ_EVT_EXT_AUTH_CONTINUE, ptr::null_mut(), ptr::null_mut());
+        assert_eq!(rc, MOSQ_ERR_INVAL);
+    }
+
+    #[test]
+    fn ext_auth_continue_callback_delegates_to_start() {
+        let (userdata, _identifier) = setup_plugin_with_config();
+
+        let auth_method = CString::new("token").unwrap();
+        let token_data = b"invalid_token";
+        let mut evt = MosquittoEvtExtendedAuth {
+            future: ptr::null_mut(),
+            client: ptr::null_mut(),
+            data_in: token_data.as_ptr() as *const c_void,
+            data_out: ptr::null_mut(),
+            data_in_len: token_data.len() as u16,
+            data_out_len: 0,
+            auth_method: auth_method.as_ptr() as *const c_char,
+            future2: [ptr::null_mut(); 3],
+        };
+
+        let rc = ext_auth_continue_callback(MOSQ_EVT_EXT_AUTH_CONTINUE, &mut evt as *mut _ as *mut c_void, userdata);
+        assert_eq!(rc, MOSQ_ERR_AUTH);
+
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn acl_check_callback_handles_null_pointers() {
+        let rc = acl_check_callback(MOSQ_EVT_ACL_CHECK, ptr::null_mut(), ptr::null_mut());
+        assert_eq!(rc, MOSQ_ERR_INVAL);
+    }
+
+    #[test]
+    fn acl_check_callback_handles_null_topic() {
+        let mut evt = MosquittoEvtAclCheck {
+            future: ptr::null_mut(),
+            client: ptr::null_mut(),
+            topic: ptr::null(),
+            payload: ptr::null(),
+            properties: ptr::null_mut(),
+            access: 1,
+            payloadlen: 0,
+            qos: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = acl_check_callback(MOSQ_EVT_ACL_CHECK, &mut evt as *mut _ as *mut c_void, ptr::null_mut());
+        assert_eq!(rc, MOSQ_ERR_INVAL);
+    }
+
+    #[test]
+    fn acl_check_callback_handles_valid_pointers() {
+        let (userdata, _identifier) = setup_plugin_with_config();
+
+        let topic = CString::new("test/topic").unwrap();
+        let mut evt = MosquittoEvtAclCheck {
+            future: ptr::null_mut(),
+            client: ptr::null_mut(),
+            topic: topic.as_ptr() as *mut c_char,
+            payload: ptr::null(),
+            properties: ptr::null_mut(),
+            access: 1,
+            payloadlen: 0,
+            qos: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = acl_check_callback(MOSQ_EVT_ACL_CHECK, &mut evt as *mut _ as *mut c_void, userdata);
+        assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
+
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn message_callback_handles_null_pointers() {
+        let rc = message_callback(MOSQ_EVT_MESSAGE, ptr::null_mut(), ptr::null_mut());
+        assert_eq!(rc, MOSQ_ERR_INVAL);
+    }
+
+    #[test]
+    fn message_callback_handles_null_topic() {
+        let mut evt = MosquittoEvtMessage {
+            future: ptr::null_mut(),
+            client: ptr::null_mut(),
+            topic: ptr::null_mut(),
+            payload: ptr::null_mut(),
+            properties: ptr::null_mut(),
+            reason_string: ptr::null_mut(),
+            payloadlen: 0,
+            qos: 0,
+            reason_code: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = message_callback(MOSQ_EVT_MESSAGE, &mut evt as *mut _ as *mut c_void, ptr::null_mut());
+        assert_eq!(rc, MOSQ_ERR_INVAL);
+    }
+
+    #[test]
+    fn message_callback_handles_valid_pointers() {
+        let (userdata, _identifier) = setup_plugin_with_config();
+
+        let topic = CString::new("test/topic").unwrap();
+        let mut evt = MosquittoEvtMessage {
+            future: ptr::null_mut(),
+            client: ptr::null_mut(),
+            topic: topic.as_ptr() as *mut c_char,
+            payload: ptr::null_mut(),
+            properties: ptr::null_mut(),
+            reason_string: ptr::null_mut(),
+            payloadlen: 0,
+            qos: 0,
+            reason_code: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = message_callback(MOSQ_EVT_MESSAGE, &mut evt as *mut _ as *mut c_void, userdata);
+        assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
+
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn control_callback_handles_null_pointers() {
+        let rc = control_callback(MOSQ_EVT_CONTROL, ptr::null_mut(), ptr::null_mut());
+        assert_eq!(rc, MOSQ_ERR_INVAL);
+    }
+
+    #[test]
+    fn control_callback_handles_null_topic() {
+        let mut evt = MosquittoEvtControl {
+            future: ptr::null_mut(),
+            client: ptr::null_mut(),
+            topic: ptr::null(),
+            payload: ptr::null(),
+            properties: ptr::null(),
+            reason_string: ptr::null_mut(),
+            payloadlen: 0,
+            qos: 0,
+            reason_code: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = control_callback(MOSQ_EVT_CONTROL, &mut evt as *mut _ as *mut c_void, ptr::null_mut());
+        assert_eq!(rc, MOSQ_ERR_INVAL);
+    }
+
+    #[test]
+    fn control_callback_handles_valid_pointers() {
+        let (userdata, _identifier) = setup_plugin_with_config();
+
+        let topic = CString::new("$CONTROL/test").unwrap();
+        let mut evt = MosquittoEvtControl {
+            future: ptr::null_mut(),
+            client: ptr::null_mut(),
+            topic: topic.as_ptr() as *const c_char,
+            payload: ptr::null(),
+            properties: ptr::null(),
+            reason_string: ptr::null_mut(),
+            payloadlen: 0,
+            qos: 0,
+            reason_code: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = control_callback(MOSQ_EVT_CONTROL, &mut evt as *mut _ as *mut c_void, userdata);
+        assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
+
+        teardown_plugin(userdata);
     }
 }
 

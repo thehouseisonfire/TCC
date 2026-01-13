@@ -24,7 +24,7 @@ pub fn check_authorization(
 ) -> bool {
     match token_type {
         TokenType::Jwt { claims, raw } => {
-            if Utc::now().timestamp() >= claims.exp as i64 {
+            if Utc::now().timestamp() >= claims.exp {
                 return false;
             }
 

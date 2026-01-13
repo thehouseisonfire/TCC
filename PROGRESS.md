@@ -273,7 +273,7 @@ machine and record the first results/known issues).
 ### Phase 9: Issue Resolution 
 
 - [ ] **Issue 1: Add Dynamic Security module comparison**
-  - Goal: implement Mosquitto's Dynamic Security module as an authorization source
+  - Goal: Implement Mosquitto's Dynamic Security module as an authorization source
     to provide a comprehensive comparison against token-based approaches.
   - Current gap: ARTICLE.MD mentions "Dynamic ACLs (via the Dynamic Security module)"
     as a policy source, but current implementation lacks this native Mosquitto
@@ -530,6 +530,74 @@ machine and record the first results/known issues).
     - Add QoS-specific performance analysis and reporting
     - At least one scenario run captured for each QoS level and mixed configurations
 
+
+- [ ] **Issue 18: Avoid Base64 encoding for Biscuit tokens (use native bytes / Protobuf wire format)**
+  - Goal: Stop wrapping Biscuit tokens in Base64 for transport where possible, using the token’s native binary serialization.
+  - Investigation note: confirm whether `biscuit-auth` serialization (`Biscuit::to_vec`) is already Protobuf-encoded on the wire (expected), and whether Base64 is currently only a *transport* layer artifact.
+  - Rationale: Base64 inflates size and may bias MTU/fragmentation experiments and JWT-vs-Biscuit parity.
+  - Deliverable:
+    - Confirm the underlying Biscuit serialization format used by `biscuit-auth` (and document it)
+    - Add a transport mode option for Biscuit credentials:
+      - `biscuit_transport=base64` (current behavior, CONNECT password compatible)
+      - `biscuit_transport=mqtt5_auth_data` (binary auth data for MQTT v5 enhanced auth)
+    - Update `auth.rs` parsing to support the selected transport mode without changing token semantics
+    - Add at least one scenario that exercises the binary transport path for Biscuit (and documents parity constraints vs JWT)
+
+- [ ] **Issue 19: Implement/validate `MOSQ_EVT_MESSAGE` fan-out per subscriber authorization**
+  - Goal: Ensure outbound message authorization is evaluated *per subscriber delivery* and is not accidentally reduced to a publish-only check.
+  - Current gap: the project wires `MOSQ_EVT_MESSAGE`, but does not explicitly validate subscriber fan-out semantics or measure its scaling effect.
+  - Deliverable:
+    - Confirm Mosquitto semantics: `MOSQ_EVT_MESSAGE` is invoked once per subscriber in the outbound flow (identify whether `evt.client` is the subscriber)
+    - Ensure the callback uses the subscriber identity/topic context correctly
+    - Add at least one benchmark scenario with 1 publisher and N subscribers to demonstrate per-subscriber fan-out cost
+    - Add a results field capturing subscriber count and observed scaling trend
+
+- [ ] **Issue 20: Fix MESSAGE/CONTROL callback semantics (not publish-only)**
+  - Goal: Make `MOSQ_EVT_MESSAGE` and `MOSQ_EVT_CONTROL` authorization decisions reflect the correct operation/access semantics rather than hardcoding publish.
+  - Current issue: `message_callback` and `control_callback` currently pass `access=2` unconditionally.
+  - Deliverable:
+    - Define correct access semantics for MESSAGE and CONTROL callbacks (publish vs subscribe vs control-plane)
+    - Replace hardcoded `access` values with correct values derived from Mosquitto event data / API expectations
+    - Add targeted scenarios for:
+      - subscribe-deny enforcement on outbound delivery (MESSAGE)
+      - control-topic enforcement behavior (CONTROL)
+
+- [ ] **Issue 21: Strengthen Biscuit authorizer template complexity**
+  - Goal: Expand the Biscuit authorizer template beyond the minimal `right(op,res)` match to represent more realistic policy complexity (while preserving request-context injection and Biscuit scoping constraints).
+  - Rationale: current template is too “thin” and may under-represent the cost/benefit of Biscuit’s Datalog evaluation compared to intended research scenarios.
+  - Deliverable:
+    - Add configurable authorizer “profiles” (e.g., `simple`, `rbac`, `contextual`) or a template file option
+    - Include policies with:
+      - role membership / derived permissions
+      - topic prefix/wildcard patterns
+      - time-based constraints using authorizer-provided `time(...)`
+    - Add at least one scenario that measures increasing authorizer complexity at constant token size
+
+- [ ] **Issue 22: Strengthen `seed_demo_rules` (RBAC), make it optional, and add runtime policy churn scenarios**
+  - Goal: Turn SQLite demo seeding into a realistic RBAC policy set, allow it to be turned off, and add scenarios where policies change periodically at runtime.
+  - Current issue: seeding is unconditional when `PolicyMode::Sqlite` is used, and policies are too simple for RBAC fairness studies.
+  - Deliverable:
+    - Add a configuration flag to enable/disable demo seeding (e.g., `sqlite_seed_demo_rules=true|false`)
+    - Extend SQLite schema and seeding to include RBAC-like structure (users/roles/role_acls), plus more realistic topic/action grants
+    - Add a benchmark scenario where SQLite rules are updated deterministically during the run (e.g., every N seconds), to simulate dynamic policy updates
+    - Ensure scenarios document when policy churn is enabled and how it affects cache validity
+
+- [ ] **Issue 23: Implement real LRU eviction in `SessionCache`**
+  - Goal: Enforce cache capacity with true LRU eviction (not just TTL + recency tracking).
+  - Current issue: `SessionCache` tracks LRU access but does not evict when capacity is exceeded.
+  - Deliverable:
+    - On insert, if capacity exceeded, evict least-recently-used key from both LRU and backing map
+    - Add a minimal test/verification to confirm eviction behavior deterministically
+
+- [ ] **Issue 24: Decide whether multi-step `MOSQ_EVT_EXT_AUTH_CONTINUE` is in research scope**
+  - Goal: Determine whether implementing true multi-step enhanced authentication (state machine across multiple AUTH packets) is required for the paper’s hypotheses, or whether the single-step “token refresh” model is sufficient.
+  - Notes:
+    - Current implementation treats enhanced auth as single-step (CONTINUE delegates to START).
+    - Multi-step flows add state-management complexity that may not affect JWT-vs-Biscuit comparison unless explicitly tested.
+  - Deliverable:
+    - Document a decision: in-scope vs out-of-scope, with justification tied to hypotheses/metrics
+    - If in-scope:
+      - Implement multi-step auth state handling (per client/session) and add at least one scenario measuring multi-step overhead
 
 ---
 

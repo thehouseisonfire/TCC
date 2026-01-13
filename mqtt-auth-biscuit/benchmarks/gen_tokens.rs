@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     sub: String,
-    exp: usize,
+    exp: i64,
     roles: Option<Vec<String>>,
     pad: Option<String>,
 }
@@ -53,7 +53,7 @@ fn main() {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_secs() as usize;
+            .as_secs() as i64;
         let claims = Claims {
             sub: "client_1".to_string(),
             exp: now + 5,

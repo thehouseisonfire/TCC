@@ -4,7 +4,9 @@ use crate::cache::SessionCache;
 use crate::config::{parse_options, PluginConfig};
 use crate::policy::PolicyMode;
 use crate::sqlite_policy::SqlitePolicy;
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::ffi::{c_char, c_int, c_void, CStr};
+#[cfg(not(any(test, miri)))]
+use std::ffi::CString;
 use std::ptr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -114,6 +116,7 @@ pub struct MosquittoEvtAclCheck {
 
 pub type MosqFuncGenericCallback = extern "C" fn(c_int, *mut c_void, *mut c_void) -> c_int;
 
+#[cfg(not(any(test, miri)))]
 extern "C" {
     pub fn mosquitto_callback_register(
         identifier: *mut MosquittoPluginId,
@@ -127,8 +130,66 @@ extern "C" {
     pub fn mosquitto_client_id(client: *const c_void) -> *const c_char;
 }
 
+#[cfg(any(test, miri))]
+#[no_mangle]
+pub extern "C" fn mosquitto_callback_register(
+    _identifier: *mut MosquittoPluginId,
+    _event: c_int,
+    _cb_func: MosqFuncGenericCallback,
+    _event_data: *const c_void,
+    _userdata: *mut c_void,
+) -> c_int {
+    MOSQ_ERR_SUCCESS
+}
+
+#[cfg(any(test, miri))]
+static TEST_CLIENT_ID: &[u8; 12] = b"test_client\0";
+
+#[cfg(any(test, miri))]
+#[no_mangle]
+pub extern "C" fn mosquitto_client_id(_client: *const c_void) -> *const c_char {
+    TEST_CLIENT_ID.as_ptr() as *const c_char
+}
+
 pub const MOSQ_LOG_INFO: c_int = 1 << 0;
 pub const MOSQ_LOG_ERR: c_int = 1 << 3;
+
+#[cfg(not(any(test, miri)))]
+fn log_info(msg: &str) {
+    if let Ok(c_msg) = CString::new(msg) {
+        unsafe {
+            mosquitto_log_printf(MOSQ_LOG_INFO, c_msg.as_ptr());
+        }
+    }
+}
+
+#[cfg(any(test, miri))]
+fn log_info(_msg: &str) {}
+
+fn cstr_to_string(ptr: *const c_char) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    Some(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned())
+}
+
+fn mosq_client_id_string(client: *const c_void) -> Option<String> {
+    if client.is_null() {
+        return None;
+    }
+    let ptr = mosquitto_client_id_ptr(client);
+    cstr_to_string(ptr)
+}
+
+#[cfg(not(any(test, miri)))]
+fn mosquitto_client_id_ptr(client: *const c_void) -> *const c_char {
+    unsafe { mosquitto_client_id(client) }
+}
+
+#[cfg(any(test, miri))]
+fn mosquitto_client_id_ptr(client: *const c_void) -> *const c_char {
+    mosquitto_client_id(client)
+}
 
 pub struct PluginState {
     auth_engine: Arc<AuthEngine>,
@@ -160,6 +221,10 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
     options: *mut MosquittoOpt,
     option_count: c_int,
 ) -> c_int {
+    if identifier.is_null() || userdata.is_null() {
+        return MOSQ_ERR_INVAL;
+    }
+
     let config = match parse_options(options, option_count) {
         Ok(c) => c,
         Err(_) => return MOSQ_ERR_INVAL,
@@ -235,8 +300,7 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
         *userdata,
     );
 
-    let msg = CString::new("Biscuit Auth Plugin initialized").unwrap();
-    mosquitto_log_printf(MOSQ_LOG_INFO, msg.as_ptr());
+    log_info("Biscuit Auth Plugin initialized");
 
     MOSQ_ERR_SUCCESS
 }
@@ -265,6 +329,9 @@ extern "C" fn basic_auth_callback(
     event_data: *mut c_void,
     userdata: *mut c_void,
 ) -> c_int {
+    if event_data.is_null() || userdata.is_null() {
+        return MOSQ_ERR_INVAL;
+    }
     let evt = unsafe { &mut *(event_data as *mut MosquittoEvtBasicAuth) };
     let state = unsafe { &*(userdata as *mut PluginState) };
 
@@ -276,10 +343,8 @@ extern "C" fn basic_auth_callback(
 
     match state.auth_engine.authenticate(&password) {
         Ok(token_type) => {
-            let client_id = unsafe {
-                CStr::from_ptr(mosquitto_client_id(evt.client))
-                    .to_string_lossy()
-                    .into_owned()
+            let Some(client_id) = mosq_client_id_string(evt.client) else {
+                return MOSQ_ERR_AUTH;
             };
             state.cache.insert(
                 client_id,
@@ -297,6 +362,9 @@ extern "C" fn ext_auth_start_callback(
     event_data: *mut c_void,
     userdata: *mut c_void,
 ) -> c_int {
+    if event_data.is_null() || userdata.is_null() {
+        return MOSQ_ERR_INVAL;
+    }
     let evt = unsafe { &mut *(event_data as *mut MosquittoEvtExtendedAuth) };
     let state = unsafe { &*(userdata as *mut PluginState) };
 
@@ -326,10 +394,8 @@ extern "C" fn ext_auth_start_callback(
 
     match state.auth_engine.authenticate(&token) {
         Ok(token_type) => {
-            let client_id = unsafe {
-                CStr::from_ptr(mosquitto_client_id(evt.client))
-                    .to_string_lossy()
-                    .into_owned()
+            let Some(client_id) = mosq_client_id_string(evt.client) else {
+                return MOSQ_ERR_AUTH;
             };
             state.cache.insert(
                 client_id,
@@ -356,13 +422,18 @@ extern "C" fn acl_check_callback(
     event_data: *mut c_void,
     userdata: *mut c_void,
 ) -> c_int {
+    if event_data.is_null() || userdata.is_null() {
+        return MOSQ_ERR_INVAL;
+    }
     let evt = unsafe { &*(event_data as *mut MosquittoEvtAclCheck) };
     let state = unsafe { &*(userdata as *mut PluginState) };
 
-    let client_id = unsafe {
-        CStr::from_ptr(mosquitto_client_id(evt.client))
-            .to_string_lossy()
-            .into_owned()
+    if evt.topic.is_null() {
+        return MOSQ_ERR_INVAL;
+    }
+
+    let Some(client_id) = mosq_client_id_string(evt.client) else {
+        return MOSQ_ERR_ACL_DENIED;
     };
     let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
 
@@ -385,21 +456,76 @@ extern "C" fn acl_check_callback(
     MOSQ_ERR_ACL_DENIED
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::CString;
+
+    #[test]
+    fn ffi_init_and_cleanup_are_miri_safe() {
+        let jwt_pub_pem = format!("{}/docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
+        let biscuit_root_key_hex = "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29";
+
+        let cstrings: Vec<CString> = vec![
+            CString::new("jwt_alg").unwrap(),
+            CString::new("ES256").unwrap(),
+            CString::new("jwt_key_file").unwrap(),
+            CString::new(jwt_pub_pem).unwrap(),
+            CString::new("biscuit_root_key_hex").unwrap(),
+            CString::new(biscuit_root_key_hex).unwrap(),
+        ];
+
+        let mut opts = vec![
+            MosquittoOpt {
+                key: cstrings[0].as_ptr() as *mut c_char,
+                value: cstrings[1].as_ptr() as *mut c_char,
+            },
+            MosquittoOpt {
+                key: cstrings[2].as_ptr() as *mut c_char,
+                value: cstrings[3].as_ptr() as *mut c_char,
+            },
+            MosquittoOpt {
+                key: cstrings[4].as_ptr() as *mut c_char,
+                value: cstrings[5].as_ptr() as *mut c_char,
+            },
+        ];
+
+        let mut userdata: *mut c_void = ptr::null_mut();
+        let userdata_ptr: *mut *mut c_void = &mut userdata;
+        let mut identifier = MosquittoPluginId { _unused: [] };
+
+        let rc = unsafe {
+            mosquitto_plugin_init(
+                &mut identifier,
+                userdata_ptr,
+                opts.as_mut_ptr(),
+                opts.len() as c_int,
+            )
+        };
+        assert_eq!(rc, MOSQ_ERR_SUCCESS);
+        assert!(!userdata.is_null());
+
+        let rc = unsafe { mosquitto_plugin_cleanup(userdata, ptr::null_mut(), 0) };
+        assert_eq!(rc, MOSQ_ERR_SUCCESS);
+    }
+}
+
 extern "C" fn message_callback(
     _event: c_int,
     event_data: *mut c_void,
     userdata: *mut c_void,
 ) -> c_int {
+    if event_data.is_null() || userdata.is_null() {
+        return MOSQ_ERR_INVAL;
+    }
     let evt = unsafe { &*(event_data as *mut MosquittoEvtMessage) };
     let state = unsafe { &*(userdata as *mut PluginState) };
     if evt.topic.is_null() {
         return MOSQ_ERR_INVAL;
     }
 
-    let client_id = unsafe {
-        CStr::from_ptr(mosquitto_client_id(evt.client))
-            .to_string_lossy()
-            .into_owned()
+    let Some(client_id) = mosq_client_id_string(evt.client) else {
+        return MOSQ_ERR_ACL_DENIED;
     };
     let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
 
@@ -426,16 +552,17 @@ extern "C" fn control_callback(
     event_data: *mut c_void,
     userdata: *mut c_void,
 ) -> c_int {
+    if event_data.is_null() || userdata.is_null() {
+        return MOSQ_ERR_INVAL;
+    }
     let evt = unsafe { &*(event_data as *mut MosquittoEvtControl) };
     let state = unsafe { &*(userdata as *mut PluginState) };
     if evt.topic.is_null() {
         return MOSQ_ERR_INVAL;
     }
 
-    let client_id = unsafe {
-        CStr::from_ptr(mosquitto_client_id(evt.client))
-            .to_string_lossy()
-            .into_owned()
+    let Some(client_id) = mosq_client_id_string(evt.client) else {
+        return MOSQ_ERR_ACL_DENIED;
     };
     let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
 

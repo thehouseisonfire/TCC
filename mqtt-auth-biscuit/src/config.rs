@@ -1,6 +1,8 @@
 use crate::policy::{PolicyBackendConfig, PolicyMode};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use std::collections::HashSet;
 use std::ffi::CStr;
+#[cfg(not(miri))]
 use std::fs;
 use thiserror::Error;
 
@@ -168,31 +170,37 @@ impl PluginConfigBuilder {
             _ => return Err(ConfigError::InvalidJwtAlgorithm(jwt_alg)),
         };
         
-        let jwt_key_file = self.jwt_key_file
+        let jwt_key_file = self
+            .jwt_key_file
             .ok_or_else(|| ConfigError::MissingJwtKey(jwt_alg.clone()))?;
-        
+
+        #[cfg(not(miri))]
         let decoding_key = match alg {
             Algorithm::RS256 => {
                 let pem = fs::read(&jwt_key_file)
                     .map_err(|e| ConfigError::JwtKeyFileError { path: jwt_key_file, source: e })?;
-                DecodingKey::from_rsa_pem(&pem)
-                    .map_err(|e| ConfigError::InvalidJwtPem(e.to_string()))?
+                DecodingKey::from_rsa_pem(&pem).map_err(|e| ConfigError::InvalidJwtPem(e.to_string()))?
             }
             Algorithm::ES256 => {
                 let pem = fs::read(&jwt_key_file)
                     .map_err(|e| ConfigError::JwtKeyFileError { path: jwt_key_file, source: e })?;
-                DecodingKey::from_ec_pem(&pem)
-                    .map_err(|e| ConfigError::InvalidJwtPem(e.to_string()))?
+                DecodingKey::from_ec_pem(&pem).map_err(|e| ConfigError::InvalidJwtPem(e.to_string()))?
             }
             _ => return Err(ConfigError::InvalidJwtAlgorithm(jwt_alg)),
+        };
+
+        #[cfg(miri)]
+        let decoding_key = {
+            let _ = jwt_key_file;
+            DecodingKey::from_secret(b"miri_dummy_key".as_slice())
         };
         
         let mut validation = Validation::new(alg);
         if let Some(iss) = self.jwt_issuer {
-            validation.set_issuer(&[iss]);
+            validation.iss = Some(HashSet::from([iss]));
         }
         if let Some(aud) = self.jwt_audience {
-            validation.set_audience(&[aud]);
+            validation.aud = Some(HashSet::from([aud]));
         }
         
         let biscuit_root_public_key = match (self.biscuit_root_key_hex, self.biscuit_root_private_key_hex) {
@@ -205,7 +213,7 @@ impl PluginConfigBuilder {
                 biscuit_auth::PublicKey::from_bytes(&bytes, biscuit_auth::Algorithm::Ed25519)
                     .map_err(|e| ConfigError::InvalidBiscuitPublicKey(e.to_string()))?
             }
-            (None, Some(priv_hex)) => {
+            (Option::None, Some(priv_hex)) => {
                 let bytes = hex::decode(priv_hex)
                     .map_err(|e| ConfigError::InvalidBiscuitKeyHex(e.to_string()))?;
                 if bytes.len() != 32 {
@@ -216,7 +224,7 @@ impl PluginConfigBuilder {
                 let keypair = biscuit_auth::KeyPair::from(&priv_key);
                 keypair.public()
             }
-            (None, None) => return Err(ConfigError::MissingBiscuitKey),
+            (Option::None, Option::None) => return Err(ConfigError::MissingBiscuitKey),
         };
         
         let policy = PolicyBackendConfig {
@@ -261,6 +269,13 @@ pub fn parse_options(
     option_count: i32,
 ) -> Result<PluginConfig, String> {
     let mut builder = PluginConfigBuilder::new();
+
+    if option_count < 0 {
+        return Err("Invalid option_count".to_string());
+    }
+    if option_count > 0 && options.is_null() {
+        return Err("Invalid options pointer".to_string());
+    }
     
     for i in 0..option_count {
         let opt_ptr = unsafe { options.add(i as usize) };

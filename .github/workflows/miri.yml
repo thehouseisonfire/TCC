@@ -1,0 +1,31 @@
+name: Miri
+
+on:
+  push:
+    paths:
+      - "mqtt-auth-biscuit/**"
+      - ".github/workflows/miri.yml"
+  pull_request:
+    paths:
+      - "mqtt-auth-biscuit/**"
+      - ".github/workflows/miri.yml"
+
+jobs:
+  miri:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust with Miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Miri setup
+        run: cargo --config build.rustflags=[] miri setup
+        working-directory: mqtt-auth-biscuit
+
+      - name: Run Miri tests
+        run: cargo --config build.rustflags=[] miri test
+        working-directory: mqtt-auth-biscuit

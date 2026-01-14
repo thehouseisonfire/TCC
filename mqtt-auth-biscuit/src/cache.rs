@@ -4,6 +4,11 @@ use std::num::NonZeroUsize;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+fn nonzero_capacity(capacity: usize) -> NonZeroUsize {
+    let v = if capacity == 0 { 1 } else { capacity };
+    unsafe { NonZeroUsize::new_unchecked(v) }
+}
+
 pub struct CacheValue<V> {
     pub value: V,
     pub expiry: Instant,
@@ -21,7 +26,7 @@ where
     pub fn new(capacity: usize) -> Self {
         Self {
             cache: DashMap::new(),
-            lru: Mutex::new(LruCache::new(NonZeroUsize::new(capacity).unwrap())),
+            lru: Mutex::new(LruCache::new(nonzero_capacity(capacity))),
         }
     }
 
@@ -29,7 +34,10 @@ where
         let expiry = Instant::now() + ttl;
         self.cache.insert(key.clone(), CacheValue { value, expiry });
 
-        let mut lru = self.lru.lock().unwrap();
+        let mut lru = match self.lru.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         if lru.put(key, ()).is_some() {
             // Already in LRU, just updated
         }
@@ -41,13 +49,19 @@ where
     {
         if let Some(entry) = self.cache.get(key) {
             if entry.expiry > Instant::now() {
-                let mut lru = self.lru.lock().unwrap();
+                let mut lru = match self.lru.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
                 lru.get(key);
                 return Some(entry.value.clone());
             } else {
                 // Expired
                 self.cache.remove(key);
-                let mut lru = self.lru.lock().unwrap();
+                let mut lru = match self.lru.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
                 lru.pop(key);
             }
         }

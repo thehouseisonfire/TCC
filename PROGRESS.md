@@ -428,57 +428,7 @@ machine and record the first results/known issues).
     - Broker-side differentiation between "expired" vs "denied" outcomes
     - MQTT v5 `AUTH`-based reauthentication flow with explicit reason reporting
       (reason code / reason string) suitable for automated clients
-- [x] **Issue 11: Add MIRI verification for FFI memory safety**
-  - Goal: integrate MIRI to detect undefined behavior and memory safety issues in the
-    Rust FFI layer that interfaces with Mosquitto's C API.
-  - Rationale: The plugin contains 25 unsafe blocks across `lib.rs` and `config.rs`
-    that handle pointer dereferencing, C string conversion, and memory management.
-  - Deliverable:
-    - MIRI integration in `Cargo.toml` and CI pipeline ✅
-    - All unsafe blocks pass MIRI checks without undefined behavior ✅
-    - Fixed memory safety issues ✅
-    - Verification notes and operational guidance captured in `PROGRESS.md` (this section) ✅
-  - Status: **Completed** (2026-01-13)
-  - Miri/FFI verification notes (keep these invariants when touching unsafe/FFI):
-    - Scope: Miri is used to catch Rust UB in the FFI layer (pointer/lifetime/memory safety). It does not validate cryptographic correctness.
-    - Crate config: `mqtt-auth-biscuit` must build as both `cdylib` (Mosquitto plugin) and `rlib` (tests + Miri).
-    - CI workflow: `.github/workflows/miri.yml` runs:
-      - `cargo --config build.rustflags=[] miri setup`
-      - `cargo --config build.rustflags=[] miri test`
-    - FFI entry invariants:
-      - Every exported callback must treat incoming pointers as untrusted and return `MOSQ_ERR_INVAL` on nulls before dereferencing.
-      - C-string inputs must be null-checked before `CStr::from_ptr`, and converted via `to_string_lossy()` into owned `String` to avoid lifetime bugs.
-      - FFI must not panic (no `unwrap()` on FFI path). Logging and other fallible ops must be defensive.
-      - Plugin state ownership must remain `Box::into_raw` (init) / `Box::from_raw` (cleanup) with exactly-once free.
-    - Miri constraints accommodated:
-      - Avoid filesystem I/O under `cfg(miri)` (e.g., JWT PEM reading); use a dummy key to exercise initialization paths.
-      - Provide `cfg(any(test, miri))` stubs for Mosquitto symbols so tests can run without linking the broker.
-    - Where to look:
-      - `.github/workflows/miri.yml` (CI)
-      - `mqtt-auth-biscuit/src/lib.rs` (FFI boundary, callback null checks, state ownership)
-      - `mqtt-auth-biscuit/src/config.rs` (Miri conditional compilation for I/O)
-    - Key tests expected to remain Miri-safe (do not regress):
-      - `ffi_init_and_cleanup_are_miri_safe`
-      - `basic_auth_callback_*`, `ext_auth_*`, `acl_check_callback_*`, `message_callback_*`, `control_callback_*`
-    - Run locally:
-      - `rustup install nightly && rustup component add miri --toolchain nightly`
-      - `cargo +nightly miri test` (from `mqtt-auth-biscuit/`)
-    - Current limitation / next action if extending FFI:
-      - When adding new callbacks or new `unsafe` blocks, add a minimal Miri test that constructs the event struct with null/valid pointers and asserts return codes.
-
-- [ ] **Issue 12: Add Kani formal verification for critical FFI functions**
-  - Goal: use Kani to formally verify memory safety properties of the most critical
-    FFI functions in the Mosquitto plugin interface.
-  - Rationale: Formal verification provides mathematical guarantees beyond MIRI's
-    runtime checking, strengthening the academic contribution and security posture.
-  - Deliverable:
-    - Kani specifications for critical functions (`mosquitto_plugin_init`,
-      `mosquitto_plugin_cleanup`, and all 6 callback functions)
-    - Proven properties: no null pointer dereferences, no buffer overflows,
-      proper lifetime management
-    - Formal verification report suitable for academic publication
-    - Counterexample analysis for any failed properties
-
+      
 - [ ] **Issue 13: Add emqtt-bench as container orchestrating load generator**
   - Goal: integrate `emqtt-bench` as an alternative to custom Python implementation,
     designed to orchestrate multiple client containers for better isolation.
@@ -626,6 +576,14 @@ machine and record the first results/known issues).
       - Implement multi-step auth state handling (per client/session) and add at least one scenario measuring multi-step overhead
 
 ---
+
+## Issue Backlog (Completed)
+
+- [x] **Issue 11: MIRI verification for FFI memory safety**
+  - Summary: MIRI CI + tests cover FFI pointer safety and lifecycle invariants.
+
+- [x] **Issue 12: Kani verification for critical FFI functions**
+  - Summary: Kani proofs for init/cleanup + all callbacks (null safety, lifetimes).
 
 ## Known Risks / Things to Watch
 

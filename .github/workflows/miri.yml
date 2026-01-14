@@ -29,3 +29,19 @@ jobs:
       - name: Run Miri tests
         run: cargo --config build.rustflags=[] miri test
         working-directory: mqtt-auth-biscuit
+
+  kani:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install Kani
+        run: cargo install kani-verifier --locked
+
+      - name: Run Kani proofs
+        run: cargo kani --all-proof
+        working-directory: mqtt-auth-biscuit

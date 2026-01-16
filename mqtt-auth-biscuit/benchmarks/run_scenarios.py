@@ -73,6 +73,9 @@ def _run_loadgen(
     mqtt5: bool,
     message_size: int,
     sync_connect: bool,
+    token_issuer_url: str | None,
+    token_issuer_kind: str | None,
+    token_issuer_ttl: int | None,
 ):
     cmd = [
         "python3",
@@ -101,6 +104,12 @@ def _run_loadgen(
         cmd.append("--mqtt5")
     if sync_connect:
         cmd.append("--sync-connect")
+    if token_issuer_url:
+        cmd.extend(["--token-issuer-url", token_issuer_url])
+    if token_issuer_kind:
+        cmd.extend(["--token-issuer-kind", token_issuer_kind])
+    if token_issuer_ttl is not None:
+        cmd.extend(["--token-issuer-ttl", str(token_issuer_ttl)])
 
     out = subprocess.check_output(cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
     return json.loads(out.decode("utf-8"))
@@ -140,255 +149,231 @@ def main():
     p.add_argument("--clients", type=int, default=50)
     p.add_argument("--messages", type=int, default=20)
     p.add_argument("--qos", type=int, default=1)
+    p.add_argument("--scenarios", help="Comma-separated list of scenario IDs to run")
     args = p.parse_args()
 
     tokens = _read_tokens(os.path.join(os.path.dirname(os.path.dirname(__file__)), args.tokens))
 
     scenarios = []
-
-    scenarios.append({
-        "id": "BASE-01",
-        "mosquitto_conf": "docker/mosquitto_base.conf",
-        "username": "",
-        "password": "",
-        "topic": "sensors/{client_id}/temp",
-        "authz": None,
-        "netem": {"clear": True},
-        "message_size": 0,
-    })
-
-    scenarios.append({
-        "id": "JWT-01",
-        "mosquitto_conf": "docker/mosquitto.conf",
-        "username": "jwt",
-        "password": tokens["jwt"],
-        "topic": "sensors/{client_id}/temp",
-        "authz": None,
-        "netem": {"clear": True},
-        "message_size": 0,
-    })
-
-    scenarios.append({
-        "id": "BIS-01",
-        "mosquitto_conf": "docker/mosquitto.conf",
-        "username": "biscuit",
-        "password": tokens["biscuit"],
-        "topic": "sensors/{client_id}/temp",
-        "authz": None,
-        "netem": {"clear": True},
-        "message_size": 0,
-    })
-
-    scenarios.append({
-        "id": "POLICY-COMPLEX-1",
-        "mosquitto_conf": "docker/mosquitto.conf",
-        "username": "biscuit",
-        "password": tokens["biscuit"],
-        "topic": "sensors/{client_id}/temp",
-        "authz": None,
-        "netem": {"clear": True},
-        "message_size": 0,
-    })
-
-    scenarios.append({
-        "id": "POLICY-COMPLEX-5",
-        "mosquitto_conf": "docker/mosquitto.conf",
-        "username": "biscuit",
-        "password": tokens["biscuit_5"],
-        "topic": "sensors/{client_id}/temp",
-        "authz": None,
-        "netem": {"clear": True},
-        "message_size": 0,
-    })
-
-    scenarios.append({
-        "id": "POLICY-COMPLEX-25",
-        "mosquitto_conf": "docker/mosquitto.conf",
-        "username": "biscuit",
-        "password": tokens["biscuit_25"],
-        "topic": "sensors/{client_id}/temp",
-        "authz": None,
-        "netem": {"clear": True},
-        "message_size": 0,
-    })
-
-    scenarios.append({
-        "id": "JWT-HTTP-200MS",
-        "mosquitto_conf": "docker/mosquitto_http.conf",
-        "username": "jwt",
-        "password": tokens["jwt"],
-        "topic": "sensors/{client_id}/temp",
-        "authz": {"delay_ms": 200, "fail_mode": "none"},
-        "netem": {"clear": True},
-        "message_size": 0,
-    })
-
-    scenarios.append({
-        "id": "JWT-HTTP-1000MS",
-        "mosquitto_conf": "docker/mosquitto_http.conf",
-        "username": "jwt",
-        "password": tokens["jwt"],
-        "topic": "sensors/{client_id}/temp",
-        "authz": {"delay_ms": 1000, "fail_mode": "none"},
-        "netem": {"clear": True},
-        "message_size": 0,
-    })
-
-    scenarios.append({
-        "id": "HYBRID-AUTHZ-DOWN",
-        "mosquitto_conf": "docker/mosquitto_hybrid.conf",
-        "username": "jwt",
-        "password": tokens["jwt"],
-        "topic": "sensors/{client_id}/temp",
-        "authz": {"delay_ms": 0, "fail_mode": "always"},
-        "netem": {"clear": True},
-        "message_size": 0,
-    })
-
-    scenarios.append({
-        "id": "MTU-200-JWT-8K",
-        "mosquitto_conf": "docker/mosquitto.conf",
-        "username": "jwt",
-        "password": tokens["jwt_pad_8k"],
-        "topic": "sensors/{client_id}/temp",
-        "authz": None,
-        "netem": {"mtu": 200},
-        "message_size": 0,
-    })
-
-    for mtu in [500, 1500, 9000]:
-        scenarios.append({
-            "id": f"MTU-{mtu}-BIS-25",
-            "mosquitto_conf": "docker/mosquitto.conf",
-            "username": "biscuit",
-            "password": tokens["biscuit_25"],
-            "topic": "sensors/{client_id}/temp",
-            "authz": None,
-            "netem": {"mtu": mtu},
-            "message_size": 0,
-        })
-
-    scenarios.append({
-        "id": "BIS-HTTP-200MS",
-        "mosquitto_conf": "docker/mosquitto_http.conf",
-        "username": "biscuit",
-        "password": tokens["biscuit"],
-        "topic": "sensors/{client_id}/temp",
-        "authz": {"delay_ms": 200, "fail_mode": "none"},
-        "netem": {"clear": True},
-        "message_size": 0,
-    })
-
-    scenarios.append({
-        "id": "JWT-HTTP-200MS-LOSS1",
-        "mosquitto_conf": "docker/mosquitto_http.conf",
-        "username": "jwt",
-        "password": tokens["jwt"],
-        "topic": "sensors/{client_id}/temp",
-        "authz": {"delay_ms": 200, "fail_mode": "rate", "fail_rate": 0.01},
-        "netem": {"clear": True},
-        "message_size": 0,
-    })
-
-    scenarios.append({
-        "id": "JWT-HTTP-200MS-LOSS5",
-        "mosquitto_conf": "docker/mosquitto_http.conf",
-        "username": "jwt",
-        "password": tokens["jwt"],
-        "topic": "sensors/{client_id}/temp",
-        "authz": {"delay_ms": 200, "fail_mode": "rate", "fail_rate": 0.05},
-        "netem": {"clear": True},
-        "message_size": 0,
-    })
-
-    scenarios.append({
-        "id": "MQTT5-REAUTH-JWT",
-        "mosquitto_conf": "docker/mosquitto.conf",
-        "authz": None,
-        "netem": {"clear": True},
-        "mqtt5_auth": {"token1": tokens["jwt_short"], "token2": tokens["jwt"]},
-    })
-
-    scenarios.append({
-        "id": "MQTT5-REAUTH-BISCUIT",
-        "mosquitto_conf": "docker/mosquitto.conf",
-        "authz": None,
-        "netem": {"clear": True},
-        "mqtt5_auth": {"token1": tokens["biscuit_short"], "token2": tokens["biscuit"]},
-    })
-
-    for mtu in [500, 1500, 9000]:
-        scenarios.append({
-            "id": f"MTU-{mtu}-JWT-8K",
-            "mosquitto_conf": "docker/mosquitto.conf",
-            "username": "jwt",
-            "password": tokens["jwt_pad_8k"],
-            "topic": "sensors/{client_id}/temp",
-            "authz": None,
-            "netem": {"mtu": mtu},
-            "message_size": 0,
-        })
-
-    scenarios.append({
-        "id": "MTU-200-BIS-25",
-        "mosquitto_conf": "docker/mosquitto.conf",
-        "username": "biscuit",
-        "password": tokens["biscuit_25"],
-        "topic": "sensors/{client_id}/temp",
-        "authz": None,
-        "netem": {"mtu": 200},
-        "message_size": 0,
-    })
-
-    scenarios.append({
-        "id": "THUNDERING-HERD",
-        "mosquitto_conf": "docker/mosquitto.conf",
-        "username": "biscuit",
-        "password": tokens["biscuit"],
-        "topic": "sensors/{client_id}/temp",
-        "authz": None,
-        "netem": {"clear": True},
-        "message_size": 0,
-        "restart_mosquitto": True,
-        "sync_connect": True,
-    })
-
-    scenarios.append({
-        "id": "DELEGATION-TEMP-ONLY",
-        "mosquitto_conf": "docker/mosquitto.conf",
-        "username": "biscuit",
-        "password": tokens["biscuit_delegated"],
-        "topic": "sensors/{client_id}/temp",
-        "authz": None,
-        "netem": {"clear": True},
-        "message_size": 0,
-    })
-
-    scenarios.append({
-        "id": "LIFECYCLE-JWT-SHORT-RECONNECT",
-        "mosquitto_conf": "docker/mosquitto_shortcache.conf",
-        "username": "jwt",
-        "password": tokens["jwt_short"],
-        "topic": "sensors/{client_id}/temp",
-        "authz": None,
-        "netem": {"clear": True},
-        "message_size": 0,
-        "repeat": 3,
-        "sleep_between": 2,
-    })
-
-    scenarios.append({
-        "id": "LIFECYCLE-BIS-SHORT-RECONNECT",
-        "mosquitto_conf": "docker/mosquitto_shortcache.conf",
-        "username": "biscuit",
-        "password": tokens["biscuit_short"],
-        "topic": "sensors/{client_id}/temp",
-        "authz": None,
-        "netem": {"clear": True},
-        "message_size": 0,
-        "repeat": 3,
-        "sleep_between": 2,
-    })
+    if args.scenarios:
+        scenario_ids = [s.strip() for s in args.scenarios.split(",")]
+        # Define available scenarios mapping
+        available_scenarios = {
+            "BASE-01": {
+                "mosquitto_conf": "docker/mosquitto_base.conf",
+                "username": "",
+                "password": "",
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+            },
+            "JWT-01": {
+                "mosquitto_conf": "docker/mosquitto.conf",
+                "username": "jwt",
+                "password": tokens["jwt"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+            },
+            "BIS-01": {
+                "mosquitto_conf": "docker/mosquitto.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+            },
+            "POLICY-COMPLEX-1": {
+                "mosquitto_conf": "docker/mosquitto.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+            },
+            "POLICY-COMPLEX-5": {
+                "mosquitto_conf": "docker/mosquitto.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit_5"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+            },
+            "POLICY-COMPLEX-25": {
+                "mosquitto_conf": "docker/mosquitto.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit_25"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+            },
+            "JWT-HTTP-200MS": {
+                "mosquitto_conf": "docker/mosquitto_http.conf",
+                "username": "jwt",
+                "password": tokens["jwt"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": {"delay_ms": 200, "fail_mode": "none"},
+                "netem": {"clear": True},
+                "message_size": 0,
+            },
+            "JWT-HTTP-1000MS": {
+                "mosquitto_conf": "docker/mosquitto_http.conf",
+                "username": "jwt",
+                "password": tokens["jwt"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": {"delay_ms": 1000, "fail_mode": "none"},
+                "netem": {"clear": True},
+                "message_size": 0,
+            },
+            "HYBRID-AUTHZ-DOWN": {
+                "mosquitto_conf": "docker/mosquitto_hybrid.conf",
+                "username": "jwt",
+                "password": tokens["jwt"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": {"delay_ms": 0, "fail_mode": "always"},
+                "netem": {"clear": True},
+                "message_size": 0,
+            },
+            "MTU-200-JWT-8K": {
+                "mosquitto_conf": "docker/mosquitto.conf",
+                "username": "jwt",
+                "password": tokens["jwt_pad_8k"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"mtu": 200},
+                "message_size": 0,
+            },
+            "BIS-HTTP-200MS": {
+                "mosquitto_conf": "docker/mosquitto_http.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": {"delay_ms": 200, "fail_mode": "none"},
+                "netem": {"clear": True},
+                "message_size": 0,
+            },
+            "JWT-HTTP-200MS-LOSS1": {
+                "mosquitto_conf": "docker/mosquitto_http.conf",
+                "username": "jwt",
+                "password": tokens["jwt"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": {"delay_ms": 200, "fail_mode": "rate", "fail_rate": 0.01},
+                "netem": {"clear": True},
+                "message_size": 0,
+            },
+            "JWT-HTTP-200MS-LOSS5": {
+                "mosquitto_conf": "docker/mosquitto_http.conf",
+                "username": "jwt",
+                "password": tokens["jwt"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": {"delay_ms": 200, "fail_mode": "rate", "fail_rate": 0.05},
+                "netem": {"clear": True},
+                "message_size": 0,
+            },
+            "MQTT5-REAUTH-JWT": {
+                "mosquitto_conf": "docker/mosquitto.conf",
+                "authz": None,
+                "netem": {"clear": True},
+                "mqtt5_auth": {"token1": tokens["jwt_short"], "token2": tokens["jwt"]},
+            },
+            "MQTT5-REAUTH-BISCUIT": {
+                "mosquitto_conf": "docker/mosquitto.conf",
+                "authz": None,
+                "netem": {"clear": True},
+                "mqtt5_auth": {"token1": tokens["biscuit_short"], "token2": tokens["biscuit"]},
+            },
+            "THUNDERING-HERD": {
+                "mosquitto_conf": "docker/mosquitto.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+                "restart_mosquitto": True,
+                "sync_connect": True,
+            },
+            "DELEGATION-TEMP-ONLY": {
+                "mosquitto_conf": "docker/mosquitto.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit_delegated"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+            },
+            "LIFECYCLE-JWT-SHORT-RECONNECT": {
+                "mosquitto_conf": "docker/mosquitto_shortcache.conf",
+                "username": "jwt",
+                "password": tokens["jwt_short"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+                "repeat": 3,
+                "sleep_between": 2,
+                "token_refresh": {"kind": "jwt", "ttl_seconds": 5},
+            },
+            "LIFECYCLE-BIS-SHORT-RECONNECT": {
+                "mosquitto_conf": "docker/mosquitto_shortcache.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit_short"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+                "repeat": 3,
+                "sleep_between": 2,
+                "token_refresh": {"kind": "biscuit", "ttl_seconds": 5},
+            },
+        }
+        
+        # Add dynamic MTU scenarios
+        for mtu in [500, 1500, 9000]:
+            available_scenarios[f"MTU-{mtu}-BIS-25"] = {
+                "mosquitto_conf": "docker/mosquitto.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit_25"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"mtu": mtu},
+                "message_size": 0,
+            }
+            available_scenarios[f"MTU-{mtu}-JWT-8K"] = {
+                "mosquitto_conf": "docker/mosquitto.conf",
+                "username": "jwt",
+                "password": tokens["jwt_pad_8k"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"mtu": mtu},
+                "message_size": 0,
+            }
+        
+        # Select requested scenarios
+        for scenario_id in scenario_ids:
+            if scenario_id in available_scenarios:
+                scenario = available_scenarios[scenario_id].copy()
+                scenario["id"] = scenario_id
+                scenarios.append(scenario)
+            else:
+                print(f"Warning: Unknown scenario '{scenario_id}', skipping")
+    else:
+        print("No scenarios specified. Use --scenarios to specify which scenarios to run.")
+        print("Available scenarios:")
+        print("BASE-01, JWT-01, BIS-01, POLICY-COMPLEX-1, POLICY-COMPLEX-5, POLICY-COMPLEX-25")
+        print("JWT-HTTP-200MS, JWT-HTTP-1000MS, HYBRID-AUTHZ-DOWN, MTU-200-JWT-8K")
+        print("BIS-HTTP-200MS, JWT-HTTP-200MS-LOSS1, JWT-HTTP-200MS-LOSS5")
+        print("MQTT5-REAUTH-JWT, MQTT5-REAUTH-BISCUIT, THUNDERING-HERD, DELEGATION-TEMP-ONLY")
+        print("LIFECYCLE-JWT-SHORT-RECONNECT, LIFECYCLE-BIS-SHORT-RECONNECT")
+        print("MTU-500-BIS-25, MTU-1500-BIS-25, MTU-9000-BIS-25")
+        print("MTU-500-JWT-8K, MTU-1500-JWT-8K, MTU-9000-JWT-8K")
+        return
 
     for s in scenarios:
         mosq_conf = s["mosquitto_conf"]
@@ -405,7 +390,17 @@ def main():
             if "loss_pct" in netem:
                 extra_env.update({"NETEM_CLEAR": "1", "NETEM_LOSS_PCT": str(netem["loss_pct"])})
 
-        _compose(["up", "--build", "-d", "mosquitto", "authz", "netem", "metrics-collector", "cadvisor"], extra_env=extra_env)
+        _compose([
+            "up",
+            "--build",
+            "-d",
+            "mosquitto",
+            "authz",
+            "netem",
+            "metrics-collector",
+            "cadvisor",
+            "token-issuer",
+        ], extra_env=extra_env)
         time.sleep(1)
 
         if s.get("authz") is not None:
@@ -424,6 +419,7 @@ def main():
                 cfg = s["mqtt5_auth"]
                 res = _run_mqtt5_auth(cfg["token1"], cfg["token2"])
             else:
+                token_refresh = s.get("token_refresh") or {}
                 res = _run_loadgen(
                     tokens=tokens,
                     username=s.get("username", ""),
@@ -435,6 +431,9 @@ def main():
                     mqtt5=False,
                     message_size=int(s.get("message_size", 0)),
                     sync_connect=bool(s.get("sync_connect", False)),
+                    token_issuer_url="http://localhost:8082" if token_refresh else None,
+                    token_issuer_kind=token_refresh.get("kind"),
+                    token_issuer_ttl=token_refresh.get("ttl_seconds"),
                 )
             try:
                 snap = _resource_snapshot()

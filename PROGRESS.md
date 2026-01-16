@@ -566,7 +566,7 @@ machine and record the first results/known issues).
     - Add a minimal test/verification to confirm eviction behavior deterministically
 
 - [ ] **Issue 24: Decide whether multi-step `MOSQ_EVT_EXT_AUTH_CONTINUE` is in research scope**
-  - Goal: Determine whether implementing true multi-step enhanced authentication (state machine across multiple AUTH packets) is required for the paper’s hypotheses, or whether the single-step “token refresh” model is sufficient.
+  - Goal: Determine whether implementing true multi-step enhanced authentication (state machine across multiple AUTH packets) is required for the paper's hypotheses, or whether the single-step "token refresh" model is sufficient.
   - Notes:
     - Current implementation treats enhanced auth as single-step (CONTINUE delegates to START).
     - Multi-step flows add state-management complexity that may not affect JWT-vs-Biscuit comparison unless explicitly tested.
@@ -574,6 +574,22 @@ machine and record the first results/known issues).
     - Document a decision: in-scope vs out-of-scope, with justification tied to hypotheses/metrics
     - If in-scope:
       - Implement multi-step auth state handling (per client/session) and add at least one scenario measuring multi-step overhead
+
+- [ ] **Issue 25: Add configurable parity scenarios and token size alignment**
+  - Goal: Implement configurable scenario flags to ensure fair JWT vs Biscuit comparisons by controlling token size, claim structure, and encoding parity.
+  - Current gaps identified in code review:
+    - JWT issuance includes default `roles: ["admin"]` while Biscuit issues only rights facts, creating token size asymmetry in refresh scenarios
+    - Biscuit uses Base64 standard encoding while JWT uses Base64URL, potentially affecting MTU/fragmentation behavior
+    - Token refresh latency is excluded from connect metrics, hiding lifecycle costs
+  - Deliverable:
+    - Add CLI flags to `token-issuer` for parity modes:
+      - `--jwt-no-default-roles` to match Biscuit minimal rights
+      - `--biscuit-base64url` to match JWT URL-safe encoding
+      - `--pad-to-size` to align token byte sizes for MTU tests
+    - Update `run_scenarios.py` to accept parity configuration flags and pass them to token-issuer
+    - Add `token_refresh_ms` metric to `loadgen.py` to capture refresh latency separately from connect latency
+    - Create documentation of parity modes and their impact on experimental validity
+    - Add at least one scenario run demonstrating parity-aligned token comparison
 
 ---
 

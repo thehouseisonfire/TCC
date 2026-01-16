@@ -4,6 +4,7 @@ import os
 import queue
 import threading
 import time
+import urllib.request
 from dataclasses import dataclass
 from statistics import mean, median
 
@@ -54,6 +55,9 @@ class WorkerConfig:
     message_size: int
     protocol: int
     sync_connect: bool
+    token_issuer_url: str | None
+    token_issuer_kind: str | None
+    token_issuer_ttl: int | None
 
 
 @dataclass
@@ -70,57 +74,128 @@ def _mk_payload(size: int) -> bytes:
     return b"A" * size
 
 
+def _fetch_token(issuer_url: str, kind: str, client_id: str, topic: str, ttl: int | None) -> str:
+    payload = {"client_id": client_id, "ttl_seconds": ttl}
+    if kind == "biscuit":
+        payload["topic"] = topic
+
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        issuer_url.rstrip("/") + f"/{kind}",
+        method="POST",
+        data=data,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+    token = body.get("token")
+    if not token:
+        raise ValueError("token issuer response missing token")
+    return token
+
+
 def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queue):
     errors: list[str] = []
     publish_ms: list[float] = []
     connect_ms = None
 
-    def on_connect(client, userdata, flags, reason_code, properties=None):
-        userdata["connected"] = True
-        userdata["connect_done"] = time.perf_counter()
+    def attempt_connect(password: str):
+        userdata = {
+            "connected": False,
+            "connect_start": 0.0,
+            "connect_done": 0.0,
+            "disconnected": False,
+            "connect_reason": None,
+        }
 
-    def on_disconnect(client, userdata, reason_code, properties=None):
-        userdata["disconnected"] = True
+        def on_connect(client, ud, flags, reason_code, properties=None):
+            ud["connect_reason"] = reason_code
+            if reason_code == 0:
+                ud["connected"] = True
+                ud["connect_done"] = time.perf_counter()
 
-    userdata = {"connected": False, "connect_start": 0.0, "connect_done": 0.0, "disconnected": False}
+        def on_disconnect(client, ud, reason_code, properties=None):
+            ud["disconnected"] = True
 
-    client = mqtt.Client(
-        mqtt.CallbackAPIVersion.VERSION2,
-        client_id=cfg.client_id,
-        protocol=cfg.protocol,
-    )
-    client.user_data_set(userdata)
-    client.username_pw_set(cfg.username, cfg.password)
-    client.on_connect = on_connect
-    client.on_disconnect = on_disconnect
+        client = mqtt.Client(
+            mqtt.CallbackAPIVersion.VERSION2,
+            client_id=cfg.client_id,
+            protocol=cfg.protocol,
+        )
+        client.user_data_set(userdata)
+        client.username_pw_set(cfg.username, password)
+        client.on_connect = on_connect
+        client.on_disconnect = on_disconnect
 
-    if cfg.sync_connect:
-        start_evt.wait()
+        if cfg.sync_connect:
+            start_evt.wait()
 
-    try:
-        userdata["connect_start"] = time.perf_counter()
-        client.connect(cfg.host, cfg.port, 30)
-    except Exception as e:
-        errors.append(f"connect_failed:{e}")
+        try:
+            userdata["connect_start"] = time.perf_counter()
+            client.connect(cfg.host, cfg.port, 30)
+        except Exception as e:
+            return None, f"connect_failed:{e}", None
+
+        client.loop_start()
+
+        t_deadline = time.time() + 10
+        while not userdata["connected"] and userdata["connect_reason"] is None and time.time() < t_deadline:
+            time.sleep(0.01)
+
+        if not userdata["connected"]:
+            reason = userdata["connect_reason"]
+            try:
+                client.loop_stop()
+            except Exception:
+                pass
+            try:
+                client.disconnect()
+            except Exception:
+                pass
+            if reason is None:
+                return None, "connect_timeout", reason
+            return None, f"connect_denied:{reason}", reason
+
+        return client, None, userdata
+
+    password = cfg.password
+    token_refreshed = False
+    client = None
+    userdata = None
+
+    for _ in range(2):
+        client, err, reason = attempt_connect(password)
+        if client is not None:
+            userdata = client._userdata
+            break
+
+        if token_refreshed:
+            errors.append(err)
+            out_q.put(WorkerResult(cfg.client_id, None, [], errors))
+            return
+
+        if cfg.token_issuer_url and cfg.token_issuer_kind and reason in (5, 0x87):
+            try:
+                password = _fetch_token(
+                    cfg.token_issuer_url,
+                    cfg.token_issuer_kind,
+                    cfg.client_id,
+                    cfg.topic,
+                    cfg.token_issuer_ttl,
+                )
+                token_refreshed = True
+                continue
+            except Exception as e:
+                errors.append(f"token_refresh_failed:{e}")
+                out_q.put(WorkerResult(cfg.client_id, None, [], errors))
+                return
+
+        errors.append(err)
         out_q.put(WorkerResult(cfg.client_id, None, [], errors))
         return
 
-    client.loop_start()
-
-    t_deadline = time.time() + 10
-    while not userdata["connected"] and time.time() < t_deadline:
-        time.sleep(0.01)
-
-    if not userdata["connected"]:
-        errors.append("connect_timeout")
-        try:
-            client.loop_stop()
-        except Exception:
-            pass
-        try:
-            client.disconnect()
-        except Exception:
-            pass
+    if userdata is None:
+        errors.append("connect_failed")
         out_q.put(WorkerResult(cfg.client_id, None, [], errors))
         return
 
@@ -131,7 +206,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
 
     payload = _mk_payload(cfg.message_size)
 
-    for i in range(cfg.message_count):
+    for _ in range(cfg.message_count):
         try:
             t0 = time.perf_counter()
             info = client.publish(cfg.topic, payload, qos=cfg.qos)
@@ -173,6 +248,9 @@ def run_load(
     message_size: int,
     protocol: int,
     sync_connect: bool,
+    token_issuer_url: str | None,
+    token_issuer_kind: str | None,
+    token_issuer_ttl: int | None,
 ):
     start_evt = threading.Event()
     out_q: queue.Queue = queue.Queue()
@@ -194,6 +272,9 @@ def run_load(
             message_size=message_size,
             protocol=protocol,
             sync_connect=sync_connect,
+            token_issuer_url=token_issuer_url,
+            token_issuer_kind=token_issuer_kind,
+            token_issuer_ttl=token_issuer_ttl,
         )
         t = threading.Thread(target=_run_worker, args=(cfg, start_evt, out_q), daemon=True)
         threads.append(t)
@@ -232,6 +313,8 @@ def run_load(
             "qos": qos,
             "message_size": message_size,
             "protocol": "mqttv5" if protocol == mqtt.MQTTv5 else "mqttv311",
+            "token_issuer_url": token_issuer_url,
+            "token_issuer_kind": token_issuer_kind,
         },
         "connect": _summarize_ms(connect_lat),
         "publish": _summarize_ms(publish_lat),
@@ -253,6 +336,9 @@ def main():
     p.add_argument("--message-size", type=int, default=int(os.environ.get("MQTT_MESSAGE_SIZE", "0")))
     p.add_argument("--mqtt5", action="store_true")
     p.add_argument("--sync-connect", action="store_true")
+    p.add_argument("--token-issuer-url", default=os.environ.get("TOKEN_ISSUER_URL"))
+    p.add_argument("--token-issuer-kind", default=os.environ.get("TOKEN_ISSUER_KIND"))
+    p.add_argument("--token-issuer-ttl", type=int, default=os.environ.get("TOKEN_ISSUER_TTL"))
     p.add_argument("--json", action="store_true")
     args = p.parse_args()
 
@@ -270,6 +356,9 @@ def main():
         message_size=args.message_size,
         protocol=protocol,
         sync_connect=args.sync_connect,
+        token_issuer_url=args.token_issuer_url,
+        token_issuer_kind=args.token_issuer_kind,
+        token_issuer_ttl=args.token_issuer_ttl,
     )
 
     if args.json:

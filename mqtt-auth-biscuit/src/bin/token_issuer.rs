@@ -1,0 +1,279 @@
+use base64::{engine::general_purpose, Engine as _};
+use biscuit_auth::{Biscuit, BlockBuilder, KeyPair, PrivateKey};
+use chrono::Utc;
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use p256::SecretKey;
+use pkcs8::{EncodePrivateKey, LineEnding};
+use serde::{Deserialize, Serialize};
+use std::env;
+use std::io::Read;
+use tiny_http::{Header as TinyHeader, Method, Response, Server, StatusCode};
+
+const DEFAULT_EC_SK_HEX: &str = "0101010101010101010101010101010101010101010101010101010101010101";
+const DEFAULT_BISCUIT_SK_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+#[derive(Debug, Deserialize)]
+struct JwtIssueRequest {
+    client_id: Option<String>,
+    subject: Option<String>,
+    roles: Option<Vec<String>>,
+    ttl_seconds: Option<i64>,
+    issuer: Option<String>,
+    audience: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BiscuitIssueRequest {
+    client_id: Option<String>,
+    topic: Option<String>,
+    ttl_seconds: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct TokenResponse {
+    token: String,
+    exp: i64,
+    issued_at: i64,
+    alg: String,
+}
+
+struct IssuerConfig {
+    host: String,
+    port: u16,
+    jwt_alg: Algorithm,
+    jwt_key: EncodingKey,
+    jwt_alg_label: String,
+    jwt_default_issuer: Option<String>,
+    jwt_default_audience: Option<String>,
+    biscuit_keypair: KeyPair,
+}
+
+fn env_default(name: &str, default: &str) -> String {
+    env::var(name).unwrap_or_else(|_| default.to_string())
+}
+
+fn parse_hex_key(hex_key: &str, expected_len: usize) -> Result<Vec<u8>, String> {
+    let bytes = hex::decode(hex_key).map_err(|e| format!("invalid hex: {e}"))?;
+    if bytes.len() != expected_len {
+        return Err(format!("expected {expected_len} bytes, got {}", bytes.len()));
+    }
+    Ok(bytes)
+}
+
+fn load_jwt_key() -> Result<(Algorithm, EncodingKey, String, Option<String>, Option<String>), String> {
+    let alg_raw = env_default("JWT_ALG", "ES256");
+    let alg = match alg_raw.as_str() {
+        "ES256" => Algorithm::ES256,
+        "RS256" => Algorithm::RS256,
+        _ => return Err(format!("unsupported JWT_ALG {alg_raw}")),
+    };
+
+    let key = match alg {
+        Algorithm::ES256 => {
+            let hex_key = env_default("JWT_EC_PRIVATE_KEY_HEX", DEFAULT_EC_SK_HEX);
+            let bytes = parse_hex_key(&hex_key, 32)?;
+            let secret = SecretKey::from_slice(&bytes).map_err(|e| format!("invalid EC key: {e}"))?;
+            let pem = secret
+                .to_pkcs8_pem(LineEnding::LF)
+                .map_err(|e| format!("pkcs8 encode failed: {e}"))?;
+            EncodingKey::from_ec_pem(pem.as_bytes()).map_err(|e| format!("ec pem parse: {e}"))?
+        }
+        Algorithm::RS256 => {
+            let pem_path = env::var("JWT_RSA_PRIVATE_KEY_FILE")
+                .map_err(|_| "JWT_RSA_PRIVATE_KEY_FILE required for RS256".to_string())?;
+            let pem = std::fs::read(&pem_path)
+                .map_err(|e| format!("failed to read {pem_path}: {e}"))?;
+            EncodingKey::from_rsa_pem(&pem).map_err(|e| format!("rsa pem parse: {e}"))?
+        }
+        _ => return Err("unsupported algorithm".to_string()),
+    };
+
+    let issuer = env::var("JWT_ISSUER").ok();
+    let audience = env::var("JWT_AUDIENCE").ok();
+
+    Ok((alg, key, alg_raw, issuer, audience))
+}
+
+fn load_biscuit_keypair() -> Result<KeyPair, String> {
+    let hex_key = env_default("BISCUIT_ROOT_PRIVATE_KEY_HEX", DEFAULT_BISCUIT_SK_HEX);
+    let bytes = parse_hex_key(&hex_key, 32)?;
+    let priv_key = PrivateKey::from_bytes(&bytes, biscuit_auth::Algorithm::Ed25519)
+        .map_err(|e| format!("invalid Biscuit key: {e}"))?;
+    Ok(KeyPair::from(&priv_key))
+}
+
+fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> Response<std::io::Cursor<Vec<u8>>> {
+    let body = serde_json::to_vec(payload).unwrap_or_else(|_| b"{}".to_vec());
+    let mut resp = Response::from_data(body);
+    resp = resp.with_status_code(status);
+    resp.add_header(TinyHeader::from_bytes("Content-Type", "application/json").unwrap());
+    resp
+}
+
+fn error_response(status: StatusCode, message: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    let payload = serde_json::json!({"error": message});
+    json_response(status, &payload)
+}
+
+fn handle_jwt(req: JwtIssueRequest, cfg: &IssuerConfig) -> Result<TokenResponse, String> {
+    let now = Utc::now().timestamp();
+    let ttl = req.ttl_seconds.unwrap_or(3600).max(1);
+    let exp = now + ttl;
+    let subject = req
+        .subject
+        .or(req.client_id.clone())
+        .unwrap_or_else(|| "client_1".to_string());
+
+    #[derive(Serialize)]
+    struct Claims {
+        sub: String,
+        exp: i64,
+        roles: Option<Vec<String>>,
+        iss: Option<String>,
+        aud: Option<String>,
+        client_id: Option<String>,
+    }
+
+    let claims = Claims {
+        sub: subject,
+        exp,
+        roles: req.roles.or_else(|| Some(vec!["admin".to_string()])),
+        iss: req.issuer.or_else(|| cfg.jwt_default_issuer.clone()),
+        aud: req.audience.or_else(|| cfg.jwt_default_audience.clone()),
+        client_id: req.client_id,
+    };
+
+    let token = encode(&Header::new(cfg.jwt_alg), &claims, &cfg.jwt_key)
+        .map_err(|e| format!("jwt encode failed: {e}"))?;
+
+    Ok(TokenResponse {
+        token,
+        exp,
+        issued_at: now,
+        alg: cfg.jwt_alg_label.clone(),
+    })
+}
+
+fn handle_biscuit(req: BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<TokenResponse, String> {
+    let now = Utc::now().timestamp();
+    let ttl = req.ttl_seconds.unwrap_or(3600).max(1);
+    let exp = now + ttl;
+    let client_id = req.client_id.unwrap_or_else(|| "client_1".to_string());
+    let topic = req
+        .topic
+        .unwrap_or_else(|| format!("sensors/{client_id}/temp"));
+
+    let biscuit = Biscuit::builder()
+        .fact(format!("right(\"publish\", \"{topic}\")"))
+        .map_err(|e| format!("biscuit fact publish: {e}"))?
+        .fact(format!("right(\"subscribe\", \"{topic}\")"))
+        .map_err(|e| format!("biscuit fact subscribe: {e}"))?
+        .build(&cfg.biscuit_keypair)
+        .map_err(|e| format!("biscuit build: {e}"))?;
+
+    let check_src = format!("check if time($t), $t < {exp}");
+    let block = BlockBuilder::new()
+        .check(check_src.as_str())
+        .map_err(|e| format!("biscuit check: {e}"))?;
+
+    let biscuit = biscuit.append(block).map_err(|e| format!("biscuit append: {e}"))?;
+
+    let bytes = biscuit.to_vec().map_err(|e| format!("biscuit encode: {e}"))?;
+    let token = general_purpose::STANDARD.encode(&bytes);
+
+    Ok(TokenResponse {
+        token,
+        exp,
+        issued_at: now,
+        alg: "Biscuit".to_string(),
+    })
+}
+
+fn main() {
+    let host = env_default("TOKEN_ISSUER_HOST", "0.0.0.0");
+    let port = env_default("TOKEN_ISSUER_PORT", "8082");
+
+    let (jwt_alg, jwt_key, jwt_alg_label, jwt_default_issuer, jwt_default_audience) =
+        match load_jwt_key() {
+            Ok(v) => v,
+            Err(err) => {
+                eprintln!("token-issuer config error: {err}");
+                std::process::exit(1);
+            }
+        };
+
+    let biscuit_keypair = match load_biscuit_keypair() {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("token-issuer config error: {err}");
+            std::process::exit(1);
+        }
+    };
+
+    let cfg = IssuerConfig {
+        host: host.clone(),
+        port: port.parse().unwrap_or(8082),
+        jwt_alg,
+        jwt_key,
+        jwt_alg_label,
+        jwt_default_issuer,
+        jwt_default_audience,
+        biscuit_keypair,
+    };
+
+    let addr = format!("{}:{}", cfg.host, cfg.port);
+    let server = Server::http(&addr).unwrap_or_else(|e| {
+        eprintln!("failed to bind token issuer on {addr}: {e}");
+        std::process::exit(1);
+    });
+
+    for mut request in server.incoming_requests() {
+        let method = request.method().clone();
+        let url = request.url().to_string();
+
+        if method == Method::Get && url == "/health" {
+            let response = json_response(StatusCode(200), &serde_json::json!({"ok": true}));
+            let _ = request.respond(response);
+            continue;
+        }
+
+        if method != Method::Post {
+            let response = error_response(StatusCode(405), "method not allowed");
+            let _ = request.respond(response);
+            continue;
+        }
+
+        let mut body = Vec::new();
+        if let Err(e) = request.as_reader().read_to_end(&mut body) {
+            let response = error_response(StatusCode(400), &format!("read body failed: {e}"));
+            let _ = request.respond(response);
+            continue;
+        }
+
+        let res = match url.as_str() {
+            "/jwt" => {
+                let parsed: Result<JwtIssueRequest, _> = serde_json::from_slice(&body);
+                match parsed {
+                    Ok(req) => handle_jwt(req, &cfg),
+                    Err(e) => Err(format!("invalid json: {e}")),
+                }
+            }
+            "/biscuit" => {
+                let parsed: Result<BiscuitIssueRequest, _> = serde_json::from_slice(&body);
+                match parsed {
+                    Ok(req) => handle_biscuit(req, &cfg),
+                    Err(e) => Err(format!("invalid json: {e}")),
+                }
+            }
+            _ => Err("not found".to_string()),
+        };
+
+        let response = match res {
+            Ok(payload) => json_response(StatusCode(200), &payload),
+            Err(err) if err == "not found" => error_response(StatusCode(404), &err),
+            Err(err) => error_response(StatusCode(400), &err),
+        };
+
+        let _ = request.respond(response);
+    }
+}

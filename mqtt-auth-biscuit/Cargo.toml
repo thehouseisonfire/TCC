@@ -51,3 +51,6 @@ panic = "abort"
 codegen-units = 1
 strip = true
 overflow-checks = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }

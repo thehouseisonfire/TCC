@@ -456,6 +456,80 @@ extern "C" fn acl_check_callback(
     MOSQ_ERR_ACL_DENIED
 }
 
+extern "C" fn message_callback(
+    _event: c_int,
+    event_data: *mut c_void,
+    userdata: *mut c_void,
+) -> c_int {
+    if event_data.is_null() || userdata.is_null() {
+        return MOSQ_ERR_INVAL;
+    }
+    let evt = unsafe { &*(event_data as *mut MosquittoEvtMessage) };
+    let state = unsafe { &*(userdata as *mut PluginState) };
+    if evt.topic.is_null() {
+        return MOSQ_ERR_INVAL;
+    }
+
+    let Some(client_id) = mosq_client_id_string(evt.client) else {
+        return MOSQ_ERR_ACL_DENIED;
+    };
+    let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
+
+    if let Some(token_type) = state.cache.get(&client_id) {
+        let params = AuthzParams {
+            client_id: &client_id,
+            topic: &topic,
+            access: 2,
+            biscuit_root_key: &state.config.biscuit.root_public_key,
+            policy_mode: state.config.policy.mode,
+            sqlite_policy: state.sqlite_policy.as_ref(),
+            http_url: state.config.policy.http_url.as_deref(),
+        };
+        
+        if check_authorization(&token_type, params) {
+            return MOSQ_ERR_SUCCESS;
+        }
+    }
+    MOSQ_ERR_ACL_DENIED
+}
+
+extern "C" fn control_callback(
+    _event: c_int,
+    event_data: *mut c_void,
+    userdata: *mut c_void,
+) -> c_int {
+    if event_data.is_null() || userdata.is_null() {
+        return MOSQ_ERR_INVAL;
+    }
+    let evt = unsafe { &*(event_data as *mut MosquittoEvtControl) };
+    let state = unsafe { &*(userdata as *mut PluginState) };
+    if evt.topic.is_null() {
+        return MOSQ_ERR_INVAL;
+    }
+
+    let Some(client_id) = mosq_client_id_string(evt.client) else {
+        return MOSQ_ERR_ACL_DENIED;
+    };
+    let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
+
+    if let Some(token_type) = state.cache.get(&client_id) {
+        let params = AuthzParams {
+            client_id: &client_id,
+            topic: &topic,
+            access: 2,
+            biscuit_root_key: &state.config.biscuit.root_public_key,
+            policy_mode: state.config.policy.mode,
+            sqlite_policy: state.sqlite_policy.as_ref(),
+            http_url: state.config.policy.http_url.as_deref(),
+        };
+        
+        if check_authorization(&token_type, params) {
+            return MOSQ_ERR_SUCCESS;
+        }
+    }
+    MOSQ_ERR_ACL_DENIED
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -792,80 +866,6 @@ mod tests {
 
         teardown_plugin(userdata);
     }
-}
-
-extern "C" fn message_callback(
-    _event: c_int,
-    event_data: *mut c_void,
-    userdata: *mut c_void,
-) -> c_int {
-    if event_data.is_null() || userdata.is_null() {
-        return MOSQ_ERR_INVAL;
-    }
-    let evt = unsafe { &*(event_data as *mut MosquittoEvtMessage) };
-    let state = unsafe { &*(userdata as *mut PluginState) };
-    if evt.topic.is_null() {
-        return MOSQ_ERR_INVAL;
-    }
-
-    let Some(client_id) = mosq_client_id_string(evt.client) else {
-        return MOSQ_ERR_ACL_DENIED;
-    };
-    let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
-
-    if let Some(token_type) = state.cache.get(&client_id) {
-        let params = AuthzParams {
-            client_id: &client_id,
-            topic: &topic,
-            access: 2,
-            biscuit_root_key: &state.config.biscuit.root_public_key,
-            policy_mode: state.config.policy.mode,
-            sqlite_policy: state.sqlite_policy.as_ref(),
-            http_url: state.config.policy.http_url.as_deref(),
-        };
-        
-        if check_authorization(&token_type, params) {
-            return MOSQ_ERR_SUCCESS;
-        }
-    }
-    MOSQ_ERR_ACL_DENIED
-}
-
-extern "C" fn control_callback(
-    _event: c_int,
-    event_data: *mut c_void,
-    userdata: *mut c_void,
-) -> c_int {
-    if event_data.is_null() || userdata.is_null() {
-        return MOSQ_ERR_INVAL;
-    }
-    let evt = unsafe { &*(event_data as *mut MosquittoEvtControl) };
-    let state = unsafe { &*(userdata as *mut PluginState) };
-    if evt.topic.is_null() {
-        return MOSQ_ERR_INVAL;
-    }
-
-    let Some(client_id) = mosq_client_id_string(evt.client) else {
-        return MOSQ_ERR_ACL_DENIED;
-    };
-    let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
-
-    if let Some(token_type) = state.cache.get(&client_id) {
-        let params = AuthzParams {
-            client_id: &client_id,
-            topic: &topic,
-            access: 2,
-            biscuit_root_key: &state.config.biscuit.root_public_key,
-            policy_mode: state.config.policy.mode,
-            sqlite_policy: state.sqlite_policy.as_ref(),
-            http_url: state.config.policy.http_url.as_deref(),
-        };
-        
-        if check_authorization(&token_type, params) {
-            return MOSQ_ERR_SUCCESS;
-        }
-    }
-    MOSQ_ERR_ACL_DENIED
 }
 
 #[cfg(kani)]

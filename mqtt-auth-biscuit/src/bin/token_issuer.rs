@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use tiny_http::{Header as TinyHeader, Method, Response, Server, StatusCode};
 
+// Type aliases to reduce complexity
+type JwtKeyResult = Result<(Algorithm, EncodingKey, String, Option<String>, Option<String>), String>;
+
 const DEFAULT_EC_SK_HEX: &str = "0101010101010101010101010101010101010101010101010101010101010101";
 const DEFAULT_BISCUIT_SK_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const MAX_BODY_BYTES: usize = 64 * 1024;
@@ -71,7 +74,7 @@ fn parse_hex_key(hex_key: &str, expected_len: usize) -> Result<Vec<u8>, String> 
     Ok(bytes)
 }
 
-fn load_jwt_key(allow_default_keys: bool) -> Result<(Algorithm, EncodingKey, String, Option<String>, Option<String>), String> {
+fn load_jwt_key(allow_default_keys: bool) -> JwtKeyResult {
     let alg_raw = env_default("JWT_ALG", "ES256");
     let alg = match alg_raw.as_str() {
         "ES256" => Algorithm::ES256,

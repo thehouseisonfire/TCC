@@ -61,6 +61,8 @@ services:
       dockerfile: docker/Dockerfile.token-issuer
     environment:
       - TOKEN_ISSUER_PORT=8082
+      # Benchmark-only defaults. Override keys + disable defaults in real deployments.
+      - TOKEN_ISSUER_ALLOW_DEFAULT_KEYS=1
       - JWT_ALG=ES256
       - JWT_EC_PRIVATE_KEY_HEX=0101010101010101010101010101010101010101010101010101010101010101
       - BISCUIT_ROOT_PRIVATE_KEY_HEX=0000000000000000000000000000000000000000000000000000000000000000

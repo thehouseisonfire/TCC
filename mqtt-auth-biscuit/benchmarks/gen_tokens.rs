@@ -13,7 +13,6 @@ struct Claims {
     sub: String,
     exp: i64,
     roles: Option<Vec<String>>,
-    pad: Option<String>,
 }
 
 fn main() {
@@ -39,7 +38,6 @@ fn main() {
             sub: "client_1".to_string(),
             exp: 2000000000, // Year 2033
             roles: Some(vec!["admin".to_string()]),
-            pad: None,
         };
         encode(
             &Header::new(Algorithm::ES256),
@@ -58,7 +56,6 @@ fn main() {
             sub: "client_1".to_string(),
             exp: now + 5,
             roles: Some(vec!["admin".to_string()]),
-            pad: None,
         };
         encode(
             &Header::new(Algorithm::ES256),
@@ -68,35 +65,6 @@ fn main() {
         .unwrap()
     };
 
-    let jwt_pad_2k = {
-        let claims = Claims {
-            sub: "client_1".to_string(),
-            exp: 2000000000,
-            roles: Some(vec!["admin".to_string()]),
-            pad: Some("A".repeat(2048)),
-        };
-        encode(
-            &Header::new(Algorithm::ES256),
-            &claims,
-            &jwt_encoding_key,
-        )
-        .unwrap()
-    };
-
-    let jwt_pad_8k = {
-        let claims = Claims {
-            sub: "client_1".to_string(),
-            exp: 2000000000,
-            roles: Some(vec!["admin".to_string()]),
-            pad: Some("A".repeat(8192)),
-        };
-        encode(
-            &Header::new(Algorithm::ES256),
-            &claims,
-            &jwt_encoding_key,
-        )
-        .unwrap()
-    };
 
     // Biscuit
     let root_bytes = [0u8; 32];
@@ -174,8 +142,6 @@ fn main() {
     let tokens = json!({
         "jwt": jwt_long,
         "jwt_short": jwt_short,
-        "jwt_pad_2k": jwt_pad_2k,
-        "jwt_pad_8k": jwt_pad_8k,
         "jwt_alg": "ES256",
         "biscuit": biscuit_b64,
         "biscuit_5": biscuit_5_b64,

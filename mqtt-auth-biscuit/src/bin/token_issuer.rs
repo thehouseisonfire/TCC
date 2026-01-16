@@ -6,11 +6,11 @@ use p256::SecretKey;
 use pkcs8::{EncodePrivateKey, LineEnding};
 use serde::{Deserialize, Serialize};
 use std::env;
-use std::io::Read;
 use tiny_http::{Header as TinyHeader, Method, Response, Server, StatusCode};
 
 const DEFAULT_EC_SK_HEX: &str = "0101010101010101010101010101010101010101010101010101010101010101";
 const DEFAULT_BISCUIT_SK_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+const MAX_BODY_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct JwtIssueRequest {
@@ -20,6 +20,11 @@ struct JwtIssueRequest {
     ttl_seconds: Option<i64>,
     issuer: Option<String>,
     audience: Option<String>,
+    no_default_roles: Option<bool>,
+}
+
+fn escape_datalog_str(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,10 +51,16 @@ struct IssuerConfig {
     jwt_default_issuer: Option<String>,
     jwt_default_audience: Option<String>,
     biscuit_keypair: KeyPair,
+    jwt_no_default_roles: bool,
+    biscuit_base64url: bool,
 }
 
 fn env_default(name: &str, default: &str) -> String {
     env::var(name).unwrap_or_else(|_| default.to_string())
+}
+
+fn env_flag(name: &str) -> bool {
+    matches!(env::var(name).as_deref(), Ok("1") | Ok("true") | Ok("TRUE"))
 }
 
 fn parse_hex_key(hex_key: &str, expected_len: usize) -> Result<Vec<u8>, String> {
@@ -60,7 +71,7 @@ fn parse_hex_key(hex_key: &str, expected_len: usize) -> Result<Vec<u8>, String> 
     Ok(bytes)
 }
 
-fn load_jwt_key() -> Result<(Algorithm, EncodingKey, String, Option<String>, Option<String>), String> {
+fn load_jwt_key(allow_default_keys: bool) -> Result<(Algorithm, EncodingKey, String, Option<String>, Option<String>), String> {
     let alg_raw = env_default("JWT_ALG", "ES256");
     let alg = match alg_raw.as_str() {
         "ES256" => Algorithm::ES256,
@@ -71,6 +82,13 @@ fn load_jwt_key() -> Result<(Algorithm, EncodingKey, String, Option<String>, Opt
     let key = match alg {
         Algorithm::ES256 => {
             let hex_key = env_default("JWT_EC_PRIVATE_KEY_HEX", DEFAULT_EC_SK_HEX);
+            if hex_key == DEFAULT_EC_SK_HEX {
+                if !allow_default_keys {
+                    return Err("JWT_EC_PRIVATE_KEY_HEX must be set (default key disallowed)"
+                        .to_string());
+                }
+                eprintln!("warning: using default JWT_EC_PRIVATE_KEY_HEX (benchmark-only)");
+            }
             let bytes = parse_hex_key(&hex_key, 32)?;
             let secret = SecretKey::from_slice(&bytes).map_err(|e| format!("invalid EC key: {e}"))?;
             let pem = secret
@@ -94,13 +112,21 @@ fn load_jwt_key() -> Result<(Algorithm, EncodingKey, String, Option<String>, Opt
     Ok((alg, key, alg_raw, issuer, audience))
 }
 
-fn load_biscuit_keypair() -> Result<KeyPair, String> {
+fn load_biscuit_keypair(allow_default_keys: bool) -> Result<KeyPair, String> {
     let hex_key = env_default("BISCUIT_ROOT_PRIVATE_KEY_HEX", DEFAULT_BISCUIT_SK_HEX);
+    if hex_key == DEFAULT_BISCUIT_SK_HEX {
+        if !allow_default_keys {
+            return Err("BISCUIT_ROOT_PRIVATE_KEY_HEX must be set (default key disallowed)"
+                .to_string());
+        }
+        eprintln!("warning: using default BISCUIT_ROOT_PRIVATE_KEY_HEX (benchmark-only)");
+    }
     let bytes = parse_hex_key(&hex_key, 32)?;
     let priv_key = PrivateKey::from_bytes(&bytes, biscuit_auth::Algorithm::Ed25519)
         .map_err(|e| format!("invalid Biscuit key: {e}"))?;
     Ok(KeyPair::from(&priv_key))
 }
+
 
 fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> Response<std::io::Cursor<Vec<u8>>> {
     let body = serde_json::to_vec(payload).unwrap_or_else(|_| b"{}".to_vec());
@@ -134,10 +160,17 @@ fn handle_jwt(req: JwtIssueRequest, cfg: &IssuerConfig) -> Result<TokenResponse,
         client_id: Option<String>,
     }
 
+    let no_default_roles = req.no_default_roles.unwrap_or(cfg.jwt_no_default_roles);
+    let roles = if no_default_roles {
+        req.roles
+    } else {
+        req.roles.or_else(|| Some(vec!["admin".to_string()]))
+    };
+
     let claims = Claims {
         sub: subject,
         exp,
-        roles: req.roles.or_else(|| Some(vec!["admin".to_string()])),
+        roles,
         iss: req.issuer.or_else(|| cfg.jwt_default_issuer.clone()),
         aud: req.audience.or_else(|| cfg.jwt_default_audience.clone()),
         client_id: req.client_id,
@@ -163,10 +196,13 @@ fn handle_biscuit(req: BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<TokenR
         .topic
         .unwrap_or_else(|| format!("sensors/{client_id}/temp"));
 
+    let topic = escape_datalog_str(&topic);
+    let publish_fact = format!("right(\"publish\", \"{topic}\")");
+    let subscribe_fact = format!("right(\"subscribe\", \"{topic}\")");
     let biscuit = Biscuit::builder()
-        .fact(format!("right(\"publish\", \"{topic}\")"))
+        .fact(publish_fact.as_str())
         .map_err(|e| format!("biscuit fact publish: {e}"))?
-        .fact(format!("right(\"subscribe\", \"{topic}\")"))
+        .fact(subscribe_fact.as_str())
         .map_err(|e| format!("biscuit fact subscribe: {e}"))?
         .build(&cfg.biscuit_keypair)
         .map_err(|e| format!("biscuit build: {e}"))?;
@@ -177,9 +213,12 @@ fn handle_biscuit(req: BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<TokenR
         .map_err(|e| format!("biscuit check: {e}"))?;
 
     let biscuit = biscuit.append(block).map_err(|e| format!("biscuit append: {e}"))?;
-
     let bytes = biscuit.to_vec().map_err(|e| format!("biscuit encode: {e}"))?;
-    let token = general_purpose::STANDARD.encode(&bytes);
+    let token = if cfg.biscuit_base64url {
+        general_purpose::URL_SAFE_NO_PAD.encode(&bytes)
+    } else {
+        general_purpose::STANDARD.encode(&bytes)
+    };
 
     Ok(TokenResponse {
         token,
@@ -192,9 +231,12 @@ fn handle_biscuit(req: BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<TokenR
 fn main() {
     let host = env_default("TOKEN_ISSUER_HOST", "0.0.0.0");
     let port = env_default("TOKEN_ISSUER_PORT", "8082");
+    let allow_default_keys = env_flag("TOKEN_ISSUER_ALLOW_DEFAULT_KEYS");
+    let jwt_no_default_roles = env_flag("JWT_NO_DEFAULT_ROLES");
+    let biscuit_base64url = env_flag("BISCUIT_BASE64URL");
 
     let (jwt_alg, jwt_key, jwt_alg_label, jwt_default_issuer, jwt_default_audience) =
-        match load_jwt_key() {
+        match load_jwt_key(allow_default_keys) {
             Ok(v) => v,
             Err(err) => {
                 eprintln!("token-issuer config error: {err}");
@@ -202,7 +244,7 @@ fn main() {
             }
         };
 
-    let biscuit_keypair = match load_biscuit_keypair() {
+    let biscuit_keypair = match load_biscuit_keypair(allow_default_keys) {
         Ok(v) => v,
         Err(err) => {
             eprintln!("token-issuer config error: {err}");
@@ -219,6 +261,8 @@ fn main() {
         jwt_default_issuer,
         jwt_default_audience,
         biscuit_keypair,
+        jwt_no_default_roles,
+        biscuit_base64url,
     };
 
     let addr = format!("{}:{}", cfg.host, cfg.port);
@@ -246,6 +290,11 @@ fn main() {
         let mut body = Vec::new();
         if let Err(e) = request.as_reader().read_to_end(&mut body) {
             let response = error_response(StatusCode(400), &format!("read body failed: {e}"));
+            let _ = request.respond(response);
+            continue;
+        }
+        if body.len() > MAX_BODY_BYTES {
+            let response = error_response(StatusCode(413), "payload too large");
             let _ = request.respond(response);
             continue;
         }

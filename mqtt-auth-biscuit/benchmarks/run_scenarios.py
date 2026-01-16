@@ -76,6 +76,8 @@ def _run_loadgen(
     token_issuer_url: str | None,
     token_issuer_kind: str | None,
     token_issuer_ttl: int | None,
+    token_issuer_no_default_roles: bool,
+    token_refresh_codes: str | None,
 ):
     cmd = [
         "python3",
@@ -110,6 +112,12 @@ def _run_loadgen(
         cmd.extend(["--token-issuer-kind", token_issuer_kind])
     if token_issuer_ttl is not None:
         cmd.extend(["--token-issuer-ttl", str(token_issuer_ttl)])
+    if token_issuer_pad_to_size is not None:
+        cmd.extend(["--token-issuer-pad-to-size", str(token_issuer_pad_to_size)])
+    if token_issuer_no_default_roles:
+        cmd.append("--token-issuer-no-default-roles")
+    if token_refresh_codes:
+        cmd.extend(["--token-refresh-codes", token_refresh_codes])
 
     out = subprocess.check_output(cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
     return json.loads(out.decode("utf-8"))
@@ -150,6 +158,9 @@ def main():
     p.add_argument("--messages", type=int, default=20)
     p.add_argument("--qos", type=int, default=1)
     p.add_argument("--scenarios", help="Comma-separated list of scenario IDs to run")
+    p.add_argument("--token-issuer-no-default-roles", action="store_true")
+    p.add_argument("--biscuit-base64url", action="store_true")
+    p.add_argument("--token-refresh-codes", default=os.environ.get("TOKEN_REFRESH_CODES"))
     args = p.parse_args()
 
     tokens = _read_tokens(os.path.join(os.path.dirname(os.path.dirname(__file__)), args.tokens))
@@ -240,10 +251,10 @@ def main():
                 "netem": {"clear": True},
                 "message_size": 0,
             },
-            "MTU-200-JWT-8K": {
+            "MTU-200-JWT": {
                 "mosquitto_conf": "docker/mosquitto.conf",
                 "username": "jwt",
-                "password": tokens["jwt_pad_8k"],
+                "password": tokens["jwt"],
                 "topic": "sensors/{client_id}/temp",
                 "authz": None,
                 "netem": {"mtu": 200},
@@ -345,10 +356,10 @@ def main():
                 "netem": {"mtu": mtu},
                 "message_size": 0,
             }
-            available_scenarios[f"MTU-{mtu}-JWT-8K"] = {
+            available_scenarios[f"MTU-{mtu}-JWT"] = {
                 "mosquitto_conf": "docker/mosquitto.conf",
                 "username": "jwt",
-                "password": tokens["jwt_pad_8k"],
+                "password": tokens["jwt"],
                 "topic": "sensors/{client_id}/temp",
                 "authz": None,
                 "netem": {"mtu": mtu},
@@ -367,12 +378,12 @@ def main():
         print("No scenarios specified. Use --scenarios to specify which scenarios to run.")
         print("Available scenarios:")
         print("BASE-01, JWT-01, BIS-01, POLICY-COMPLEX-1, POLICY-COMPLEX-5, POLICY-COMPLEX-25")
-        print("JWT-HTTP-200MS, JWT-HTTP-1000MS, HYBRID-AUTHZ-DOWN, MTU-200-JWT-8K")
+        print("JWT-HTTP-200MS, JWT-HTTP-1000MS, HYBRID-AUTHZ-DOWN, MTU-200-JWT")
         print("BIS-HTTP-200MS, JWT-HTTP-200MS-LOSS1, JWT-HTTP-200MS-LOSS5")
         print("MQTT5-REAUTH-JWT, MQTT5-REAUTH-BISCUIT, THUNDERING-HERD, DELEGATION-TEMP-ONLY")
         print("LIFECYCLE-JWT-SHORT-RECONNECT, LIFECYCLE-BIS-SHORT-RECONNECT")
         print("MTU-500-BIS-25, MTU-1500-BIS-25, MTU-9000-BIS-25")
-        print("MTU-500-JWT-8K, MTU-1500-JWT-8K, MTU-9000-JWT-8K")
+        print("MTU-500-JWT, MTU-1500-JWT, MTU-9000-JWT")
         return
 
     for s in scenarios:
@@ -389,6 +400,12 @@ def main():
                 extra_env.update({"NETEM_CLEAR": "1", "NETEM_DELAY_MS": str(netem["delay_ms"])})
             if "loss_pct" in netem:
                 extra_env.update({"NETEM_CLEAR": "1", "NETEM_LOSS_PCT": str(netem["loss_pct"])})
+
+        extra_env.update({
+            "TOKEN_ISSUER_ALLOW_DEFAULT_KEYS": os.environ.get("TOKEN_ISSUER_ALLOW_DEFAULT_KEYS", "1"),
+            "JWT_NO_DEFAULT_ROLES": "1" if args.token_issuer_no_default_roles else "0",
+            "BISCUIT_BASE64URL": "1" if args.biscuit_base64url else "0",
+        })
 
         _compose([
             "up",
@@ -408,7 +425,17 @@ def main():
             _authz_config(delay_ms=cfg.get("delay_ms"), fail_mode=cfg.get("fail_mode"), fail_rate=cfg.get("fail_rate"))
 
         repeats = int(s.get("repeat", 1))
-        out_payload = {"scenario": s["id"], "runs": []}
+        token_len = len(s.get("password", "")) if s.get("password") else 0
+        out_payload = {
+            "scenario": s["id"],
+            "token_len": token_len,
+            "parity": {
+                "token_issuer_no_default_roles": args.token_issuer_no_default_roles,
+                "biscuit_base64url": args.biscuit_base64url,
+                "token_refresh_codes": args.token_refresh_codes,
+            },
+            "runs": [],
+        }
 
         if s.get("restart_mosquitto"):
             _compose(["restart", "mosquitto"], extra_env=extra_env)
@@ -434,6 +461,8 @@ def main():
                     token_issuer_url="http://localhost:8082" if token_refresh else None,
                     token_issuer_kind=token_refresh.get("kind"),
                     token_issuer_ttl=token_refresh.get("ttl_seconds"),
+                    token_issuer_no_default_roles=args.token_issuer_no_default_roles,
+                    token_refresh_codes=args.token_refresh_codes,
                 )
             try:
                 snap = _resource_snapshot()

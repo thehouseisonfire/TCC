@@ -58,6 +58,8 @@ class WorkerConfig:
     token_issuer_url: str | None
     token_issuer_kind: str | None
     token_issuer_ttl: int | None
+    token_issuer_no_default_roles: bool
+    token_refresh_codes: set[int]
 
 
 @dataclass
@@ -65,6 +67,8 @@ class WorkerResult:
     client_id: str
     connect_ms: float | None
     publish_ms: list[float]
+    token_refresh_ms: float | None
+    token_refresh_len: int | None
     errors: list[str]
 
 
@@ -74,10 +78,19 @@ def _mk_payload(size: int) -> bytes:
     return b"A" * size
 
 
-def _fetch_token(issuer_url: str, kind: str, client_id: str, topic: str, ttl: int | None) -> str:
+def _fetch_token(
+    issuer_url: str,
+    kind: str,
+    client_id: str,
+    topic: str,
+    ttl: int | None,
+    no_default_roles: bool,
+) -> str:
     payload = {"client_id": client_id, "ttl_seconds": ttl}
     if kind == "biscuit":
         payload["topic"] = topic
+    if no_default_roles:
+        payload["no_default_roles"] = True
 
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -98,6 +111,8 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
     errors: list[str] = []
     publish_ms: list[float] = []
     connect_ms = None
+    token_refresh_ms = None
+    token_refresh_len = None
 
     def attempt_connect(password: str):
         userdata = {
@@ -134,7 +149,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
             userdata["connect_start"] = time.perf_counter()
             client.connect(cfg.host, cfg.port, 30)
         except Exception as e:
-            return None, f"connect_failed:{e}", None
+            return None, f"connect_failed:{e}", None, None
 
         client.loop_start()
 
@@ -153,10 +168,10 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
             except Exception:
                 pass
             if reason is None:
-                return None, "connect_timeout", reason
-            return None, f"connect_denied:{reason}", reason
+                return None, "connect_timeout", reason, userdata
+            return None, f"connect_denied:{reason}", reason, userdata
 
-        return client, None, userdata
+        return client, None, None, userdata
 
     password = cfg.password
     token_refreshed = False
@@ -164,39 +179,43 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
     userdata = None
 
     for _ in range(2):
-        client, err, reason = attempt_connect(password)
+        client, err, reason, connect_userdata = attempt_connect(password)
         if client is not None:
-            userdata = client._userdata
+            userdata = connect_userdata
             break
 
         if token_refreshed:
             errors.append(err)
-            out_q.put(WorkerResult(cfg.client_id, None, [], errors))
+            out_q.put(WorkerResult(cfg.client_id, None, [], token_refresh_ms, token_refresh_len, errors))
             return
 
-        if cfg.token_issuer_url and cfg.token_issuer_kind and reason in (5, 0x87):
+        if cfg.token_issuer_url and cfg.token_issuer_kind and reason in cfg.token_refresh_codes:
             try:
+                t_refresh_start = time.perf_counter()
                 password = _fetch_token(
                     cfg.token_issuer_url,
                     cfg.token_issuer_kind,
                     cfg.client_id,
                     cfg.topic,
                     cfg.token_issuer_ttl,
+                    cfg.token_issuer_no_default_roles,
                 )
+                token_refresh_ms = (time.perf_counter() - t_refresh_start) * 1000.0
+                token_refresh_len = len(password)
                 token_refreshed = True
                 continue
             except Exception as e:
                 errors.append(f"token_refresh_failed:{e}")
-                out_q.put(WorkerResult(cfg.client_id, None, [], errors))
+                out_q.put(WorkerResult(cfg.client_id, None, [], token_refresh_ms, token_refresh_len, errors))
                 return
 
         errors.append(err)
-        out_q.put(WorkerResult(cfg.client_id, None, [], errors))
+        out_q.put(WorkerResult(cfg.client_id, None, [], token_refresh_ms, token_refresh_len, errors))
         return
 
     if userdata is None:
         errors.append("connect_failed")
-        out_q.put(WorkerResult(cfg.client_id, None, [], errors))
+        out_q.put(WorkerResult(cfg.client_id, None, [], token_refresh_ms, token_refresh_len, errors))
         return
 
     connect_ms = (userdata["connect_done"] - userdata["connect_start"]) * 1000.0
@@ -233,7 +252,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
     except Exception:
         pass
 
-    out_q.put(WorkerResult(cfg.client_id, connect_ms, publish_ms, errors))
+    out_q.put(WorkerResult(cfg.client_id, connect_ms, publish_ms, token_refresh_ms, token_refresh_len, errors))
 
 
 def run_load(
@@ -251,6 +270,8 @@ def run_load(
     token_issuer_url: str | None,
     token_issuer_kind: str | None,
     token_issuer_ttl: int | None,
+    token_issuer_no_default_roles: bool,
+    token_refresh_codes: set[int],
 ):
     start_evt = threading.Event()
     out_q: queue.Queue = queue.Queue()
@@ -275,6 +296,8 @@ def run_load(
             token_issuer_url=token_issuer_url,
             token_issuer_kind=token_issuer_kind,
             token_issuer_ttl=token_issuer_ttl,
+            token_issuer_no_default_roles=token_issuer_no_default_roles,
+            token_refresh_codes=token_refresh_codes,
         )
         t = threading.Thread(target=_run_worker, args=(cfg, start_evt, out_q), daemon=True)
         threads.append(t)
@@ -297,6 +320,8 @@ def run_load(
 
     connect_lat = [r.connect_ms for r in results if r.connect_ms is not None]
     publish_lat = [x for r in results for x in r.publish_ms]
+    refresh_lat = [r.token_refresh_ms for r in results if r.token_refresh_ms is not None]
+    refresh_len = [r.token_refresh_len for r in results if r.token_refresh_len is not None]
 
     errors = [e for r in results for e in r.errors]
 
@@ -315,8 +340,12 @@ def run_load(
             "protocol": "mqttv5" if protocol == mqtt.MQTTv5 else "mqttv311",
             "token_issuer_url": token_issuer_url,
             "token_issuer_kind": token_issuer_kind,
+            "token_issuer_no_default_roles": token_issuer_no_default_roles,
+            "token_refresh_codes": sorted(token_refresh_codes),
         },
         "connect": _summarize_ms(connect_lat),
+        "token_refresh": _summarize_ms(refresh_lat),
+        "token_refresh_len": _summarize_ms(refresh_len),
         "publish": _summarize_ms(publish_lat),
         "throughput_mps": throughput_mps,
         "errors": errors,
@@ -339,10 +368,26 @@ def main():
     p.add_argument("--token-issuer-url", default=os.environ.get("TOKEN_ISSUER_URL"))
     p.add_argument("--token-issuer-kind", default=os.environ.get("TOKEN_ISSUER_KIND"))
     p.add_argument("--token-issuer-ttl", type=int, default=os.environ.get("TOKEN_ISSUER_TTL"))
+    p.add_argument("--token-issuer-no-default-roles", action="store_true")
+    p.add_argument(
+        "--token-refresh-codes",
+        default=os.environ.get("TOKEN_REFRESH_CODES", "5,135"),
+        help="Comma-separated MQTT reason codes that should trigger token refresh (e.g., 5/0x87 = Not authorized)",
+    )
     p.add_argument("--json", action="store_true")
     args = p.parse_args()
 
     protocol = mqtt.MQTTv5 if args.mqtt5 else mqtt.MQTTv311
+
+    token_refresh_codes = set()
+    for part in str(args.token_refresh_codes).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            token_refresh_codes.add(int(part, 0))
+        except ValueError:
+            raise SystemExit(f"invalid token refresh code: {part}")
 
     res = run_load(
         host=args.host,
@@ -359,6 +404,8 @@ def main():
         token_issuer_url=args.token_issuer_url,
         token_issuer_kind=args.token_issuer_kind,
         token_issuer_ttl=args.token_issuer_ttl,
+        token_issuer_no_default_roles=args.token_issuer_no_default_roles,
+        token_refresh_codes=token_refresh_codes,
     )
 
     if args.json:

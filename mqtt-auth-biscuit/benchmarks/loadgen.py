@@ -337,7 +337,7 @@ def run_load(
             "message_count": message_count,
             "qos": qos,
             "message_size": message_size,
-            "protocol": "mqttv5" if protocol == mqtt.MQTTv5 else "mqttv311",
+            "protocol": "mqttv5",
             "token_issuer_url": token_issuer_url,
             "token_issuer_kind": token_issuer_kind,
             "token_issuer_no_default_roles": token_issuer_no_default_roles,
@@ -363,7 +363,6 @@ def main():
     p.add_argument("--messages", type=int, default=int(os.environ.get("MQTT_MESSAGES", "50")))
     p.add_argument("--qos", type=int, default=int(os.environ.get("MQTT_QOS", "1")))
     p.add_argument("--message-size", type=int, default=int(os.environ.get("MQTT_MESSAGE_SIZE", "0")))
-    p.add_argument("--mqtt5", action="store_true")
     p.add_argument("--sync-connect", action="store_true")
     p.add_argument("--token-issuer-url", default=os.environ.get("TOKEN_ISSUER_URL"))
     p.add_argument("--token-issuer-kind", default=os.environ.get("TOKEN_ISSUER_KIND"))
@@ -372,12 +371,12 @@ def main():
     p.add_argument(
         "--token-refresh-codes",
         default=os.environ.get("TOKEN_REFRESH_CODES", "5,135"),
-        help="Comma-separated MQTT reason codes that should trigger token refresh (e.g., 5/0x87 = Not authorized)",
+        help="Comma-separated MQTT v5 reason codes that should trigger token refresh (e.g., 5/0x87 = Not authorized)",
     )
     p.add_argument("--json", action="store_true")
     args = p.parse_args()
 
-    protocol = mqtt.MQTTv5 if args.mqtt5 else mqtt.MQTTv311
+    protocol = mqtt.MQTTv5  # MQTT v5 only
 
     token_refresh_codes = set()
     for part in str(args.token_refresh_codes).split(","):

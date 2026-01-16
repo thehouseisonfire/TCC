@@ -70,7 +70,6 @@ def _run_loadgen(
     messages: int,
     topic: str,
     qos: int,
-    mqtt5: bool,
     message_size: int,
     sync_connect: bool,
     token_issuer_url: str | None,
@@ -102,8 +101,6 @@ def _run_loadgen(
         str(message_size),
         "--json",
     ]
-    if mqtt5:
-        cmd.append("--mqtt5")
     if sync_connect:
         cmd.append("--sync-connect")
     if token_issuer_url:
@@ -134,7 +131,7 @@ def _write_result(out_dir: str, name: str, payload: dict):
 def _run_mqtt5_auth(token1: str, token2: str):
     cmd = [
         "python3",
-        "benchmarks/mqtt5_auth_client.py",
+        "benchmarks/mqtt_auth_client.py",
         "--host",
         "localhost",
         "--port",
@@ -455,7 +452,6 @@ def main():
                     messages=args.messages,
                     topic=s.get("topic", "sensors/{client_id}/temp"),
                     qos=args.qos,
-                    mqtt5=False,
                     message_size=int(s.get("message_size", 0)),
                     sync_connect=bool(s.get("sync_connect", False)),
                     token_issuer_url="http://localhost:8082" if token_refresh else None,

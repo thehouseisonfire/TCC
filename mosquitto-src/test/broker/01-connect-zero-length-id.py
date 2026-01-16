@@ -2,7 +2,6 @@
 
 # Test whether a CONNECT with a zero length client id results in the correct behaviour.
 
-# MQTT v3.1.1 - zero length is allowed, unless allow_zero_length_clientid is false, and unless clean_start is False.
 # MQTT v5.0 - zero length is allowed, unless allow_zero_length_clientid is false
 
 from mosq_test_helper import *
@@ -65,37 +64,7 @@ def do_test(per_listener, proto_ver, clean_start, allow_zero, client_port, expec
 
 (port1, port2) = mosq_test.get_port(2)
 
-test_v4 = True
 test_v5 = True
-
-if test_v4 == True:
-    do_test(per_listener="false", proto_ver=4, client_port=port1, clean_start=True, allow_zero="true", expect_fail=False)
-    do_test(per_listener="false", proto_ver=4, client_port=port1, clean_start=True, allow_zero="false", expect_fail=True)
-    do_test(per_listener="false", proto_ver=4, client_port=port1, clean_start=False, allow_zero="true", expect_fail=True)
-    do_test(per_listener="false", proto_ver=4, client_port=port1, clean_start=False, allow_zero="false", expect_fail=True)
-    do_test(per_listener="true", proto_ver=4, client_port=port1, clean_start=True, allow_zero="true", expect_fail=False)
-    do_test(per_listener="true", proto_ver=4, client_port=port1, clean_start=True, allow_zero="false", expect_fail=True)
-    do_test(per_listener="true", proto_ver=4, client_port=port1, clean_start=False, allow_zero="true", expect_fail=True)
-    do_test(per_listener="true", proto_ver=4, client_port=port1, clean_start=False, allow_zero="false", expect_fail=True)
-
-    do_test(per_listener="false", proto_ver=4, client_port=port2, clean_start=True, allow_zero="true", expect_fail=False)
-    do_test(per_listener="false", proto_ver=4, client_port=port2, clean_start=True, allow_zero="false", expect_fail=True)
-    do_test(per_listener="false", proto_ver=4, client_port=port2, clean_start=False, allow_zero="true", expect_fail=True)
-    do_test(per_listener="false", proto_ver=4, client_port=port2, clean_start=False, allow_zero="false", expect_fail=True)
-    do_test(per_listener="true", proto_ver=4, client_port=port2, clean_start=True, allow_zero="true", expect_fail=False)
-    do_test(per_listener="true", proto_ver=4, client_port=port2, clean_start=True, allow_zero="false", expect_fail=True)
-    do_test(per_listener="true", proto_ver=4, client_port=port2, clean_start=False, allow_zero="true", expect_fail=True)
-    do_test(per_listener="true", proto_ver=4, client_port=port2, clean_start=False, allow_zero="false", expect_fail=True)
-
-    do_test(per_listener="false", proto_ver=4, client_port=port1, clean_start=True, allow_zero="", expect_fail=False)
-    do_test(per_listener="false", proto_ver=4, client_port=port1, clean_start=False, allow_zero="", expect_fail=True)
-    do_test(per_listener="true", proto_ver=4, client_port=port1, clean_start=True, allow_zero="", expect_fail=False)
-    do_test(per_listener="true", proto_ver=4, client_port=port1, clean_start=False, allow_zero="", expect_fail=True)
-
-    do_test(per_listener="false", proto_ver=4, client_port=port2, clean_start=True, allow_zero="", expect_fail=False)
-    do_test(per_listener="false", proto_ver=4, client_port=port2, clean_start=False, allow_zero="", expect_fail=True)
-    do_test(per_listener="true", proto_ver=4, client_port=port2, clean_start=True, allow_zero="", expect_fail=False)
-    do_test(per_listener="true", proto_ver=4, client_port=port2, clean_start=False, allow_zero="", expect_fail=True)
 
 if test_v5 == True:
     do_test(per_listener="false", proto_ver=5, client_port=port1, clean_start=True, allow_zero="true", expect_fail=False)

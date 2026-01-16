@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 # Check whether an incoming bridge connection receives its own messages. It
-# shouldn't because for v3.1 and v3.1.1 we have no-local set for all bridges.
+# shouldn't because for v5 we have no-local set for bridges.
 
 from mosq_test_helper import *
 
@@ -40,8 +40,6 @@ def do_test(proto_ver_connect, proto_ver_msgs, sub_opts):
             print(stde.decode('utf-8'))
             exit(rc)
 
-do_test(128+3, 3, 0)
-do_test(128+4, 4, 0)
 do_test(5, 5, mqtt5_opts.MQTT_SUB_OPT_NO_LOCAL)
 
 exit(0)

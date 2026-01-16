@@ -3,6 +3,8 @@
 This guide explains how to run the benchmarks for the JWT and Biscuit
 authentication plugin.
 
+**Important Note**: This implementation supports **MQTT v5 only**. MQTT v3.1 is not implemented and will not be analyzed in these benchmarks.
+
 ## Prerequisites
 
 - **Rust**: For building the plugin and token generator.
@@ -54,7 +56,7 @@ You can run the benchmark script to measure latency and throughput:
 python3 benchmarks/metrics_collector.py
 ```
 
-You can also run the full scenario battery from `ARTICLE.MD` (MTU sweep, thundering herd, policy complexity, HTTP introspection latency/loss, hybrid contingency, and MQTT5 reauthentication):
+You can also run the full scenario battery from `ARTICLE.MD` (MTU sweep, thundering herd, policy complexity, HTTP introspection latency/loss, hybrid contingency, and MQTT reauthentication):
 
 ```bash
 python3 benchmarks/run_scenarios.py
@@ -66,10 +68,10 @@ To select a different Mosquitto configuration for a run (e.g. HTTP policy or hyb
 MOSQUITTO_CONF=docker/mosquitto_http.conf python3 benchmarks/run_scenarios.py
 ```
 
-For the MQTT5 `AUTH` reauthentication microbenchmark only:
+For the MQTT `AUTH` reauthentication microbenchmark only:
 
 ```bash
-python3 benchmarks/mqtt5_auth_client.py --token1 "<token>" --token2 "<token>"
+python3 benchmarks/mqtt_auth_client.py --token1 "<token>" --token2 "<token>"
 ```
 
 You can also monitor resource usage via:

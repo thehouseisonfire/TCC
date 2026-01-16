@@ -8,7 +8,7 @@ both JWT and Biscuit tokens, intended as a reproducible research prototype.
 - **Fast and Secure**: Implemented in Rust with a thread-safe LRU cache.
 - **Flexible Authorization**: Supports both standard JWT claims and powerful
   Biscuit Datalog policies.
-- **MQTT 5.0 Ready**: Built for modern MQTT environments.
+- **MQTT 5.0 Ready**: Built for modern MQTT environments. **Note: Only MQTT v5 is supported - MQTT v3.1 is not implemented.**
 - **Containerized**: Ready-to-use Docker environment for testing and deployment.
 
 ## Getting Started

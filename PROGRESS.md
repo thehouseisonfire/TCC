@@ -355,31 +355,6 @@ machine and record the first results/known issues).
     - Updated delegation benchmark scenario with actual client-side delegation
     - Performance comparison between simulated and real delegation flows
 
-- [ ] **Issue 8: Implement a long-running Token Issuer service (JWT + Biscuit)**
-  - Goal: provide a live issuance endpoint so benchmark clients can request new
-    tokens after expiry (as proposed in `ARTICLE.MD`).
-
-  Security invariants (must hold for research validity):
-  - The Token Issuer is the **only** component allowed to access:
-    - JWT private signing keys
-    - Biscuit root private key material
-  - The broker/PEP must only ever receive:
-    - JWT public verification keys (PEM)
-    - Biscuit root public key
-  - The Token Issuer is **not** the same component as the HTTP authorization
-    policy backend (scenario-only PDP).
-
-  - Deliverable:
-    - A containerized Token Issuer service with HTTP endpoints to mint:
-      - ES256/RS256 JWTs
-      - Biscuits (including short-lived tokens)
-    - Clear separation in Docker topology between:
-      - Token Issuer (holds private keys)
-      - Authorization PDP (`authz`, scenario-only)
-      - PEP (Mosquitto + plugin, public keys only)
-    - Scenario runner/client support to request new tokens on expiry and retry
-      failed operations.
-
 - [ ] **Issue 8.1: Implement comprehensive TLS support for all network communications**
   - Goal: provide configurable TLS support for all network paths in the system to enable
     testing TLS overhead impact on JWT vs Biscuit performance comparison.
@@ -594,6 +569,10 @@ machine and record the first results/known issues).
 ---
 
 ## Issue Backlog (Completed)
+
+- [x] **Issue 8: Implement a long-running Token Issuer service (JWT + Biscuit)**
+  - Summary: Complete token issuer service with HTTP endpoints for JWT/Biscuit issuance,
+    proper security separation, Docker integration, and token refresh support in benchmark scenarios.
 
 - [x] **Issue 11: MIRI verification for FFI memory safety**
   - Summary: MIRI CI + tests cover FFI pointer safety and lifecycle invariants.

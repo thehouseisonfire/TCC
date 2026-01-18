@@ -79,6 +79,8 @@ pub struct PluginConfigBuilder {
     policy_mode: Option<PolicyMode>,
     sqlite_path: Option<String>,
     http_url: Option<String>,
+    http_ca_file: Option<String>,
+    http_tls_insecure: Option<bool>,
     cache_ttl_seconds: Option<u64>,
     ext_auth_method: Option<String>,
 }
@@ -101,6 +103,8 @@ impl PluginConfigBuilder {
             policy_mode: None,
             sqlite_path: None,
             http_url: None,
+            http_ca_file: None,
+            http_tls_insecure: None,
             cache_ttl_seconds: None,
             ext_auth_method: None,
         }
@@ -148,6 +152,16 @@ impl PluginConfigBuilder {
     
     pub fn http_url(mut self, url: impl Into<String>) -> Self {
         self.http_url = Some(url.into());
+        self
+    }
+
+    pub fn http_ca_file(mut self, path: impl Into<String>) -> Self {
+        self.http_ca_file = Some(path.into());
+        self
+    }
+
+    pub fn http_tls_insecure(mut self, enabled: bool) -> Self {
+        self.http_tls_insecure = Some(enabled);
         self
     }
     
@@ -231,6 +245,8 @@ impl PluginConfigBuilder {
             mode: self.policy_mode.unwrap_or(PolicyMode::TokenOnly),
             sqlite_path: self.sqlite_path,
             http_url: self.http_url,
+            http_ca_file: self.http_ca_file,
+            http_tls_insecure: self.http_tls_insecure.unwrap_or(false),
         };
         
         Ok(PluginConfig {
@@ -302,6 +318,13 @@ pub fn parse_options(
             }
             "sqlite_path" => builder.sqlite_path(value),
             "http_url" => builder.http_url(value),
+            "http_ca_file" => builder.http_ca_file(value),
+            "http_tls_insecure" => {
+                let enabled = value
+                    .parse::<bool>()
+                    .map_err(|e| format!("Invalid http_tls_insecure: {e}"))?;
+                builder.http_tls_insecure(enabled)
+            }
             "cache_ttl_seconds" => {
                 let ttl = value
                     .parse::<u64>()

@@ -1,9 +1,22 @@
-import paho.mqtt.client as mqtt
-import time
-import statistics
+import argparse
 import json
+import ssl
+import statistics
+import time
 
-def run_benchmark(host, port, username, password, topic, message_count=1000):
+import paho.mqtt.client as mqtt
+
+def run_benchmark(
+    host,
+    port,
+    username,
+    password,
+    topic,
+    message_count=1000,
+    tls_enabled=False,
+    tls_ca_file=None,
+    tls_insecure=False,
+):
     latencies = []
     
     def on_connect(client, userdata, flags, rc, properties=None):
@@ -17,6 +30,13 @@ def run_benchmark(host, port, username, password, topic, message_count=1000):
     client.username_pw_set(username, password)
     client.on_connect = on_connect
     client.on_publish = on_publish
+    if tls_enabled:
+        if tls_ca_file:
+            client.tls_set(ca_certs=tls_ca_file)
+        else:
+            client.tls_set()
+        if tls_insecure:
+            client.tls_insecure_set(True)
     
     userdata = {'start_time': 0}
     client.user_data_set(userdata)
@@ -43,6 +63,15 @@ def run_benchmark(host, port, username, password, topic, message_count=1000):
     return latencies
 
 if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--host", default="localhost")
+    ap.add_argument("--port", type=int, default=1883)
+    ap.add_argument("--tls", action="store_true")
+    ap.add_argument("--tls-ca-file")
+    ap.add_argument("--tls-insecure", action="store_true")
+    ap.add_argument("--messages", type=int, default=100)
+    args = ap.parse_args()
+
     with open("benchmarks/tokens.json", "r") as f:
         tokens = json.load(f)
     
@@ -50,7 +79,17 @@ if __name__ == "__main__":
     
     for token_type in ["jwt", "biscuit"]:
         print(f"Benchmarking {token_type}...")
-        latencies = run_benchmark("localhost", 1883, token_type, tokens[token_type], f"sensors/client_1/temp", message_count=100)
+        latencies = run_benchmark(
+            args.host,
+            args.port,
+            token_type,
+            tokens[token_type],
+            f"sensors/client_1/temp",
+            message_count=args.messages,
+            tls_enabled=args.tls,
+            tls_ca_file=args.tls_ca_file,
+            tls_insecure=args.tls_insecure,
+        )
         results[token_type] = {
             "median": statistics.median(latencies) * 1000,
             "mean": statistics.mean(latencies) * 1000,

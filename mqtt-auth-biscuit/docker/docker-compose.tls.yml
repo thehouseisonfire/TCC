@@ -1,0 +1,56 @@
+services:
+  mosquitto:
+    ports:
+      - "8883:8883"
+    volumes:
+      - ./tls/server.pem:/mosquitto/config/tls/server.pem:ro
+      - ./tls/server.key:/mosquitto/config/tls/server.key:ro
+      - ./tls/ca.pem:/mosquitto/config/tls/ca.pem:ro
+
+  authz:
+    environment:
+      - AUTHZ_PORT=8443
+      - AUTHZ_TLS=1
+      - AUTHZ_TLS_CERT=/app/tls/server.pem
+      - AUTHZ_TLS_KEY=/app/tls/server.key
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./tls/server.pem:/app/tls/server.pem:ro
+      - ./tls/server.key:/app/tls/server.key:ro
+      - ./tls/ca.pem:/app/tls/ca.pem:ro
+
+  token-issuer:
+    environment:
+      - TOKEN_ISSUER_PORT=8444
+      - TOKEN_ISSUER_TLS=1
+      - TOKEN_ISSUER_TLS_CERT=/etc/tls/server.pem
+      - TOKEN_ISSUER_TLS_KEY=/etc/tls/server.key
+    ports:
+      - "8444:8444"
+    volumes:
+      - ./tls/server.pem:/etc/tls/server.pem:ro
+      - ./tls/server.key:/etc/tls/server.key:ro
+      - ./tls/ca.pem:/etc/tls/ca.pem:ro
+
+  metrics-collector:
+    ports:
+      - "9443:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--web.config.file=/etc/prometheus/web.yml"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./tls/prometheus_web.yml:/etc/prometheus/web.yml:ro
+      - ./tls/server.pem:/etc/prometheus/server.pem:ro
+      - ./tls/server.key:/etc/prometheus/server.key:ro
+
+  cadvisor:
+    ports:
+      - "9444:8080"
+    command:
+      - "--http_tls_cert=/etc/cadvisor/server.pem"
+      - "--http_tls_key=/etc/cadvisor/server.key"
+    volumes:
+      - ./tls/server.pem:/etc/cadvisor/server.pem:ro
+      - ./tls/server.key:/etc/cadvisor/server.key:ro

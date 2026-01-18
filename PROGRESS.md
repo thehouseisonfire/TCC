@@ -355,19 +355,6 @@ machine and record the first results/known issues).
     - Updated delegation benchmark scenario with actual client-side delegation
     - Performance comparison between simulated and real delegation flows
 
-- [ ] **Issue 8.1: Implement comprehensive TLS support for all network communications**
-  - Goal: provide configurable TLS support for all network paths in the system to enable
-    testing TLS overhead impact on JWT vs Biscuit performance comparison.
-  - Deliverable:
-    - TLS configuration flags for all scenarios to enable/disable secure communications
-    - MQTT over TLS support for client to broker communications (port 8883)
-    - HTTPS support for Token Issuer to client communications
-    - HTTPS support for plugin to authorization PDP communications  
-    - HTTPS support for benchmark/control communications (Prometheus, metrics)
-    - Docker compose configurations for TLS-enabled scenarios
-    - Certificate generation and management scripts for testing
-    - At least one scenario run captured with TLS enabled across all communications
-
 - [ ] **Issue 8.2: Containerized benchmark topology (client-per-container + service separation)**
   - Goal: strengthen experimental isolation and fidelity by running benchmark clients in containers (optionally one container per client) and ensuring each major logical component is separated into the appropriate container(s) for the scenario.
   - Rationale: the current load generator runs as a host process with many threads/clients, which is acceptable for many comparisons but can introduce host scheduling noise and makes it harder to claim “N independent IoT nodes” when discussing external validity.
@@ -492,6 +479,7 @@ machine and record the first results/known issues).
       - `biscuit_transport=base64` (current behavior, CONNECT password compatible)
       - `biscuit_transport=mqtt5_auth_data` (binary auth data for MQTT v5 enhanced auth)
     - Update `auth.rs` parsing to support the selected transport mode without changing token semantics
+    - Ensure the token issuing HTTP endpoint is updated to use the selected transport mode for the Biscuit token, instead of the JSON payload it uses for both token types
     - Add at least one scenario that exercises the binary transport path for Biscuit (and documents parity constraints vs JWT)
 
 - [ ] **Issue 19: Implement/validate `MOSQ_EVT_MESSAGE` fan-out per subscriber authorization**
@@ -573,6 +561,11 @@ machine and record the first results/known issues).
 - [x] **Issue 8: Implement a long-running Token Issuer service (JWT + Biscuit)**
   - Summary: Complete token issuer service with HTTP endpoints for JWT/Biscuit issuance,
     proper security separation, Docker integration, and token refresh support in benchmark scenarios.
+
+- [x] **Issue 8.1: Implement comprehensive TLS support for all network communications**
+  - Summary: TLS support implemented for all external network paths (MQTT, Token Issuer, Authz PDP, 
+    Prometheus/cAdvisor UIs). Internal Prometheus-cAdvisor scraping remains HTTP-only as TLS 
+    would provide minimal security benefit for internal Docker network traffic.
 
 - [x] **Issue 11: MIRI verification for FFI memory safety**
   - Summary: MIRI CI + tests cover FFI pointer safety and lifecycle invariants.

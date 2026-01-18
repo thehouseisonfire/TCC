@@ -56,10 +56,47 @@ You can run the benchmark script to measure latency and throughput:
 python3 benchmarks/metrics_collector.py
 ```
 
+### Smoke test
+
+Run a lightweight health check + single publish for JWT and Biscuit:
+
+```bash
+python3 benchmarks/smoke_test.py
+```
+
+TLS smoke test:
+
+```bash
+bash docker/tls/generate_certs.sh
+python3 benchmarks/smoke_test.py --tls
+```
+
 You can also run the full scenario battery from `ARTICLE.MD` (MTU sweep, thundering herd, policy complexity, HTTP introspection latency/loss, hybrid contingency, and MQTT reauthentication):
 
 ```bash
 python3 benchmarks/run_scenarios.py
+```
+
+### TLS-enabled runs
+
+To measure TLS overhead across all network paths (MQTT, token issuer, authz HTTP, Prometheus):
+
+```bash
+bash docker/tls/generate_certs.sh
+docker compose -f docker/docker-compose.yml -f docker/docker-compose.tls.yml up --build -d
+python3 benchmarks/run_scenarios.py --tls
+```
+
+Optional TLS flags:
+
+- `--tls-ca-file <path>`: custom CA bundle (default: `docker/tls/ca.pem`)
+- `--tls-insecure`: disable certificate verification for local testing (obviously not recommended for production)
+
+For the microbenchmark or single-run metrics collector over TLS:
+
+```bash
+python3 benchmarks/mqtt_auth_client.py --token1 "<token>" --token2 "<token>" --tls
+python3 benchmarks/metrics_collector.py --tls --port 8883
 ```
 
 To select a different Mosquitto configuration for a run (e.g. HTTP policy or hybrid policy), set `MOSQUITTO_CONF`:

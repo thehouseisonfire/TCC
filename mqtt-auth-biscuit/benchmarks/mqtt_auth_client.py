@@ -1,6 +1,7 @@
 import argparse
 import json
 import socket
+import ssl
 import time
 
 
@@ -123,16 +124,26 @@ def main():
     ap.add_argument("--token1", required=True)
     ap.add_argument("--token2", required=True)
     ap.add_argument("--sleep", type=float, default=6.0)
+    ap.add_argument("--tls", action="store_true")
+    ap.add_argument("--tls-ca-file")
+    ap.add_argument("--tls-insecure", action="store_true")
     args = ap.parse_args()
 
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(10)
+    raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    raw_sock.settimeout(10)
+    sock: socket.socket = raw_sock
+    if args.tls:
+        ctx = ssl.create_default_context(cafile=args.tls_ca_file)
+        if args.tls_insecure:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        sock = ctx.wrap_socket(raw_sock, server_hostname=args.host)
 
     t0 = time.perf_counter()
-    s.connect((args.host, args.port))
-    s.sendall(_build_connect(args.client_id, args.auth_method, args.token1.encode("utf-8")))
+    sock.connect((args.host, args.port))
+    sock.sendall(_build_connect(args.client_id, args.auth_method, args.token1.encode("utf-8")))
 
-    pkt_type, payload = _recv_packet(s)
+    pkt_type, payload = _recv_packet(sock)
     t1 = time.perf_counter()
 
     ok = False
@@ -147,15 +158,15 @@ def main():
     time.sleep(args.sleep)
 
     t2 = time.perf_counter()
-    s.sendall(_build_auth(0x19, args.auth_method, args.token2.encode("utf-8")))
+    sock.sendall(_build_auth(0x19, args.auth_method, args.token2.encode("utf-8")))
 
-    pkt_type2, payload2 = _recv_packet(s)
+    pkt_type2, payload2 = _recv_packet(sock)
     t3 = time.perf_counter()
 
     reauth_ms = (t3 - t2) * 1000.0
 
-    s.sendall(_build_disconnect(0))
-    s.close()
+    sock.sendall(_build_disconnect(0))
+    sock.close()
 
     out = {
         "connect_ms": connect_ms,

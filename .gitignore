@@ -16,3 +16,11 @@ Thumbs.db
 # IDE files
 .vscode/
 .idea/
+
+# Python cache
+__pycache__/
+
+# Generated TLS assets (see docker/tls/generate_certs.sh)
+/mqtt-auth-biscuit/docker/tls/*.pem
+/mqtt-auth-biscuit/docker/tls/*.key
+/mqtt-auth-biscuit/docker/tls/*.srl

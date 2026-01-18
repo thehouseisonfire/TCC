@@ -6,7 +6,7 @@ use p256::SecretKey;
 use pkcs8::{EncodePrivateKey, LineEnding};
 use serde::{Deserialize, Serialize};
 use std::env;
-use tiny_http::{Header as TinyHeader, Method, Response, Server, StatusCode};
+use tiny_http::{Header as TinyHeader, Method, Response, Server, SslConfig, StatusCode};
 
 // Type aliases to reduce complexity
 type JwtKeyResult = Result<(Algorithm, EncodingKey, String, Option<String>, Option<String>), String>;
@@ -24,6 +24,24 @@ struct JwtIssueRequest {
     issuer: Option<String>,
     audience: Option<String>,
     no_default_roles: Option<bool>,
+}
+
+fn load_tls_config(enabled: bool) -> Result<Option<SslConfig>, String> {
+    if !enabled {
+        return Ok(None);
+    }
+    let cert_path = env::var("TOKEN_ISSUER_TLS_CERT")
+        .map_err(|_| "TOKEN_ISSUER_TLS_CERT required when TOKEN_ISSUER_TLS is enabled".to_string())?;
+    let key_path = env::var("TOKEN_ISSUER_TLS_KEY")
+        .map_err(|_| "TOKEN_ISSUER_TLS_KEY required when TOKEN_ISSUER_TLS is enabled".to_string())?;
+    let cert = std::fs::read(&cert_path)
+        .map_err(|e| format!("failed to read {cert_path}: {e}"))?;
+    let key = std::fs::read(&key_path)
+        .map_err(|e| format!("failed to read {key_path}: {e}"))?;
+    Ok(Some(SslConfig {
+        certificate: cert,
+        private_key: key,
+    }))
 }
 
 fn escape_datalog_str(value: &str) -> String {
@@ -56,6 +74,7 @@ struct IssuerConfig {
     biscuit_keypair: KeyPair,
     jwt_no_default_roles: bool,
     biscuit_base64url: bool,
+    tls_config: Option<SslConfig>,
 }
 
 fn env_default(name: &str, default: &str) -> String {
@@ -237,6 +256,7 @@ fn main() {
     let allow_default_keys = env_flag("TOKEN_ISSUER_ALLOW_DEFAULT_KEYS");
     let jwt_no_default_roles = env_flag("JWT_NO_DEFAULT_ROLES");
     let biscuit_base64url = env_flag("BISCUIT_BASE64URL");
+    let tls_enabled = env_flag("TOKEN_ISSUER_TLS");
 
     let (jwt_alg, jwt_key, jwt_alg_label, jwt_default_issuer, jwt_default_audience) =
         match load_jwt_key(allow_default_keys) {
@@ -266,13 +286,27 @@ fn main() {
         biscuit_keypair,
         jwt_no_default_roles,
         biscuit_base64url,
+        tls_config: match load_tls_config(tls_enabled) {
+            Ok(cfg) => cfg,
+            Err(err) => {
+                eprintln!("token-issuer tls config error: {err}");
+                std::process::exit(1);
+            }
+        },
     };
 
     let addr = format!("{}:{}", cfg.host, cfg.port);
-    let server = Server::http(&addr).unwrap_or_else(|e| {
-        eprintln!("failed to bind token issuer on {addr}: {e}");
-        std::process::exit(1);
-    });
+    let server = if let Some(tls_cfg) = cfg.tls_config.clone() {
+        Server::https(&addr, tls_cfg).unwrap_or_else(|e| {
+            eprintln!("failed to bind token issuer (TLS) on {addr}: {e}");
+            std::process::exit(1);
+        })
+    } else {
+        Server::http(&addr).unwrap_or_else(|e| {
+            eprintln!("failed to bind token issuer on {addr}: {e}");
+            std::process::exit(1);
+        })
+    };
 
     for mut request in server.incoming_requests() {
         let method = request.method().clone();

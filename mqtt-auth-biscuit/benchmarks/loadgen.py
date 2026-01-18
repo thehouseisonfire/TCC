@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import queue
+import ssl
 import threading
 import time
 import urllib.request
@@ -60,6 +61,9 @@ class WorkerConfig:
     token_issuer_ttl: int | None
     token_issuer_no_default_roles: bool
     token_refresh_codes: set[int]
+    tls_enabled: bool
+    tls_ca_file: str | None
+    tls_insecure: bool
 
 
 @dataclass
@@ -85,6 +89,8 @@ def _fetch_token(
     topic: str,
     ttl: int | None,
     no_default_roles: bool,
+    tls_ca_file: str | None,
+    tls_insecure: bool,
 ) -> str:
     payload = {"client_id": client_id, "ttl_seconds": ttl}
     if kind == "biscuit":
@@ -99,7 +105,13 @@ def _fetch_token(
         data=data,
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=5) as resp:
+    ctx = None
+    if issuer_url.startswith("https://"):
+        ctx = ssl.create_default_context(cafile=tls_ca_file)
+        if tls_insecure:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+    with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
         body = json.loads(resp.read().decode("utf-8"))
     token = body.get("token")
     if not token:
@@ -139,6 +151,13 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
         )
         client.user_data_set(userdata)
         client.username_pw_set(cfg.username, password)
+        if cfg.tls_enabled:
+            if cfg.tls_ca_file:
+                client.tls_set(ca_certs=cfg.tls_ca_file)
+            else:
+                client.tls_set()
+            if cfg.tls_insecure:
+                client.tls_insecure_set(True)
         client.on_connect = on_connect
         client.on_disconnect = on_disconnect
 
@@ -199,6 +218,8 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                     cfg.topic,
                     cfg.token_issuer_ttl,
                     cfg.token_issuer_no_default_roles,
+                    cfg.tls_ca_file,
+                    cfg.tls_insecure,
                 )
                 token_refresh_ms = (time.perf_counter() - t_refresh_start) * 1000.0
                 token_refresh_len = len(password)
@@ -272,6 +293,9 @@ def run_load(
     token_issuer_ttl: int | None,
     token_issuer_no_default_roles: bool,
     token_refresh_codes: set[int],
+    tls_enabled: bool,
+    tls_ca_file: str | None,
+    tls_insecure: bool,
 ):
     start_evt = threading.Event()
     out_q: queue.Queue = queue.Queue()
@@ -298,6 +322,9 @@ def run_load(
             token_issuer_ttl=token_issuer_ttl,
             token_issuer_no_default_roles=token_issuer_no_default_roles,
             token_refresh_codes=token_refresh_codes,
+            tls_enabled=tls_enabled,
+            tls_ca_file=tls_ca_file,
+            tls_insecure=tls_insecure,
         )
         t = threading.Thread(target=_run_worker, args=(cfg, start_evt, out_q), daemon=True)
         threads.append(t)
@@ -373,6 +400,9 @@ def main():
         default=os.environ.get("TOKEN_REFRESH_CODES", "5,135"),
         help="Comma-separated MQTT v5 reason codes that should trigger token refresh (e.g., 5/0x87 = Not authorized)",
     )
+    p.add_argument("--tls", action="store_true")
+    p.add_argument("--tls-ca-file")
+    p.add_argument("--tls-insecure", action="store_true")
     p.add_argument("--json", action="store_true")
     args = p.parse_args()
 
@@ -405,6 +435,9 @@ def main():
         token_issuer_ttl=args.token_issuer_ttl,
         token_issuer_no_default_roles=args.token_issuer_no_default_roles,
         token_refresh_codes=token_refresh_codes,
+        tls_enabled=args.tls,
+        tls_ca_file=args.tls_ca_file,
+        tls_insecure=args.tls_insecure,
     )
 
     if args.json:

@@ -16,6 +16,8 @@ pub struct AuthzParams<'a> {
     pub policy_mode: PolicyMode,
     pub sqlite_policy: Option<&'a SqlitePolicy>,
     pub http_url: Option<&'a str>,
+    pub http_ca_file: Option<&'a str>,
+    pub http_tls_insecure: bool,
 }
 
 pub fn check_authorization(
@@ -53,7 +55,15 @@ pub fn check_authorization(
                 }
                 PolicyMode::Http => {
                     let Some(url) = params.http_url else { return false };
-                    http_policy::check_http(url, params.client_id, params.topic, params.access, Some(raw))
+                    http_policy::check_http(
+                        url,
+                        params.client_id,
+                        params.topic,
+                        params.access,
+                        Some(raw),
+                        params.http_ca_file,
+                        params.http_tls_insecure,
+                    )
                         .unwrap_or(false)
                 }
                 PolicyMode::Hybrid => {
@@ -61,7 +71,15 @@ pub fn check_authorization(
                         return token_only();
                     };
 
-                    match http_policy::check_http(url, params.client_id, params.topic, params.access, Some(raw)) {
+                    match http_policy::check_http(
+                        url,
+                        params.client_id,
+                        params.topic,
+                        params.access,
+                        Some(raw),
+                        params.http_ca_file,
+                        params.http_tls_insecure,
+                    ) {
                         Ok(allowed) => allowed,
                         Err(_) => token_only(),
                     }
@@ -94,14 +112,31 @@ pub fn check_authorization(
                 }
                 PolicyMode::Http => {
                     let Some(url) = params.http_url else { return false };
-                    http_policy::check_http(url, params.client_id, params.topic, params.access, None).unwrap_or(false)
+                    http_policy::check_http(
+                        url,
+                        params.client_id,
+                        params.topic,
+                        params.access,
+                        None,
+                        params.http_ca_file,
+                        params.http_tls_insecure,
+                    )
+                    .unwrap_or(false)
                 }
                 PolicyMode::Hybrid => {
                     let Some(url) = params.http_url else {
                         return token_only();
                     };
 
-                    match http_policy::check_http(url, params.client_id, params.topic, params.access, None) {
+                    match http_policy::check_http(
+                        url,
+                        params.client_id,
+                        params.topic,
+                        params.access,
+                        None,
+                        params.http_ca_file,
+                        params.http_tls_insecure,
+                    ) {
                         Ok(allowed) => allowed,
                         Err(_) => token_only(),
                     }

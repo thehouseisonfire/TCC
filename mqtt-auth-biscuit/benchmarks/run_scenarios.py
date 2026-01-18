@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import ssl
 import subprocess
 import time
 import urllib.parse
@@ -16,15 +17,36 @@ def _compose_bin():
     return os.environ.get("DOCKER_COMPOSE_BIN", "docker compose")
 
 
-def _compose(args: list[str], extra_env: dict | None = None):
+def _compose(args: list[str], extra_env: dict | None = None, compose_files: list[str] | None = None):
     env = os.environ.copy()
     if extra_env:
         env.update(extra_env)
-    cmd = _compose_bin().split(" ") + ["-f", "docker/docker-compose.yml"] + args
+    files = compose_files or ["docker/docker-compose.yml"]
+    file_args: list[str] = []
+    for path in files:
+        file_args.extend(["-f", path])
+    cmd = _compose_bin().split(" ") + file_args + args
     subprocess.check_call(cmd, cwd=os.path.dirname(os.path.dirname(__file__)), env=env)
 
 
-def _authz_config(delay_ms: int | None = None, fail_mode: str | None = None, fail_rate: float | None = None):
+def _ssl_context(ca_file: str | None, insecure: bool) -> ssl.SSLContext | None:
+    if not insecure and not ca_file:
+        return None
+    ctx = ssl.create_default_context(cafile=ca_file)
+    if insecure:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def _authz_config(
+    authz_url: str,
+    delay_ms: int | None = None,
+    fail_mode: str | None = None,
+    fail_rate: float | None = None,
+    ca_file: str | None = None,
+    insecure: bool = False,
+):
     body = {}
     if delay_ms is not None:
         body["delay_ms"] = delay_ms
@@ -35,28 +57,30 @@ def _authz_config(delay_ms: int | None = None, fail_mode: str | None = None, fai
 
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
-        "http://localhost:8081/config",
+        authz_url.rstrip("/") + "/config",
         method="POST",
         data=data,
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=5) as resp:
+    ctx = _ssl_context(ca_file, insecure)
+    with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _prom_query(query: str):
-    url = "http://localhost:9090/api/v1/query?query=" + urllib.parse.quote(query, safe="")
-    with urllib.request.urlopen(url, timeout=5) as resp:
+def _prom_query(base_url: str, query: str, ca_file: str | None, insecure: bool):
+    url = base_url.rstrip("/") + "/api/v1/query?query=" + urllib.parse.quote(query, safe="")
+    ctx = _ssl_context(ca_file, insecure)
+    with urllib.request.urlopen(url, timeout=5, context=ctx) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _resource_snapshot():
+def _resource_snapshot(base_url: str, ca_file: str | None, insecure: bool):
     cpu_q = 'sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service="mosquitto"}[30s]))'
     mem_q = 'max(container_memory_working_set_bytes{container_label_com_docker_compose_service="mosquitto"})'
     snap = {
         "prometheus": {
-            "cpu": _prom_query(cpu_q),
-            "memory": _prom_query(mem_q),
+            "cpu": _prom_query(base_url, cpu_q, ca_file, insecure),
+            "memory": _prom_query(base_url, mem_q, ca_file, insecure),
         }
     }
     return snap
@@ -64,6 +88,8 @@ def _resource_snapshot():
 
 def _run_loadgen(
     tokens: dict,
+    host: str,
+    port: int,
     username: str,
     password: str,
     clients: int,
@@ -77,14 +103,17 @@ def _run_loadgen(
     token_issuer_ttl: int | None,
     token_issuer_no_default_roles: bool,
     token_refresh_codes: str | None,
+    tls_enabled: bool,
+    tls_ca_file: str | None,
+    tls_insecure: bool,
 ):
     cmd = [
         "python3",
         "benchmarks/loadgen.py",
         "--host",
-        "localhost",
+        host,
         "--port",
-        "1883",
+        str(port),
         "--username",
         username,
         "--password",
@@ -109,12 +138,16 @@ def _run_loadgen(
         cmd.extend(["--token-issuer-kind", token_issuer_kind])
     if token_issuer_ttl is not None:
         cmd.extend(["--token-issuer-ttl", str(token_issuer_ttl)])
-    if token_issuer_pad_to_size is not None:
-        cmd.extend(["--token-issuer-pad-to-size", str(token_issuer_pad_to_size)])
     if token_issuer_no_default_roles:
         cmd.append("--token-issuer-no-default-roles")
     if token_refresh_codes:
         cmd.extend(["--token-refresh-codes", token_refresh_codes])
+    if tls_enabled:
+        cmd.append("--tls")
+    if tls_ca_file:
+        cmd.extend(["--tls-ca-file", tls_ca_file])
+    if tls_insecure:
+        cmd.append("--tls-insecure")
 
     out = subprocess.check_output(cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
     return json.loads(out.decode("utf-8"))
@@ -128,14 +161,22 @@ def _write_result(out_dir: str, name: str, payload: dict):
     return path
 
 
-def _run_mqtt5_auth(token1: str, token2: str):
+def _run_mqtt5_auth(
+    host: str,
+    port: int,
+    token1: str,
+    token2: str,
+    tls_enabled: bool,
+    tls_ca_file: str | None,
+    tls_insecure: bool,
+):
     cmd = [
         "python3",
         "benchmarks/mqtt_auth_client.py",
         "--host",
-        "localhost",
+        host,
         "--port",
-        "1883",
+        str(port),
         "--auth-method",
         "token",
         "--token1",
@@ -143,6 +184,12 @@ def _run_mqtt5_auth(token1: str, token2: str):
         "--token2",
         token2,
     ]
+    if tls_enabled:
+        cmd.append("--tls")
+    if tls_ca_file:
+        cmd.extend(["--tls-ca-file", tls_ca_file])
+    if tls_insecure:
+        cmd.append("--tls-insecure")
     out = subprocess.check_output(cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
     return json.loads(out.decode("utf-8"))
 
@@ -158,11 +205,19 @@ def main():
     p.add_argument("--token-issuer-no-default-roles", action="store_true")
     p.add_argument("--biscuit-base64url", action="store_true")
     p.add_argument("--token-refresh-codes", default=os.environ.get("TOKEN_REFRESH_CODES"))
+    p.add_argument("--tls", action="store_true", help="Enable TLS for all supported services")
+    p.add_argument("--tls-insecure", action="store_true", help="Disable TLS certificate verification")
+    p.add_argument("--tls-ca-file", help="CA bundle path for TLS verification")
     args = p.parse_args()
 
     tokens = _read_tokens(os.path.join(os.path.dirname(os.path.dirname(__file__)), args.tokens))
 
     scenarios = []
+    tls_enabled = args.tls
+    tls_insecure = args.tls_insecure
+    tls_ca = args.tls_ca_file or ("docker/tls/ca.pem" if tls_enabled else None)
+    if tls_enabled and tls_ca and not os.path.exists(os.path.join(os.path.dirname(os.path.dirname(__file__)), tls_ca)):
+        raise SystemExit(f"TLS enabled but CA file not found at {tls_ca}. Run docker/tls/generate_certs.sh")
     if args.scenarios:
         scenario_ids = [s.strip() for s in args.scenarios.split(",")]
         # Define available scenarios mapping
@@ -385,7 +440,17 @@ def main():
 
     for s in scenarios:
         mosq_conf = s["mosquitto_conf"]
+        if tls_enabled:
+            mosq_conf = mosq_conf.replace("docker/", "docker/tls/")
         extra_env = {"MOSQUITTO_CONF": mosq_conf}
+        authz_base = "https://localhost:8443" if tls_enabled else "http://localhost:8081"
+        prom_base = "https://localhost:9443" if tls_enabled else "http://localhost:9090"
+        token_issuer_base = "https://localhost:8444" if tls_enabled else "http://localhost:8082"
+        mqtt_host = "localhost"
+        mqtt_port = 8883 if tls_enabled else 1883
+        compose_files = ["docker/docker-compose.yml"]
+        if tls_enabled:
+            compose_files.append("docker/docker-compose.tls.yml")
 
         netem = s.get("netem")
         if netem:
@@ -414,18 +479,30 @@ def main():
             "metrics-collector",
             "cadvisor",
             "token-issuer",
-        ], extra_env=extra_env)
+        ], extra_env=extra_env, compose_files=compose_files)
         time.sleep(1)
 
         if s.get("authz") is not None:
             cfg = s["authz"]
-            _authz_config(delay_ms=cfg.get("delay_ms"), fail_mode=cfg.get("fail_mode"), fail_rate=cfg.get("fail_rate"))
+            _authz_config(
+                authz_base,
+                delay_ms=cfg.get("delay_ms"),
+                fail_mode=cfg.get("fail_mode"),
+                fail_rate=cfg.get("fail_rate"),
+                ca_file=tls_ca,
+                insecure=tls_insecure,
+            )
 
         repeats = int(s.get("repeat", 1))
         token_len = len(s.get("password", "")) if s.get("password") else 0
         out_payload = {
             "scenario": s["id"],
             "token_len": token_len,
+            "tls": {
+                "enabled": tls_enabled,
+                "ca_file": tls_ca,
+                "insecure": tls_insecure,
+            },
             "parity": {
                 "token_issuer_no_default_roles": args.token_issuer_no_default_roles,
                 "biscuit_base64url": args.biscuit_base64url,
@@ -441,11 +518,21 @@ def main():
         for _ in range(repeats):
             if s.get("mqtt5_auth") is not None:
                 cfg = s["mqtt5_auth"]
-                res = _run_mqtt5_auth(cfg["token1"], cfg["token2"])
+                res = _run_mqtt5_auth(
+                    mqtt_host,
+                    mqtt_port,
+                    cfg["token1"],
+                    cfg["token2"],
+                    tls_enabled,
+                    tls_ca,
+                    tls_insecure,
+                )
             else:
                 token_refresh = s.get("token_refresh") or {}
                 res = _run_loadgen(
                     tokens=tokens,
+                    host=mqtt_host,
+                    port=mqtt_port,
                     username=s.get("username", ""),
                     password=s.get("password", ""),
                     clients=args.clients,
@@ -454,14 +541,17 @@ def main():
                     qos=args.qos,
                     message_size=int(s.get("message_size", 0)),
                     sync_connect=bool(s.get("sync_connect", False)),
-                    token_issuer_url="http://localhost:8082" if token_refresh else None,
+                    token_issuer_url=token_issuer_base if token_refresh else None,
                     token_issuer_kind=token_refresh.get("kind"),
                     token_issuer_ttl=token_refresh.get("ttl_seconds"),
                     token_issuer_no_default_roles=args.token_issuer_no_default_roles,
                     token_refresh_codes=args.token_refresh_codes,
+                    tls_enabled=tls_enabled,
+                    tls_ca_file=tls_ca,
+                    tls_insecure=tls_insecure,
                 )
             try:
-                snap = _resource_snapshot()
+                snap = _resource_snapshot(prom_base, tls_ca, tls_insecure)
             except Exception as e:
                 snap = {"error": str(e)}
 

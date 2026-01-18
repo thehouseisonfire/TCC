@@ -446,6 +446,8 @@ extern "C" fn acl_check_callback(
             policy_mode: state.config.policy.mode,
             sqlite_policy: state.sqlite_policy.as_ref(),
             http_url: state.config.policy.http_url.as_deref(),
+            http_ca_file: state.config.policy.http_ca_file.as_deref(),
+            http_tls_insecure: state.config.policy.http_tls_insecure,
         };
         
         if check_authorization(&token_type, params) {
@@ -484,6 +486,8 @@ extern "C" fn message_callback(
             policy_mode: state.config.policy.mode,
             sqlite_policy: state.sqlite_policy.as_ref(),
             http_url: state.config.policy.http_url.as_deref(),
+            http_ca_file: state.config.policy.http_ca_file.as_deref(),
+            http_tls_insecure: state.config.policy.http_tls_insecure,
         };
         
         if check_authorization(&token_type, params) {
@@ -521,6 +525,8 @@ extern "C" fn control_callback(
             policy_mode: state.config.policy.mode,
             sqlite_policy: state.sqlite_policy.as_ref(),
             http_url: state.config.policy.http_url.as_deref(),
+            http_ca_file: state.config.policy.http_ca_file.as_deref(),
+            http_tls_insecure: state.config.policy.http_tls_insecure,
         };
         
         if check_authorization(&token_type, params) {
@@ -909,6 +915,8 @@ mod verification {
                 mode: PolicyMode::TokenOnly,
                 sqlite_path: None,
                 http_url: None,
+                http_ca_file: None,
+                http_tls_insecure: false,
             },
             cache_ttl_seconds: 3600,
             ext_auth_method: Some("token".to_string()),

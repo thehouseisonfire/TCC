@@ -97,7 +97,6 @@ fn load_jwt_key(allow_default_keys: bool) -> JwtKeyResult {
     let alg_raw = env_default("JWT_ALG", "ES256");
     let alg = match alg_raw.as_str() {
         "ES256" => Algorithm::ES256,
-        "RS256" => Algorithm::RS256,
         _ => return Err(format!("unsupported JWT_ALG {alg_raw}")),
     };
 
@@ -117,13 +116,6 @@ fn load_jwt_key(allow_default_keys: bool) -> JwtKeyResult {
                 .to_pkcs8_pem(LineEnding::LF)
                 .map_err(|e| format!("pkcs8 encode failed: {e}"))?;
             EncodingKey::from_ec_pem(pem.as_bytes()).map_err(|e| format!("ec pem parse: {e}"))?
-        }
-        Algorithm::RS256 => {
-            let pem_path = env::var("JWT_RSA_PRIVATE_KEY_FILE")
-                .map_err(|_| "JWT_RSA_PRIVATE_KEY_FILE required for RS256".to_string())?;
-            let pem = std::fs::read(&pem_path)
-                .map_err(|e| format!("failed to read {pem_path}: {e}"))?;
-            EncodingKey::from_rsa_pem(&pem).map_err(|e| format!("rsa pem parse: {e}"))?
         }
         _ => return Err("unsupported algorithm".to_string()),
     };

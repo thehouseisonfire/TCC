@@ -179,7 +179,6 @@ impl PluginConfigBuilder {
         let jwt_alg = self.jwt_alg.ok_or(ConfigError::MissingJwtAlgorithm)?;
         
         let alg = match jwt_alg.as_str() {
-            "RS256" => Algorithm::RS256,
             "ES256" => Algorithm::ES256,
             _ => return Err(ConfigError::InvalidJwtAlgorithm(jwt_alg)),
         };
@@ -190,11 +189,6 @@ impl PluginConfigBuilder {
 
         #[cfg(not(miri))]
         let decoding_key = match alg {
-            Algorithm::RS256 => {
-                let pem = fs::read(&jwt_key_file)
-                    .map_err(|e| ConfigError::JwtKeyFileError { path: jwt_key_file, source: e })?;
-                DecodingKey::from_rsa_pem(&pem).map_err(|e| ConfigError::InvalidJwtPem(e.to_string()))?
-            }
             Algorithm::ES256 => {
                 let pem = fs::read(&jwt_key_file)
                     .map_err(|e| ConfigError::JwtKeyFileError { path: jwt_key_file, source: e })?;

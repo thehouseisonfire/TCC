@@ -28,7 +28,7 @@ described in `ARTICLE.MD`, including a controllable HTTP authz service and a
 Important architectural note (matches `ARTICLE.MD` terminology):
 
 - **Token Issuer (not yet implemented as a service)**: the only component that
-  may ever hold **private signing keys** (JWT ES256/RS256 private key material)
+  may ever hold **private signing keys** (JWT ES256 private key material)
   and **Biscuit root private key material**.
 - **PDP (scenario-only)**: the existing `authz` HTTP service is an
   authorization/introspection **Policy Decision Point** used only for the
@@ -239,13 +239,6 @@ machine and record the first results/known issues).
   - Goal: confirm Prometheus snapshots are populated (CPU + memory for mosquitto
     container).
   - Deliverable: scenario outputs include non-error `resources` snapshots.
-
-- [ ] **6.3 Fairness alignment: add asymmetric JWT baseline**
-  - Goal: add a JWT test baseline using an **asymmetric** algorithm (e.g.,
-    RS256/ES256) and rerun the key scenarios to compare with Biscuit under
-    similar cryptographic assumptions.
-  - Deliverable: updated token generation + Mosquitto config option(s) + at
-    least one scenario run captured with the asymmetric JWT baseline.
 
 ### Phase 7: Data Analysis & Validation
 

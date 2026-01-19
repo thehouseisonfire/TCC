@@ -138,6 +138,7 @@ fn main() {
     let biscuit_short_b64 = general_purpose::STANDARD.encode(biscuit_short.to_vec().unwrap());
 
     let biscuit_pubkey_hex = hex::encode(root_keypair.public().to_bytes());
+    std::fs::write("docker/biscuit_public.key", biscuit_pubkey_hex.as_bytes()).unwrap();
 
     let tokens = json!({
         "jwt": jwt_long,

@@ -17,7 +17,7 @@ authentication plugin.
 The Mosquitto plugin must be built in release mode:
 
 ```bash
-cargo build --release
+cargo build --release -p mosquitto-auth-biscuit
 ```
 
 This generates `target/release/libmosquitto_auth_biscuit.so`.
@@ -27,10 +27,10 @@ This generates `target/release/libmosquitto_auth_biscuit.so`.
 The benchmarking suite uses predefined tokens. Generate them with:
 
 ```bash
-cargo run --bin gen-tokens
+cargo run -p gen-tokens
 ```
 
-This will create/update `benchmarks/tokens.json`.
+This will create/update `benchmarks/tokens.json` and write `docker/biscuit_public.key` for the Mosquitto plugin.
 
 The Docker Mosquitto configuration is pre-wired to the deterministic keys used
 by `gen-tokens` (see `docker/mosquitto.conf`).

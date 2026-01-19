@@ -33,10 +33,10 @@ pub enum ConfigError {
     #[error("Invalid biscuit root public key: {0}")]
     InvalidBiscuitPublicKey(String),
     
-    #[error("Invalid biscuit root private key: {0}")]
-    InvalidBiscuitPrivateKey(String),
+    #[error("Failed to read biscuit public key file '{path}': {source}")]
+    BiscuitKeyFileError { path: String, #[source] source: std::io::Error },
     
-    #[error("Biscuit root key (hex or private) is required")]
+    #[error("Biscuit root public key is required")]
     MissingBiscuitKey,
     
     #[allow(dead_code)]
@@ -74,8 +74,7 @@ pub struct PluginConfigBuilder {
     jwt_key_file: Option<String>,
     jwt_issuer: Option<String>,
     jwt_audience: Option<String>,
-    biscuit_root_key_hex: Option<String>,
-    biscuit_root_private_key_hex: Option<String>,
+    biscuit_root_key_file: Option<String>,
     policy_mode: Option<PolicyMode>,
     sqlite_path: Option<String>,
     http_url: Option<String>,
@@ -98,8 +97,7 @@ impl PluginConfigBuilder {
             jwt_key_file: None,
             jwt_issuer: None,
             jwt_audience: None,
-            biscuit_root_key_hex: None,
-            biscuit_root_private_key_hex: None,
+            biscuit_root_key_file: None,
             policy_mode: None,
             sqlite_path: None,
             http_url: None,
@@ -129,14 +127,9 @@ impl PluginConfigBuilder {
         self.jwt_audience = Some(audience.into());
         self
     }
-    
-    pub fn biscuit_root_key_hex(mut self, key_hex: impl Into<String>) -> Self {
-        self.biscuit_root_key_hex = Some(key_hex.into());
-        self
-    }
-    
-    pub fn biscuit_root_private_key_hex(mut self, key_hex: impl Into<String>) -> Self {
-        self.biscuit_root_private_key_hex = Some(key_hex.into());
+
+    pub fn biscuit_root_key_file(mut self, path: impl Into<String>) -> Self {
+        self.biscuit_root_key_file = Some(path.into());
         self
     }
     
@@ -211,29 +204,30 @@ impl PluginConfigBuilder {
             validation.aud = Some(HashSet::from([aud]));
         }
         
-        let biscuit_root_public_key = match (self.biscuit_root_key_hex, self.biscuit_root_private_key_hex) {
-            (Some(pub_hex), _) => {
-                let bytes = hex::decode(pub_hex)
-                    .map_err(|e| ConfigError::InvalidBiscuitKeyHex(e.to_string()))?;
-                if bytes.len() != 32 {
-                    return Err(ConfigError::InvalidBiscuitKeyLength(bytes.len()));
+        let pub_hex = match self.biscuit_root_key_file {
+            Some(path) => {
+                #[cfg(not(miri))]
+                {
+                    let raw = fs::read_to_string(&path)
+                        .map_err(|e| ConfigError::BiscuitKeyFileError { path, source: e })?;
+                    raw.trim().to_string()
                 }
-                biscuit_auth::PublicKey::from_bytes(&bytes, biscuit_auth::Algorithm::Ed25519)
-                    .map_err(|e| ConfigError::InvalidBiscuitPublicKey(e.to_string()))?
-            }
-            (Option::None, Some(priv_hex)) => {
-                let bytes = hex::decode(priv_hex)
-                    .map_err(|e| ConfigError::InvalidBiscuitKeyHex(e.to_string()))?;
-                if bytes.len() != 32 {
-                    return Err(ConfigError::InvalidBiscuitKeyLength(bytes.len()));
+                #[cfg(miri)]
+                {
+                    let _ = path;
+                    return Err(ConfigError::MissingBiscuitKey);
                 }
-                let priv_key = biscuit_auth::PrivateKey::from_bytes(&bytes, biscuit_auth::Algorithm::Ed25519)
-                    .map_err(|e| ConfigError::InvalidBiscuitPrivateKey(e.to_string()))?;
-                let keypair = biscuit_auth::KeyPair::from(&priv_key);
-                keypair.public()
             }
-            (Option::None, Option::None) => return Err(ConfigError::MissingBiscuitKey),
+            None => return Err(ConfigError::MissingBiscuitKey),
         };
+        let bytes = hex::decode(pub_hex)
+            .map_err(|e| ConfigError::InvalidBiscuitKeyHex(e.to_string()))?;
+        if bytes.len() != 32 {
+            return Err(ConfigError::InvalidBiscuitKeyLength(bytes.len()));
+        }
+        let biscuit_root_public_key =
+            biscuit_auth::PublicKey::from_bytes(&bytes, biscuit_auth::Algorithm::Ed25519)
+                .map_err(|e| ConfigError::InvalidBiscuitPublicKey(e.to_string()))?;
         
         let policy = PolicyBackendConfig {
             mode: self.policy_mode.unwrap_or(PolicyMode::TokenOnly),
@@ -298,8 +292,7 @@ pub fn parse_options(
             "jwt_key_file" => builder.jwt_key_file(value),
             "jwt_issuer" => builder.jwt_issuer(value),
             "jwt_audience" => builder.jwt_audience(value),
-            "biscuit_root_key_hex" => builder.biscuit_root_key_hex(value),
-            "biscuit_root_private_key_hex" => builder.biscuit_root_private_key_hex(value),
+            "biscuit_root_key_file" => builder.biscuit_root_key_file(value),
             "policy_mode" => {
                 let mode = match value.as_str() {
                     "token" => PolicyMode::TokenOnly,

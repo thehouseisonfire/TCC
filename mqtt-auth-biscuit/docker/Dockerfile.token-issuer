@@ -3,10 +3,11 @@ FROM rust:1.92-slim AS builder
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
-COPY src ./src
-COPY benchmarks ./benchmarks
+COPY crates/mosquitto-plugin ./crates/mosquitto-plugin
+COPY crates/benchmarks ./crates/benchmarks
+COPY crates/token-issuer ./crates/token-issuer
 
-RUN cargo build --release --bin token-issuer
+RUN cargo build --release -p token-issuer
 
 FROM debian:bookworm-slim
 

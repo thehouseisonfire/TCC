@@ -1,0 +1,23 @@
+[package]
+name = "token-issuer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+base64 = "0.22"
+biscuit-auth = "6.0"
+bytes = "1.7"
+chrono = "0.4"
+hex = "0.4"
+http-body-util = "0.1"
+hyper = { version = "1.5", features = ["full"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+jsonwebtoken = { version = "10.2.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+p256 = { version = "0.13", features = ["arithmetic", "pkcs8", "pem"] }
+pkcs8 = { version = "0.10", features = ["pem"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.38", features = ["rt-multi-thread", "macros", "net"] }
+tokio-rustls = "0.26"
+rustls = "0.23.36"
+rustls-pemfile = "2.2.0"

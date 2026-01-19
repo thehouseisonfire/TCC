@@ -595,6 +595,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e575fab7d1e0dcb8d0c7bcf9a63ee213816ab51902e6d244a95819acacf1d4f7"
 
 [[package]]
+name = "gen-tokens"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "biscuit-auth",
+ "hex",
+ "jsonwebtoken",
+ "p256",
+ "pkcs8 0.10.2",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -968,21 +982,15 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "biscuit-auth",
- "bytes",
  "chrono",
  "dashmap",
  "env_logger",
  "hex",
- "http-body-util",
- "hyper",
- "hyper-util",
  "jsonwebtoken",
  "libc",
  "log",
  "lru",
  "once_cell",
- "p256",
- "pkcs8 0.10.2",
  "rand 0.9.2",
  "rusqlite",
  "rustls",
@@ -990,8 +998,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "tokio",
- "tokio-rustls",
  "webpki-roots",
 ]
 
@@ -1745,6 +1751,29 @@ checksum = "71e552d1249bf61ac2a52db88179fd0673def1e1ad8243a00d9ec9ed71fee3dd"
 dependencies = [
  "num-conv",
  "time-core",
+]
+
+[[package]]
+name = "token-issuer"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "biscuit-auth",
+ "bytes",
+ "chrono",
+ "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "jsonwebtoken",
+ "p256",
+ "pkcs8 0.10.2",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]

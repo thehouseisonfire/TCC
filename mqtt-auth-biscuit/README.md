@@ -22,7 +22,7 @@ both JWT and Biscuit tokens, intended as a reproducible research prototype.
 ### Building
 
 ```bash
-cargo build --release
+cargo build --release -p mosquitto-auth-biscuit
 ```
 
 The plugin will be generated at `target/release/libmosquitto_auth_biscuit.so`.
@@ -36,7 +36,7 @@ docker compose -f docker/docker-compose.yml up --build
 ### Generating Tokens
 
 ```bash
-cargo run --release --bin gen-tokens
+cargo run --release -p gen-tokens
 ```
 
 ## Benchmarking

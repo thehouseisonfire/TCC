@@ -1,6 +1,7 @@
-FROM alpine:3.20
+FROM debian:bookworm-slim
 
-RUN apk add --no-cache iproute2
+RUN apt-get update && apt-get install -y --no-install-recommends iproute2 \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY docker/netem_entrypoint.sh /netem_entrypoint.sh
 RUN chmod +x /netem_entrypoint.sh

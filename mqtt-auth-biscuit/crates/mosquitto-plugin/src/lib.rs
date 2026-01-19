@@ -542,7 +542,10 @@ mod tests {
     use std::ffi::CString;
 
     fn setup_plugin_with_config() -> (*mut c_void, MosquittoPluginId) {
-        let jwt_pub_pem = format!("{}/docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
+        let jwt_pub_pem = format!(
+            "{}/../../docker/jwt_public.pem",
+            env!("CARGO_MANIFEST_DIR")
+        );
         let biscuit_root_key_hex = "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29";
 
         let cstrings: Vec<CString> = vec![

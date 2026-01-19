@@ -5,8 +5,9 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustls::{Certificate, ClientConfig, ClientConnection, RootCertStore, StreamOwned};
-use rustls::client::{ServerCertVerified, ServerCertVerifier};
+use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
+use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls_pemfile::certs;
 use webpki_roots::TLS_SERVER_ROOTS;
 
@@ -109,19 +110,13 @@ fn build_tls_config(ca_file: Option<&str>, tls_insecure: bool) -> Result<Arc<Cli
         let mut cursor = std::io::Cursor::new(pem);
         let certs = certs(&mut cursor).map_err(|e| format!("parse CA file failed: {e}"))?;
         for cert in certs {
-            let cert = Certificate(cert);
+            let cert: CertificateDer<'static> = cert;
             root_store
-                .add(&cert)
+                .add(cert)
                 .map_err(|e| format!("invalid CA cert: {e}"))?;
         }
     } else {
-        root_store.add_trust_anchors(TLS_SERVER_ROOTS.iter().map(|anchor| {
-            rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
-                anchor.subject,
-                anchor.spki,
-                anchor.name_constraints,
-            )
-        }));
+        root_store.extend(TLS_SERVER_ROOTS.iter().cloned());
     }
 
     // SECURITY: tls_insecure disables certificate verification and is intended
@@ -131,26 +126,24 @@ fn build_tls_config(ca_file: Option<&str>, tls_insecure: bool) -> Result<Arc<Cli
         impl ServerCertVerifier for NoVerifier {
             fn verify_server_cert(
                 &self,
-                _end_entity: &rustls::Certificate,
-                _intermediates: &[rustls::Certificate],
-                _server_name: &rustls::ServerName,
-                _scts: &mut dyn Iterator<Item = &[u8]>,
+                _end_entity: &CertificateDer<'_>,
+                _intermediates: &[CertificateDer<'_>],
+                _server_name: &ServerName<'_>,
                 _ocsp_response: &[u8],
-                _now: std::time::SystemTime,
+                _now: UnixTime,
             ) -> Result<ServerCertVerified, rustls::Error> {
                 Ok(ServerCertVerified::assertion())
             }
         }
 
         let config = ClientConfig::builder()
-            .with_safe_defaults()
+            .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoVerifier))
             .with_no_client_auth();
         return Ok(Arc::new(config));
     }
 
     let config = ClientConfig::builder()
-        .with_safe_defaults()
         .with_root_certificates(root_store)
         .with_no_client_auth();
     Ok(Arc::new(config))
@@ -207,7 +200,7 @@ pub fn check_http(
 
     let resp = if scheme == "https" {
         let config = build_tls_config(ca_file, tls_insecure)?;
-        let server_name = rustls::ServerName::try_from(host.as_str())
+        let server_name = ServerName::try_from(host.as_str())
             .map_err(|_| "invalid TLS server name".to_string())?;
         let conn = ClientConnection::new(config, server_name)
             .map_err(|e| format!("tls connect failed: {e}"))?;

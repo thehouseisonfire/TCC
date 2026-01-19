@@ -23,11 +23,11 @@ jobs:
           components: miri
 
       - name: Miri setup
-        run: cargo --config build.rustflags=[] miri setup
+        run: cargo --config build.rustflags=[] miri setup -p mosquitto-auth-biscuit
         working-directory: mqtt-auth-biscuit
 
       - name: Run Miri tests
-        run: cargo --config build.rustflags=[] miri test
+        run: cargo --config build.rustflags=[] miri test -p mosquitto-auth-biscuit
         working-directory: mqtt-auth-biscuit
 
   kani:
@@ -43,5 +43,5 @@ jobs:
         run: cargo install kani-verifier --locked
 
       - name: Run Kani proofs
-        run: cargo kani --all-proof
+        run: cargo kani -p mosquitto-auth-biscuit --all-proof
         working-directory: mqtt-auth-biscuit

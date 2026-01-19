@@ -2,7 +2,7 @@
 
 **Project**: Eclipse Mosquitto Auth Biscuit Plugin (Rust)\
 **Started**: 2026-01-04\
-**Last Updated**: 2026-01-13\
+**Last Updated**: 2026-01-16\
 **Current Focus**: Reproducible benchmark/scenario harness aligned with
 `ARTICLE.MD`
 
@@ -27,9 +27,10 @@ described in `ARTICLE.MD`, including a controllable HTTP authz service and a
 
 Important architectural note (matches `ARTICLE.MD` terminology):
 
-- **Token Issuer (not yet implemented as a service)**: the only component that
-  may ever hold **private signing keys** (JWT ES256 private key material)
-  and **Biscuit root private key material**.
+- **Token Issuer (implemented)**: the `token-issuer` service is the only
+  component that may ever hold **private signing keys** (JWT ES256 private key
+  material) and **Biscuit root private key material**. It runs as a standalone
+  HTTP service for refresh scenarios and is wired in Docker Compose.
 - **PDP (scenario-only)**: the existing `authz` HTTP service is an
   authorization/introspection **Policy Decision Point** used only for the
   external-policy benchmark scenarios; it is not a Token Issuer.
@@ -55,15 +56,15 @@ Important architectural note (matches `ARTICLE.MD` terminology):
 
 **Key files**:
 
-- `mqtt-auth-biscuit/src/lib.rs` (plugin init/cleanup + Mosquitto callback
+- `mqtt-auth-biscuit/crates/mosquitto-plugin/src/lib.rs` (plugin init/cleanup + Mosquitto callback
   wiring)
-- `mqtt-auth-biscuit/src/auth.rs` (token parsing + verification dispatch)
-- `mqtt-auth-biscuit/src/jwt_handler.rs` (JWT verification)
-- `mqtt-auth-biscuit/src/biscuit_handler.rs` (Biscuit verification)
-- `mqtt-auth-biscuit/src/authz.rs` (authorization logic + policy mode dispatch)
-- `mqtt-auth-biscuit/src/http_policy.rs` (HTTP policy client)
-- `mqtt-auth-biscuit/src/sqlite_policy.rs` (SQLite policy backend)
-- `mqtt-auth-biscuit/src/cache.rs` (session cache)
+- `mqtt-auth-biscuit/crates/mosquitto-plugin/src/auth.rs` (token parsing + verification dispatch)
+- `mqtt-auth-biscuit/crates/mosquitto-plugin/src/jwt_handler.rs` (JWT verification)
+- `mqtt-auth-biscuit/crates/mosquitto-plugin/src/biscuit_handler.rs` (Biscuit verification)
+- `mqtt-auth-biscuit/crates/mosquitto-plugin/src/authz.rs` (authorization logic + policy mode dispatch)
+- `mqtt-auth-biscuit/crates/mosquitto-plugin/src/http_policy.rs` (HTTP policy client)
+- `mqtt-auth-biscuit/crates/mosquitto-plugin/src/sqlite_policy.rs` (SQLite policy backend)
+- `mqtt-auth-biscuit/crates/mosquitto-plugin/src/cache.rs` (session cache)
 
 ### 2) Docker Orchestration (Reproducible Environment)
 
@@ -94,20 +95,20 @@ Important architectural note (matches `ARTICLE.MD` terminology):
 
 **Key files**:
 
-- `mqtt-auth-biscuit/benchmarks/gen_tokens.rs`
+- `mqtt-auth-biscuit/crates/benchmarks/src/main.rs` (crate name: `gen-tokens`)
 - Output: `mqtt-auth-biscuit/benchmarks/tokens.json`
 
 Current limitation:
 
-- Tokens are generated **offline** for reproducibility. There is currently no
-  long-running **Token Issuer** service that clients can contact to obtain a
-  fresh token after expiry.
-- In `gen_tokens.rs`, the JWT private signing key exists only in the generator
-  process memory at runtime; only the public verification key is written to
-  `docker/jwt_public.pem` for the broker/PEP.
-- In `gen_tokens.rs`, the Biscuit root private key exists only in the generator
-  process memory at runtime; only the public verification key is written to
-  `benchmarks/tokens.json` as `biscuit_root_key_hex` for the broker/PEP.
+- Tokens are still generated **offline** for deterministic baseline runs, while
+  the **Token Issuer** service is used for refresh scenarios.
+- In `gen-tokens` (`crates/benchmarks/src/main.rs`), the JWT private signing key
+  exists only in the generator process memory at runtime; only the public
+  verification key is written to `docker/jwt_public.pem` for the broker/PEP.
+- In `gen-tokens`, the Biscuit root private key exists only in the generator
+  process memory at runtime; the public key is written to `docker/biscuit_public.key`
+  (hex-encoded) for the broker/PEP. The plugin reads this file via the
+  `biscuit_root_key_file` config option; no remaining hex config is needed.
 
 ### 4) Benchmark/Scenario Harness
 
@@ -127,7 +128,7 @@ Load generation is driven by:
 
 MQTT v5 reauthentication microbenchmark:
 
-- `benchmarks/mqtt5_auth_client.py`
+- `benchmarks/mqtt_auth_client.py`
   - Raw-socket MQTT5 client that measures CONNECT and subsequent `AUTH` latency
     (reauth)
 
@@ -211,7 +212,7 @@ Each file contains:
 - Rust plugin builds in release mode (historically validated)
 - Python benchmark scripts syntax-checked successfully:
   - `benchmarks/run_scenarios.py`
-  - `benchmarks/mqtt5_auth_client.py`
+  - `benchmarks/mqtt_auth_client.py`
 
 ### Important note on “execution vs implementation”
 
@@ -537,12 +538,15 @@ machine and record the first results/known issues).
     - JWT issuance includes default `roles: ["admin"]` while Biscuit issues only rights facts, creating token size asymmetry in refresh scenarios
     - Biscuit uses Base64 standard encoding while JWT uses Base64URL, potentially affecting MTU/fragmentation behavior
     - Token refresh latency is excluded from connect metrics, hiding lifecycle costs
+  - Status update:
+    - Implemented: `token-issuer` parity flags for `--jwt-no-default-roles` and
+      `--biscuit-base64url`, and scenario runner plumbing to pass them through.
   - Deliverable:
     - Add CLI flags to `token-issuer` for parity modes:
-      - `--jwt-no-default-roles` to match Biscuit minimal rights
-      - `--biscuit-base64url` to match JWT URL-safe encoding
+      - ✅ `--jwt-no-default-roles` to match Biscuit minimal rights
+      - ✅ `--biscuit-base64url` to match JWT URL-safe encoding
       - `--pad-to-size` to align token byte sizes for MTU tests
-    - Update `run_scenarios.py` to accept parity configuration flags and pass them to token-issuer
+    - Update `run_scenarios.py` to accept parity configuration flags and pass them to token-issuer (✅ done for the two flags above)
     - Add `token_refresh_ms` metric to `loadgen.py` to capture refresh latency separately from connect latency
     - Create documentation of parity modes and their impact on experimental validity
     - Add at least one scenario run demonstrating parity-aligned token comparison
@@ -610,7 +614,7 @@ establishment. The library supports enhanced authentication during the initial
 CONNECT/CONNACK handshake but lacks methods like `send_auth()` or
 `reauthenticate()` for triggering mid-session re-authentication.
 
-**Workaround**: `benchmarks/mqtt5_auth_client.py` implements a minimal
+**Workaround**: `benchmarks/mqtt_auth_client.py` implements a minimal
 raw-socket MQTT5 client that:
 
 - Sends `CONNECT` with Authentication Method/Data

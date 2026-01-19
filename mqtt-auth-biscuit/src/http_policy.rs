@@ -6,8 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
-use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{DigitallySignedStruct, SignatureScheme};
 use rustls_pemfile::certs;
 use webpki_roots::TLS_SERVER_ROOTS;
 
@@ -108,7 +109,9 @@ fn build_tls_config(ca_file: Option<&str>, tls_insecure: bool) -> Result<Arc<Cli
     if let Some(path) = ca_file {
         let pem = std::fs::read(path).map_err(|e| format!("read CA file failed: {e}"))?;
         let mut cursor = std::io::Cursor::new(pem);
-        let certs = certs(&mut cursor).map_err(|e| format!("parse CA file failed: {e}"))?;
+        let certs = certs(&mut cursor)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("parse CA file failed: {e}"))?;
         for cert in certs {
             let cert: CertificateDer<'static> = cert;
             root_store
@@ -122,6 +125,7 @@ fn build_tls_config(ca_file: Option<&str>, tls_insecure: bool) -> Result<Arc<Cli
     // SECURITY: tls_insecure disables certificate verification and is intended
     // only for controlled benchmark environments.
     if tls_insecure {
+        #[derive(Debug)]
         struct NoVerifier;
         impl ServerCertVerifier for NoVerifier {
             fn verify_server_cert(
@@ -133,6 +137,34 @@ fn build_tls_config(ca_file: Option<&str>, tls_insecure: bool) -> Result<Arc<Cli
                 _now: UnixTime,
             ) -> Result<ServerCertVerified, rustls::Error> {
                 Ok(ServerCertVerified::assertion())
+            }
+
+            // No TLS 1.2 signatures allowed
+            fn verify_tls12_signature(
+                &self,
+                _message: &[u8],
+                _cert: &CertificateDer<'_>,
+                _dss: &DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                Err(rustls::Error::PeerIncompatible(
+                    rustls::PeerIncompatible::ServerTlsVersionIsDisabledByOurConfig
+                ))
+            }
+
+            fn verify_tls13_signature(
+                &self,
+                _message: &[u8],
+                _cert: &CertificateDer<'_>,
+                _dss: &DigitallySignedStruct,
+            ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                Ok(HandshakeSignatureValid::assertion())
+            }
+
+            fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+                vec![
+                    // ECDSA is an NSA psyop, only use ED25519
+                    SignatureScheme::ED25519,
+                ]
             }
         }
 
@@ -201,7 +233,8 @@ pub fn check_http(
     let resp = if scheme == "https" {
         let config = build_tls_config(ca_file, tls_insecure)?;
         let server_name = ServerName::try_from(host.as_str())
-            .map_err(|_| "invalid TLS server name".to_string())?;
+            .map_err(|_| "invalid TLS server name".to_string())?
+            .to_owned();
         let conn = ClientConnection::new(config, server_name)
             .map_err(|e| format!("tls connect failed: {e}"))?;
         let mut tls_stream = StreamOwned::new(conn, stream);

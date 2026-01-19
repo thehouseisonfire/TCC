@@ -1,12 +1,25 @@
 use base64::{engine::general_purpose, Engine as _};
 use biscuit_auth::{Biscuit, BlockBuilder, KeyPair, PrivateKey};
 use chrono::Utc;
+use http_body_util::{BodyExt, Full};
+use hyper::body::Incoming;
+use hyper::service::service_fn;
+use hyper::{Method, Request, Response, StatusCode};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use p256::SecretKey;
 use pkcs8::{EncodePrivateKey, LineEnding};
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 use std::env;
-use tiny_http::{Header as TinyHeader, Method, Response, Server, SslConfig, StatusCode};
+use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::TcpListener;
+use tokio_rustls::TlsAcceptor;
+use hyper_util::rt::TokioIo;
+use bytes::Bytes;
+use rustls::{ServerConfig};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls_pemfile::{certs, private_key};
 
 // Type aliases to reduce complexity
 type JwtKeyResult = Result<(Algorithm, EncodingKey, String, Option<String>, Option<String>), String>;
@@ -26,7 +39,7 @@ struct JwtIssueRequest {
     no_default_roles: Option<bool>,
 }
 
-fn load_tls_config(enabled: bool) -> Result<Option<SslConfig>, String> {
+fn load_tls_config(enabled: bool) -> Result<Option<Arc<ServerConfig>>, String> {
     if !enabled {
         return Ok(None);
     }
@@ -38,10 +51,27 @@ fn load_tls_config(enabled: bool) -> Result<Option<SslConfig>, String> {
         .map_err(|e| format!("failed to read {cert_path}: {e}"))?;
     let key = std::fs::read(&key_path)
         .map_err(|e| format!("failed to read {key_path}: {e}"))?;
-    Ok(Some(SslConfig {
-        certificate: cert,
-        private_key: key,
-    }))
+    let mut cert_cursor = std::io::Cursor::new(cert);
+    let certs = certs(&mut cert_cursor)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("failed to parse TLS cert: {e}"))?
+        .into_iter()
+        .map(CertificateDer::from)
+        .collect::<Vec<_>>();
+    if certs.is_empty() {
+        return Err("no TLS certificates found".to_string());
+    }
+    let mut key_cursor = std::io::Cursor::new(key);
+    let key = private_key(&mut key_cursor)
+        .map_err(|e| format!("failed to parse TLS key: {e}"))?
+        .ok_or_else(|| "no TLS private key found".to_string())?;
+    let key = PrivateKeyDer::from(key);
+    let mut config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| format!("TLS config error: {e}"))?;
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(Some(Arc::new(config)))
 }
 
 fn escape_datalog_str(value: &str) -> String {
@@ -74,7 +104,7 @@ struct IssuerConfig {
     biscuit_keypair: KeyPair,
     jwt_no_default_roles: bool,
     biscuit_base64url: bool,
-    tls_config: Option<SslConfig>,
+    tls_config: Option<Arc<ServerConfig>>,
 }
 
 fn env_default(name: &str, default: &str) -> String {
@@ -142,15 +172,16 @@ fn load_biscuit_keypair(allow_default_keys: bool) -> Result<KeyPair, String> {
 }
 
 
-fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> Response<std::io::Cursor<Vec<u8>>> {
+fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> Response<Full<Bytes>> {
     let body = serde_json::to_vec(payload).unwrap_or_else(|_| b"{}".to_vec());
-    let mut resp = Response::from_data(body);
-    resp = resp.with_status_code(status);
-    resp.add_header(TinyHeader::from_bytes("Content-Type", "application/json").unwrap());
-    resp
+    Response::builder()
+        .status(status)
+        .header("Content-Type", "application/json")
+        .body(Full::new(Bytes::from(body)))
+        .unwrap_or_else(|_| Response::new(Full::new(Bytes::from_static(b"{}"))))
 }
 
-fn error_response(status: StatusCode, message: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
     let payload = serde_json::json!({"error": message});
     json_response(status, &payload)
 }
@@ -242,7 +273,75 @@ fn handle_biscuit(req: BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<TokenR
     })
 }
 
-fn main() {
+async fn handle_request(req: Request<Incoming>, cfg: Arc<IssuerConfig>) -> Result<Response<Full<Bytes>>, Infallible> {
+    let method = req.method().clone();
+    let url = req.uri().path().to_string();
+
+    if method == Method::GET && url == "/health" {
+        return Ok(json_response(StatusCode::OK, &serde_json::json!({"ok": true})));
+    }
+
+    if method != Method::POST {
+        return Ok(error_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"));
+    }
+
+    let body = match req.into_body().collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(err) => {
+            return Ok(error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("read body failed: {err}"),
+            ));
+        }
+    };
+    if body.len() > MAX_BODY_BYTES {
+        return Ok(error_response(StatusCode::PAYLOAD_TOO_LARGE, "payload too large"));
+    }
+
+    let res: Result<TokenResponse, (StatusCode, String)> = match url.as_str() {
+        "/jwt" => {
+            let parsed: Result<JwtIssueRequest, _> = serde_json::from_slice(&body);
+            match parsed {
+                Ok(req) => handle_jwt(req, &cfg)
+                    .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err)),
+                Err(e) => Err((StatusCode::BAD_REQUEST, format!("invalid json: {e}"))),
+            }
+        }
+        "/biscuit" => {
+            let parsed: Result<BiscuitIssueRequest, _> = serde_json::from_slice(&body);
+            match parsed {
+                Ok(req) => handle_biscuit(req, &cfg)
+                    .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err)),
+                Err(e) => Err((StatusCode::BAD_REQUEST, format!("invalid json: {e}"))),
+            }
+        }
+        _ => Err((StatusCode::NOT_FOUND, "not found".to_string())),
+    };
+
+    let response = match res {
+        Ok(payload) => json_response(StatusCode::OK, &payload),
+        Err((status, err)) => error_response(status, &err),
+    };
+
+    Ok(response)
+}
+
+async fn serve_connection<S>(stream: S, cfg: Arc<IssuerConfig>)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let io = TokioIo::new(stream);
+    let service = service_fn(move |req| handle_request(req, Arc::clone(&cfg)));
+    if let Err(e) = hyper::server::conn::http1::Builder::new()
+        .serve_connection(io, service)
+        .await
+    {
+        eprintln!("http serve error: {e}");
+    }
+}
+
+#[tokio::main]
+async fn main() {
     let host = env_default("TOKEN_ISSUER_HOST", "0.0.0.0");
     let port = env_default("TOKEN_ISSUER_PORT", "8082");
     let allow_default_keys = env_flag("TOKEN_ISSUER_ALLOW_DEFAULT_KEYS");
@@ -288,70 +387,35 @@ fn main() {
     };
 
     let addr = format!("{}:{}", cfg.host, cfg.port);
-    let server = if let Some(tls_cfg) = cfg.tls_config.clone() {
-        Server::https(&addr, tls_cfg).unwrap_or_else(|e| {
-            eprintln!("failed to bind token issuer (TLS) on {addr}: {e}");
-            std::process::exit(1);
-        })
-    } else {
-        Server::http(&addr).unwrap_or_else(|e| {
-            eprintln!("failed to bind token issuer on {addr}: {e}");
-            std::process::exit(1);
-        })
-    };
+    let listener = TcpListener::bind(&addr).await.unwrap_or_else(|e| {
+        eprintln!("failed to bind token issuer on {addr}: {e}");
+        std::process::exit(1);
+    });
+    let cfg = Arc::new(cfg);
+    let tls_acceptor = cfg.tls_config.clone().map(TlsAcceptor::from);
 
-    for mut request in server.incoming_requests() {
-        let method = request.method().clone();
-        let url = request.url().to_string();
-
-        if method == Method::Get && url == "/health" {
-            let response = json_response(StatusCode(200), &serde_json::json!({"ok": true}));
-            let _ = request.respond(response);
-            continue;
-        }
-
-        if method != Method::Post {
-            let response = error_response(StatusCode(405), "method not allowed");
-            let _ = request.respond(response);
-            continue;
-        }
-
-        let mut body = Vec::new();
-        if let Err(e) = request.as_reader().read_to_end(&mut body) {
-            let response = error_response(StatusCode(400), &format!("read body failed: {e}"));
-            let _ = request.respond(response);
-            continue;
-        }
-        if body.len() > MAX_BODY_BYTES {
-            let response = error_response(StatusCode(413), "payload too large");
-            let _ = request.respond(response);
-            continue;
-        }
-
-        let res = match url.as_str() {
-            "/jwt" => {
-                let parsed: Result<JwtIssueRequest, _> = serde_json::from_slice(&body);
-                match parsed {
-                    Ok(req) => handle_jwt(req, &cfg),
-                    Err(e) => Err(format!("invalid json: {e}")),
-                }
+    loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("accept failed: {e}");
+                continue;
             }
-            "/biscuit" => {
-                let parsed: Result<BiscuitIssueRequest, _> = serde_json::from_slice(&body);
-                match parsed {
-                    Ok(req) => handle_biscuit(req, &cfg),
-                    Err(e) => Err(format!("invalid json: {e}")),
-                }
-            }
-            _ => Err("not found".to_string()),
         };
 
-        let response = match res {
-            Ok(payload) => json_response(StatusCode(200), &payload),
-            Err(err) if err == "not found" => error_response(StatusCode(404), &err),
-            Err(err) => error_response(StatusCode(400), &err),
-        };
-
-        let _ = request.respond(response);
+        if let Some(acceptor) = tls_acceptor.clone() {
+            let cfg = Arc::clone(&cfg);
+            tokio::spawn(async move {
+                match acceptor.accept(stream).await {
+                    Ok(tls_stream) => serve_connection(tls_stream, cfg).await,
+                    Err(e) => eprintln!("tls accept failed: {e}"),
+                }
+            });
+        } else {
+            let cfg = Arc::clone(&cfg);
+            tokio::spawn(async move {
+                serve_connection(stream, cfg).await;
+            });
+        }
     }
 }

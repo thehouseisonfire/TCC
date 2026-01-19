@@ -18,7 +18,6 @@ use tokio_rustls::TlsAcceptor;
 use hyper_util::rt::TokioIo;
 use bytes::Bytes;
 use rustls::{ServerConfig};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls_pemfile::{certs, private_key};
 
 // Type aliases to reduce complexity
@@ -56,7 +55,6 @@ fn load_tls_config(enabled: bool) -> Result<Option<Arc<ServerConfig>>, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("failed to parse TLS cert: {e}"))?
         .into_iter()
-        .map(CertificateDer::from)
         .collect::<Vec<_>>();
     if certs.is_empty() {
         return Err("no TLS certificates found".to_string());
@@ -65,7 +63,6 @@ fn load_tls_config(enabled: bool) -> Result<Option<Arc<ServerConfig>>, String> {
     let key = private_key(&mut key_cursor)
         .map_err(|e| format!("failed to parse TLS key: {e}"))?
         .ok_or_else(|| "no TLS private key found".to_string())?;
-    let key = PrivateKeyDer::from(key);
     let mut config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)

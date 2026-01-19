@@ -134,6 +134,9 @@ def main():
     ap.add_argument("--tls", action="store_true")
     ap.add_argument("--tls-ca-file")
     ap.add_argument("--tls-insecure", action="store_true")
+    ap.add_argument("--authz-base", help="Override Authz base URL")
+    ap.add_argument("--issuer-base", help="Override Token Issuer base URL")
+    ap.add_argument("--mqtt-host", help="Override MQTT broker host")
     args = ap.parse_args()
 
     repo_root = os.path.dirname(os.path.dirname(__file__))
@@ -166,9 +169,9 @@ def main():
     with open(tokens_path, "r", encoding="utf-8") as f:
         tokens = json.load(f)
 
-    authz_base = "https://localhost:8443" if args.tls else "http://localhost:8081"
-    issuer_base = "https://localhost:8444" if args.tls else "http://localhost:8082"
-    mqtt_host = "localhost"
+    authz_base = args.authz_base or ("https://localhost:8443" if args.tls else "http://localhost:8081")
+    issuer_base = args.issuer_base or ("https://localhost:8444" if args.tls else "http://localhost:8082")
+    mqtt_host = args.mqtt_host or "localhost"
     mqtt_port = 8883 if args.tls else 1883
 
     _health_check("authz", authz_base, tls_ca, args.tls_insecure)

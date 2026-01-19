@@ -1,0 +1,83 @@
+{
+  "scenario": "BASE-01",
+  "token_len": 0,
+  "tls": {
+    "enabled": false,
+    "ca_file": null,
+    "insecure": false
+  },
+  "parity": {
+    "token_issuer_no_default_roles": false,
+    "biscuit_base64url": false,
+    "token_refresh_codes": null
+  },
+  "runs": [
+    {
+      "loadgen": {
+        "inputs": {
+          "host": "localhost",
+          "port": 1883,
+          "username": "",
+          "clients": 50,
+          "message_count": 20,
+          "qos": 1,
+          "message_size": 0,
+          "protocol": "mqttv5",
+          "token_issuer_url": null,
+          "token_issuer_kind": null,
+          "token_issuer_no_default_roles": false,
+          "token_refresh_codes": [
+            5,
+            135
+          ]
+        },
+        "connect": {
+          "count": 50,
+          "min_ms": 4.90723899929435,
+          "p50_ms": 16.21280750077858,
+          "p95_ms": 35.45830824987206,
+          "p99_ms": 37.31716269056051,
+          "max_ms": 37.38871200039284,
+          "mean_ms": 20.04143328027567,
+          "median_ms": 16.21280750077858
+        },
+        "token_refresh": {
+          "count": 0
+        },
+        "token_refresh_len": {
+          "count": 0
+        },
+        "publish": {
+          "count": 1000,
+          "min_ms": 1.3578660000348464,
+          "p50_ms": 8.970327999122674,
+          "p95_ms": 22.496249250980323,
+          "p99_ms": 31.785511469824986,
+          "max_ms": 50.51775899846689,
+          "mean_ms": 10.540165988997614,
+          "median_ms": 8.970327999122674
+        },
+        "throughput_mps": 4204.8636657314755,
+        "errors": []
+      },
+      "resources": {
+        "prometheus": {
+          "cpu": {
+            "status": "success",
+            "data": {
+              "resultType": "vector",
+              "result": []
+            }
+          },
+          "memory": {
+            "status": "success",
+            "data": {
+              "resultType": "vector",
+              "result": []
+            }
+          }
+        }
+      }
+    }
+  ]
+}

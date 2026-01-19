@@ -1,11 +1,25 @@
+FROM rust:1.92-alpine AS builder
+
+RUN apk add --no-cache build-base cmake perl libc-dev
+
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY crates/mosquitto-plugin ./crates/mosquitto-plugin
+COPY crates/token-issuer ./crates/token-issuer
+COPY crates/benchmarks ./crates/benchmarks
+
+RUN RUSTFLAGS="-C target-feature=-crt-static" cargo build --release -p mosquitto-auth-biscuit
+
 FROM eclipse-mosquitto:2.0.15
 
-# Install runtime dependencies only (no build tools)
-COPY docker/packages/*.apk /tmp/
-RUN apk add --allow-untrusted /tmp/*.apk && \
-    rm /tmp/*.apk
+# Install basic C++ libs required by the dynamically linked Rust plugin
+RUN apk add --no-cache libgcc libstdc++
 
-# Copy pre-built shared library from host
-COPY target/release/libmosquitto_auth_biscuit.so /mosquitto/plugins/
+COPY docker/jwt_public.pem /mosquitto/config/
+COPY docker/biscuit_public.key /mosquitto/config/
 
-# mosquitto.conf is already mounted via Docker Compose
+# No extra libc compatibility should be needed if built for musl
+# COPY docker/packages/*.apk /tmp/
+# RUN apk add --allow-untrusted /tmp/*.apk && rm /tmp/*.apk
+
+COPY --from=builder /app/target/release/libmosquitto_auth_biscuit.so /mosquitto/plugins/

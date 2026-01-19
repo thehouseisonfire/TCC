@@ -161,6 +161,15 @@ def _write_result(out_dir: str, name: str, payload: dict):
     return path
 
 
+def _ensure_paho_mqtt():
+    try:
+        import paho.mqtt.client as _  # noqa: F401
+    except ModuleNotFoundError as exc:
+        raise SystemExit(
+            "Missing dependency 'paho-mqtt'. Install it with: pip install paho-mqtt"
+        ) from exc
+
+
 def _run_mqtt5_auth(
     host: str,
     port: int,
@@ -223,7 +232,7 @@ def main():
         # Define available scenarios mapping
         available_scenarios = {
             "BASE-01": {
-                "mosquitto_conf": "docker/mosquitto_base.conf",
+                "mosquitto_conf": "./mosquitto_base.conf",
                 "username": "",
                 "password": "",
                 "topic": "sensors/{client_id}/temp",
@@ -232,7 +241,7 @@ def main():
                 "message_size": 0,
             },
             "JWT-01": {
-                "mosquitto_conf": "docker/mosquitto.conf",
+                "mosquitto_conf": "./mosquitto.conf",
                 "username": "jwt",
                 "password": tokens["jwt"],
                 "topic": "sensors/{client_id}/temp",
@@ -241,7 +250,7 @@ def main():
                 "message_size": 0,
             },
             "BIS-01": {
-                "mosquitto_conf": "docker/mosquitto.conf",
+                "mosquitto_conf": "./mosquitto.conf",
                 "username": "biscuit",
                 "password": tokens["biscuit"],
                 "topic": "sensors/{client_id}/temp",
@@ -250,7 +259,7 @@ def main():
                 "message_size": 0,
             },
             "POLICY-COMPLEX-1": {
-                "mosquitto_conf": "docker/mosquitto.conf",
+                "mosquitto_conf": "./mosquitto.conf",
                 "username": "biscuit",
                 "password": tokens["biscuit"],
                 "topic": "sensors/{client_id}/temp",
@@ -259,7 +268,7 @@ def main():
                 "message_size": 0,
             },
             "POLICY-COMPLEX-5": {
-                "mosquitto_conf": "docker/mosquitto.conf",
+                "mosquitto_conf": "./mosquitto.conf",
                 "username": "biscuit",
                 "password": tokens["biscuit_5"],
                 "topic": "sensors/{client_id}/temp",
@@ -268,7 +277,7 @@ def main():
                 "message_size": 0,
             },
             "POLICY-COMPLEX-25": {
-                "mosquitto_conf": "docker/mosquitto.conf",
+                "mosquitto_conf": "./mosquitto.conf",
                 "username": "biscuit",
                 "password": tokens["biscuit_25"],
                 "topic": "sensors/{client_id}/temp",
@@ -277,7 +286,7 @@ def main():
                 "message_size": 0,
             },
             "JWT-HTTP-200MS": {
-                "mosquitto_conf": "docker/mosquitto_http.conf",
+                "mosquitto_conf": "./mosquitto_http.conf",
                 "username": "jwt",
                 "password": tokens["jwt"],
                 "topic": "sensors/{client_id}/temp",
@@ -286,7 +295,7 @@ def main():
                 "message_size": 0,
             },
             "JWT-HTTP-1000MS": {
-                "mosquitto_conf": "docker/mosquitto_http.conf",
+                "mosquitto_conf": "./mosquitto_http.conf",
                 "username": "jwt",
                 "password": tokens["jwt"],
                 "topic": "sensors/{client_id}/temp",
@@ -295,7 +304,7 @@ def main():
                 "message_size": 0,
             },
             "HYBRID-AUTHZ-DOWN": {
-                "mosquitto_conf": "docker/mosquitto_hybrid.conf",
+                "mosquitto_conf": "./mosquitto_hybrid.conf",
                 "username": "jwt",
                 "password": tokens["jwt"],
                 "topic": "sensors/{client_id}/temp",
@@ -304,7 +313,7 @@ def main():
                 "message_size": 0,
             },
             "MTU-200-JWT": {
-                "mosquitto_conf": "docker/mosquitto.conf",
+                "mosquitto_conf": "./mosquitto.conf",
                 "username": "jwt",
                 "password": tokens["jwt"],
                 "topic": "sensors/{client_id}/temp",
@@ -313,7 +322,7 @@ def main():
                 "message_size": 0,
             },
             "BIS-HTTP-200MS": {
-                "mosquitto_conf": "docker/mosquitto_http.conf",
+                "mosquitto_conf": "./mosquitto_http.conf",
                 "username": "biscuit",
                 "password": tokens["biscuit"],
                 "topic": "sensors/{client_id}/temp",
@@ -322,7 +331,7 @@ def main():
                 "message_size": 0,
             },
             "JWT-HTTP-200MS-LOSS1": {
-                "mosquitto_conf": "docker/mosquitto_http.conf",
+                "mosquitto_conf": "./mosquitto_http.conf",
                 "username": "jwt",
                 "password": tokens["jwt"],
                 "topic": "sensors/{client_id}/temp",
@@ -331,7 +340,7 @@ def main():
                 "message_size": 0,
             },
             "JWT-HTTP-200MS-LOSS5": {
-                "mosquitto_conf": "docker/mosquitto_http.conf",
+                "mosquitto_conf": "./mosquitto_http.conf",
                 "username": "jwt",
                 "password": tokens["jwt"],
                 "topic": "sensors/{client_id}/temp",
@@ -340,19 +349,19 @@ def main():
                 "message_size": 0,
             },
             "MQTT5-REAUTH-JWT": {
-                "mosquitto_conf": "docker/mosquitto.conf",
+                "mosquitto_conf": "./mosquitto.conf",
                 "authz": None,
                 "netem": {"clear": True},
                 "mqtt5_auth": {"token1": tokens["jwt_short"], "token2": tokens["jwt"]},
             },
             "MQTT5-REAUTH-BISCUIT": {
-                "mosquitto_conf": "docker/mosquitto.conf",
+                "mosquitto_conf": "./mosquitto.conf",
                 "authz": None,
                 "netem": {"clear": True},
                 "mqtt5_auth": {"token1": tokens["biscuit_short"], "token2": tokens["biscuit"]},
             },
             "THUNDERING-HERD": {
-                "mosquitto_conf": "docker/mosquitto.conf",
+                "mosquitto_conf": "./mosquitto.conf",
                 "username": "biscuit",
                 "password": tokens["biscuit"],
                 "topic": "sensors/{client_id}/temp",
@@ -363,7 +372,7 @@ def main():
                 "sync_connect": True,
             },
             "DELEGATION-TEMP-ONLY": {
-                "mosquitto_conf": "docker/mosquitto.conf",
+                "mosquitto_conf": "./mosquitto.conf",
                 "username": "biscuit",
                 "password": tokens["biscuit_delegated"],
                 "topic": "sensors/{client_id}/temp",
@@ -372,7 +381,7 @@ def main():
                 "message_size": 0,
             },
             "LIFECYCLE-JWT-SHORT-RECONNECT": {
-                "mosquitto_conf": "docker/mosquitto_shortcache.conf",
+                "mosquitto_conf": "./mosquitto_shortcache.conf",
                 "username": "jwt",
                 "password": tokens["jwt_short"],
                 "topic": "sensors/{client_id}/temp",
@@ -384,7 +393,7 @@ def main():
                 "token_refresh": {"kind": "jwt", "ttl_seconds": 5},
             },
             "LIFECYCLE-BIS-SHORT-RECONNECT": {
-                "mosquitto_conf": "docker/mosquitto_shortcache.conf",
+                "mosquitto_conf": "./mosquitto_shortcache.conf",
                 "username": "biscuit",
                 "password": tokens["biscuit_short"],
                 "topic": "sensors/{client_id}/temp",
@@ -400,7 +409,7 @@ def main():
         # Add dynamic MTU scenarios
         for mtu in [500, 1500, 9000]:
             available_scenarios[f"MTU-{mtu}-BIS-25"] = {
-                "mosquitto_conf": "docker/mosquitto.conf",
+                "mosquitto_conf": "./mosquitto.conf",
                 "username": "biscuit",
                 "password": tokens["biscuit_25"],
                 "topic": "sensors/{client_id}/temp",
@@ -409,7 +418,7 @@ def main():
                 "message_size": 0,
             }
             available_scenarios[f"MTU-{mtu}-JWT"] = {
-                "mosquitto_conf": "docker/mosquitto.conf",
+                "mosquitto_conf": "./mosquitto.conf",
                 "username": "jwt",
                 "password": tokens["jwt"],
                 "topic": "sensors/{client_id}/temp",
@@ -438,10 +447,13 @@ def main():
         print("MTU-500-JWT, MTU-1500-JWT, MTU-9000-JWT")
         return
 
+    if any("mqtt5_auth" not in s for s in scenarios):
+        _ensure_paho_mqtt()
+
     for s in scenarios:
         mosq_conf = s["mosquitto_conf"]
         if tls_enabled:
-            mosq_conf = mosq_conf.replace("docker/", "docker/tls/")
+            mosq_conf = mosq_conf.replace("./", "./tls/")
         extra_env = {"MOSQUITTO_CONF": mosq_conf}
         authz_base = "https://localhost:8443" if tls_enabled else "http://localhost:8081"
         prom_base = "https://localhost:9443" if tls_enabled else "http://localhost:9090"

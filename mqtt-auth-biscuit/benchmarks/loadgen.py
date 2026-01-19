@@ -9,7 +9,12 @@ import urllib.request
 from dataclasses import dataclass
 from statistics import mean, median
 
-import paho.mqtt.client as mqtt
+try:
+    import paho.mqtt.client as mqtt
+except ModuleNotFoundError as exc:
+    raise SystemExit(
+        "Missing dependency 'paho-mqtt'. Install it with: pip install paho-mqtt"
+    ) from exc
 
 
 def _percentile(sorted_vals, p):
@@ -141,7 +146,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                 ud["connected"] = True
                 ud["connect_done"] = time.perf_counter()
 
-        def on_disconnect(client, ud, reason_code, properties=None):
+        def on_disconnect(client, ud, disconnect_flags, reason_code, properties=None):
             ud["disconnected"] = True
 
         client = mqtt.Client(

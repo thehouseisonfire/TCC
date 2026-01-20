@@ -12,6 +12,22 @@ authentication plugin.
 - **Python 3**: For running the metrics collector.
   - Install dependency: `pip install paho-mqtt`
 
+## One-command run (recommended)
+
+From the repository root, you can run the full workflow (build, token generation,
+scenario run, cleanup) with:
+
+```bash
+python3 run_benchmarks.py
+```
+
+To run a subset of scenarios or enable TLS, pass flags through:
+
+```bash
+python3 run_benchmarks.py --scenarios JWT-01,BIS-01
+python3 run_benchmarks.py --tls
+```
+
 ## Step 1: Build the Plugin
 
 The Mosquitto plugin must be built in release mode:

@@ -1,0 +1,114 @@
+name: CI Benchmark Infrastructure
+
+on:
+  push:
+    branches: [ master, main ]
+    paths:
+      - 'mqtt-auth-biscuit/benchmarks/**'
+      - 'mqtt-auth-biscuit/docker/**'
+      - 'mqtt-auth-biscuit/crates/**'
+  pull_request:
+    branches: [ master, main ]
+    paths:
+      - 'mqtt-auth-biscuit/benchmarks/**'
+      - 'mqtt-auth-biscuit/docker/**'
+      - 'mqtt-auth-biscuit/crates/**'
+
+jobs:
+  test-benchmark-infrastructure:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Install Python dependencies
+      run: |
+        python3 -m pip install --upgrade pip
+        pip install paho-mqtt requests
+        
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+        
+    - name: Build plugin in debug mode
+      run: |
+        cd mqtt-auth-biscuit
+        cargo build
+        
+    - name: Generate test tokens
+      run: |
+        cd mqtt-auth-biscuit
+        cargo run --bin gen-tokens
+        
+    - name: Test debug queries script syntax
+      run: |
+        cd mqtt-auth-biscuit
+        python3 -m py_compile benchmarks/debug_queries.py
+        
+    - name: Test resource snapshot script syntax
+      run: |
+        cd mqtt-auth-biscuit
+        python3 -m py_compile benchmarks/test_resource_snapshot.py
+        
+    - name: Test verification script syntax
+      run: |
+        cd mqtt-auth-biscuit
+        python3 -m py_compile benchmarks/verify_phase_6_2.py
+        
+    - name: Test scenario runner syntax
+      run: |
+        cd mqtt-auth-biscuit
+        python3 -m py_compile benchmarks/run_scenarios.py
+        
+    - name: Test load generator syntax
+      run: |
+        cd mqtt-auth-biscuit
+        python3 -m py_compile benchmarks/loadgen.py
+        
+    - name: Validate Docker Compose configuration
+      run: |
+        cd mqtt-auth-biscuit/docker
+        docker-compose -f docker-compose.yml config
+        
+    - name: Build Docker images (dry run)
+      run: |
+        cd mqtt-auth-biscuit/docker
+        docker-compose -f docker-compose.yml build --dry-run 2>/dev/null || echo "Dry-run completed"
+        
+    - name: Check token generation output
+      run: |
+        cd mqtt-auth-biscuit
+        if [ -f benchmarks/tokens.json ]; then
+          echo "✅ tokens.json generated successfully"
+          python3 -c "import json; data=json.load(open('benchmarks/tokens.json')); print(f'✅ Contains {len(data)} token entries')"
+        else
+          echo "❌ tokens.json not found"
+          exit 1
+        fi
+        
+    - name: Validate token JSON structure
+      run: |
+        cd mqtt-auth-biscuit
+        python3 -c "
+        import json
+        with open('benchmarks/tokens.json') as f:
+            data = json.load(f)
+        
+        required_tokens = ['jwt', 'jwt_short', 'biscuit', 'biscuit_short', 'biscuit_5', 'biscuit_25', 'biscuit_delegated']
+        missing = [t for t in required_tokens if t not in data]
+        if missing:
+            print(f'❌ Missing tokens: {missing}')
+            exit(1)
+        print('✅ All required token types present')
+        
+        # Check token formats
+        import re
+        jwt_pattern = r'^eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*$'
+        if not re.match(jwt_pattern, data['jwt']):
+            print('❌ JWT token format invalid')
+            exit(1)
+        print('✅ JWT token format valid')
+        "

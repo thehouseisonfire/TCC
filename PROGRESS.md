@@ -2,7 +2,7 @@
 
 **Project**: Eclipse Mosquitto Auth Biscuit Plugin (Rust)\
 **Started**: 2026-01-04\
-**Last Updated**: 2026-01-16\
+**Last Updated**: 2026-01-19\
 **Current Focus**: Reproducible benchmark/scenario harness aligned with
 `ARTICLE.MD`
 
@@ -246,47 +246,29 @@ machine and record the first results/known issues).
 
 ## Roadmap (Next Steps)
 
-### Phase 6: Benchmark Execution
+### Phase 6: Data Analysis & Validation
 
-- [x] **6.1 Run a smoke test for the full scenario runner**
-  - Goal: ensure Docker services start reliably, scenarios run, results JSON is
-    produced.
-  - Status: Executed (2026-01-19). `tokens.json` updated with latest benchmarks.
-  - Command sequence:
-    - `cargo build --release`
-    - `cargo run --release --bin gen-tokens`
-    - `docker compose -f docker/docker-compose.yml up --build -d`
-    - `python3 benchmarks/run_scenarios.py`
-  - Deliverable: results JSON files + a short log of any failures.
-
-- [ ] **6.2 Resource monitoring verification**
-  - Goal: confirm Prometheus snapshots are populated (CPU + memory for mosquitto
-    container).
-  - Deliverable: scenario outputs include non-error `resources` snapshots.
-
-### Phase 7: Data Analysis & Validation
-
-- [ ] **7.1 Aggregate results**
+- [ ] **6.1 Aggregate results**
   - Collect scenario JSONs and generate a summary table (latency p50/p95/p99,
     throughput, errors, CPU/memory).
-- [ ] **7.2 Validate hypotheses / identify crossover points**
+- [ ] **6.2 Validate hypotheses / identify crossover points**
   - Identify when Biscuit becomes more/less expensive than JWT under:
     - MTU constraints
     - policy complexity (block count)
     - external authz latency/failure
 
-### Phase 8: Optional Enhancements (Only If Needed)
+### Phase 7: Optional Enhancements (Only If Needed)
 
-- [ ] **8.1 Add a single “one-command reproducibility” script**
+- [ ] **7.1 Add a single "one-command reproducibility" script**
   - e.g. `./run_benchmarks.sh` wrapping build, token generation, compose
     up/down, scenario run.
-- [ ] **8.2 Improve reporting quality**
+- [ ] **7.2 Improve reporting quality**
   - Produce a consolidated `summary.json` and optionally CSV for plotting.
-- [ ] **8.3 Make docker-compose invocation robust across environments**
+- [ ] **7.3 Make docker-compose invocation robust across environments**
   - Some systems use `docker compose` instead of `docker-compose`.
   - If this becomes an issue, adapt runner to detect and use the available CLI.
 
-### Phase 9: Issue Resolution
+### Phase 8: Issue Resolution
 
 - [ ] **Issue 1: Add Dynamic Security module comparison**
   - Goal: Implement Mosquitto's Dynamic Security module as an authorization
@@ -692,23 +674,16 @@ machine and record the first results/known issues).
 ## Issue Backlog (Completed)
 
 - [x] **Issue 8: Implement a long-running Token Issuer service (JWT + Biscuit)**
-  - Summary: Complete token issuer service with HTTP endpoints for JWT/Biscuit
-    issuance, proper security separation, Docker integration, and token refresh
-    support in benchmark scenarios.
+  - Summary: HTTP endpoints for token issuance, security separation, Docker integration, and refresh support.
 
-- [x] **Issue 8.1: Implement comprehensive TLS support for all network
-      communications**
-  - Summary: TLS support implemented for all external network paths (MQTT, Token
-    Issuer, Authz PDP, Prometheus/cAdvisor UIs). Internal Prometheus-cAdvisor
-    scraping remains HTTP-only as TLS would provide minimal security benefit for
-    internal Docker network traffic.
+- [x] **Issue 8.1: Implement comprehensive TLS support for all network communications**
+  - Summary: TLS for all external paths (MQTT, Token Issuer, Authz PDP, Prometheus/cAdvisor UIs). Internal scraping remains HTTP-only.
 
 - [x] **Issue 11: MIRI verification for FFI memory safety**
   - Summary: MIRI CI + tests cover FFI pointer safety and lifecycle invariants.
 
 - [x] **Issue 12: Kani verification for critical FFI functions**
-  - Summary: Kani proofs for init/cleanup + all callbacks (null safety,
-    lifetimes).
+  - Summary: Kani proofs for init/cleanup + all callbacks (null safety, lifetimes).
 
 ## Known Risks / Things to Watch
 

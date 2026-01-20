@@ -67,6 +67,10 @@ def _authz_config(
         return json.loads(resp.read().decode("utf-8"))
 
 
+# Prometheus query templates
+CURRENT_DOCKER_COMPOSE_CPU_QUERY = 'sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service="mosquitto"}[30s]))'
+CURRENT_DOCKER_COMPOSE_MEM_QUERY = 'max(container_memory_working_set_bytes{container_label_com_docker_compose_service="mosquitto"})'
+
 def _prom_query(base_url: str, query: str, ca_file: str | None, insecure: bool):
     url = base_url.rstrip("/") + "/api/v1/query?query=" + urllib.parse.quote(query, safe="")
     ctx = _ssl_context(ca_file, insecure)
@@ -74,9 +78,38 @@ def _prom_query(base_url: str, query: str, ca_file: str | None, insecure: bool):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _resource_snapshot(base_url: str, ca_file: str | None, insecure: bool):
-    cpu_q = 'sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service="mosquitto"}[30s]))'
-    mem_q = 'max(container_memory_working_set_bytes{container_label_com_docker_compose_service="mosquitto"})'
+def _resource_snapshot(base_url: str, ca_file: str | None, insecure: bool, cpu_query_type: str = "instant"):
+    """
+    Capture resource snapshot from Prometheus.
+    
+    Args:
+        base_url: Prometheus base URL
+        ca_file: TLS CA file path
+        insecure: Skip TLS verification
+        cpu_query_type: "instant" for immediate values, "rate" for rate over time
+    """
+    import subprocess
+    # Get mosquitto container ID dynamically
+    try:
+        result = subprocess.run(
+            ["docker", "inspect", "docker-mosquitto-1", "--format", "{{.Id}}"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        container_id = result.stdout.strip()[:12]  # Use first 12 chars for regex matching (Docker ID prefix convention)
+    except Exception:
+        # Fallback: try to find container by name in metrics
+        container_id = "mosquitto"
+    
+    # Use container ID-based queries instead of Docker Compose labels
+    if cpu_query_type == "rate":
+        cpu_q = f'sum(rate(container_cpu_usage_seconds_total{{id=~".*{container_id}.*"}}[30s]))'
+    else:  # instant (default)
+        cpu_q = f'container_cpu_usage_seconds_total{{id=~".*{container_id}.*"}}'
+    
+    mem_q = f'max(container_memory_working_set_bytes{{id=~".*{container_id}.*"}})'
+    
     snap = {
         "prometheus": {
             "cpu": _prom_query(base_url, cpu_q, ca_file, insecure),
@@ -562,6 +595,8 @@ def main():
                     tls_ca_file=tls_ca,
                     tls_insecure=tls_insecure,
                 )
+            # Small delay to ensure container metrics are available after loadgen
+            time.sleep(2)
             try:
                 snap = _resource_snapshot(prom_base, tls_ca, tls_insecure)
             except Exception as e:

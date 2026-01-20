@@ -674,16 +674,23 @@ machine and record the first results/known issues).
 ## Issue Backlog (Completed)
 
 - [x] **Issue 8: Implement a long-running Token Issuer service (JWT + Biscuit)**
-  - Summary: HTTP endpoints for token issuance, security separation, Docker integration, and refresh support.
+  - Summary: Complete token issuer service with HTTP endpoints for JWT/Biscuit
+    issuance, proper security separation, Docker integration, and token refresh
+    support in benchmark scenarios.
 
-- [x] **Issue 8.1: Implement comprehensive TLS support for all network communications**
-  - Summary: TLS for all external paths (MQTT, Token Issuer, Authz PDP, Prometheus/cAdvisor UIs). Internal scraping remains HTTP-only.
+- [x] **Issue 8.1: Implement comprehensive TLS support for all network
+      communications**
+  - Summary: TLS support implemented for all external network paths (MQTT, Token
+    Issuer, Authz PDP, Prometheus/cAdvisor UIs). Internal Prometheus-cAdvisor
+    scraping remains HTTP-only as TLS would provide minimal security benefit for
+    internal Docker network traffic.
 
 - [x] **Issue 11: MIRI verification for FFI memory safety**
   - Summary: MIRI CI + tests cover FFI pointer safety and lifecycle invariants.
 
 - [x] **Issue 12: Kani verification for critical FFI functions**
-  - Summary: Kani proofs for init/cleanup + all callbacks (null safety, lifetimes).
+  - Summary: Kani proofs for init/cleanup + all callbacks (null safety,
+    lifetimes).
 
 ## Known Risks / Things to Watch
 

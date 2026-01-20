@@ -8,7 +8,7 @@
 
 ---
 
-## Executive Summary
+## 1) Executive Summary
 
 This repository contains a Mosquitto authentication/authorization plugin
 implemented in Rust that supports:
@@ -25,7 +25,11 @@ The Docker + benchmark stack is now set up to run the experimental scenarios
 described in `ARTICLE.MD`, including a controllable HTTP authz service and a
 `netem` helper for MTU/latency/loss experiments.
 
-Important architectural note (matches `ARTICLE.MD` terminology):
+---
+
+## 2) Architecture & Crate Map
+
+### 2.1 Logical Roles (ARTICLE.MD Terminology)
 
 - **Token Issuer (implemented)**: the `token-issuer` service is the only
   component that may ever hold **private signing keys** (JWT ES256 private key
@@ -37,11 +41,23 @@ Important architectural note (matches `ARTICLE.MD` terminology):
 - **PEP**: Mosquitto + this plugin acts as the **Policy Enforcement Point** and
   must only hold **public verification keys**.
 
+### 2.2 Crates
+
+- `mosquitto-plugin`: core authn/authz logic, callback wiring, policy backends
+- `token-issuer`: JWT/Biscuit issuance service for refresh scenarios
+- `benchmarks`: token generation + scenario runner + load generator
+
+### 2.3 Infrastructure
+
+- Docker orchestration for Mosquitto + support services
+- Prometheus + cAdvisor for telemetry
+- `netem` helper for MTU/latency/loss experiments
+
 ---
 
-## What Is Implemented (Current State)
+## 3) What Is Implemented (Current State)
 
-### 1) Mosquitto Rust Plugin (Core)
+### 3.1 Mosquitto Rust Plugin (Core)
 
 - **Authentication**
   - JWT verification and claim validation
@@ -72,25 +88,7 @@ Important architectural note (matches `ARTICLE.MD` terminology):
   policy backend)
 - `mqtt-auth-biscuit/crates/mosquitto-plugin/src/cache.rs` (session cache)
 
-### 2) Docker Orchestration (Reproducible Environment)
-
-- Mosquitto broker container with the compiled plugin mounted
-- Prometheus + cAdvisor for container resource telemetry
-- HTTP authz service (`authz`) used for introspection/latency/failure scenarios
-- `netem` helper container joined to Mosquitto network namespace for tc/MTU
-  shaping
-
-**Key files**:
-
-- `mqtt-auth-biscuit/docker/docker-compose.yml`
-- `mqtt-auth-biscuit/docker/prometheus.yml`
-- `mqtt-auth-biscuit/docker/Dockerfile.mosquitto`
-- `mqtt-auth-biscuit/docker/Dockerfile.authz`
-- `mqtt-auth-biscuit/docker/authz_server.py`
-- `mqtt-auth-biscuit/docker/Dockerfile.netem`
-- `mqtt-auth-biscuit/docker/netem_entrypoint.sh`
-
-### 3) Token Generation (Deterministic, Scenario-Ready)
+### 3.2 Token Generation & Issuance (Deterministic + Online)
 
 `gen-tokens` generates a fixed set of tokens into `benchmarks/tokens.json`:
 
@@ -104,7 +102,7 @@ Important architectural note (matches `ARTICLE.MD` terminology):
 - `mqtt-auth-biscuit/crates/benchmarks/src/main.rs` (crate name: `gen-tokens`)
 - Output: `mqtt-auth-biscuit/benchmarks/tokens.json`
 
-Current limitation:
+**Current limitation**:
 
 - Tokens are still generated **offline** for deterministic baseline runs, while
   the **Token Issuer** service is used for refresh scenarios.
@@ -117,7 +115,7 @@ Current limitation:
   this file via the `biscuit_root_key_file` config option; no remaining hex
   config is needed.
 
-### 4) Benchmark/Scenario Harness
+### 3.3 Benchmark/Scenario Harness
 
 There are two benchmark entrypoints now:
 
@@ -139,9 +137,27 @@ MQTT v5 reauthentication microbenchmark:
   - Raw-socket MQTT5 client that measures CONNECT and subsequent `AUTH` latency
     (reauth)
 
+### 3.4 Docker Orchestration & Observability
+
+- Mosquitto broker container with the compiled plugin mounted
+- Prometheus + cAdvisor for container resource telemetry
+- HTTP authz service (`authz`) used for introspection/latency/failure scenarios
+- `netem` helper container joined to Mosquitto network namespace for tc/MTU
+  shaping
+
+**Key files**:
+
+- `mqtt-auth-biscuit/docker/docker-compose.yml`
+- `mqtt-auth-biscuit/docker/prometheus.yml`
+- `mqtt-auth-biscuit/docker/Dockerfile.mosquitto`
+- `mqtt-auth-biscuit/docker/Dockerfile.authz`
+- `mqtt-auth-biscuit/docker/authz_server.py`
+- `mqtt-auth-biscuit/docker/Dockerfile.netem`
+- `mqtt-auth-biscuit/docker/netem_entrypoint.sh`
+
 ---
 
-## Benchmark Design (Formerly BENCHMARK_PLAN.md)
+## 4) Benchmark Design (Formerly BENCHMARK_PLAN.md)
 
 ### Objectives
 
@@ -191,7 +207,7 @@ MQTT v5 reauthentication microbenchmark:
 
 ---
 
-## Scenario Coverage (Implemented)
+## 5) Scenario Coverage (Implemented)
 
 The harness includes scenarios aligned to the proposal themes:
 
@@ -210,7 +226,7 @@ The harness includes scenarios aligned to the proposal themes:
 
 ---
 
-## Outputs and Artifacts
+## 6) Outputs and Artifacts
 
 ### Scenario runner outputs
 
@@ -227,7 +243,7 @@ Each file contains:
 
 ---
 
-## Validation Status
+## 7) Validation Status
 
 ### Build/syntax
 
@@ -236,7 +252,7 @@ Each file contains:
   - `benchmarks/run_scenarios.py`
   - `benchmarks/mqtt_auth_client.py`
 
-### Important note on “execution vs implementation”
+### Important note on "execution vs implementation"
 
 The harness and scenarios are implemented and wired, but **the project still
 needs an end-to-end execution pass** (run the full scenario suite on the target
@@ -244,31 +260,33 @@ machine and record the first results/known issues).
 
 ---
 
-## Roadmap (Next Steps)
+## 8) Roadmap (Next Steps)
 
-### Phase 6: Data Analysis & Validation
+### Phase 1: Data Analysis & Validation
 
-- [ ] **6.1 Aggregate results**
+- [ ] **1.1 Aggregate results**
   - Collect scenario JSONs and generate a summary table (latency p50/p95/p99,
     throughput, errors, CPU/memory).
-- [ ] **6.2 Validate hypotheses / identify crossover points**
+- [ ] **1.2 Validate hypotheses / identify crossover points**
   - Identify when Biscuit becomes more/less expensive than JWT under:
     - MTU constraints
     - policy complexity (block count)
     - external authz latency/failure
 
-### Phase 7: Optional Enhancements (Only If Needed)
+### Phase 2: Optional Enhancements (Only If Needed)
 
-- [ ] **7.1 Add a single "one-command reproducibility" script**
+- [ ] **2.1 Add a single "one-command reproducibility" script**
   - e.g. `./run_benchmarks.sh` wrapping build, token generation, compose
     up/down, scenario run.
-- [ ] **7.2 Improve reporting quality**
+- [ ] **2.2 Improve reporting quality**
   - Produce a consolidated `summary.json` and optionally CSV for plotting.
-- [ ] **7.3 Make docker-compose invocation robust across environments**
+- [ ] **2.3 Make docker-compose invocation robust across environments**
   - Some systems use `docker compose` instead of `docker-compose`.
   - If this becomes an issue, adapt runner to detect and use the available CLI.
 
-### Phase 8: Issue Resolution
+### Phase 3: Open Issues (Grouped)
+
+#### A) Policy Source Parity
 
 - [ ] **Issue 1: Add Dynamic Security module comparison**
   - Goal: Implement Mosquitto's Dynamic Security module as an authorization
@@ -317,7 +335,7 @@ machine and record the first results/known issues).
     - At least one scenario run captured with static ACL mode enabled
 
 - [ ] **Issue 3: Implement proper JWT access logic (replace demo token-only
-      authz)**
+     authz)**
   - Goal: replace the current heuristic JWT token-only authorization rules with
     a policy model that is comparable to Biscuit rights (e.g., encode
     topic/action grants as structured claims, or route JWT through SQLite/HTTP
@@ -334,60 +352,22 @@ machine and record the first results/known issues).
     - Configurable timeouts and error semantics (what triggers hybrid fallback)
     - Optional support for HTTPS (if required by the environment)
 
-- [ ] **Issue 5: Avoid per-message Biscuit re-verification**
-  - Goal: avoid re-verifying/deserializing the Biscuit token on every
-    authorization check to match JWT behavior (verify once, evaluate policies
-    only).
-  - Current issue: Biscuit verification cryptographically verifies and runs
-    policies during each authorization check, while JWT is only verified once
-    per session.
-  - Deliverable: a documented change (and rerun) showing the impact on
-    authorization latency/CPU.
-
-- [ ] **Issue 6: Implement online attenuation capabilities for MQTT clients**
-  - Goal: enable MQTT clients to perform runtime biscuit attenuation and
-    delegation, moving beyond pre-generated tokens to dynamic rights
-    restriction.
-  - Current limitation: clients can only use pre-attenuated tokens from
-    `gen_tokens.rs`; they cannot create new attenuation blocks or delegate
-    rights at runtime.
-  - Deliverable:
-    - Client library/API for biscuit attenuation (add blocks, restrict rights,
-      delegate)
-    - Integration with MQTT client workflows to support dynamic token
-      modification
-    - Benchmark scenarios that test client-side attenuation performance and
-      behavior
-    - Documentation of attenuation patterns and use cases for IoT deployments
-
-- [ ] **Issue 7: Fix delegation scenario simulation vs actual client
-      delegation**
-  - Goal: replace the simulated delegation in `gen_tokens.rs` with true
-    client-to-client delegation.
-  - Current issue: the "delegation" scenario uses pre-attenuated tokens created
-    by the token generator, not actual master clients attenuating rights for
-    worker clients.
-  - Deliverable:
-    - Real master client implementation that can attenuate and delegate tokens
-      to workers
-    - Worker client logic to receive and use delegated tokens
-    - Updated delegation benchmark scenario with actual client-side delegation
-    - Performance comparison between simulated and real delegation flows
+#### B) Benchmark Fidelity & Tooling
 
 - [ ] **Issue 8.2: Containerized benchmark topology (client-per-container +
-      service separation)**
+     service separation)**
   - Goal: strengthen experimental isolation and fidelity by running benchmark
     clients in containers (optionally one container per client) and ensuring
     each major logical component is separated into the appropriate container(s)
     for the scenario.
   - Rationale: the current load generator runs as a host process with many
     threads/clients, which is acceptable for many comparisons but can introduce
-    host scheduling noise and makes it harder to claim “N independent IoT nodes”
+    host scheduling noise and makes it harder to claim "N independent IoT nodes"
     when discussing external validity.
   - Notes / scope:
     - This should be implemented as an optional benchmark mode (not mandatory
-      for all runs), so results can be compared between “host loadgen” and
-      “containerized clients”.
+      for all runs), so results can be compared between "host loadgen" and
+      "containerized clients".
     - This issue is about benchmark topology only; Token Issuer separation is
       handled by Issue 8, and external authorization PDP separation is already
       modeled by the `authz` container.
@@ -404,31 +384,6 @@ machine and record the first results/known issues).
       and collect client-side outputs deterministically
     - Documentation of the measurement trade-offs between the modes and guidance
       for which scenarios require client-per-container to improve realism
-
-- [ ] **Issue 9: Document and analyze scenario policies**
-  - Goal: create comprehensive documentation of all Biscuit and JWT policies
-    used across test scenarios to ensure fair comparison and research validity.
-  - Current issue: Biscuit uses production-grade Datalog policies while JWT uses
-    demo-like string matching, creating an unfair comparison.
-  - More advanced and intricate policies should be proposed for biscuit, and JWT
-    should be tested as both holding intricate policies and basic role
-    affirmations, of which the PDP will derive permissions at each request
-  - Deliverable:
-    - `SCENARIO_POLICIES.md` documenting all authorization policies per scenario
-    - Analysis of policy complexity and fairness between JWT and Biscuit
-      implementations
-    - Recommendations for policy alignment to ensure valid benchmark comparisons
-    - Mapping of each scenario to its specific policy rules and expected
-      behaviors
-
-- [ ] **Issue 10: Expiry-aware client signaling via MQTT v5 enhanced auth**
-  - Goal: when access fails due to token expiry, make the broker/PEP signal this
-    distinctly from generic policy denial, enabling clients to trigger a token
-    refresh + reauthentication flow.
-  - Deliverable:
-    - Broker-side differentiation between "expired" vs "denied" outcomes
-    - MQTT v5 `AUTH`-based reauthentication flow with explicit reason reporting
-      (reason code / reason string) suitable for automated clients
 
 - [ ] **Issue 13: Add emqtt-bench as container orchestrating load generator**
   - Goal: integrate `emqtt-bench` as an alternative to custom Python
@@ -466,7 +421,7 @@ machine and record the first results/known issues).
     - Ability to detect and report when network constraints affect test validity
 
 - [ ] **Issue 15: Add packet-level analysis with tcpdump for fragmentation
-      studies**
+     studies**
   - Goal: integrate `tcpdump` capture capabilities to analyze TCP fragmentation
     behavior during MTU stress tests.
   - Rationale: ARTICLE.MD specifically mentions fragmentation analysis, and
@@ -480,7 +435,7 @@ machine and record the first results/known issues).
     - Correlation of fragmentation data with latency/throughput metrics
 
 - [ ] **Issue 16: Add host-targeted kernel-level performance profiling with
-      perf**
+     perf**
   - Goal: integrate `perf` for detailed CPU performance analysis of
     containerized Mosquitto process during token verification and policy
     evaluation.
@@ -501,7 +456,7 @@ machine and record the first results/known issues).
     - Documentation of profiling methodology for reproducibility
 
 - [ ] **Issue 17: Implement comprehensive QoS configuration and mixing
-      features**
+     features**
   - Goal: Add support for different QoS levels (0, 1, 2) and mixed QoS workloads
     to enable comprehensive performance analysis across quality of service
     levels.
@@ -525,10 +480,38 @@ machine and record the first results/known issues).
     - At least one scenario run captured for each QoS level and mixed
       configurations
 
+#### C) Biscuit/JWT Fairness & Policy Complexity
+
+- [ ] **Issue 5: Avoid per-message Biscuit re-verification**
+  - Goal: avoid re-verifying/deserializing the Biscuit token on every
+    authorization check to match JWT behavior (verify once, evaluate policies
+    only).
+  - Current issue: Biscuit verification cryptographically verifies and runs
+    policies during each authorization check, while JWT is only verified once
+    per session.
+  - Deliverable: a documented change (and rerun) showing the impact on
+    authorization latency/CPU.
+
+- [ ] **Issue 9: Document and analyze scenario policies**
+  - Goal: create comprehensive documentation of all Biscuit and JWT policies
+    used across test scenarios to ensure fair comparison and research validity.
+  - Current issue: Biscuit uses production-grade Datalog policies while JWT uses
+    demo-like string matching, creating an unfair comparison.
+  - More advanced and intricate policies should be proposed for biscuit, and JWT
+    should be tested as both holding intricate policies and basic role
+    affirmations, of which the PDP will derive permissions at each request
+  - Deliverable:
+    - `SCENARIO_POLICIES.md` documenting all authorization policies per scenario
+    - Analysis of policy complexity and fairness between JWT and Biscuit
+      implementations
+    - Recommendations for policy alignment to ensure valid benchmark comparisons
+    - Mapping of each scenario to its specific policy rules and expected
+      behaviors
+
 - [ ] **Issue 18: Avoid Base64 encoding for Biscuit tokens (use native bytes /
-      Protobuf wire format)**
+     Protobuf wire format)**
   - Goal: Stop wrapping Biscuit tokens in Base64 for transport where possible,
-    using the token’s native binary serialization.
+    using the token's native binary serialization.
   - Investigation note: confirm whether `biscuit-auth` serialization
     (`Biscuit::to_vec`) is already Protobuf-encoded on the wire (expected), and
     whether Base64 is currently only a _transport_ layer artifact.
@@ -550,8 +533,85 @@ machine and record the first results/known issues).
     - Add at least one scenario that exercises the binary transport path for
       Biscuit (and documents parity constraints vs JWT)
 
+- [ ] **Issue 21: Strengthen Biscuit authorizer template complexity**
+  - Goal: Expand the Biscuit authorizer template beyond the minimal
+    `right(op,res)` match to represent more realistic policy complexity (while
+    preserving request-context injection and Biscuit scoping constraints).
+  - Rationale: current template is too "thin" and may under-represent the
+    cost/benefit of Biscuit's Datalog evaluation compared to intended research
+    scenarios.
+  - Deliverable:
+    - Add configurable authorizer "profiles" (e.g., `simple`, `rbac`,
+      `contextual`) or a template file option
+    - Include policies with:
+      - role membership / derived permissions
+      - topic prefix/wildcard patterns
+      - time-based constraints using authorizer-provided `time(...)`
+    - Add at least one scenario that measures increasing authorizer complexity
+      at constant token size
+
+- [ ] **Issue 22: Strengthen `seed_demo_rules` (RBAC), make it optional, and add
+     runtime policy churn scenarios**
+  - Goal: Turn SQLite demo seeding into a realistic RBAC policy set, allow it to
+    be turned off, and add scenarios where policies change periodically at
+    runtime.
+  - Current issue: seeding is unconditional when `PolicyMode::Sqlite` is used,
+    and policies are too simple for RBAC fairness studies.
+  - Deliverable:
+    - Add a configuration flag to enable/disable demo seeding (e.g.,
+      `sqlite_seed_demo_rules=true|false`)
+    - Extend SQLite schema and seeding to include RBAC-like structure
+      (users/roles/role_acls), plus more realistic topic/action grants
+    - Add a benchmark scenario where SQLite rules are updated deterministically
+      during the run (e.g., every N seconds), to simulate dynamic policy updates
+    - Ensure scenarios document when policy churn is enabled and how it affects
+      cache validity
+
+#### D) Client-Side Attenuation & Delegation
+
+- [ ] **Issue 6: Implement online attenuation capabilities for MQTT clients**
+  - Goal: enable MQTT clients to perform runtime biscuit attenuation and
+    delegation, moving beyond pre-generated tokens to dynamic rights
+    restriction.
+  - Current limitation: clients can only use pre-attenuated tokens from
+    `gen_tokens.rs`; they cannot create new attenuation blocks or delegate
+    rights at runtime.
+  - Deliverable:
+    - Client library/API for biscuit attenuation (add blocks, restrict rights,
+      delegate)
+    - Integration with MQTT client workflows to support dynamic token
+      modification
+    - Benchmark scenarios that test client-side attenuation performance and
+      behavior
+    - Documentation of attenuation patterns and use cases for IoT deployments
+
+- [ ] **Issue 7: Fix delegation scenario simulation vs actual client
+     delegation**
+  - Goal: replace the simulated delegation in `gen_tokens.rs` with true
+    client-to-client delegation.
+  - Current issue: the "delegation" scenario uses pre-attenuated tokens created
+    by the token generator, not actual master clients attenuating rights for
+    worker clients.
+  - Deliverable:
+    - Real master client implementation that can attenuate and delegate tokens
+      to workers
+    - Worker client logic to receive and use delegated tokens
+    - Updated delegation benchmark scenario with actual client-side delegation
+    - Performance comparison between simulated and real delegation flows
+
+#### E) Correctness & Semantics
+
+- [ ] **Issue 10: Expiry-aware client signaling via MQTT v5 enhanced auth**
+  - Goal: when access fails due to token expiry, make the broker/PEP signal this
+    distinctly from generic policy denial, enabling clients to trigger a token
+    refresh + reauthentication flow.
+  - Deliverable:
+    - Broker-side differentiation between "expired" vs "denied" outcomes
+    - MQTT v5 `AUTH`-based reauthentication flow with explicit reason reporting
+      (reason code / reason string) suitable for automated clients
+
 - [ ] **Issue 19: Implement/validate `MOSQ_EVT_MESSAGE` fan-out per subscriber
-      authorization**
+     authorization**
   - Goal: Ensure outbound message authorization is evaluated _per subscriber
     delivery_ and is not accidentally reduced to a publish-only check.
   - Current gap: the project wires `MOSQ_EVT_MESSAGE`, but does not explicitly
@@ -580,40 +640,6 @@ machine and record the first results/known issues).
       - subscribe-deny enforcement on outbound delivery (MESSAGE)
       - control-topic enforcement behavior (CONTROL)
 
-- [ ] **Issue 21: Strengthen Biscuit authorizer template complexity**
-  - Goal: Expand the Biscuit authorizer template beyond the minimal
-    `right(op,res)` match to represent more realistic policy complexity (while
-    preserving request-context injection and Biscuit scoping constraints).
-  - Rationale: current template is too “thin” and may under-represent the
-    cost/benefit of Biscuit’s Datalog evaluation compared to intended research
-    scenarios.
-  - Deliverable:
-    - Add configurable authorizer “profiles” (e.g., `simple`, `rbac`,
-      `contextual`) or a template file option
-    - Include policies with:
-      - role membership / derived permissions
-      - topic prefix/wildcard patterns
-      - time-based constraints using authorizer-provided `time(...)`
-    - Add at least one scenario that measures increasing authorizer complexity
-      at constant token size
-
-- [ ] **Issue 22: Strengthen `seed_demo_rules` (RBAC), make it optional, and add
-      runtime policy churn scenarios**
-  - Goal: Turn SQLite demo seeding into a realistic RBAC policy set, allow it to
-    be turned off, and add scenarios where policies change periodically at
-    runtime.
-  - Current issue: seeding is unconditional when `PolicyMode::Sqlite` is used,
-    and policies are too simple for RBAC fairness studies.
-  - Deliverable:
-    - Add a configuration flag to enable/disable demo seeding (e.g.,
-      `sqlite_seed_demo_rules=true|false`)
-    - Extend SQLite schema and seeding to include RBAC-like structure
-      (users/roles/role_acls), plus more realistic topic/action grants
-    - Add a benchmark scenario where SQLite rules are updated deterministically
-      during the run (e.g., every N seconds), to simulate dynamic policy updates
-    - Ensure scenarios document when policy churn is enabled and how it affects
-      cache validity
-
 - [ ] **Issue 23: Implement real LRU eviction in `SessionCache`**
   - Goal: Enforce cache capacity with true LRU eviction (not just TTL + recency
     tracking).
@@ -626,7 +652,7 @@ machine and record the first results/known issues).
       deterministically
 
 - [ ] **Issue 24: Decide whether multi-step `MOSQ_EVT_EXT_AUTH_CONTINUE` is in
-      research scope**
+     research scope**
   - Goal: Determine whether implementing true multi-step enhanced authentication
     (state machine across multiple AUTH packets) is required for the paper's
     hypotheses, or whether the single-step "token refresh" model is sufficient.
@@ -642,7 +668,30 @@ machine and record the first results/known issues).
       - Implement multi-step auth state handling (per client/session) and add at
         least one scenario measuring multi-step overhead
 
-- [x] **Issue 25: Add configurable parity scenarios and token size alignment**
+---
+
+## 9) Completed Issues (Backlog)
+
+- [x] **Issue 8: Implement a long-running Token Issuer service (JWT + Biscuit)**
+  - Summary: Complete token issuer service with HTTP endpoints for JWT/Biscuit
+    issuance, proper security separation, Docker integration, and token refresh
+    support in benchmark scenarios.
+
+- [x] **Issue 8.1: Implement comprehensive TLS support for all network
+     communications**
+  - Summary: TLS support implemented for all external network paths (MQTT, Token
+    Issuer, Authz PDP, Prometheus/cAdvisor UIs). Internal Prometheus-cAdvisor
+    scraping remains HTTP-only as TLS would provide minimal security benefit for
+    internal Docker network traffic.
+
+- [x] **Issue 11: MIRI verification for FFI memory safety**
+  - Summary: MIRI CI + tests cover FFI pointer safety and lifecycle invariants.
+
+- [x] **Issue 12: Kani verification for critical FFI functions**
+  - Summary: Kani proofs for init/cleanup + all callbacks (null safety,
+    lifetimes).
+
+- [-] **Issue 25: Add configurable parity scenarios and token size alignment (half implemented)**
   - Goal: Implement configurable scenario flags to ensure fair JWT vs Biscuit
     comparisons by controlling token size, claim structure, and encoding parity.
   - Current gaps identified in code review:
@@ -671,28 +720,7 @@ machine and record the first results/known issues).
 
 ---
 
-## Issue Backlog (Completed)
-
-- [x] **Issue 8: Implement a long-running Token Issuer service (JWT + Biscuit)**
-  - Summary: Complete token issuer service with HTTP endpoints for JWT/Biscuit
-    issuance, proper security separation, Docker integration, and token refresh
-    support in benchmark scenarios.
-
-- [x] **Issue 8.1: Implement comprehensive TLS support for all network
-      communications**
-  - Summary: TLS support implemented for all external network paths (MQTT, Token
-    Issuer, Authz PDP, Prometheus/cAdvisor UIs). Internal Prometheus-cAdvisor
-    scraping remains HTTP-only as TLS would provide minimal security benefit for
-    internal Docker network traffic.
-
-- [x] **Issue 11: MIRI verification for FFI memory safety**
-  - Summary: MIRI CI + tests cover FFI pointer safety and lifecycle invariants.
-
-- [x] **Issue 12: Kani verification for critical FFI functions**
-  - Summary: Kani proofs for init/cleanup + all callbacks (null safety,
-    lifetimes).
-
-## Known Risks / Things to Watch
+## 10) Known Risks / Things to Watch
 
 - **Docker permissions**: `tc netem` requires `CAP_NET_ADMIN` (already
   configured in compose).
@@ -701,7 +729,9 @@ machine and record the first results/known issues).
 - **HTTP fallback semantics**: hybrid mode relies on HTTP failures being treated
   as errors (non-200 => error) to trigger fallback.
 
-## Dependency Optimization Note
+---
+
+## 11) Dependency Optimization Note
 
 Optimize dependency features in `Cargo.toml` by disabling unused default
 features to ensure accurate performance measurements. This should be done
@@ -712,7 +742,9 @@ features to ensure accurate performance measurements. This should be done
 - Ensure fair JWT vs Biscuit comparison with optimal configurations
 - Document any features needed for specific benchmark scenarios
 
-## Research Footnotes
+---
+
+## 12) Research Footnotes
 
 ### Why `netem` runs in a separate container with `network_mode: service:mosquitto`
 
@@ -723,7 +755,7 @@ features to ensure accurate performance measurements. This should be done
   scripts). Impairments are toggled via environment variables without rebuilding
   the broker.
 - **Precise targeting**: `network_mode: service:mosquitto` ensures `tc qdisc`
-  commands affect the broker’s interfaces directly, not a dummy NIC.
+  commands affect the broker's interfaces directly, not a dummy NIC.
 
 ### Why `cadvisor` is separate from Prometheus
 
@@ -731,7 +763,7 @@ features to ensure accurate performance measurements. This should be done
   the other remains available.
 - **Security boundary**: cAdvisor requires sensitive host mounts (`/sys`,
   `/var/lib/docker`); Prometheus does not. Combining them expands the
-  container’s attack surface unnecessarily.
+  container's attack surface unnecessarily.
 - **Clarity and reproducibility**: Explicit services make the measurement
   pipeline easier to reason about and match common deployment patterns.
 - **Operational simplicity**: Both tools are maintained as upstream images;
@@ -741,7 +773,7 @@ features to ensure accurate performance measurements. This should be done
 
 **Context**: The research design requires measuring broker-side token
 verification latency during MQTT v5 enhanced authentication flows, specifically
-re-authentication via `AUTH` packets (reason code `0x19`) for token renewal
+reauthentication via `AUTH` packets (reason code `0x19`) for token renewal
 without disconnection.
 
 **Implementation Decision**: Paho Python does not provide a straightforward
@@ -767,8 +799,8 @@ MQTT5 client that:
   measurements by eliminating Paho's internal state management overhead,
   actually **strengthening** the isolation of broker-side processing costs.
 - **No hypothesis compromise**: The hypothesis focus on broker-side functional
-  viability, cryptographic verification costs, and policy evaluation latency—all
-  measured server-side and unaffected by client implementation details.
+  viability, cryptographic verification costs, and policy evaluation latency
+  are measured server-side and unaffected by client implementation details.
 
 ### JWT Algorithm and Cryptographic Backend Choices
 

@@ -3,6 +3,7 @@ import json
 import os
 import ssl
 import subprocess
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -250,6 +251,9 @@ def main():
     p.add_argument("--tls", action="store_true", help="Enable TLS for all supported services")
     p.add_argument("--tls-insecure", action="store_true", help="Disable TLS certificate verification")
     p.add_argument("--tls-ca-file", help="CA bundle path for TLS verification")
+    p.add_argument("--summary-json", default="summary.json", help="Summary JSON filename (relative to --out)")
+    p.add_argument("--summary-csv", default="summary.csv", help="Summary CSV filename (relative to --out)")
+    p.add_argument("--no-summary-csv", action="store_true", help="Disable CSV summary output")
     args = p.parse_args()
 
     tokens = _read_tokens(os.path.join(os.path.dirname(os.path.dirname(__file__)), args.tokens))
@@ -608,6 +612,30 @@ def main():
 
         path = _write_result(args.out, s["id"], out_payload)
         print(f"wrote {path}")
+
+    summary_json = args.summary_json
+    if not os.path.isabs(summary_json):
+        summary_json = os.path.join(args.out, summary_json)
+    summary_csv = args.summary_csv
+    if not os.path.isabs(summary_csv):
+        summary_csv = os.path.join(args.out, summary_csv)
+
+    agg_cmd = [
+        "python3",
+        "benchmarks/aggregate_results.py",
+        "--input",
+        args.out,
+        "--out-json",
+        summary_json,
+    ]
+    if args.no_summary_csv:
+        agg_cmd.append("--no-csv")
+    else:
+        agg_cmd.extend(["--out-csv", summary_csv])
+    try:
+        subprocess.check_call(agg_cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
+    except subprocess.CalledProcessError as exc:
+        print(f"warning: aggregation failed ({exc}); scenario results preserved", file=sys.stderr)
 
 
 if __name__ == "__main__":

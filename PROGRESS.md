@@ -260,31 +260,7 @@ machine and record the first results/known issues).
 
 ---
 
-## 8) Roadmap (Next Steps)
-
-### Phase 1: Data Analysis & Validation
-
-- [ ] **1.1 Aggregate results**
-  - Collect scenario JSONs and generate a summary table (latency p50/p95/p99,
-    throughput, errors, CPU/memory).
-- [ ] **1.2 Validate hypotheses / identify crossover points**
-  - Identify when Biscuit becomes more/less expensive than JWT under:
-    - MTU constraints
-    - policy complexity (block count)
-    - external authz latency/failure
-
-### Phase 2: Optional Enhancements (Only If Needed)
-
-- [ ] **2.1 Add a single "one-command reproducibility" script**
-  - e.g. `./run_benchmarks.sh` wrapping build, token generation, compose
-    up/down, scenario run.
-- [ ] **2.2 Improve reporting quality**
-  - Produce a consolidated `summary.json` and optionally CSV for plotting.
-- [ ] **2.3 Make docker-compose invocation robust across environments**
-  - Some systems use `docker compose` instead of `docker-compose`.
-  - If this becomes an issue, adapt runner to detect and use the available CLI.
-
-### Phase 3: Open Issues (Grouped)
+### 8) Open Issues (Next Steps, Grouped)
 
 #### A) Policy Source Parity
 
@@ -720,7 +696,20 @@ machine and record the first results/known issues).
 
 ---
 
-## 10) Known Risks / Things to Watch
+### 10) Last Phase: Data Analysis & Validation
+
+- [ ] **Aggregate results**
+  - Collect scenario JSONs and generate a summary table (latency p50/p95/p99,
+    throughput, errors, CPU/memory).
+- [ ] **Validate hypotheses / identify crossover points**
+  - Identify when Biscuit becomes more/less expensive than JWT under:
+    - MTU constraints
+    - policy complexity (block count)
+    - external authz latency/failure
+
+---
+
+## 11) Known Risks / Things to Watch
 
 - **Docker permissions**: `tc netem` requires `CAP_NET_ADMIN` (already
   configured in compose).
@@ -731,7 +720,7 @@ machine and record the first results/known issues).
 
 ---
 
-## 11) Dependency Optimization Note
+## 12) Dependency Optimization Note
 
 Optimize dependency features in `Cargo.toml` by disabling unused default
 features to ensure accurate performance measurements. This should be done
@@ -744,7 +733,7 @@ features to ensure accurate performance measurements. This should be done
 
 ---
 
-## 12) Research Footnotes
+## 13) Research Footnotes
 
 ### Why `netem` runs in a separate container with `network_mode: service:mosquitto`
 

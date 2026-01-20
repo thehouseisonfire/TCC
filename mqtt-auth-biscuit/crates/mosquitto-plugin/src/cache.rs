@@ -17,6 +17,7 @@ pub struct CacheValue<V> {
 pub struct SessionCache<K, V> {
     cache: DashMap<K, CacheValue<V>>,
     lru: Mutex<LruCache<K, ()>>,
+    capacity: usize,
 }
 
 #[cfg(not(kani))]
@@ -25,9 +26,11 @@ where
     K: std::hash::Hash + Eq + Clone,
 {
     pub fn new(capacity: usize) -> Self {
+        let capacity = if capacity == 0 { 1 } else { capacity };
         Self {
             cache: DashMap::new(),
             lru: Mutex::new(LruCache::new(nonzero_capacity(capacity))),
+            capacity,
         }
     }
 
@@ -39,8 +42,13 @@ where
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if lru.put(key, ()).is_some() {
-            // Already in LRU, just updated
+        lru.put(key, ());
+        while lru.len() > self.capacity {
+            if let Some((evicted_key, _)) = lru.pop_lru() {
+                self.cache.remove(&evicted_key);
+            } else {
+                break;
+            }
         }
     }
 
@@ -79,6 +87,7 @@ where
         Self {
             cache: DashMap::new(),
             lru: Mutex::new(LruCache::new(NonZeroUsize::new(1).unwrap())),
+            capacity: 1,
         }
     }
 
@@ -89,5 +98,27 @@ where
         V: Clone,
     {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SessionCache;
+    use std::time::Duration;
+
+    #[test]
+    fn evicts_least_recently_used_entry() {
+        let cache = SessionCache::new(2);
+
+        cache.insert("a".to_string(), 1, Duration::from_secs(60));
+        cache.insert("b".to_string(), 2, Duration::from_secs(60));
+
+        assert_eq!(cache.get(&"a".to_string()), Some(1));
+
+        cache.insert("c".to_string(), 3, Duration::from_secs(60));
+
+        assert_eq!(cache.get(&"b".to_string()), None);
+        assert_eq!(cache.get(&"a".to_string()), Some(1));
+        assert_eq!(cache.get(&"c".to_string()), Some(3));
     }
 }

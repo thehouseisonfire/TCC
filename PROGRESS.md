@@ -616,17 +616,6 @@ machine and record the first results/known issues).
       - subscribe-deny enforcement on outbound delivery (MESSAGE)
       - control-topic enforcement behavior (CONTROL)
 
-- [ ] **Issue 23: Implement real LRU eviction in `SessionCache`**
-  - Goal: Enforce cache capacity with true LRU eviction (not just TTL + recency
-    tracking).
-  - Current issue: `SessionCache` tracks LRU access but does not evict when
-    capacity is exceeded.
-  - Deliverable:
-    - On insert, if capacity exceeded, evict least-recently-used key from both
-      LRU and backing map
-    - Add a minimal test/verification to confirm eviction behavior
-      deterministically
-
 - [ ] **Issue 24: Decide whether multi-step `MOSQ_EVT_EXT_AUTH_CONTINUE` is in
      research scope**
   - Goal: Determine whether implementing true multi-step enhanced authentication
@@ -666,6 +655,9 @@ machine and record the first results/known issues).
 - [x] **Issue 12: Kani verification for critical FFI functions**
   - Summary: Kani proofs for init/cleanup + all callbacks (null safety,
     lifetimes).
+
+- [x] **Issue 23: Implement real LRU eviction in `SessionCache`**
+  - Summary: Enforced cache capacity with true LRU eviction, added capacity tracking, edge case handling, and comprehensive unit tests.
 
 - [-] **Issue 25: Add configurable parity scenarios and token size alignment (half implemented)**
   - Goal: Implement configurable scenario flags to ensure fair JWT vs Biscuit

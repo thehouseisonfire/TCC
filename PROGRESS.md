@@ -260,7 +260,7 @@ machine and record the first results/known issues).
 
 ---
 
-### 8) Open Issues (Next Steps, Grouped)
+## 8) Open Issues (Next Steps, Grouped)
 
 #### A) Policy Source Parity
 

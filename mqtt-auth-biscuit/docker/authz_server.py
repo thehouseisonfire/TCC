@@ -124,7 +124,9 @@ def main() -> None:
     httpd = HTTPServer((host, port), Handler)
     if tls_enabled:
         if not tls_cert or not tls_key:
-            raise SystemExit("AUTHZ_TLS_CERT and AUTHZ_TLS_KEY must be set when AUTHZ_TLS=1")
+            raise SystemExit(
+                "AUTHZ_TLS_CERT and AUTHZ_TLS_KEY must be set when AUTHZ_TLS=1"
+            )
         ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
         ctx.load_cert_chain(certfile=tls_cert, keyfile=tls_key)
         httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)

@@ -178,7 +178,11 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
         client.loop_start()
 
         t_deadline = time.time() + 10
-        while not userdata["connected"] and userdata["connect_reason"] is None and time.time() < t_deadline:
+        while (
+            not userdata["connected"]
+            and userdata["connect_reason"] is None
+            and time.time() < t_deadline
+        ):
             time.sleep(0.01)
 
         if not userdata["connected"]:
@@ -210,10 +214,18 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
 
         if token_refreshed:
             errors.append(err)
-            out_q.put(WorkerResult(cfg.client_id, None, [], token_refresh_ms, token_refresh_len, errors))
+            out_q.put(
+                WorkerResult(
+                    cfg.client_id, None, [], token_refresh_ms, token_refresh_len, errors
+                )
+            )
             return
 
-        if cfg.token_issuer_url and cfg.token_issuer_kind and reason in cfg.token_refresh_codes:
+        if (
+            cfg.token_issuer_url
+            and cfg.token_issuer_kind
+            and reason in cfg.token_refresh_codes
+        ):
             try:
                 t_refresh_start = time.perf_counter()
                 password = _fetch_token(
@@ -232,16 +244,33 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                 continue
             except Exception as e:
                 errors.append(f"token_refresh_failed:{e}")
-                out_q.put(WorkerResult(cfg.client_id, None, [], token_refresh_ms, token_refresh_len, errors))
+                out_q.put(
+                    WorkerResult(
+                        cfg.client_id,
+                        None,
+                        [],
+                        token_refresh_ms,
+                        token_refresh_len,
+                        errors,
+                    )
+                )
                 return
 
         errors.append(err)
-        out_q.put(WorkerResult(cfg.client_id, None, [], token_refresh_ms, token_refresh_len, errors))
+        out_q.put(
+            WorkerResult(
+                cfg.client_id, None, [], token_refresh_ms, token_refresh_len, errors
+            )
+        )
         return
 
     if userdata is None:
         errors.append("connect_failed")
-        out_q.put(WorkerResult(cfg.client_id, None, [], token_refresh_ms, token_refresh_len, errors))
+        out_q.put(
+            WorkerResult(
+                cfg.client_id, None, [], token_refresh_ms, token_refresh_len, errors
+            )
+        )
         return
 
     connect_ms = (userdata["connect_done"] - userdata["connect_start"]) * 1000.0
@@ -278,7 +307,16 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
     except Exception:
         pass
 
-    out_q.put(WorkerResult(cfg.client_id, connect_ms, publish_ms, token_refresh_ms, token_refresh_len, errors))
+    out_q.put(
+        WorkerResult(
+            cfg.client_id,
+            connect_ms,
+            publish_ms,
+            token_refresh_ms,
+            token_refresh_len,
+            errors,
+        )
+    )
 
 
 def run_load(
@@ -308,7 +346,7 @@ def run_load(
     threads: list[threading.Thread] = []
 
     for i in range(clients):
-        client_id = f"client_{i+1}"
+        client_id = f"client_{i + 1}"
         topic = topic_template.format(client_id=client_id)
         cfg = WorkerConfig(
             host=host,
@@ -331,7 +369,9 @@ def run_load(
             tls_ca_file=tls_ca_file,
             tls_insecure=tls_insecure,
         )
-        t = threading.Thread(target=_run_worker, args=(cfg, start_evt, out_q), daemon=True)
+        t = threading.Thread(
+            target=_run_worker, args=(cfg, start_evt, out_q), daemon=True
+        )
         threads.append(t)
 
     for t in threads:
@@ -352,8 +392,12 @@ def run_load(
 
     connect_lat = [r.connect_ms for r in results if r.connect_ms is not None]
     publish_lat = [x for r in results for x in r.publish_ms]
-    refresh_lat = [r.token_refresh_ms for r in results if r.token_refresh_ms is not None]
-    refresh_len = [r.token_refresh_len for r in results if r.token_refresh_len is not None]
+    refresh_lat = [
+        r.token_refresh_ms for r in results if r.token_refresh_ms is not None
+    ]
+    refresh_len = [
+        r.token_refresh_len for r in results if r.token_refresh_len is not None
+    ]
 
     errors = [e for r in results for e in r.errors]
 
@@ -390,15 +434,27 @@ def main():
     p.add_argument("--port", type=int, default=int(os.environ.get("MQTT_PORT", "1883")))
     p.add_argument("--username", default=os.environ.get("MQTT_USERNAME", "jwt"))
     p.add_argument("--password", default=os.environ.get("MQTT_PASSWORD", ""))
-    p.add_argument("--topic", default=os.environ.get("MQTT_TOPIC", "sensors/{client_id}/temp"))
-    p.add_argument("--clients", type=int, default=int(os.environ.get("MQTT_CLIENTS", "10")))
-    p.add_argument("--messages", type=int, default=int(os.environ.get("MQTT_MESSAGES", "50")))
+    p.add_argument(
+        "--topic", default=os.environ.get("MQTT_TOPIC", "sensors/{client_id}/temp")
+    )
+    p.add_argument(
+        "--clients", type=int, default=int(os.environ.get("MQTT_CLIENTS", "10"))
+    )
+    p.add_argument(
+        "--messages", type=int, default=int(os.environ.get("MQTT_MESSAGES", "50"))
+    )
     p.add_argument("--qos", type=int, default=int(os.environ.get("MQTT_QOS", "1")))
-    p.add_argument("--message-size", type=int, default=int(os.environ.get("MQTT_MESSAGE_SIZE", "0")))
+    p.add_argument(
+        "--message-size",
+        type=int,
+        default=int(os.environ.get("MQTT_MESSAGE_SIZE", "0")),
+    )
     p.add_argument("--sync-connect", action="store_true")
     p.add_argument("--token-issuer-url", default=os.environ.get("TOKEN_ISSUER_URL"))
     p.add_argument("--token-issuer-kind", default=os.environ.get("TOKEN_ISSUER_KIND"))
-    p.add_argument("--token-issuer-ttl", type=int, default=os.environ.get("TOKEN_ISSUER_TTL"))
+    p.add_argument(
+        "--token-issuer-ttl", type=int, default=os.environ.get("TOKEN_ISSUER_TTL")
+    )
     p.add_argument("--token-issuer-no-default-roles", action="store_true")
     p.add_argument(
         "--token-refresh-codes",

@@ -296,7 +296,11 @@ def _write_csv(summary, path):
 
 def main():
     p = argparse.ArgumentParser(description="Aggregate scenario JSON results.")
-    p.add_argument("--input", default="benchmarks/results", help="Directory with scenario JSON files")
+    p.add_argument(
+        "--input",
+        default="benchmarks/results",
+        help="Directory with scenario JSON files",
+    )
     p.add_argument("--out-json", default="summary.json", help="Summary JSON filename")
     p.add_argument("--out-csv", default="summary.csv", help="Summary CSV filename")
     p.add_argument("--no-csv", action="store_true")

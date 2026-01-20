@@ -84,7 +84,9 @@ def _props_auth(method: str, data: bytes) -> bytes:
     return _enc_varint(len(props)) + props
 
 
-def _build_connect(client_id: str, auth_method: str, auth_data: bytes, keepalive: int = 60) -> bytes:
+def _build_connect(
+    client_id: str, auth_method: str, auth_data: bytes, keepalive: int = 60
+) -> bytes:
     vh = bytearray()
     vh += _enc_utf8("MQTT")
     vh.append(5)
@@ -141,7 +143,9 @@ def main():
 
     t0 = time.perf_counter()
     sock.connect((args.host, args.port))
-    sock.sendall(_build_connect(args.client_id, args.auth_method, args.token1.encode("utf-8")))
+    sock.sendall(
+        _build_connect(args.client_id, args.auth_method, args.token1.encode("utf-8"))
+    )
 
     pkt_type, payload = _recv_packet(sock)
     t1 = time.perf_counter()

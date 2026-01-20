@@ -18,7 +18,11 @@ def _compose_bin():
     return os.environ.get("DOCKER_COMPOSE_BIN", "docker compose")
 
 
-def _compose(args: list[str], extra_env: dict | None = None, compose_files: list[str] | None = None):
+def _compose(
+    args: list[str],
+    extra_env: dict | None = None,
+    compose_files: list[str] | None = None,
+):
     env = os.environ.copy()
     if extra_env:
         env.update(extra_env)
@@ -72,17 +76,24 @@ def _authz_config(
 CURRENT_DOCKER_COMPOSE_CPU_QUERY = 'sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service="mosquitto"}[30s]))'
 CURRENT_DOCKER_COMPOSE_MEM_QUERY = 'max(container_memory_working_set_bytes{container_label_com_docker_compose_service="mosquitto"})'
 
+
 def _prom_query(base_url: str, query: str, ca_file: str | None, insecure: bool):
-    url = base_url.rstrip("/") + "/api/v1/query?query=" + urllib.parse.quote(query, safe="")
+    url = (
+        base_url.rstrip("/")
+        + "/api/v1/query?query="
+        + urllib.parse.quote(query, safe="")
+    )
     ctx = _ssl_context(ca_file, insecure)
     with urllib.request.urlopen(url, timeout=5, context=ctx) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
-def _resource_snapshot(base_url: str, ca_file: str | None, insecure: bool, cpu_query_type: str = "instant"):
+def _resource_snapshot(
+    base_url: str, ca_file: str | None, insecure: bool, cpu_query_type: str = "instant"
+):
     """
     Capture resource snapshot from Prometheus.
-    
+
     Args:
         base_url: Prometheus base URL
         ca_file: TLS CA file path
@@ -90,27 +101,30 @@ def _resource_snapshot(base_url: str, ca_file: str | None, insecure: bool, cpu_q
         cpu_query_type: "instant" for immediate values, "rate" for rate over time
     """
     import subprocess
+
     # Get mosquitto container ID dynamically
     try:
         result = subprocess.run(
             ["docker", "inspect", "docker-mosquitto-1", "--format", "{{.Id}}"],
             capture_output=True,
             text=True,
-            check=True
+            check=True,
         )
-        container_id = result.stdout.strip()[:12]  # Use first 12 chars for regex matching (Docker ID prefix convention)
+        container_id = result.stdout.strip()[
+            :12
+        ]  # Use first 12 chars for regex matching (Docker ID prefix convention)
     except Exception:
         # Fallback: try to find container by name in metrics
         container_id = "mosquitto"
-    
+
     # Use container ID-based queries instead of Docker Compose labels
     if cpu_query_type == "rate":
         cpu_q = f'sum(rate(container_cpu_usage_seconds_total{{id=~".*{container_id}.*"}}[30s]))'
     else:  # instant (default)
         cpu_q = f'container_cpu_usage_seconds_total{{id=~".*{container_id}.*"}}'
-    
+
     mem_q = f'max(container_memory_working_set_bytes{{id=~".*{container_id}.*"}})'
-    
+
     snap = {
         "prometheus": {
             "cpu": _prom_query(base_url, cpu_q, ca_file, insecure),
@@ -247,23 +261,51 @@ def main():
     p.add_argument("--scenarios", help="Comma-separated list of scenario IDs to run")
     p.add_argument("--token-issuer-no-default-roles", action="store_true")
     p.add_argument("--biscuit-base64url", action="store_true")
-    p.add_argument("--token-refresh-codes", default=os.environ.get("TOKEN_REFRESH_CODES"))
-    p.add_argument("--tls", action="store_true", help="Enable TLS for all supported services")
-    p.add_argument("--tls-insecure", action="store_true", help="Disable TLS certificate verification")
+    p.add_argument(
+        "--token-refresh-codes", default=os.environ.get("TOKEN_REFRESH_CODES")
+    )
+    p.add_argument(
+        "--tls", action="store_true", help="Enable TLS for all supported services"
+    )
+    p.add_argument(
+        "--tls-insecure",
+        action="store_true",
+        help="Disable TLS certificate verification",
+    )
     p.add_argument("--tls-ca-file", help="CA bundle path for TLS verification")
-    p.add_argument("--summary-json", default="summary.json", help="Summary JSON filename (relative to --out)")
-    p.add_argument("--summary-csv", default="summary.csv", help="Summary CSV filename (relative to --out)")
-    p.add_argument("--no-summary-csv", action="store_true", help="Disable CSV summary output")
+    p.add_argument(
+        "--summary-json",
+        default="summary.json",
+        help="Summary JSON filename (relative to --out)",
+    )
+    p.add_argument(
+        "--summary-csv",
+        default="summary.csv",
+        help="Summary CSV filename (relative to --out)",
+    )
+    p.add_argument(
+        "--no-summary-csv", action="store_true", help="Disable CSV summary output"
+    )
     args = p.parse_args()
 
-    tokens = _read_tokens(os.path.join(os.path.dirname(os.path.dirname(__file__)), args.tokens))
+    tokens = _read_tokens(
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), args.tokens)
+    )
 
     scenarios = []
     tls_enabled = args.tls
     tls_insecure = args.tls_insecure
     tls_ca = args.tls_ca_file or ("docker/tls/ca.pem" if tls_enabled else None)
-    if tls_enabled and tls_ca and not os.path.exists(os.path.join(os.path.dirname(os.path.dirname(__file__)), tls_ca)):
-        raise SystemExit(f"TLS enabled but CA file not found at {tls_ca}. Run docker/tls/generate_certs.sh")
+    if (
+        tls_enabled
+        and tls_ca
+        and not os.path.exists(
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), tls_ca)
+        )
+    ):
+        raise SystemExit(
+            f"TLS enabled but CA file not found at {tls_ca}. Run docker/tls/generate_certs.sh"
+        )
     if args.scenarios:
         scenario_ids = [s.strip() for s in args.scenarios.split(",")]
         # Define available scenarios mapping
@@ -395,7 +437,10 @@ def main():
                 "mosquitto_conf": "./mosquitto.conf",
                 "authz": None,
                 "netem": {"clear": True},
-                "mqtt5_auth": {"token1": tokens["biscuit_short"], "token2": tokens["biscuit"]},
+                "mqtt5_auth": {
+                    "token1": tokens["biscuit_short"],
+                    "token2": tokens["biscuit"],
+                },
             },
             "THUNDERING-HERD": {
                 "mosquitto_conf": "./mosquitto.conf",
@@ -442,7 +487,7 @@ def main():
                 "token_refresh": {"kind": "biscuit", "ttl_seconds": 5},
             },
         }
-        
+
         # Add dynamic MTU scenarios
         for mtu in [500, 1500, 9000]:
             available_scenarios[f"MTU-{mtu}-BIS-25"] = {
@@ -463,7 +508,7 @@ def main():
                 "netem": {"mtu": mtu},
                 "message_size": 0,
             }
-        
+
         # Select requested scenarios
         for scenario_id in scenario_ids:
             if scenario_id in available_scenarios:
@@ -473,12 +518,18 @@ def main():
             else:
                 print(f"Warning: Unknown scenario '{scenario_id}', skipping")
     else:
-        print("No scenarios specified. Use --scenarios to specify which scenarios to run.")
+        print(
+            "No scenarios specified. Use --scenarios to specify which scenarios to run."
+        )
         print("Available scenarios:")
-        print("BASE-01, JWT-01, BIS-01, POLICY-COMPLEX-1, POLICY-COMPLEX-5, POLICY-COMPLEX-25")
+        print(
+            "BASE-01, JWT-01, BIS-01, POLICY-COMPLEX-1, POLICY-COMPLEX-5, POLICY-COMPLEX-25"
+        )
         print("JWT-HTTP-200MS, JWT-HTTP-1000MS, HYBRID-AUTHZ-DOWN, MTU-200-JWT")
         print("BIS-HTTP-200MS, JWT-HTTP-200MS-LOSS1, JWT-HTTP-200MS-LOSS5")
-        print("MQTT5-REAUTH-JWT, MQTT5-REAUTH-BISCUIT, THUNDERING-HERD, DELEGATION-TEMP-ONLY")
+        print(
+            "MQTT5-REAUTH-JWT, MQTT5-REAUTH-BISCUIT, THUNDERING-HERD, DELEGATION-TEMP-ONLY"
+        )
         print("LIFECYCLE-JWT-SHORT-RECONNECT, LIFECYCLE-BIS-SHORT-RECONNECT")
         print("MTU-500-BIS-25, MTU-1500-BIS-25, MTU-9000-BIS-25")
         print("MTU-500-JWT, MTU-1500-JWT, MTU-9000-JWT")
@@ -492,9 +543,13 @@ def main():
         if tls_enabled:
             mosq_conf = mosq_conf.replace("./", "./tls/")
         extra_env = {"MOSQUITTO_CONF": mosq_conf}
-        authz_base = "https://localhost:8443" if tls_enabled else "http://localhost:8081"
+        authz_base = (
+            "https://localhost:8443" if tls_enabled else "http://localhost:8081"
+        )
         prom_base = "https://localhost:9443" if tls_enabled else "http://localhost:9090"
-        token_issuer_base = "https://localhost:8444" if tls_enabled else "http://localhost:8082"
+        token_issuer_base = (
+            "https://localhost:8444" if tls_enabled else "http://localhost:8082"
+        )
         mqtt_host = "localhost"
         mqtt_port = 8883 if tls_enabled else 1883
         compose_files = ["docker/docker-compose.yml"]
@@ -504,31 +559,53 @@ def main():
         netem = s.get("netem")
         if netem:
             if netem.get("clear"):
-                extra_env.update({"NETEM_CLEAR": "1", "NETEM_MTU": "", "NETEM_DELAY_MS": "", "NETEM_LOSS_PCT": "", "NETEM_RATE_KBIT": ""})
+                extra_env.update(
+                    {
+                        "NETEM_CLEAR": "1",
+                        "NETEM_MTU": "",
+                        "NETEM_DELAY_MS": "",
+                        "NETEM_LOSS_PCT": "",
+                        "NETEM_RATE_KBIT": "",
+                    }
+                )
             if "mtu" in netem:
                 extra_env.update({"NETEM_CLEAR": "1", "NETEM_MTU": str(netem["mtu"])})
             if "delay_ms" in netem:
-                extra_env.update({"NETEM_CLEAR": "1", "NETEM_DELAY_MS": str(netem["delay_ms"])})
+                extra_env.update(
+                    {"NETEM_CLEAR": "1", "NETEM_DELAY_MS": str(netem["delay_ms"])}
+                )
             if "loss_pct" in netem:
-                extra_env.update({"NETEM_CLEAR": "1", "NETEM_LOSS_PCT": str(netem["loss_pct"])})
+                extra_env.update(
+                    {"NETEM_CLEAR": "1", "NETEM_LOSS_PCT": str(netem["loss_pct"])}
+                )
 
-        extra_env.update({
-            "TOKEN_ISSUER_ALLOW_DEFAULT_KEYS": os.environ.get("TOKEN_ISSUER_ALLOW_DEFAULT_KEYS", "1"),
-            "JWT_NO_DEFAULT_ROLES": "1" if args.token_issuer_no_default_roles else "0",
-            "BISCUIT_BASE64URL": "1" if args.biscuit_base64url else "0",
-        })
+        extra_env.update(
+            {
+                "TOKEN_ISSUER_ALLOW_DEFAULT_KEYS": os.environ.get(
+                    "TOKEN_ISSUER_ALLOW_DEFAULT_KEYS", "1"
+                ),
+                "JWT_NO_DEFAULT_ROLES": "1"
+                if args.token_issuer_no_default_roles
+                else "0",
+                "BISCUIT_BASE64URL": "1" if args.biscuit_base64url else "0",
+            }
+        )
 
-        _compose([
-            "up",
-            "--build",
-            "-d",
-            "mosquitto",
-            "authz",
-            "netem",
-            "metrics-collector",
-            "cadvisor",
-            "token-issuer",
-        ], extra_env=extra_env, compose_files=compose_files)
+        _compose(
+            [
+                "up",
+                "--build",
+                "-d",
+                "mosquitto",
+                "authz",
+                "netem",
+                "metrics-collector",
+                "cadvisor",
+                "token-issuer",
+            ],
+            extra_env=extra_env,
+            compose_files=compose_files,
+        )
         time.sleep(1)
 
         if s.get("authz") is not None:
@@ -635,7 +712,10 @@ def main():
     try:
         subprocess.check_call(agg_cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
     except subprocess.CalledProcessError as exc:
-        print(f"warning: aggregation failed ({exc}); scenario results preserved", file=sys.stderr)
+        print(
+            f"warning: aggregation failed ({exc}); scenario results preserved",
+            file=sys.stderr,
+        )
 
 
 if __name__ == "__main__":

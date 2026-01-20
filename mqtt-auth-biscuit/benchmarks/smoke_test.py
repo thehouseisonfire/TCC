@@ -142,7 +142,9 @@ def main():
     repo_root = os.path.dirname(os.path.dirname(__file__))
     tls_ca = args.tls_ca_file or ("docker/tls/ca.pem" if args.tls else None)
     if args.tls and tls_ca and not os.path.exists(os.path.join(repo_root, tls_ca)):
-        raise SystemExit(f"TLS enabled but CA file not found at {tls_ca}. Run docker/tls/generate_certs.sh")
+        raise SystemExit(
+            f"TLS enabled but CA file not found at {tls_ca}. Run docker/tls/generate_certs.sh"
+        )
 
     compose_files = ["docker/docker-compose.yml"]
     if args.tls:
@@ -169,8 +171,12 @@ def main():
     with open(tokens_path, "r", encoding="utf-8") as f:
         tokens = json.load(f)
 
-    authz_base = args.authz_base or ("https://localhost:8443" if args.tls else "http://localhost:8081")
-    issuer_base = args.issuer_base or ("https://localhost:8444" if args.tls else "http://localhost:8082")
+    authz_base = args.authz_base or (
+        "https://localhost:8443" if args.tls else "http://localhost:8081"
+    )
+    issuer_base = args.issuer_base or (
+        "https://localhost:8444" if args.tls else "http://localhost:8082"
+    )
     mqtt_host = args.mqtt_host or "localhost"
     mqtt_port = 8883 if args.tls else 1883
 

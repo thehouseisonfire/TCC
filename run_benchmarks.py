@@ -29,16 +29,22 @@ def check_paho() -> None:
 def detect_compose_bin(override: str | None) -> List[str]:
     if override:
         return shlex.split(override)
-    if shutil.which("docker") and subprocess.run(
-        ["docker", "compose", "version"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    ).returncode == 0:
+    if (
+        shutil.which("docker")
+        and subprocess.run(
+            ["docker", "compose", "version"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        ).returncode
+        == 0
+    ):
         return ["docker", "compose"]
     if shutil.which("docker-compose"):
         return ["docker-compose"]
-    raise SystemExit("Docker Compose not found. Install docker compose or docker-compose.")
+    raise SystemExit(
+        "Docker Compose not found. Install docker compose or docker-compose."
+    )
 
 
 def compose_args(compose_files: List[str]) -> List[str]:
@@ -54,7 +60,8 @@ def run(cmd: List[str], cwd: str | None = None, env: dict | None = None) -> None
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run build, token generation, and scenario benchmarks.")
+        description="Run build, token generation, and scenario benchmarks."
+    )
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--skip-tokens", action="store_true")
     parser.add_argument("--scenarios")
@@ -87,7 +94,9 @@ def main() -> int:
             return
         print("🧹 Cleaning up Docker services...")
         cmd = compose_bin + compose_args(compose_files) + ["down"]
-        subprocess.run(cmd, cwd=WORKDIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            cmd, cwd=WORKDIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
 
     atexit.register(cleanup)
 
@@ -95,7 +104,9 @@ def main() -> int:
 
     if not args.skip_build:
         print("🔧 Building plugin...")
-        run(["cargo", "build", "--release", "-p", "mosquitto-auth-biscuit"], cwd=WORKDIR)
+        run(
+            ["cargo", "build", "--release", "-p", "mosquitto-auth-biscuit"], cwd=WORKDIR
+        )
     else:
         print("⚠️  Skipping build (per --skip-build)")
 

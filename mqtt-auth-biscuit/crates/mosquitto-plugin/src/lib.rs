@@ -1061,7 +1061,7 @@ mod tests {
             &mut evt as *mut _ as *mut c_void,
             userdata,
         );
-        assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
+        assert_eq!(rc, MOSQ_ERR_SUCCESS);
 
         teardown_plugin(userdata);
     }

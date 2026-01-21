@@ -27,10 +27,7 @@ pub enum AuthzOutcome {
     Expired,
 }
 
-pub fn check_authorization(
-    token_type: &TokenType,
-    params: AuthzParams<'_>,
-) -> AuthzOutcome {
+pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> AuthzOutcome {
     match token_type {
         TokenType::Jwt { claims, raw } => {
             if Utc::now().timestamp() >= claims.exp {
@@ -70,7 +67,9 @@ pub fn check_authorization(
                     }
                 }
                 PolicyMode::Http => {
-                    let Some(url) = params.http_url else { return AuthzOutcome::Denied };
+                    let Some(url) = params.http_url else {
+                        return AuthzOutcome::Denied;
+                    };
                     let allowed = http_policy::check_http(
                         url,
                         params.client_id,
@@ -80,7 +79,7 @@ pub fn check_authorization(
                         params.http_ca_file,
                         params.http_tls_insecure,
                     )
-                        .unwrap_or(false);
+                    .unwrap_or(false);
                     if allowed {
                         AuthzOutcome::Allowed
                     } else {
@@ -158,7 +157,9 @@ pub fn check_authorization(
                     }
                 }
                 PolicyMode::Http => {
-                    let Some(url) = params.http_url else { return AuthzOutcome::Denied };
+                    let Some(url) = params.http_url else {
+                        return AuthzOutcome::Denied;
+                    };
                     let allowed = http_policy::check_http(
                         url,
                         params.client_id,

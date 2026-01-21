@@ -1,12 +1,18 @@
 use crate::jwt_handler::{verify_jwt_token, Claims};
+use jsonwebtoken::errors::ErrorKind;
 use jsonwebtoken::DecodingKey;
 use jsonwebtoken::Validation;
-use jsonwebtoken::errors::ErrorKind;
 
 #[derive(Clone)]
 pub enum TokenType {
-    Jwt { claims: Claims, raw: String },
-    Biscuit { bytes: Vec<u8>, expires_at: Option<i64> },
+    Jwt {
+        claims: Claims,
+        raw: String,
+    },
+    Biscuit {
+        bytes: Vec<u8>,
+        expires_at: Option<i64>,
+    },
 }
 
 #[derive(Debug)]
@@ -44,9 +50,9 @@ impl AuthEngine {
         } else {
             // Try Biscuit (assuming it's base64 encoded if string)
             use base64::{engine::general_purpose, Engine as _};
-            let bytes = general_purpose::STANDARD
-                .decode(token)
-                .map_err(|e| AuthError::Invalid(format!("Invalid token format (base64 error: {e})")))?;
+            let bytes = general_purpose::STANDARD.decode(token).map_err(|e| {
+                AuthError::Invalid(format!("Invalid token format (base64 error: {e})"))
+            })?;
 
             // We just return the bytes for now, authorization will happen per topic
             Ok(TokenType::Biscuit {

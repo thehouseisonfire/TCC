@@ -1,7 +1,7 @@
 use biscuit_auth::{Biscuit, BlockBuilder, KeyPair, PrivateKey};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
-use pkcs8::{EncodePublicKey, EncodePrivateKey, LineEnding};
 use p256::SecretKey;
+use pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs::File;
@@ -39,12 +39,7 @@ fn main() {
             exp: 2000000000, // Year 2033
             roles: Some(vec!["admin".to_string()]),
         };
-        encode(
-            &Header::new(Algorithm::ES256),
-            &claims,
-            &jwt_encoding_key,
-        )
-        .unwrap()
+        encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
     };
 
     let jwt_short = {
@@ -57,14 +52,8 @@ fn main() {
             exp: now + 5,
             roles: Some(vec!["admin".to_string()]),
         };
-        encode(
-            &Header::new(Algorithm::ES256),
-            &claims,
-            &jwt_encoding_key,
-        )
-        .unwrap()
+        encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
     };
-
 
     // Biscuit
     let root_bytes = [0u8; 32];

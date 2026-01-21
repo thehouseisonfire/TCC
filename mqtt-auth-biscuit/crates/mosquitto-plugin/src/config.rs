@@ -11,38 +11,46 @@ use thiserror::Error;
 pub enum ConfigError {
     #[error("JWT algorithm is required")]
     MissingJwtAlgorithm,
-    
+
     #[error("JWT key file is required for algorithm {0}")]
     MissingJwtKey(String),
-    
+
     #[error("Invalid JWT algorithm: {0}")]
     InvalidJwtAlgorithm(String),
-    
+
     #[error("Failed to read JWT key file '{path}': {source}")]
-    JwtKeyFileError { path: String, #[source] source: std::io::Error },
-    
+    JwtKeyFileError {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("Invalid JWT public key PEM: {0}")]
     InvalidJwtPem(String),
-    
+
     #[error("Invalid biscuit root key hex: {0}")]
     InvalidBiscuitKeyHex(String),
-    
+
     #[error("Biscuit root key must be exactly 32 bytes, got {0}")]
     InvalidBiscuitKeyLength(usize),
-    
+
     #[error("Invalid biscuit root public key: {0}")]
     InvalidBiscuitPublicKey(String),
-    
+
     #[error("Failed to read biscuit public key file '{path}': {source}")]
-    BiscuitKeyFileError { path: String, #[source] source: std::io::Error },
-    
+    BiscuitKeyFileError {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("Biscuit root public key is required")]
     MissingBiscuitKey,
-    
+
     #[allow(dead_code)]
     #[error("Invalid policy mode: {0}")]
     InvalidPolicyMode(String),
-    
+
     #[allow(dead_code)]
     #[error("Invalid cache TTL seconds: {0}")]
     InvalidCacheTtl(String),
@@ -107,22 +115,22 @@ impl PluginConfigBuilder {
             ext_auth_method: None,
         }
     }
-    
+
     pub fn jwt_algorithm(mut self, alg: impl Into<String>) -> Self {
         self.jwt_alg = Some(alg.into());
         self
     }
-    
+
     pub fn jwt_key_file(mut self, path: impl Into<String>) -> Self {
         self.jwt_key_file = Some(path.into());
         self
     }
-    
+
     pub fn jwt_issuer(mut self, issuer: impl Into<String>) -> Self {
         self.jwt_issuer = Some(issuer.into());
         self
     }
-    
+
     pub fn jwt_audience(mut self, audience: impl Into<String>) -> Self {
         self.jwt_audience = Some(audience.into());
         self
@@ -132,17 +140,17 @@ impl PluginConfigBuilder {
         self.biscuit_root_key_file = Some(path.into());
         self
     }
-    
+
     pub fn policy_mode(mut self, mode: PolicyMode) -> Self {
         self.policy_mode = Some(mode);
         self
     }
-    
+
     pub fn sqlite_path(mut self, path: impl Into<String>) -> Self {
         self.sqlite_path = Some(path.into());
         self
     }
-    
+
     pub fn http_url(mut self, url: impl Into<String>) -> Self {
         self.http_url = Some(url.into());
         self
@@ -157,25 +165,25 @@ impl PluginConfigBuilder {
         self.http_tls_insecure = Some(enabled);
         self
     }
-    
+
     pub fn cache_ttl_seconds(mut self, ttl: u64) -> Self {
         self.cache_ttl_seconds = Some(ttl);
         self
     }
-    
+
     pub fn ext_auth_method(mut self, method: impl Into<String>) -> Self {
         self.ext_auth_method = Some(method.into());
         self
     }
-    
+
     pub fn build(self) -> Result<PluginConfig, ConfigError> {
         let jwt_alg = self.jwt_alg.ok_or(ConfigError::MissingJwtAlgorithm)?;
-        
+
         let alg = match jwt_alg.as_str() {
             "ES256" => Algorithm::ES256,
             _ => return Err(ConfigError::InvalidJwtAlgorithm(jwt_alg)),
         };
-        
+
         let jwt_key_file = self
             .jwt_key_file
             .ok_or_else(|| ConfigError::MissingJwtKey(jwt_alg.clone()))?;
@@ -183,9 +191,12 @@ impl PluginConfigBuilder {
         #[cfg(not(miri))]
         let decoding_key = match alg {
             Algorithm::ES256 => {
-                let pem = fs::read(&jwt_key_file)
-                    .map_err(|e| ConfigError::JwtKeyFileError { path: jwt_key_file, source: e })?;
-                DecodingKey::from_ec_pem(&pem).map_err(|e| ConfigError::InvalidJwtPem(e.to_string()))?
+                let pem = fs::read(&jwt_key_file).map_err(|e| ConfigError::JwtKeyFileError {
+                    path: jwt_key_file,
+                    source: e,
+                })?;
+                DecodingKey::from_ec_pem(&pem)
+                    .map_err(|e| ConfigError::InvalidJwtPem(e.to_string()))?
             }
             _ => return Err(ConfigError::InvalidJwtAlgorithm(jwt_alg)),
         };
@@ -195,7 +206,7 @@ impl PluginConfigBuilder {
             let _ = jwt_key_file;
             DecodingKey::from_secret(b"miri_dummy_key".as_slice())
         };
-        
+
         let mut validation = Validation::new(alg);
         if let Some(iss) = self.jwt_issuer {
             validation.iss = Some(HashSet::from([iss]));
@@ -203,7 +214,7 @@ impl PluginConfigBuilder {
         if let Some(aud) = self.jwt_audience {
             validation.aud = Some(HashSet::from([aud]));
         }
-        
+
         let pub_hex = match self.biscuit_root_key_file {
             Some(path) => {
                 #[cfg(not(miri))]
@@ -220,15 +231,15 @@ impl PluginConfigBuilder {
             }
             None => return Err(ConfigError::MissingBiscuitKey),
         };
-        let bytes = hex::decode(pub_hex)
-            .map_err(|e| ConfigError::InvalidBiscuitKeyHex(e.to_string()))?;
+        let bytes =
+            hex::decode(pub_hex).map_err(|e| ConfigError::InvalidBiscuitKeyHex(e.to_string()))?;
         if bytes.len() != 32 {
             return Err(ConfigError::InvalidBiscuitKeyLength(bytes.len()));
         }
         let biscuit_root_public_key =
             biscuit_auth::PublicKey::from_bytes(&bytes, biscuit_auth::Algorithm::Ed25519)
                 .map_err(|e| ConfigError::InvalidBiscuitPublicKey(e.to_string()))?;
-        
+
         let policy = PolicyBackendConfig {
             mode: self.policy_mode.unwrap_or(PolicyMode::TokenOnly),
             sqlite_path: self.sqlite_path,
@@ -236,7 +247,7 @@ impl PluginConfigBuilder {
             http_ca_file: self.http_ca_file,
             http_tls_insecure: self.http_tls_insecure.unwrap_or(false),
         };
-        
+
         Ok(PluginConfig {
             jwt: JwtConfig {
                 decoding_key,
@@ -280,7 +291,7 @@ pub fn parse_options(
     if option_count > 0 && options.is_null() {
         return Err("Invalid options pointer".to_string());
     }
-    
+
     for i in 0..option_count {
         let opt_ptr = unsafe { options.add(i as usize) };
         let Some((key, value)) = opt_kv(opt_ptr) else {
@@ -322,6 +333,6 @@ pub fn parse_options(
             _ => builder,
         };
     }
-    
+
     builder.build().map_err(|e| e.to_string())
 }

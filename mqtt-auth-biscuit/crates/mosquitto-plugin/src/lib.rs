@@ -248,7 +248,11 @@ fn cstr_to_string(ptr: *const c_char) -> Option<String> {
     if ptr.is_null() {
         return None;
     }
-    Some(unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned())
+    Some(
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 fn mosq_client_id_string(client: *const c_void) -> Option<String> {
@@ -329,7 +333,7 @@ pub extern "C" fn mosquitto_plugin_version(
 }
 
 /// # Safety
-/// 
+///
 /// This function is part of the Mosquitto plugin FFI interface.
 /// - `identifier` must be a valid pointer to a MosquittoPluginId
 /// - `userdata` must be a valid pointer to a null pointer that will be set to plugin state
@@ -428,7 +432,7 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
 }
 
 /// # Safety
-/// 
+///
 /// This function is part of the Mosquitto plugin FFI interface.
 /// - `userdata` must be a valid pointer that was previously set by mosquitto_plugin_init
 /// - `options` and `option_count` are ignored in this implementation but may be valid pointers
@@ -476,13 +480,16 @@ extern "C" fn basic_auth_callback(
 
     match state.auth_engine.authenticate(&password) {
         Ok(token_type) => {
-            let token_type = match attach_biscuit_expiry(token_type, &state.config.biscuit.root_public_key) {
-                Ok(token_type) => token_type,
-                Err(err) => {
-                    log_debug(&format!("Authentication rejected: biscuit expiry extraction failed: {err}"));
-                    return MOSQ_ERR_AUTH;
-                }
-            };
+            let token_type =
+                match attach_biscuit_expiry(token_type, &state.config.biscuit.root_public_key) {
+                    Ok(token_type) => token_type,
+                    Err(err) => {
+                        log_debug(&format!(
+                            "Authentication rejected: biscuit expiry extraction failed: {err}"
+                        ));
+                        return MOSQ_ERR_AUTH;
+                    }
+                };
             let cache_ttl = match cache_ttl_for_token(&token_type, state.config.cache_ttl_seconds) {
                 Ok(ttl) => ttl,
                 Err(err) => {
@@ -493,11 +500,7 @@ extern "C" fn basic_auth_callback(
             let Some(client_id) = mosq_client_id_string(evt.client) else {
                 return MOSQ_ERR_AUTH;
             };
-            state.cache.insert(
-                client_id,
-                token_type,
-                cache_ttl,
-            );
+            state.cache.insert(client_id, token_type, cache_ttl);
             MOSQ_ERR_SUCCESS
         }
         Err(AuthError::Expired) => {
@@ -548,13 +551,16 @@ extern "C" fn ext_auth_start_callback(
 
     match state.auth_engine.authenticate(&token) {
         Ok(token_type) => {
-            let token_type = match attach_biscuit_expiry(token_type, &state.config.biscuit.root_public_key) {
-                Ok(token_type) => token_type,
-                Err(err) => {
-                    log_debug(&format!("Enhanced auth rejected: biscuit expiry extraction failed: {err}"));
-                    return MOSQ_ERR_AUTH;
-                }
-            };
+            let token_type =
+                match attach_biscuit_expiry(token_type, &state.config.biscuit.root_public_key) {
+                    Ok(token_type) => token_type,
+                    Err(err) => {
+                        log_debug(&format!(
+                            "Enhanced auth rejected: biscuit expiry extraction failed: {err}"
+                        ));
+                        return MOSQ_ERR_AUTH;
+                    }
+                };
             let cache_ttl = match cache_ttl_for_token(&token_type, state.config.cache_ttl_seconds) {
                 Ok(ttl) => ttl,
                 Err(err) => {
@@ -565,11 +571,7 @@ extern "C" fn ext_auth_start_callback(
             let Some(client_id) = mosq_client_id_string(evt.client) else {
                 return MOSQ_ERR_AUTH;
             };
-            state.cache.insert(
-                client_id,
-                token_type,
-                cache_ttl,
-            );
+            state.cache.insert(client_id, token_type, cache_ttl);
             MOSQ_ERR_SUCCESS
         }
         Err(AuthError::Expired) => {
@@ -624,7 +626,7 @@ extern "C" fn acl_check_callback(
             http_ca_file: state.config.policy.http_ca_file.as_deref(),
             http_tls_insecure: state.config.policy.http_tls_insecure,
         };
-        
+
         match check_authorization(&token_type, params) {
             AuthzOutcome::Allowed => return MOSQ_ERR_SUCCESS,
             AuthzOutcome::Expired => {
@@ -669,7 +671,7 @@ extern "C" fn message_callback(
             http_ca_file: state.config.policy.http_ca_file.as_deref(),
             http_tls_insecure: state.config.policy.http_tls_insecure,
         };
-        
+
         match check_authorization(&token_type, params) {
             AuthzOutcome::Allowed => return MOSQ_ERR_SUCCESS,
             AuthzOutcome::Expired => {
@@ -714,7 +716,7 @@ extern "C" fn control_callback(
             http_ca_file: state.config.policy.http_ca_file.as_deref(),
             http_tls_insecure: state.config.policy.http_tls_insecure,
         };
-        
+
         match check_authorization(&token_type, params) {
             AuthzOutcome::Allowed => return MOSQ_ERR_SUCCESS,
             AuthzOutcome::Expired => {
@@ -734,10 +736,7 @@ mod tests {
     use std::ffi::CString;
 
     fn setup_plugin_with_config() -> (*mut c_void, MosquittoPluginId) {
-        let jwt_pub_pem = format!(
-            "{}/../../docker/jwt_public.pem",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
         let biscuit_root_key_file = format!(
             "{}/../../docker/biscuit_public.key",
             env!("CARGO_MANIFEST_DIR")
@@ -814,7 +813,11 @@ mod tests {
             future2: [ptr::null_mut(); 4],
         };
 
-        let rc = basic_auth_callback(MOSQ_EVT_BASIC_AUTH, &mut evt as *mut _ as *mut c_void, userdata);
+        let rc = basic_auth_callback(
+            MOSQ_EVT_BASIC_AUTH,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
         assert_eq!(rc, MOSQ_ERR_AUTH);
 
         teardown_plugin(userdata);
@@ -834,7 +837,11 @@ mod tests {
             future2: [ptr::null_mut(); 4],
         };
 
-        let rc = basic_auth_callback(MOSQ_EVT_BASIC_AUTH, &mut evt as *mut _ as *mut c_void, userdata);
+        let rc = basic_auth_callback(
+            MOSQ_EVT_BASIC_AUTH,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
         assert_eq!(rc, MOSQ_ERR_AUTH);
 
         teardown_plugin(userdata);
@@ -862,7 +869,11 @@ mod tests {
             future2: [ptr::null_mut(); 3],
         };
 
-        let rc = ext_auth_start_callback(MOSQ_EVT_EXT_AUTH_START, &mut evt as *mut _ as *mut c_void, userdata);
+        let rc = ext_auth_start_callback(
+            MOSQ_EVT_EXT_AUTH_START,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
         assert_eq!(rc, MOSQ_ERR_AUTH);
 
         teardown_plugin(userdata);
@@ -885,7 +896,11 @@ mod tests {
             future2: [ptr::null_mut(); 3],
         };
 
-        let rc = ext_auth_start_callback(MOSQ_EVT_EXT_AUTH_START, &mut evt as *mut _ as *mut c_void, userdata);
+        let rc = ext_auth_start_callback(
+            MOSQ_EVT_EXT_AUTH_START,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
         assert_eq!(rc, MOSQ_ERR_AUTH);
 
         teardown_plugin(userdata);
@@ -893,7 +908,11 @@ mod tests {
 
     #[test]
     fn ext_auth_continue_callback_handles_null_pointers() {
-        let rc = ext_auth_continue_callback(MOSQ_EVT_EXT_AUTH_CONTINUE, ptr::null_mut(), ptr::null_mut());
+        let rc = ext_auth_continue_callback(
+            MOSQ_EVT_EXT_AUTH_CONTINUE,
+            ptr::null_mut(),
+            ptr::null_mut(),
+        );
         assert_eq!(rc, MOSQ_ERR_INVAL);
     }
 
@@ -914,7 +933,11 @@ mod tests {
             future2: [ptr::null_mut(); 3],
         };
 
-        let rc = ext_auth_continue_callback(MOSQ_EVT_EXT_AUTH_CONTINUE, &mut evt as *mut _ as *mut c_void, userdata);
+        let rc = ext_auth_continue_callback(
+            MOSQ_EVT_EXT_AUTH_CONTINUE,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
         assert_eq!(rc, MOSQ_ERR_AUTH);
 
         teardown_plugin(userdata);
@@ -941,7 +964,11 @@ mod tests {
             future2: [ptr::null_mut(); 4],
         };
 
-        let rc = acl_check_callback(MOSQ_EVT_ACL_CHECK, &mut evt as *mut _ as *mut c_void, ptr::null_mut());
+        let rc = acl_check_callback(
+            MOSQ_EVT_ACL_CHECK,
+            &mut evt as *mut _ as *mut c_void,
+            ptr::null_mut(),
+        );
         assert_eq!(rc, MOSQ_ERR_INVAL);
     }
 
@@ -963,7 +990,11 @@ mod tests {
             future2: [ptr::null_mut(); 4],
         };
 
-        let rc = acl_check_callback(MOSQ_EVT_ACL_CHECK, &mut evt as *mut _ as *mut c_void, userdata);
+        let rc = acl_check_callback(
+            MOSQ_EVT_ACL_CHECK,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
         assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
 
         teardown_plugin(userdata);
@@ -991,7 +1022,11 @@ mod tests {
             future2: [ptr::null_mut(); 4],
         };
 
-        let rc = message_callback(MOSQ_EVT_MESSAGE, &mut evt as *mut _ as *mut c_void, ptr::null_mut());
+        let rc = message_callback(
+            MOSQ_EVT_MESSAGE,
+            &mut evt as *mut _ as *mut c_void,
+            ptr::null_mut(),
+        );
         assert_eq!(rc, MOSQ_ERR_INVAL);
     }
 
@@ -1014,7 +1049,11 @@ mod tests {
             future2: [ptr::null_mut(); 4],
         };
 
-        let rc = message_callback(MOSQ_EVT_MESSAGE, &mut evt as *mut _ as *mut c_void, userdata);
+        let rc = message_callback(
+            MOSQ_EVT_MESSAGE,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
         assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
 
         teardown_plugin(userdata);
@@ -1042,7 +1081,11 @@ mod tests {
             future2: [ptr::null_mut(); 4],
         };
 
-        let rc = control_callback(MOSQ_EVT_CONTROL, &mut evt as *mut _ as *mut c_void, ptr::null_mut());
+        let rc = control_callback(
+            MOSQ_EVT_CONTROL,
+            &mut evt as *mut _ as *mut c_void,
+            ptr::null_mut(),
+        );
         assert_eq!(rc, MOSQ_ERR_INVAL);
     }
 
@@ -1065,7 +1108,11 @@ mod tests {
             future2: [ptr::null_mut(); 4],
         };
 
-        let rc = control_callback(MOSQ_EVT_CONTROL, &mut evt as *mut _ as *mut c_void, userdata);
+        let rc = control_callback(
+            MOSQ_EVT_CONTROL,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
         assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
 
         teardown_plugin(userdata);
@@ -1075,18 +1122,18 @@ mod tests {
 #[cfg(kani)]
 mod verification {
     use super::*;
-    use std::ptr;
     use crate::auth::{AuthEngine, TokenType};
     use crate::cache::SessionCache;
-    use crate::config::{JwtConfig, BiscuitConfig, PluginConfig};
+    use crate::config::{BiscuitConfig, JwtConfig, PluginConfig};
     use crate::policy::{PolicyBackendConfig, PolicyMode};
     use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+    use std::ptr;
     use std::sync::Arc;
 
     /// Helper to generate a symbolic C string of fixed size
     fn symbolic_cstr<const N: usize>() -> [c_char; N] {
         let mut bytes: [c_char; N] = kani::any();
-        bytes[N-1] = 0; // Ensure null termination
+        bytes[N - 1] = 0; // Ensure null termination
         bytes
     }
 
@@ -1094,18 +1141,20 @@ mod verification {
     fn mock_plugin_state() -> *mut PluginState {
         let decoding_key = DecodingKey::from_secret(kani::any::<[u8; 16]>().as_slice());
         let validation = Validation::new(Algorithm::HS256);
-        
+
         let jwt_config = JwtConfig {
             decoding_key,
             validation,
         };
-        
+
         // Use a dummy public key for Ed25519
-        let biscuit_pub_key = biscuit_auth::PublicKey::from_bytes(&[0u8; 32], biscuit_auth::Algorithm::Ed25519).unwrap();
+        let biscuit_pub_key =
+            biscuit_auth::PublicKey::from_bytes(&[0u8; 32], biscuit_auth::Algorithm::Ed25519)
+                .unwrap();
         let biscuit_config = BiscuitConfig {
             root_public_key: biscuit_pub_key,
         };
-        
+
         let config = PluginConfig {
             jwt: jwt_config,
             biscuit: biscuit_config,
@@ -1121,12 +1170,15 @@ mod verification {
         };
 
         let state = Box::new(PluginState {
-            auth_engine: Arc::new(AuthEngine::new(config.jwt.decoding_key.clone(), config.jwt.validation.clone())),
+            auth_engine: Arc::new(AuthEngine::new(
+                config.jwt.decoding_key.clone(),
+                config.jwt.validation.clone(),
+            )),
             cache: Arc::new(SessionCache::new(10)),
             config,
             sqlite_policy: None,
         });
-        
+
         Box::into_raw(state)
     }
 
@@ -1135,13 +1187,13 @@ mod verification {
     fn verify_mosquitto_plugin_init_full() {
         let mut identifier = MosquittoPluginId { _unused: [] };
         let mut userdata: *mut c_void = ptr::null_mut();
-        
+
         let option_count: c_int = kani::any_where(|&x| x >= 0 && x <= 1);
         let mut option = MosquittoOpt {
             key: ptr::null_mut(),
             value: ptr::null_mut(),
         };
-        
+
         let options_ptr = if option_count > 0 {
             &mut option as *mut _
         } else {
@@ -1149,8 +1201,9 @@ mod verification {
         };
 
         unsafe {
-            let rc = mosquitto_plugin_init(&mut identifier, &mut userdata, options_ptr, option_count);
-            
+            let rc =
+                mosquitto_plugin_init(&mut identifier, &mut userdata, options_ptr, option_count);
+
             if rc == MOSQ_ERR_SUCCESS {
                 assert!(!userdata.is_null());
                 mosquitto_plugin_cleanup(userdata, ptr::null_mut(), 0);
@@ -1177,17 +1230,21 @@ mod verification {
         let state = mock_plugin_state();
         let username = symbolic_cstr::<8>();
         let password = symbolic_cstr::<16>();
-        
+
         let mut evt = MosquittoEvtBasicAuth {
             future: ptr::null_mut(),
-            client: 0x1 as *mut c_void, 
+            client: 0x1 as *mut c_void,
             username: username.as_ptr() as *mut _,
             password: password.as_ptr() as *mut _,
             future2: [ptr::null_mut(); 4],
         };
 
         unsafe {
-            let rc = basic_auth_callback(MOSQ_EVT_BASIC_AUTH, &mut evt as *mut _ as *mut c_void, state as *mut c_void);
+            let rc = basic_auth_callback(
+                MOSQ_EVT_BASIC_AUTH,
+                &mut evt as *mut _ as *mut c_void,
+                state as *mut c_void,
+            );
             assert!(rc == MOSQ_ERR_SUCCESS || rc == MOSQ_ERR_AUTH || rc == MOSQ_ERR_INVAL);
             mosquitto_plugin_cleanup(state as *mut _, ptr::null_mut(), 0);
         }
@@ -1198,7 +1255,7 @@ mod verification {
         let state = mock_plugin_state();
         let auth_data = kani::any::<[u8; 8]>();
         let auth_method = symbolic_cstr::<8>();
-        
+
         let mut evt = MosquittoEvtExtendedAuth {
             future: ptr::null_mut(),
             client: 0x1 as *mut c_void,
@@ -1211,8 +1268,17 @@ mod verification {
         };
 
         unsafe {
-            let rc = ext_auth_start_callback(MOSQ_EVT_EXT_AUTH_START, &mut evt as *mut _ as *mut c_void, state as *mut c_void);
-            assert!(rc == MOSQ_ERR_SUCCESS || rc == MOSQ_ERR_AUTH || rc == MOSQ_ERR_INVAL || rc == MOSQ_ERR_AUTH_CONTINUE);
+            let rc = ext_auth_start_callback(
+                MOSQ_EVT_EXT_AUTH_START,
+                &mut evt as *mut _ as *mut c_void,
+                state as *mut c_void,
+            );
+            assert!(
+                rc == MOSQ_ERR_SUCCESS
+                    || rc == MOSQ_ERR_AUTH
+                    || rc == MOSQ_ERR_INVAL
+                    || rc == MOSQ_ERR_AUTH_CONTINUE
+            );
             mosquitto_plugin_cleanup(state as *mut _, ptr::null_mut(), 0);
         }
     }
@@ -1221,7 +1287,7 @@ mod verification {
     fn verify_ext_auth_continue_callback_with_symbolic_inputs() {
         let state = mock_plugin_state();
         let auth_data = kani::any::<[u8; 8]>();
-        
+
         let mut evt = MosquittoEvtExtendedAuth {
             future: ptr::null_mut(),
             client: 0x1 as *mut c_void,
@@ -1234,8 +1300,17 @@ mod verification {
         };
 
         unsafe {
-            let rc = ext_auth_continue_callback(MOSQ_EVT_EXT_AUTH_CONTINUE, &mut evt as *mut _ as *mut c_void, state as *mut c_void);
-            assert!(rc == MOSQ_ERR_SUCCESS || rc == MOSQ_ERR_AUTH || rc == MOSQ_ERR_INVAL || rc == MOSQ_ERR_AUTH_CONTINUE);
+            let rc = ext_auth_continue_callback(
+                MOSQ_EVT_EXT_AUTH_CONTINUE,
+                &mut evt as *mut _ as *mut c_void,
+                state as *mut c_void,
+            );
+            assert!(
+                rc == MOSQ_ERR_SUCCESS
+                    || rc == MOSQ_ERR_AUTH
+                    || rc == MOSQ_ERR_INVAL
+                    || rc == MOSQ_ERR_AUTH_CONTINUE
+            );
             mosquitto_plugin_cleanup(state as *mut _, ptr::null_mut(), 0);
         }
     }
@@ -1244,7 +1319,7 @@ mod verification {
     fn verify_acl_check_callback_with_symbolic_inputs() {
         let state = mock_plugin_state();
         let topic = symbolic_cstr::<16>();
-        
+
         let mut evt = MosquittoEvtAclCheck {
             future: ptr::null_mut(),
             client: 0x1 as *mut c_void,
@@ -1259,7 +1334,11 @@ mod verification {
         };
 
         unsafe {
-            let rc = acl_check_callback(MOSQ_EVT_ACL_CHECK, &mut evt as *mut _ as *mut c_void, state as *mut c_void);
+            let rc = acl_check_callback(
+                MOSQ_EVT_ACL_CHECK,
+                &mut evt as *mut _ as *mut c_void,
+                state as *mut c_void,
+            );
             assert!(rc == MOSQ_ERR_SUCCESS || rc == MOSQ_ERR_ACL_DENIED || rc == MOSQ_ERR_INVAL);
             mosquitto_plugin_cleanup(state as *mut _, ptr::null_mut(), 0);
         }
@@ -1269,7 +1348,7 @@ mod verification {
     fn verify_message_callback_with_symbolic_inputs() {
         let state = mock_plugin_state();
         let topic = symbolic_cstr::<16>();
-        
+
         let mut evt = MosquittoEvtMessage {
             future: ptr::null_mut(),
             client: 0x1 as *mut c_void,
@@ -1285,7 +1364,11 @@ mod verification {
         };
 
         unsafe {
-            let rc = message_callback(MOSQ_EVT_MESSAGE, &mut evt as *mut _ as *mut c_void, state as *mut c_void);
+            let rc = message_callback(
+                MOSQ_EVT_MESSAGE,
+                &mut evt as *mut _ as *mut c_void,
+                state as *mut c_void,
+            );
             assert!(rc == MOSQ_ERR_SUCCESS || rc == MOSQ_ERR_ACL_DENIED || rc == MOSQ_ERR_INVAL);
             mosquitto_plugin_cleanup(state as *mut _, ptr::null_mut(), 0);
         }
@@ -1295,7 +1378,7 @@ mod verification {
     fn verify_control_callback_with_symbolic_inputs() {
         let state = mock_plugin_state();
         let topic = symbolic_cstr::<16>();
-        
+
         let mut evt = MosquittoEvtControl {
             future: ptr::null_mut(),
             client: 0x1 as *mut c_void,
@@ -1311,7 +1394,11 @@ mod verification {
         };
 
         unsafe {
-            let rc = control_callback(MOSQ_EVT_CONTROL, &mut evt as *mut _ as *mut c_void, state as *mut c_void);
+            let rc = control_callback(
+                MOSQ_EVT_CONTROL,
+                &mut evt as *mut _ as *mut c_void,
+                state as *mut c_void,
+            );
             assert!(rc == MOSQ_ERR_SUCCESS || rc == MOSQ_ERR_ACL_DENIED || rc == MOSQ_ERR_INVAL);
             mosquitto_plugin_cleanup(state as *mut _, ptr::null_mut(), 0);
         }
@@ -1322,21 +1409,73 @@ mod verification {
         let state = mock_plugin_state();
         unsafe {
             // Test all callbacks with null event_data
-            assert_eq!(basic_auth_callback(MOSQ_EVT_BASIC_AUTH, ptr::null_mut(), state as *mut c_void), MOSQ_ERR_INVAL);
-            assert_eq!(ext_auth_start_callback(MOSQ_EVT_EXT_AUTH_START, ptr::null_mut(), state as *mut c_void), MOSQ_ERR_INVAL);
-            assert_eq!(ext_auth_continue_callback(MOSQ_EVT_EXT_AUTH_CONTINUE, ptr::null_mut(), state as *mut c_void), MOSQ_ERR_INVAL);
-            assert_eq!(acl_check_callback(MOSQ_EVT_ACL_CHECK, ptr::null_mut(), state as *mut c_void), MOSQ_ERR_INVAL);
-            assert_eq!(message_callback(MOSQ_EVT_MESSAGE, ptr::null_mut(), state as *mut c_void), MOSQ_ERR_INVAL);
-            assert_eq!(control_callback(MOSQ_EVT_CONTROL, ptr::null_mut(), state as *mut c_void), MOSQ_ERR_INVAL);
+            assert_eq!(
+                basic_auth_callback(MOSQ_EVT_BASIC_AUTH, ptr::null_mut(), state as *mut c_void),
+                MOSQ_ERR_INVAL
+            );
+            assert_eq!(
+                ext_auth_start_callback(
+                    MOSQ_EVT_EXT_AUTH_START,
+                    ptr::null_mut(),
+                    state as *mut c_void
+                ),
+                MOSQ_ERR_INVAL
+            );
+            assert_eq!(
+                ext_auth_continue_callback(
+                    MOSQ_EVT_EXT_AUTH_CONTINUE,
+                    ptr::null_mut(),
+                    state as *mut c_void
+                ),
+                MOSQ_ERR_INVAL
+            );
+            assert_eq!(
+                acl_check_callback(MOSQ_EVT_ACL_CHECK, ptr::null_mut(), state as *mut c_void),
+                MOSQ_ERR_INVAL
+            );
+            assert_eq!(
+                message_callback(MOSQ_EVT_MESSAGE, ptr::null_mut(), state as *mut c_void),
+                MOSQ_ERR_INVAL
+            );
+            assert_eq!(
+                control_callback(MOSQ_EVT_CONTROL, ptr::null_mut(), state as *mut c_void),
+                MOSQ_ERR_INVAL
+            );
 
             // Test all callbacks with null userdata
-            assert_eq!(basic_auth_callback(MOSQ_EVT_BASIC_AUTH, 0x1 as *mut c_void, ptr::null_mut()), MOSQ_ERR_INVAL);
-            assert_eq!(ext_auth_start_callback(MOSQ_EVT_EXT_AUTH_START, 0x1 as *mut c_void, ptr::null_mut()), MOSQ_ERR_INVAL);
-            assert_eq!(ext_auth_continue_callback(MOSQ_EVT_EXT_AUTH_CONTINUE, 0x1 as *mut c_void, ptr::null_mut()), MOSQ_ERR_INVAL);
-            assert_eq!(acl_check_callback(MOSQ_EVT_ACL_CHECK, 0x1 as *mut c_void, ptr::null_mut()), MOSQ_ERR_INVAL);
-            assert_eq!(message_callback(MOSQ_EVT_MESSAGE, 0x1 as *mut c_void, ptr::null_mut()), MOSQ_ERR_INVAL);
-            assert_eq!(control_callback(MOSQ_EVT_CONTROL, 0x1 as *mut c_void, ptr::null_mut()), MOSQ_ERR_INVAL);
-            
+            assert_eq!(
+                basic_auth_callback(MOSQ_EVT_BASIC_AUTH, 0x1 as *mut c_void, ptr::null_mut()),
+                MOSQ_ERR_INVAL
+            );
+            assert_eq!(
+                ext_auth_start_callback(
+                    MOSQ_EVT_EXT_AUTH_START,
+                    0x1 as *mut c_void,
+                    ptr::null_mut()
+                ),
+                MOSQ_ERR_INVAL
+            );
+            assert_eq!(
+                ext_auth_continue_callback(
+                    MOSQ_EVT_EXT_AUTH_CONTINUE,
+                    0x1 as *mut c_void,
+                    ptr::null_mut()
+                ),
+                MOSQ_ERR_INVAL
+            );
+            assert_eq!(
+                acl_check_callback(MOSQ_EVT_ACL_CHECK, 0x1 as *mut c_void, ptr::null_mut()),
+                MOSQ_ERR_INVAL
+            );
+            assert_eq!(
+                message_callback(MOSQ_EVT_MESSAGE, 0x1 as *mut c_void, ptr::null_mut()),
+                MOSQ_ERR_INVAL
+            );
+            assert_eq!(
+                control_callback(MOSQ_EVT_CONTROL, 0x1 as *mut c_void, ptr::null_mut()),
+                MOSQ_ERR_INVAL
+            );
+
             mosquitto_plugin_cleanup(state as *mut _, ptr::null_mut(), 0);
         }
     }

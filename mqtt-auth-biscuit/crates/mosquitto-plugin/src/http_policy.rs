@@ -5,9 +5,9 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use rustls_pemfile::certs;
 use webpki_roots::TLS_SERVER_ROOTS;
@@ -22,13 +22,17 @@ struct AuthzResponse {
 
 fn split_host_port(host_port: &str, default_port: u16) -> Result<(String, u16), String> {
     if host_port.starts_with('[') {
-        let end = host_port.find(']').ok_or_else(|| "invalid host".to_string())?;
+        let end = host_port
+            .find(']')
+            .ok_or_else(|| "invalid host".to_string())?;
         let host = &host_port[1..end];
         let rest = &host_port[end + 1..];
         if rest.is_empty() {
             return Ok((host.to_string(), default_port));
         }
-        let port_str = rest.strip_prefix(':').ok_or_else(|| "invalid host".to_string())?;
+        let port_str = rest
+            .strip_prefix(':')
+            .ok_or_else(|| "invalid host".to_string())?;
         let port = port_str
             .parse::<u16>()
             .map_err(|_| "invalid port".to_string())?;
@@ -65,8 +69,8 @@ fn parse_http_response(resp: &[u8]) -> Result<AuthzResponse, String> {
     let (header_bytes, body_with_sep) = resp.split_at(header_end);
     let body = &body_with_sep[4..];
 
-    let header_str = std::str::from_utf8(header_bytes)
-        .map_err(|_| "http headers not utf-8".to_string())?;
+    let header_str =
+        std::str::from_utf8(header_bytes).map_err(|_| "http headers not utf-8".to_string())?;
     let mut lines = header_str.lines();
     let status_line = lines
         .next()
@@ -94,7 +98,10 @@ fn parse_http_response(resp: &[u8]) -> Result<AuthzResponse, String> {
     }
 
     let content_type = content_type.ok_or_else(|| "http missing content-type".to_string())?;
-    if !content_type.to_ascii_lowercase().starts_with("application/json") {
+    if !content_type
+        .to_ascii_lowercase()
+        .starts_with("application/json")
+    {
         return Err("http invalid content-type".to_string());
     }
     if body.is_empty() {
@@ -104,7 +111,10 @@ fn parse_http_response(resp: &[u8]) -> Result<AuthzResponse, String> {
     serde_json::from_slice(body).map_err(|e| format!("http invalid json: {e}"))
 }
 
-fn build_tls_config(ca_file: Option<&str>, tls_insecure: bool) -> Result<Arc<ClientConfig>, String> {
+fn build_tls_config(
+    ca_file: Option<&str>,
+    tls_insecure: bool,
+) -> Result<Arc<ClientConfig>, String> {
     let mut root_store = RootCertStore::empty();
     if let Some(path) = ca_file {
         let pem = std::fs::read(path).map_err(|e| format!("read CA file failed: {e}"))?;
@@ -147,7 +157,7 @@ fn build_tls_config(ca_file: Option<&str>, tls_insecure: bool) -> Result<Arc<Cli
                 _dss: &DigitallySignedStruct,
             ) -> Result<HandshakeSignatureValid, rustls::Error> {
                 Err(rustls::Error::PeerIncompatible(
-                    rustls::PeerIncompatible::ServerTlsVersionIsDisabledByOurConfig
+                    rustls::PeerIncompatible::ServerTlsVersionIsDisabledByOurConfig,
                 ))
             }
 
@@ -207,7 +217,10 @@ pub fn check_http(
     let (host, port) = split_host_port(host_port, default_port)?;
 
     let mut payload = serde_json::Map::from_iter([
-        ("client_id".to_string(), Value::String(client_id.to_string())),
+        (
+            "client_id".to_string(),
+            Value::String(client_id.to_string()),
+        ),
         ("topic".to_string(), Value::String(topic.to_string())),
         ("access".to_string(), Value::Number(access.into())),
     ]);

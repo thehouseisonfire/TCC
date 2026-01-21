@@ -93,7 +93,7 @@ pub fn verify_biscuit_token(
     // The authorizer! macro requires a string literal at compile time
     // Template caching is preserved for documentation and potential future use
     let _template = get_authorizer_template(); // Keep the template cache for consistency
-    
+
     let authorizer = authorizer!(
         r#"
         resource({topic});
@@ -126,7 +126,9 @@ mod tests {
 
     fn root_keypair() -> KeyPair {
         let root_bytes = [1u8; 32];
-        KeyPair::from(&PrivateKey::from_bytes(&root_bytes, biscuit_auth::Algorithm::Ed25519).unwrap())
+        KeyPair::from(
+            &PrivateKey::from_bytes(&root_bytes, biscuit_auth::Algorithm::Ed25519).unwrap(),
+        )
     }
 
     #[test]

@@ -130,6 +130,13 @@ where
     {
         None
     }
+
+    pub fn stats(&self) -> CacheStats {
+        CacheStats {
+            hits: 0,
+            misses: 0,
+        }
+    }
 }
 
 #[cfg(test)]

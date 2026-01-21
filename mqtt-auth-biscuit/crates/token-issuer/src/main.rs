@@ -1,13 +1,17 @@
 use base64::{engine::general_purpose, Engine as _};
 use biscuit_auth::{Biscuit, BlockBuilder, KeyPair, PrivateKey};
+use bytes::Bytes;
 use chrono::Utc;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use p256::SecretKey;
 use pkcs8::{EncodePrivateKey, LineEnding};
+use rustls::ServerConfig;
+use rustls_pemfile::{certs, private_key};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::env;
@@ -15,16 +19,22 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
-use hyper_util::rt::TokioIo;
-use bytes::Bytes;
-use rustls::{ServerConfig};
-use rustls_pemfile::{certs, private_key};
 
 // Type aliases to reduce complexity
-type JwtKeyResult = Result<(Algorithm, EncodingKey, String, Option<String>, Option<String>), String>;
+type JwtKeyResult = Result<
+    (
+        Algorithm,
+        EncodingKey,
+        String,
+        Option<String>,
+        Option<String>,
+    ),
+    String,
+>;
 
 const DEFAULT_EC_SK_HEX: &str = "0101010101010101010101010101010101010101010101010101010101010101";
-const DEFAULT_BISCUIT_SK_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+const DEFAULT_BISCUIT_SK_HEX: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Deserialize)]
@@ -42,14 +52,14 @@ fn load_tls_config(enabled: bool) -> Result<Option<Arc<ServerConfig>>, String> {
     if !enabled {
         return Ok(None);
     }
-    let cert_path = env::var("TOKEN_ISSUER_TLS_CERT")
-        .map_err(|_| "TOKEN_ISSUER_TLS_CERT required when TOKEN_ISSUER_TLS is enabled".to_string())?;
-    let key_path = env::var("TOKEN_ISSUER_TLS_KEY")
-        .map_err(|_| "TOKEN_ISSUER_TLS_KEY required when TOKEN_ISSUER_TLS is enabled".to_string())?;
-    let cert = std::fs::read(&cert_path)
-        .map_err(|e| format!("failed to read {cert_path}: {e}"))?;
-    let key = std::fs::read(&key_path)
-        .map_err(|e| format!("failed to read {key_path}: {e}"))?;
+    let cert_path = env::var("TOKEN_ISSUER_TLS_CERT").map_err(|_| {
+        "TOKEN_ISSUER_TLS_CERT required when TOKEN_ISSUER_TLS is enabled".to_string()
+    })?;
+    let key_path = env::var("TOKEN_ISSUER_TLS_KEY").map_err(|_| {
+        "TOKEN_ISSUER_TLS_KEY required when TOKEN_ISSUER_TLS is enabled".to_string()
+    })?;
+    let cert = std::fs::read(&cert_path).map_err(|e| format!("failed to read {cert_path}: {e}"))?;
+    let key = std::fs::read(&key_path).map_err(|e| format!("failed to read {key_path}: {e}"))?;
     let mut cert_cursor = std::io::Cursor::new(cert);
     let certs = certs(&mut cert_cursor)
         .collect::<Result<Vec<_>, _>>()
@@ -115,7 +125,10 @@ fn env_flag(name: &str) -> bool {
 fn parse_hex_key(hex_key: &str, expected_len: usize) -> Result<Vec<u8>, String> {
     let bytes = hex::decode(hex_key).map_err(|e| format!("invalid hex: {e}"))?;
     if bytes.len() != expected_len {
-        return Err(format!("expected {expected_len} bytes, got {}", bytes.len()));
+        return Err(format!(
+            "expected {expected_len} bytes, got {}",
+            bytes.len()
+        ));
     }
     Ok(bytes)
 }
@@ -132,13 +145,15 @@ fn load_jwt_key(allow_default_keys: bool) -> JwtKeyResult {
             let hex_key = env_default("JWT_EC_PRIVATE_KEY_HEX", DEFAULT_EC_SK_HEX);
             if hex_key == DEFAULT_EC_SK_HEX {
                 if !allow_default_keys {
-                    return Err("JWT_EC_PRIVATE_KEY_HEX must be set (default key disallowed)"
-                        .to_string());
+                    return Err(
+                        "JWT_EC_PRIVATE_KEY_HEX must be set (default key disallowed)".to_string(),
+                    );
                 }
                 eprintln!("warning: using default JWT_EC_PRIVATE_KEY_HEX (benchmark-only)");
             }
             let bytes = parse_hex_key(&hex_key, 32)?;
-            let secret = SecretKey::from_slice(&bytes).map_err(|e| format!("invalid EC key: {e}"))?;
+            let secret =
+                SecretKey::from_slice(&bytes).map_err(|e| format!("invalid EC key: {e}"))?;
             let pem = secret
                 .to_pkcs8_pem(LineEnding::LF)
                 .map_err(|e| format!("pkcs8 encode failed: {e}"))?;
@@ -157,8 +172,9 @@ fn load_biscuit_keypair(allow_default_keys: bool) -> Result<KeyPair, String> {
     let hex_key = env_default("BISCUIT_ROOT_PRIVATE_KEY_HEX", DEFAULT_BISCUIT_SK_HEX);
     if hex_key == DEFAULT_BISCUIT_SK_HEX {
         if !allow_default_keys {
-            return Err("BISCUIT_ROOT_PRIVATE_KEY_HEX must be set (default key disallowed)"
-                .to_string());
+            return Err(
+                "BISCUIT_ROOT_PRIVATE_KEY_HEX must be set (default key disallowed)".to_string(),
+            );
         }
         eprintln!("warning: using default BISCUIT_ROOT_PRIVATE_KEY_HEX (benchmark-only)");
     }
@@ -167,7 +183,6 @@ fn load_biscuit_keypair(allow_default_keys: bool) -> Result<KeyPair, String> {
         .map_err(|e| format!("invalid Biscuit key: {e}"))?;
     Ok(KeyPair::from(&priv_key))
 }
-
 
 fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> Response<Full<Bytes>> {
     let body = serde_json::to_vec(payload).unwrap_or_else(|_| b"{}".to_vec());
@@ -259,8 +274,12 @@ fn handle_biscuit(req: BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<TokenR
         .fact(expires_fact.as_str())
         .map_err(|e| format!("biscuit fact expires_at: {e}"))?;
 
-    let biscuit = biscuit.append(block).map_err(|e| format!("biscuit append: {e}"))?;
-    let bytes = biscuit.to_vec().map_err(|e| format!("biscuit encode: {e}"))?;
+    let biscuit = biscuit
+        .append(block)
+        .map_err(|e| format!("biscuit append: {e}"))?;
+    let bytes = biscuit
+        .to_vec()
+        .map_err(|e| format!("biscuit encode: {e}"))?;
     let token = if cfg.biscuit_base64url {
         general_purpose::URL_SAFE_NO_PAD.encode(&bytes)
     } else {
@@ -275,16 +294,25 @@ fn handle_biscuit(req: BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<TokenR
     })
 }
 
-async fn handle_request(req: Request<Incoming>, cfg: Arc<IssuerConfig>) -> Result<Response<Full<Bytes>>, Infallible> {
+async fn handle_request(
+    req: Request<Incoming>,
+    cfg: Arc<IssuerConfig>,
+) -> Result<Response<Full<Bytes>>, Infallible> {
     let method = req.method().clone();
     let url = req.uri().path().to_string();
 
     if method == Method::GET && url == "/health" {
-        return Ok(json_response(StatusCode::OK, &serde_json::json!({"ok": true})));
+        return Ok(json_response(
+            StatusCode::OK,
+            &serde_json::json!({"ok": true}),
+        ));
     }
 
     if method != Method::POST {
-        return Ok(error_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed"));
+        return Ok(error_response(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "method not allowed",
+        ));
     }
 
     let body = match req.into_body().collect().await {
@@ -297,15 +325,19 @@ async fn handle_request(req: Request<Incoming>, cfg: Arc<IssuerConfig>) -> Resul
         }
     };
     if body.len() > MAX_BODY_BYTES {
-        return Ok(error_response(StatusCode::PAYLOAD_TOO_LARGE, "payload too large"));
+        return Ok(error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload too large",
+        ));
     }
 
     let res: Result<TokenResponse, (StatusCode, String)> = match url.as_str() {
         "/jwt" => {
             let parsed: Result<JwtIssueRequest, _> = serde_json::from_slice(&body);
             match parsed {
-                Ok(req) => handle_jwt(req, &cfg)
-                    .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err)),
+                Ok(req) => {
+                    handle_jwt(req, &cfg).map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err))
+                }
                 Err(e) => Err((StatusCode::BAD_REQUEST, format!("invalid json: {e}"))),
             }
         }

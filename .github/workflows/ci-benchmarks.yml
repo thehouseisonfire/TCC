@@ -28,10 +28,9 @@ jobs:
         pip install paho-mqtt requests
         
     - name: Install Rust
-      uses: actions-rs/toolchain@v1
+      uses: dtolnay/rust-toolchain@stable
       with:
         toolchain: stable
-        override: true
         
     - name: Build plugin in debug mode
       run: |

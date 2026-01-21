@@ -1,6 +1,7 @@
 use dashmap::DashMap;
 use lru::LruCache;
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -14,10 +15,24 @@ pub struct CacheValue<V> {
     pub expiry: Instant,
 }
 
+/// Snapshot of cache hit/miss metrics for diagnostics and benchmarking.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CacheStats {
+    pub hits: u64,
+    pub misses: u64,
+}
+
+#[derive(Debug, Default)]
+struct CacheMetrics {
+    hits: AtomicU64,
+    misses: AtomicU64,
+}
+
 pub struct SessionCache<K, V> {
     cache: DashMap<K, CacheValue<V>>,
     lru: Mutex<LruCache<K, ()>>,
     capacity: usize,
+    metrics: CacheMetrics,
 }
 
 #[cfg(not(kani))]
@@ -31,6 +46,7 @@ where
             cache: DashMap::new(),
             lru: Mutex::new(LruCache::new(nonzero_capacity(capacity))),
             capacity,
+            metrics: CacheMetrics::default(),
         }
     }
 
@@ -42,7 +58,9 @@ where
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        lru.put(key, ());
+        if let Some((evicted_key, _)) = lru.push(key, ()) {
+            self.cache.remove(&evicted_key);
+        }
         while lru.len() > self.capacity {
             if let Some((evicted_key, _)) = lru.pop_lru() {
                 self.cache.remove(&evicted_key);
@@ -58,6 +76,7 @@ where
     {
         if let Some(entry) = self.cache.get(key) {
             if entry.expiry > Instant::now() {
+                self.metrics.hits.fetch_add(1, Ordering::Relaxed);
                 let mut lru = match self.lru.lock() {
                     Ok(guard) => guard,
                     Err(poisoned) => poisoned.into_inner(),
@@ -65,6 +84,7 @@ where
                 lru.get(key);
                 return Some(entry.value.clone());
             } else {
+                self.metrics.misses.fetch_add(1, Ordering::Relaxed);
                 // Expired
                 self.cache.remove(key);
                 let mut lru = match self.lru.lock() {
@@ -73,8 +93,18 @@ where
                 };
                 lru.pop(key);
             }
+        } else {
+            self.metrics.misses.fetch_add(1, Ordering::Relaxed);
         }
         None
+    }
+
+    /// Returns a snapshot of cache hit/miss counts for observability.
+    pub fn stats(&self) -> CacheStats {
+        CacheStats {
+            hits: self.metrics.hits.load(Ordering::Relaxed),
+            misses: self.metrics.misses.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -88,6 +118,7 @@ where
             cache: DashMap::new(),
             lru: Mutex::new(LruCache::new(NonZeroUsize::new(1).unwrap())),
             capacity: 1,
+            metrics: CacheMetrics::default(),
         }
     }
 

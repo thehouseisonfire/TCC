@@ -1,6 +1,6 @@
 use crate::auth::{AuthEngine, AuthError, TokenType};
 use crate::authz::{check_authorization, AuthzOutcome, AuthzParams};
-use crate::biscuit_handler::extract_min_expiry;
+use crate::biscuit_handler::{expiry_stats, extract_min_expiry};
 use crate::cache::SessionCache;
 use crate::config::{parse_options, PluginConfig};
 use crate::policy::PolicyMode;
@@ -43,6 +43,7 @@ pub const MOSQ_EVT_EXT_AUTH_CONTINUE: c_int = 5;
 pub const MOSQ_EVT_CONTROL: c_int = 6;
 pub const MOSQ_EVT_MESSAGE: c_int = 7;
 
+/// Fallback cache TTL when tokens do not expose an expiry; meant as a sane default only.
 const FALLBACK_CACHE_TTL_SECONDS: u64 = 300;
 
 #[repr(C)]
@@ -178,7 +179,23 @@ fn log_info(msg: &str) {
     }
 }
 
-fn cache_ttl_for_token(token_type: &TokenType, configured_ttl_seconds: u64) -> Result<Duration, &'static str> {
+#[derive(Debug)]
+enum CacheTtlError {
+    Expired,
+}
+
+impl std::fmt::Display for CacheTtlError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CacheTtlError::Expired => write!(f, "token expired"),
+        }
+    }
+}
+
+fn cache_ttl_for_token(
+    token_type: &TokenType,
+    configured_ttl_seconds: u64,
+) -> Result<Duration, CacheTtlError> {
     let configured_ttl = Duration::from_secs(configured_ttl_seconds);
     let now = Utc::now().timestamp();
     let expires_at = match token_type {
@@ -190,7 +207,7 @@ fn cache_ttl_for_token(token_type: &TokenType, configured_ttl_seconds: u64) -> R
         Some(exp) => {
             let remaining = exp - now;
             if remaining <= 0 {
-                return Err("token expired");
+                return Err(CacheTtlError::Expired);
             }
             let remaining = Duration::from_secs(remaining as u64);
             if remaining < configured_ttl {
@@ -424,6 +441,17 @@ pub unsafe extern "C" fn mosquitto_plugin_cleanup(
     _option_count: c_int,
 ) -> c_int {
     if !_userdata.is_null() {
+        let state = &*(_userdata as *mut PluginState);
+        let cache_stats = state.cache.stats();
+        let expiry_stats = expiry_stats();
+        log_info(&format!(
+            "Session cache stats: hits={}, misses={}",
+            cache_stats.hits, cache_stats.misses
+        ));
+        log_info(&format!(
+            "Biscuit expiry extraction stats: calls={}, failures={}, total_nanos={}",
+            expiry_stats.calls, expiry_stats.failures, expiry_stats.total_nanos
+        ));
         let _ = Box::from_raw(_userdata as *mut PluginState);
     }
     MOSQ_ERR_SUCCESS
@@ -457,8 +485,8 @@ extern "C" fn basic_auth_callback(
             };
             let cache_ttl = match cache_ttl_for_token(&token_type, state.config.cache_ttl_seconds) {
                 Ok(ttl) => ttl,
-                Err(msg) => {
-                    log_debug(&format!("Authentication rejected: {msg}"));
+                Err(err) => {
+                    log_debug(&format!("Authentication rejected: {err}"));
                     return MOSQ_ERR_AUTH;
                 }
             };
@@ -529,8 +557,8 @@ extern "C" fn ext_auth_start_callback(
             };
             let cache_ttl = match cache_ttl_for_token(&token_type, state.config.cache_ttl_seconds) {
                 Ok(ttl) => ttl,
-                Err(msg) => {
-                    log_debug(&format!("Enhanced auth rejected: {msg}"));
+                Err(err) => {
+                    log_debug(&format!("Enhanced auth rejected: {err}"));
                     return MOSQ_ERR_AUTH;
                 }
             };
@@ -710,15 +738,18 @@ mod tests {
             "{}/../../docker/jwt_public.pem",
             env!("CARGO_MANIFEST_DIR")
         );
-        let biscuit_root_key_hex = "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29";
+        let biscuit_root_key_file = format!(
+            "{}/../../docker/biscuit_public.key",
+            env!("CARGO_MANIFEST_DIR")
+        );
 
         let cstrings: Vec<CString> = vec![
             CString::new("jwt_alg").unwrap(),
             CString::new("ES256").unwrap(),
             CString::new("jwt_key_file").unwrap(),
             CString::new(jwt_pub_pem).unwrap(),
-            CString::new("biscuit_root_key_hex").unwrap(),
-            CString::new(biscuit_root_key_hex).unwrap(),
+            CString::new("biscuit_root_key_file").unwrap(),
+            CString::new(biscuit_root_key_file).unwrap(),
         ];
 
         let mut opts = vec![

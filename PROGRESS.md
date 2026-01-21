@@ -665,19 +665,6 @@ machine and record the first results/known issues).
     - When false, `ACL_READ` only validates expiry (no full authz).
     - When true, run full authz checks and document the expected performance hit.
 
-- [ ] **Issue 27: Cache Biscuit expiry via min `expires_at` fact (remove brittle parsing)**
-  - Goal: Extract the minimum `expires_at` value from all Biscuit blocks using
-    the Datalog query engine and cache it per client/session for fast expiry
-    checks during `ACL_READ` fan-out.
-  - Rationale: Current expiry detection relies on parsing failed checks and is
-    brittle. Using `authorizer.query_all` over `expires_at($ts)` provides a
-    stable, structured expiry source without full authorization evaluation.
-  - Deliverable:
-    - Update issuer/token generator to include explicit `expires_at($ts)` facts
-      in the authority block (and allow attenuation blocks to reduce expiry).
-    - Implement a helper to compute `min(expires_at)` via Datalog query and
-      store it in the session cache at authentication/reauth time.
-    - Replace string-based expiry classification with the cached timestamp.
 
 ---
 
@@ -704,6 +691,9 @@ machine and record the first results/known issues).
 
 - [x] **Issue 23: Implement real LRU eviction in `SessionCache`**
   - Summary: Enforced cache capacity with true LRU eviction, added capacity tracking, edge case handling, and comprehensive unit tests.
+
+- [x] **Issue 27: Cache Biscuit expiry via min `expires_at` fact (remove brittle parsing)**
+  - Summary: Replaced brittle error-message parsing with structured Datalog query to extract the minimum `expires_at` from Biscuit tokens. Updated `TokenType::Biscuit` to cache the expiry timestamp per session, clamped cache TTL to token expiry with a 5-minute fallback, and rejected already-expired tokens at auth time. Token issuer and benchmark generators now embed `expires_at` facts in authority and attenuation blocks to support stable expiry extraction.
 
 - [-] **Issue 25: Add configurable parity scenarios and token size alignment (half implemented)**
   - Goal: Implement configurable scenario flags to ensure fair JWT vs Biscuit

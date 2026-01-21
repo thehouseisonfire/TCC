@@ -68,15 +68,22 @@ jobs:
         cd mqtt-auth-biscuit
         python3 -m py_compile benchmarks/loadgen.py
         
+    - name: Install Docker Compose v2 plugin
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y docker-compose-plugin
+        docker --version
+        docker compose version
+        
     - name: Validate Docker Compose configuration
       run: |
         cd mqtt-auth-biscuit/docker
-        docker-compose -f docker-compose.yml config
+        docker compose -f docker-compose.yml config
         
     - name: Build Docker images (dry run)
       run: |
         cd mqtt-auth-biscuit/docker
-        docker-compose -f docker-compose.yml build --dry-run 2>/dev/null || echo "Dry-run completed"
+        docker compose -f docker-compose.yml build --dry-run 2>/dev/null || echo "Dry-run completed"
         
     - name: Check token generation output
       run: |

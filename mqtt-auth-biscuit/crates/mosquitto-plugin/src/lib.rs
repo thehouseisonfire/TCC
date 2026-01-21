@@ -298,11 +298,6 @@ fn set_reason_string(target: *mut *mut c_char, message: &str) {
     }
 }
 
-fn set_auth_reauth_signal(evt: &mut MosquittoEvtMessage, message: &str) {
-    evt.reason_code = MQTT_RC_REAUTHENTICATE;
-    set_reason_string(&mut evt.reason_string, message);
-}
-
 fn set_control_reauth_signal(evt: &mut MosquittoEvtControl, message: &str) {
     evt.reason_code = MQTT_RC_REAUTHENTICATE;
     set_reason_string(&mut evt.reason_string, message);
@@ -649,40 +644,10 @@ extern "C" fn message_callback(
         return MOSQ_ERR_INVAL;
     }
     let evt = unsafe { &mut *(event_data as *mut MosquittoEvtMessage) };
-    let state = unsafe { &*(userdata as *mut PluginState) };
     if evt.topic.is_null() {
         return MOSQ_ERR_INVAL;
     }
-
-    let Some(client_id) = mosq_client_id_string(evt.client) else {
-        return MOSQ_ERR_ACL_DENIED;
-    };
-    let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
-
-    if let Some(token_type) = state.cache.get(&client_id) {
-        let params = AuthzParams {
-            client_id: &client_id,
-            topic: &topic,
-            access: 2,
-            biscuit_root_key: &state.config.biscuit.root_public_key,
-            policy_mode: state.config.policy.mode,
-            sqlite_policy: state.sqlite_policy.as_ref(),
-            http_url: state.config.policy.http_url.as_deref(),
-            http_ca_file: state.config.policy.http_ca_file.as_deref(),
-            http_tls_insecure: state.config.policy.http_tls_insecure,
-        };
-
-        match check_authorization(&token_type, params) {
-            AuthzOutcome::Allowed => return MOSQ_ERR_SUCCESS,
-            AuthzOutcome::Expired => {
-                set_auth_reauth_signal(evt, "token expired; reauthenticate");
-                log_debug("Message delivery rejected: token expired");
-                return MOSQ_ERR_ACL_DENIED;
-            }
-            AuthzOutcome::Denied => {}
-        }
-    }
-    MOSQ_ERR_ACL_DENIED
+    MOSQ_ERR_SUCCESS
 }
 
 extern "C" fn control_callback(

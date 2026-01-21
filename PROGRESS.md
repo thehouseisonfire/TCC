@@ -577,11 +577,6 @@ machine and record the first results/known issues).
 
 #### E) Correctness & Semantics
 
-- [x] **Issue 10: Expiry-aware client signaling via MQTT v5 enhanced auth**
-  - Summary: authorization now distinguishes expired tokens and surfaces
-    reauthentication intent via MQTT v5 reason codes/reason strings in message
-    and control callbacks, enabling clients to trigger refresh flows.
-
 - [ ] **Issue 19: Implement/validate `MOSQ_EVT_MESSAGE` fan-out per subscriber
      authorization**
   - Goal: Ensure outbound message authorization is evaluated _per subscriber
@@ -597,20 +592,30 @@ machine and record the first results/known issues).
       demonstrate per-subscriber fan-out cost
     - Add a results field capturing subscriber count and observed scaling trend
 
-- [ ] **Issue 20: Fix MESSAGE/CONTROL callback semantics (not publish-only)**
-  - Goal: Make `MOSQ_EVT_MESSAGE` and `MOSQ_EVT_CONTROL` authorization decisions
-    reflect the correct operation/access semantics rather than hardcoding
-    publish.
-  - Current issue: `message_callback` and `control_callback` currently pass
-    `access=2` unconditionally.
+- [ ] **Issue 20: Fix CONTROL callback semantics (not publish-only)**
+  - Goal: Make `MOSQ_EVT_CONTROL` authorization decisions reflect the correct
+    control-plane access semantics rather than hardcoding publish.
+  - Current issue: `control_callback` currently passes `access=2`
+    unconditionally.
   - Deliverable:
-    - Define correct access semantics for MESSAGE and CONTROL callbacks (publish
-      vs subscribe vs control-plane)
+    - Define correct access semantics for the CONTROL callback (control-plane)
     - Replace hardcoded `access` values with correct values derived from
       Mosquitto event data / API expectations
-    - Add targeted scenarios for:
-      - subscribe-deny enforcement on outbound delivery (MESSAGE)
-      - control-topic enforcement behavior (CONTROL)
+    - Add targeted scenarios for control-topic enforcement behavior (CONTROL)
+
+- [ ] **Issue 20.1: Verify ACL_CHECK subtype handling across policy modes**
+  - Goal: Confirm all policy modes apply authorization correctly for each
+    `MOSQ_EVT_ACL_CHECK` access subtype (`MOSQ_ACL_WRITE`, `MOSQ_ACL_READ`,
+    `MOSQ_ACL_SUBSCRIBE`).
+  - Current gap: Access discrimination varies by policy mode (e.g., JWT
+    token-only ignores `access`), and correctness per subtype has not been
+    validated.
+  - Deliverable:
+    - Matrix review of policy modes (TokenOnly/SQLite/HTTP/Hybrid) vs access
+      subtypes
+    - Add targeted tests or benchmark scenarios that exercise each subtype
+      under each policy mode
+    - Document expected outcomes and any deviations from Mosquitto ACL semantics
 
 - [ ] **Issue 21: Expiry enforcement in ACL_CHECK with disconnect (no reason codes)**
   - Goal: On expired tokens, rely on `MOSQ_EVT_ACL_CHECK` to deny access and

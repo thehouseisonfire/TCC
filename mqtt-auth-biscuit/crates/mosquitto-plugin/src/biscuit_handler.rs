@@ -20,40 +20,18 @@ fn get_authorizer_template() -> &'static str {
 
 pub enum BiscuitAuthOutcome {
     Allowed,
-    Expired,
     Denied,
     Error(biscuit_auth::error::Token),
 }
 
-pub fn check_biscuit_expiry(
+pub fn extract_min_expiry(
     token_bytes: &[u8],
     root_public_key: &PublicKey,
-) -> BiscuitAuthOutcome {
-    let biscuit = match Biscuit::from(token_bytes, root_public_key) {
-        Ok(token) => token,
-        Err(err) => return BiscuitAuthOutcome::Error(err),
-    };
-
-    use biscuit_auth::macros::authorizer;
-    let authorizer = authorizer!(
-        r#"
-        time({time});
-        allow if time($t);
-        "#,
-        time = Utc::now().timestamp()
-    )
-    .build(&biscuit)
-    .map_err(|_| biscuit_auth::error::Token::InternalError);
-
-    let mut authorizer = match authorizer {
-        Ok(authorizer) => authorizer,
-        Err(err) => return BiscuitAuthOutcome::Error(err),
-    };
-
-    match authorizer.authorize() {
-        Ok(_) => BiscuitAuthOutcome::Allowed,
-        Err(err) => classify_biscuit_error(&err),
-    }
+) -> Result<Option<i64>, biscuit_auth::error::Token> {
+    let biscuit = Biscuit::from(token_bytes, root_public_key)?;
+    let mut authorizer = biscuit.authorizer()?;
+    let expiries: Vec<(i64,)> = authorizer.query_all("data($ts) <- expires_at($ts)")?;
+    Ok(expiries.into_iter().map(|(ts,)| ts).min())
 }
 
 pub fn verify_biscuit_token(
@@ -94,29 +72,6 @@ pub fn verify_biscuit_token(
     // Authorize
     match authorizer.authorize() {
         Ok(_) => BiscuitAuthOutcome::Allowed,
-        Err(err) => classify_biscuit_error(&err),
-    }
-}
-
-fn classify_biscuit_error(err: &biscuit_auth::error::Token) -> BiscuitAuthOutcome {
-    use biscuit_auth::error::{FailedCheck, Logic};
-
-    let expired = matches!(
-        err,
-        biscuit_auth::error::Token::FailedLogic(Logic::Unauthorized { checks, .. })
-            | biscuit_auth::error::Token::FailedLogic(Logic::NoMatchingPolicy { checks })
-            if checks.iter().any(|check| {
-                let rule = match check {
-                    FailedCheck::Block(block) => &block.rule,
-                    FailedCheck::Authorizer(authorizer) => &authorizer.rule,
-                };
-                rule.contains("time(") && rule.contains('<')
-            })
-    );
-
-    if expired {
-        BiscuitAuthOutcome::Expired
-    } else {
-        BiscuitAuthOutcome::Denied
+        Err(_) => BiscuitAuthOutcome::Denied,
     }
 }

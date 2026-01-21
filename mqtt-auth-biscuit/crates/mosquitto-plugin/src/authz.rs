@@ -1,5 +1,5 @@
 use crate::auth::TokenType;
-use crate::biscuit_handler::{check_biscuit_expiry, verify_biscuit_token, BiscuitAuthOutcome};
+use crate::biscuit_handler::{verify_biscuit_token, BiscuitAuthOutcome};
 use crate::http_policy;
 use crate::policy::PolicyMode;
 use crate::sqlite_policy::SqlitePolicy;
@@ -113,18 +113,10 @@ pub fn check_authorization(
                 }
             }
         }
-        TokenType::Biscuit(token_bytes) => {
-            if params.policy_mode != PolicyMode::TokenOnly {
-                match check_biscuit_expiry(token_bytes, params.biscuit_root_key) {
-                    BiscuitAuthOutcome::Allowed => {}
-                    BiscuitAuthOutcome::Expired => return AuthzOutcome::Expired,
-                    BiscuitAuthOutcome::Denied => {
-                        return AuthzOutcome::Denied
-                    }
-                    BiscuitAuthOutcome::Error(err) => {
-                        let _ = err;
-                        return AuthzOutcome::Denied
-                    }
+        TokenType::Biscuit { bytes, expires_at } => {
+            if let Some(expires_at) = expires_at {
+                if Utc::now().timestamp() >= *expires_at {
+                    return AuthzOutcome::Expired;
                 }
             }
 
@@ -137,13 +129,12 @@ pub fn check_authorization(
             };
 
             let token_only = || match verify_biscuit_token(
-                token_bytes,
+                bytes,
                 params.biscuit_root_key,
                 params.topic,
                 operation,
             ) {
                 BiscuitAuthOutcome::Allowed => AuthzOutcome::Allowed,
-                BiscuitAuthOutcome::Expired => AuthzOutcome::Expired,
                 BiscuitAuthOutcome::Denied => AuthzOutcome::Denied,
                 BiscuitAuthOutcome::Error(err) => {
                     let _ = err;

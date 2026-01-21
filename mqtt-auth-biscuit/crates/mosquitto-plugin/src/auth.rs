@@ -6,7 +6,7 @@ use jsonwebtoken::errors::ErrorKind;
 #[derive(Clone)]
 pub enum TokenType {
     Jwt { claims: Claims, raw: String },
-    Biscuit(Vec<u8>),
+    Biscuit { bytes: Vec<u8>, expires_at: Option<i64> },
 }
 
 #[derive(Debug)]
@@ -49,7 +49,10 @@ impl AuthEngine {
                 .map_err(|e| AuthError::Invalid(format!("Invalid token format (base64 error: {e})")))?;
 
             // We just return the bytes for now, authorization will happen per topic
-            Ok(TokenType::Biscuit(bytes))
+            Ok(TokenType::Biscuit {
+                bytes,
+                expires_at: None,
+            })
         }
     }
 }

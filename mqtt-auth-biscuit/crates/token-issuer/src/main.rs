@@ -241,18 +241,23 @@ fn handle_biscuit(req: BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<TokenR
     let topic = escape_datalog_str(&topic);
     let publish_fact = format!("right(\"publish\", \"{topic}\")");
     let subscribe_fact = format!("right(\"subscribe\", \"{topic}\")");
+    let expires_fact = format!("expires_at({exp})");
     let biscuit = Biscuit::builder()
         .fact(publish_fact.as_str())
         .map_err(|e| format!("biscuit fact publish: {e}"))?
         .fact(subscribe_fact.as_str())
         .map_err(|e| format!("biscuit fact subscribe: {e}"))?
+        .fact(expires_fact.as_str())
+        .map_err(|e| format!("biscuit fact expires_at: {e}"))?
         .build(&cfg.biscuit_keypair)
         .map_err(|e| format!("biscuit build: {e}"))?;
 
     let check_src = format!("check if time($t), $t < {exp}");
     let block = BlockBuilder::new()
         .check(check_src.as_str())
-        .map_err(|e| format!("biscuit check: {e}"))?;
+        .map_err(|e| format!("biscuit check: {e}"))?
+        .fact(expires_fact.as_str())
+        .map_err(|e| format!("biscuit fact expires_at: {e}"))?;
 
     let biscuit = biscuit.append(block).map_err(|e| format!("biscuit append: {e}"))?;
     let bytes = biscuit.to_vec().map_err(|e| format!("biscuit encode: {e}"))?;

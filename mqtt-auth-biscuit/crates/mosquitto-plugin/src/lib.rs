@@ -1,9 +1,11 @@
 use crate::auth::{AuthEngine, AuthError, TokenType};
 use crate::authz::{check_authorization, AuthzOutcome, AuthzParams};
+use crate::biscuit_handler::extract_min_expiry;
 use crate::cache::SessionCache;
 use crate::config::{parse_options, PluginConfig};
 use crate::policy::PolicyMode;
 use crate::sqlite_policy::SqlitePolicy;
+use chrono::Utc;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
 use std::sync::Arc;
@@ -40,6 +42,8 @@ pub const MOSQ_EVT_EXT_AUTH_START: c_int = 4;
 pub const MOSQ_EVT_EXT_AUTH_CONTINUE: c_int = 5;
 pub const MOSQ_EVT_CONTROL: c_int = 6;
 pub const MOSQ_EVT_MESSAGE: c_int = 7;
+
+const FALLBACK_CACHE_TTL_SECONDS: u64 = 300;
 
 #[repr(C)]
 pub struct MosquittoOpt {
@@ -174,6 +178,40 @@ fn log_info(msg: &str) {
     }
 }
 
+fn cache_ttl_for_token(token_type: &TokenType, configured_ttl_seconds: u64) -> Result<Duration, &'static str> {
+    let configured_ttl = Duration::from_secs(configured_ttl_seconds);
+    let now = Utc::now().timestamp();
+    let expires_at = match token_type {
+        TokenType::Jwt { claims, .. } => Some(claims.exp),
+        TokenType::Biscuit { expires_at, .. } => *expires_at,
+    };
+
+    let ttl = match expires_at {
+        Some(exp) => {
+            let remaining = exp - now;
+            if remaining <= 0 {
+                return Err("token expired");
+            }
+            let remaining = Duration::from_secs(remaining as u64);
+            if remaining < configured_ttl {
+                remaining
+            } else {
+                configured_ttl
+            }
+        }
+        None => {
+            let fallback = Duration::from_secs(FALLBACK_CACHE_TTL_SECONDS);
+            if fallback < configured_ttl {
+                fallback
+            } else {
+                configured_ttl
+            }
+        }
+    };
+
+    Ok(ttl)
+}
+
 #[cfg(any(test, miri, kani))]
 fn log_info(_msg: &str) {}
 
@@ -247,6 +285,22 @@ fn set_auth_reauth_signal(evt: &mut MosquittoEvtMessage, message: &str) {
 fn set_control_reauth_signal(evt: &mut MosquittoEvtControl, message: &str) {
     evt.reason_code = MQTT_RC_REAUTHENTICATE;
     set_reason_string(&mut evt.reason_string, message);
+}
+
+fn attach_biscuit_expiry(
+    token_type: TokenType,
+    root_public_key: &biscuit_auth::PublicKey,
+) -> Result<TokenType, biscuit_auth::error::Token> {
+    match token_type {
+        TokenType::Biscuit { bytes, expires_at } => {
+            let expires_at = match expires_at {
+                Some(value) => Some(value),
+                None => extract_min_expiry(&bytes, root_public_key)?,
+            };
+            Ok(TokenType::Biscuit { bytes, expires_at })
+        }
+        other => Ok(other),
+    }
 }
 
 #[no_mangle]
@@ -394,13 +448,27 @@ extern "C" fn basic_auth_callback(
 
     match state.auth_engine.authenticate(&password) {
         Ok(token_type) => {
+            let token_type = match attach_biscuit_expiry(token_type, &state.config.biscuit.root_public_key) {
+                Ok(token_type) => token_type,
+                Err(err) => {
+                    log_debug(&format!("Authentication rejected: biscuit expiry extraction failed: {err}"));
+                    return MOSQ_ERR_AUTH;
+                }
+            };
+            let cache_ttl = match cache_ttl_for_token(&token_type, state.config.cache_ttl_seconds) {
+                Ok(ttl) => ttl,
+                Err(msg) => {
+                    log_debug(&format!("Authentication rejected: {msg}"));
+                    return MOSQ_ERR_AUTH;
+                }
+            };
             let Some(client_id) = mosq_client_id_string(evt.client) else {
                 return MOSQ_ERR_AUTH;
             };
             state.cache.insert(
                 client_id,
                 token_type,
-                Duration::from_secs(state.config.cache_ttl_seconds),
+                cache_ttl,
             );
             MOSQ_ERR_SUCCESS
         }
@@ -452,13 +520,27 @@ extern "C" fn ext_auth_start_callback(
 
     match state.auth_engine.authenticate(&token) {
         Ok(token_type) => {
+            let token_type = match attach_biscuit_expiry(token_type, &state.config.biscuit.root_public_key) {
+                Ok(token_type) => token_type,
+                Err(err) => {
+                    log_debug(&format!("Enhanced auth rejected: biscuit expiry extraction failed: {err}"));
+                    return MOSQ_ERR_AUTH;
+                }
+            };
+            let cache_ttl = match cache_ttl_for_token(&token_type, state.config.cache_ttl_seconds) {
+                Ok(ttl) => ttl,
+                Err(msg) => {
+                    log_debug(&format!("Enhanced auth rejected: {msg}"));
+                    return MOSQ_ERR_AUTH;
+                }
+            };
             let Some(client_id) = mosq_client_id_string(evt.client) else {
                 return MOSQ_ERR_AUTH;
             };
             state.cache.insert(
                 client_id,
                 token_type,
-                Duration::from_secs(state.config.cache_ttl_seconds),
+                cache_ttl,
             );
             MOSQ_ERR_SUCCESS
         }

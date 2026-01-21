@@ -77,6 +77,8 @@ fn main() {
         .unwrap()
         .fact("right(\"subscribe\", \"sensors/client_1/temp\")")
         .unwrap()
+        .fact("expires_at(2000000000)")
+        .unwrap()
         .build(&root_keypair)
         .unwrap();
 
@@ -87,7 +89,11 @@ fn main() {
             .as_secs() as i64;
         let exp = now + 5;
         let check_src = format!("check if time($t), $t < {exp}");
-        let b = BlockBuilder::new().check(check_src.as_str()).unwrap();
+        let b = BlockBuilder::new()
+            .check(check_src.as_str())
+            .unwrap()
+            .fact(format!("expires_at({exp})").as_str())
+            .unwrap();
         biscuit_base.append(b).unwrap()
     };
 
@@ -117,11 +123,15 @@ fn main() {
             .unwrap()
             .fact("right(\"publish\", \"sensors/client_1/humidity\")")
             .unwrap()
+            .fact("expires_at(2000000000)")
+            .unwrap()
             .build(&root_keypair)
             .unwrap();
 
         let b = BlockBuilder::new()
             .check("check if resource(\"sensors/client_1/temp\")")
+            .unwrap()
+            .fact("expires_at(2000000000)")
             .unwrap();
         master.append(b).unwrap()
     };

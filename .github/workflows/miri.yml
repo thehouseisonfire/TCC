@@ -43,5 +43,5 @@ jobs:
         run: cargo install kani-verifier --locked
 
       - name: Run Kani proofs
-        run: cargo kani -p mosquitto-auth-biscuit --all-proof
+        run: cargo kani -p mosquitto-auth-biscuit
         working-directory: mqtt-auth-biscuit

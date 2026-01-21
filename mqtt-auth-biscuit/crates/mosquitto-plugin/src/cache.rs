@@ -35,7 +35,6 @@ pub struct SessionCache<K, V> {
     metrics: CacheMetrics,
 }
 
-#[cfg(not(kani))]
 impl<K, V> SessionCache<K, V>
 where
     K: std::hash::Hash + Eq + Clone,
@@ -105,34 +104,6 @@ where
             hits: self.metrics.hits.load(Ordering::Relaxed),
             misses: self.metrics.misses.load(Ordering::Relaxed),
         }
-    }
-}
-
-#[cfg(kani)]
-impl<K, V> SessionCache<K, V>
-where
-    K: std::hash::Hash + Eq + Clone,
-{
-    pub fn new(_capacity: usize) -> Self {
-        Self {
-            cache: DashMap::new(),
-            lru: Mutex::new(LruCache::new(NonZeroUsize::new(1).unwrap())),
-            capacity: 1,
-            metrics: CacheMetrics::default(),
-        }
-    }
-
-    pub fn insert(&self, _key: K, _value: V, _ttl: Duration) {}
-
-    pub fn get(&self, _key: &K) -> Option<V>
-    where
-        V: Clone,
-    {
-        None
-    }
-
-    pub fn stats(&self) -> CacheStats {
-        CacheStats { hits: 0, misses: 0 }
     }
 }
 

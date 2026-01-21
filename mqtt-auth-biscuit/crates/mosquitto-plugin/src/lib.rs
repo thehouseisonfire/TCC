@@ -14,7 +14,49 @@ use std::time::Duration;
 mod auth;
 mod authz;
 mod biscuit_handler;
+/// Kani builds skip the real cache to keep proofs lightweight and deterministic.
+/// The stubbed cache exposes the same API surface without stateful behavior.
+#[cfg(not(kani))]
 mod cache;
+#[cfg(kani)]
+mod cache {
+    use std::marker::PhantomData;
+    use std::time::Duration;
+
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct CacheStats {
+        pub hits: u64,
+        pub misses: u64,
+    }
+
+    pub struct SessionCache<K, V> {
+        _marker: PhantomData<(K, V)>,
+    }
+
+    impl<K, V> SessionCache<K, V>
+    where
+        K: std::hash::Hash + Eq + Clone,
+    {
+        pub fn new(_capacity: usize) -> Self {
+            Self {
+                _marker: PhantomData,
+            }
+        }
+
+        pub fn insert(&self, _key: K, _value: V, _ttl: Duration) {}
+
+        pub fn get(&self, _key: &K) -> Option<V>
+        where
+            V: Clone,
+        {
+            None
+        }
+
+        pub fn stats(&self) -> CacheStats {
+            CacheStats::default()
+        }
+    }
+}
 mod config;
 mod http_policy;
 mod jwt_handler;
@@ -1087,7 +1129,7 @@ mod tests {
 #[cfg(kani)]
 mod verification {
     use super::*;
-    use crate::auth::{AuthEngine, TokenType};
+    use crate::auth::AuthEngine;
     use crate::cache::SessionCache;
     use crate::config::{BiscuitConfig, JwtConfig, PluginConfig};
     use crate::policy::{PolicyBackendConfig, PolicyMode};

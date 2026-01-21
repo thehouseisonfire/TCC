@@ -1,5 +1,5 @@
 use crate::auth::TokenType;
-use crate::biscuit_handler::verify_biscuit_token;
+use crate::biscuit_handler::{check_biscuit_expiry, verify_biscuit_token, BiscuitAuthOutcome};
 use crate::http_policy;
 use crate::policy::PolicyMode;
 use crate::sqlite_policy::SqlitePolicy;
@@ -20,42 +20,58 @@ pub struct AuthzParams<'a> {
     pub http_tls_insecure: bool,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum AuthzOutcome {
+    Allowed,
+    Denied,
+    Expired,
+}
+
 pub fn check_authorization(
     token_type: &TokenType,
     params: AuthzParams<'_>,
-) -> bool {
+) -> AuthzOutcome {
     match token_type {
         TokenType::Jwt { claims, raw } => {
             if Utc::now().timestamp() >= claims.exp {
-                return false;
+                return AuthzOutcome::Expired;
             }
 
             let token_only = || {
                 let roles = claims.roles.as_ref();
                 if let Some(roles) = roles {
                     if roles.iter().any(|r| r.trim() == "admin") {
-                        return true;
+                        return AuthzOutcome::Allowed;
                     }
                 }
 
                 let subject = claims.sub.trim();
                 let prefix = format!("sensors/{}", subject);
-                params.topic.contains(&prefix) || params.topic.contains(subject)
+                if params.topic.contains(&prefix) || params.topic.contains(subject) {
+                    AuthzOutcome::Allowed
+                } else {
+                    AuthzOutcome::Denied
+                }
             };
 
             match params.policy_mode {
                 PolicyMode::TokenOnly => token_only(),
                 PolicyMode::Sqlite => {
                     let Some(sqlite_policy) = params.sqlite_policy else {
-                        return false;
+                        return AuthzOutcome::Denied;
                     };
-                    sqlite_policy
+                    if sqlite_policy
                         .check(params.client_id, params.topic, params.access)
                         .unwrap_or(false)
+                    {
+                        AuthzOutcome::Allowed
+                    } else {
+                        AuthzOutcome::Denied
+                    }
                 }
                 PolicyMode::Http => {
-                    let Some(url) = params.http_url else { return false };
-                    http_policy::check_http(
+                    let Some(url) = params.http_url else { return AuthzOutcome::Denied };
+                    let allowed = http_policy::check_http(
                         url,
                         params.client_id,
                         params.topic,
@@ -64,7 +80,12 @@ pub fn check_authorization(
                         params.http_ca_file,
                         params.http_tls_insecure,
                     )
-                        .unwrap_or(false)
+                        .unwrap_or(false);
+                    if allowed {
+                        AuthzOutcome::Allowed
+                    } else {
+                        AuthzOutcome::Denied
+                    }
                 }
                 PolicyMode::Hybrid => {
                     let Some(url) = params.http_url else {
@@ -80,13 +101,33 @@ pub fn check_authorization(
                         params.http_ca_file,
                         params.http_tls_insecure,
                     ) {
-                        Ok(allowed) => allowed,
+                        Ok(allowed) => {
+                            if allowed {
+                                AuthzOutcome::Allowed
+                            } else {
+                                AuthzOutcome::Denied
+                            }
+                        }
                         Err(_) => token_only(),
                     }
                 }
             }
         }
         TokenType::Biscuit(token_bytes) => {
+            if params.policy_mode != PolicyMode::TokenOnly {
+                match check_biscuit_expiry(token_bytes, params.biscuit_root_key) {
+                    BiscuitAuthOutcome::Allowed => {}
+                    BiscuitAuthOutcome::Expired => return AuthzOutcome::Expired,
+                    BiscuitAuthOutcome::Denied => {
+                        return AuthzOutcome::Denied
+                    }
+                    BiscuitAuthOutcome::Error(err) => {
+                        let _ = err;
+                        return AuthzOutcome::Denied
+                    }
+                }
+            }
+
             let operation = if (params.access & 0x02) != 0 {
                 "publish"
             } else if (params.access & 0x04) != 0 || (params.access & 0x01) != 0 {
@@ -95,24 +136,39 @@ pub fn check_authorization(
                 "read"
             };
 
-            let token_only = || {
-                verify_biscuit_token(token_bytes, params.biscuit_root_key, params.topic, operation)
-                    .unwrap_or(false)
+            let token_only = || match verify_biscuit_token(
+                token_bytes,
+                params.biscuit_root_key,
+                params.topic,
+                operation,
+            ) {
+                BiscuitAuthOutcome::Allowed => AuthzOutcome::Allowed,
+                BiscuitAuthOutcome::Expired => AuthzOutcome::Expired,
+                BiscuitAuthOutcome::Denied => AuthzOutcome::Denied,
+                BiscuitAuthOutcome::Error(err) => {
+                    let _ = err;
+                    AuthzOutcome::Denied
+                }
             };
 
             match params.policy_mode {
                 PolicyMode::TokenOnly => token_only(),
                 PolicyMode::Sqlite => {
                     let Some(sqlite_policy) = params.sqlite_policy else {
-                        return false;
+                        return AuthzOutcome::Denied;
                     };
-                    sqlite_policy
+                    if sqlite_policy
                         .check(params.client_id, params.topic, params.access)
                         .unwrap_or(false)
+                    {
+                        AuthzOutcome::Allowed
+                    } else {
+                        AuthzOutcome::Denied
+                    }
                 }
                 PolicyMode::Http => {
-                    let Some(url) = params.http_url else { return false };
-                    http_policy::check_http(
+                    let Some(url) = params.http_url else { return AuthzOutcome::Denied };
+                    let allowed = http_policy::check_http(
                         url,
                         params.client_id,
                         params.topic,
@@ -121,7 +177,12 @@ pub fn check_authorization(
                         params.http_ca_file,
                         params.http_tls_insecure,
                     )
-                    .unwrap_or(false)
+                    .unwrap_or(false);
+                    if allowed {
+                        AuthzOutcome::Allowed
+                    } else {
+                        AuthzOutcome::Denied
+                    }
                 }
                 PolicyMode::Hybrid => {
                     let Some(url) = params.http_url else {
@@ -137,7 +198,13 @@ pub fn check_authorization(
                         params.http_ca_file,
                         params.http_tls_insecure,
                     ) {
-                        Ok(allowed) => allowed,
+                        Ok(allowed) => {
+                            if allowed {
+                                AuthzOutcome::Allowed
+                            } else {
+                                AuthzOutcome::Denied
+                            }
+                        }
                         Err(_) => token_only(),
                     }
                 }

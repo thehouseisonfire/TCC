@@ -18,21 +18,62 @@ fn get_authorizer_template() -> &'static str {
     })
 }
 
+pub enum BiscuitAuthOutcome {
+    Allowed,
+    Expired,
+    Denied,
+    Error(biscuit_auth::error::Token),
+}
+
+pub fn check_biscuit_expiry(
+    token_bytes: &[u8],
+    root_public_key: &PublicKey,
+) -> BiscuitAuthOutcome {
+    let biscuit = match Biscuit::from(token_bytes, root_public_key) {
+        Ok(token) => token,
+        Err(err) => return BiscuitAuthOutcome::Error(err),
+    };
+
+    use biscuit_auth::macros::authorizer;
+    let authorizer = authorizer!(
+        r#"
+        time({time});
+        allow if time($t);
+        "#,
+        time = Utc::now().timestamp()
+    )
+    .build(&biscuit)
+    .map_err(|_| biscuit_auth::error::Token::InternalError);
+
+    let mut authorizer = match authorizer {
+        Ok(authorizer) => authorizer,
+        Err(err) => return BiscuitAuthOutcome::Error(err),
+    };
+
+    match authorizer.authorize() {
+        Ok(_) => BiscuitAuthOutcome::Allowed,
+        Err(err) => classify_biscuit_error(&err),
+    }
+}
+
 pub fn verify_biscuit_token(
     token_bytes: &[u8],
     root_public_key: &PublicKey,
     topic: &str,
     operation: &str, // "publish" or "subscribe"
-) -> Result<bool, biscuit_auth::error::Token> {
+) -> BiscuitAuthOutcome {
     // Deserialize token
-    let biscuit = Biscuit::from(token_bytes, root_public_key)?;
+    let biscuit = match Biscuit::from(token_bytes, root_public_key) {
+        Ok(token) => token,
+        Err(err) => return BiscuitAuthOutcome::Error(err),
+    };
 
     use biscuit_auth::macros::authorizer;
     // The authorizer! macro requires a string literal at compile time
     // Template caching is preserved for documentation and potential future use
     let _template = get_authorizer_template(); // Keep the template cache for consistency
     
-    let mut authorizer = authorizer!(
+    let authorizer = authorizer!(
         r#"
         resource({topic});
         operation({operation});
@@ -44,8 +85,38 @@ pub fn verify_biscuit_token(
         time = Utc::now().timestamp()
     )
     .build(&biscuit)
-    .map_err(|_| biscuit_auth::error::Token::InternalError)?;
+    .map_err(|_| biscuit_auth::error::Token::InternalError);
+    let mut authorizer = match authorizer {
+        Ok(authorizer) => authorizer,
+        Err(err) => return BiscuitAuthOutcome::Error(err),
+    };
 
     // Authorize
-    authorizer.authorize().map(|_| true)
+    match authorizer.authorize() {
+        Ok(_) => BiscuitAuthOutcome::Allowed,
+        Err(err) => classify_biscuit_error(&err),
+    }
+}
+
+fn classify_biscuit_error(err: &biscuit_auth::error::Token) -> BiscuitAuthOutcome {
+    use biscuit_auth::error::{FailedCheck, Logic};
+
+    let expired = matches!(
+        err,
+        biscuit_auth::error::Token::FailedLogic(Logic::Unauthorized { checks, .. })
+            | biscuit_auth::error::Token::FailedLogic(Logic::NoMatchingPolicy { checks })
+            if checks.iter().any(|check| {
+                let rule = match check {
+                    FailedCheck::Block(block) => &block.rule,
+                    FailedCheck::Authorizer(authorizer) => &authorizer.rule,
+                };
+                rule.contains("time(") && rule.contains('<')
+            })
+    );
+
+    if expired {
+        BiscuitAuthOutcome::Expired
+    } else {
+        BiscuitAuthOutcome::Denied
+    }
 }

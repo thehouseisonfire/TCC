@@ -577,14 +577,10 @@ machine and record the first results/known issues).
 
 #### E) Correctness & Semantics
 
-- [ ] **Issue 10: Expiry-aware client signaling via MQTT v5 enhanced auth**
-  - Goal: when access fails due to token expiry, make the broker/PEP signal this
-    distinctly from generic policy denial, enabling clients to trigger a token
-    refresh + reauthentication flow.
-  - Deliverable:
-    - Broker-side differentiation between "expired" vs "denied" outcomes
-    - MQTT v5 `AUTH`-based reauthentication flow with explicit reason reporting
-      (reason code / reason string) suitable for automated clients
+- [x] **Issue 10: Expiry-aware client signaling via MQTT v5 enhanced auth**
+  - Summary: authorization now distinguishes expired tokens and surfaces
+    reauthentication intent via MQTT v5 reason codes/reason strings in message
+    and control callbacks, enabling clients to trigger refresh flows.
 
 - [ ] **Issue 19: Implement/validate `MOSQ_EVT_MESSAGE` fan-out per subscriber
      authorization**
@@ -616,6 +612,30 @@ machine and record the first results/known issues).
       - subscribe-deny enforcement on outbound delivery (MESSAGE)
       - control-topic enforcement behavior (CONTROL)
 
+- [ ] **Issue 21: Expiry enforcement in ACL_CHECK with disconnect (no reason codes)**
+  - Goal: On expired tokens, rely on `MOSQ_EVT_ACL_CHECK` to deny access and
+    forcibly disconnect the client, since ACL checks do not support MQTT v5
+    reason codes/strings for explicit expiry signaling.
+  - Constraints:
+    - Do not send or depend on reason codes in ACL checks.
+    - Avoid full token signature verification in `ACL_CHECK`; only validate
+      expiry and policy evaluation (authz). Cryptographic verification should
+      remain in auth/enhanced-auth entrypoints.
+  - Deliverable:
+    - Add explicit disconnect path when `AuthzOutcome::Expired` is returned in
+      `ACL_CHECK` (document which Mosquitto API is used).
+    - Document rationale: ACL_CHECK is the authoritative access gate; expiry
+      means immediate disconnect without reason codes.
+
+- [ ] **Issue 22: Proactive client reauthentication before expiry**
+  - Goal: Clients refresh tokens proactively and initiate MQTT v5 reauth at
+    least one minute before token expiration, minimizing ACL denials.
+  - Deliverable:
+    - Client-side refresh timer logic using the token `exp` claim.
+    - Request a new token from the Token Issuer and send an AUTH packet with
+      fresh credentials at least 60 seconds before expiry.
+    - Update benchmark clients/scenarios to exercise proactive refresh flow.
+
 - [ ] **Issue 24: Decide whether multi-step `MOSQ_EVT_EXT_AUTH_CONTINUE` is in
      research scope**
   - Goal: Determine whether implementing true multi-step enhanced authentication
@@ -632,6 +652,32 @@ machine and record the first results/known issues).
     - If in-scope:
       - Implement multi-step auth state handling (per client/session) and add at
         least one scenario measuring multi-step overhead
+
+- [ ] **Issue 26: Optional full authz on ACL_READ behind a flag (default expiry-only)**
+  - Goal: Support full authorization checks on `MOSQ_EVT_ACL_CHECK` +
+    `MOSQ_ACL_READ` behind a config flag (disabled by default) to avoid
+    per-subscriber performance penalties in high fan-out scenarios.
+  - Rationale: Full Datalog/HTTP/SQLite checks on every read can be too costly;
+    default behavior should only validate token expiry for read fan-out, while
+    leaving the full authz path available for correctness experiments.
+  - Deliverable:
+    - Add a config option (e.g., `acl_read_full_authz`) defaulting to false.
+    - When false, `ACL_READ` only validates expiry (no full authz).
+    - When true, run full authz checks and document the expected performance hit.
+
+- [ ] **Issue 27: Cache Biscuit expiry via min `expires_at` fact (remove brittle parsing)**
+  - Goal: Extract the minimum `expires_at` value from all Biscuit blocks using
+    the Datalog query engine and cache it per client/session for fast expiry
+    checks during `ACL_READ` fan-out.
+  - Rationale: Current expiry detection relies on parsing failed checks and is
+    brittle. Using `authorizer.query_all` over `expires_at($ts)` provides a
+    stable, structured expiry source without full authorization evaluation.
+  - Deliverable:
+    - Update issuer/token generator to include explicit `expires_at($ts)` facts
+      in the authority block (and allow attenuation blocks to reduce expiry).
+    - Implement a helper to compute `min(expires_at)` via Datalog query and
+      store it in the session cache at authentication/reauth time.
+    - Replace string-based expiry classification with the cached timestamp.
 
 ---
 

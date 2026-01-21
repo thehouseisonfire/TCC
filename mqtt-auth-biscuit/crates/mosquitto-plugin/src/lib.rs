@@ -1,12 +1,10 @@
-use crate::auth::{AuthEngine, TokenType};
-use crate::authz::{check_authorization, AuthzParams};
+use crate::auth::{AuthEngine, AuthError, TokenType};
+use crate::authz::{check_authorization, AuthzOutcome, AuthzParams};
 use crate::cache::SessionCache;
 use crate::config::{parse_options, PluginConfig};
 use crate::policy::PolicyMode;
 use crate::sqlite_policy::SqlitePolicy;
-use std::ffi::{c_char, c_int, c_void, CStr};
-#[cfg(not(any(test, miri)))]
-use std::ffi::CString;
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,6 +27,11 @@ pub const MOSQ_ERR_AUTH: c_int = 11;
 pub const MOSQ_ERR_ACL_DENIED: c_int = 12;
 pub const MOSQ_ERR_PLUGIN_DEFER: c_int = 17;
 pub const MOSQ_ERR_AUTH_CONTINUE: c_int = -4;
+
+// MQTT v5 reason codes (subset needed for auth signaling)
+pub const MQTT_RC_CONTINUE_AUTHENTICATION: u8 = 24;
+pub const MQTT_RC_REAUTHENTICATE: u8 = 25;
+pub const MQTT_RC_NOT_AUTHORIZED: u8 = 135;
 
 // Mosquitto Event Types
 pub const MOSQ_EVT_ACL_CHECK: c_int = 2;
@@ -128,6 +131,7 @@ extern "C" {
 
     pub fn mosquitto_log_printf(level: c_int, fmt: *const c_char, ...);
     pub fn mosquitto_client_id(client: *const c_void) -> *const c_char;
+    pub fn mosquitto_malloc(size: usize) -> *mut c_void;
 }
 
 #[cfg(any(test, miri, kani))]
@@ -151,8 +155,15 @@ pub extern "C" fn mosquitto_client_id(_client: *const c_void) -> *const c_char {
     TEST_CLIENT_ID.as_ptr() as *const c_char
 }
 
+#[cfg(any(test, miri, kani))]
+#[no_mangle]
+pub extern "C" fn mosquitto_malloc(size: usize) -> *mut c_void {
+    unsafe { libc::malloc(size) }
+}
+
 pub const MOSQ_LOG_INFO: c_int = 1 << 0;
 pub const MOSQ_LOG_ERR: c_int = 1 << 3;
+pub const MOSQ_LOG_DEBUG: c_int = 1 << 4;
 
 #[cfg(not(any(test, miri, kani)))]
 fn log_info(msg: &str) {
@@ -165,6 +176,18 @@ fn log_info(msg: &str) {
 
 #[cfg(any(test, miri, kani))]
 fn log_info(_msg: &str) {}
+
+#[cfg(not(any(test, miri, kani)))]
+fn log_debug(msg: &str) {
+    if let Ok(c_msg) = CString::new(msg) {
+        unsafe {
+            mosquitto_log_printf(MOSQ_LOG_DEBUG, c_msg.as_ptr());
+        }
+    }
+}
+
+#[cfg(any(test, miri, kani))]
+fn log_debug(_msg: &str) {}
 
 fn cstr_to_string(ptr: *const c_char) -> Option<String> {
     if ptr.is_null() {
@@ -196,6 +219,34 @@ pub struct PluginState {
     cache: Arc<SessionCache<String, TokenType>>,
     config: PluginConfig,
     sqlite_policy: Option<SqlitePolicy>,
+}
+
+fn set_reason_string(target: *mut *mut c_char, message: &str) {
+    if target.is_null() {
+        return;
+    }
+    if let Ok(c_msg) = CString::new(message) {
+        unsafe {
+            let len = c_msg.as_bytes_with_nul().len();
+            let ptr = mosquitto_malloc(len) as *mut c_char;
+            if ptr.is_null() {
+                return;
+            }
+            ptr::copy_nonoverlapping(c_msg.as_ptr(), ptr, len);
+            // Mosquitto takes ownership and frees this buffer.
+            *target = ptr;
+        }
+    }
+}
+
+fn set_auth_reauth_signal(evt: &mut MosquittoEvtMessage, message: &str) {
+    evt.reason_code = MQTT_RC_REAUTHENTICATE;
+    set_reason_string(&mut evt.reason_string, message);
+}
+
+fn set_control_reauth_signal(evt: &mut MosquittoEvtControl, message: &str) {
+    evt.reason_code = MQTT_RC_REAUTHENTICATE;
+    set_reason_string(&mut evt.reason_string, message);
 }
 
 #[no_mangle]
@@ -353,7 +404,14 @@ extern "C" fn basic_auth_callback(
             );
             MOSQ_ERR_SUCCESS
         }
-        Err(_) => MOSQ_ERR_AUTH,
+        Err(AuthError::Expired) => {
+            log_debug("Authentication rejected: token expired");
+            MOSQ_ERR_AUTH
+        }
+        Err(AuthError::Invalid(msg)) => {
+            log_debug(&format!("Authentication rejected: {msg}"));
+            MOSQ_ERR_AUTH
+        }
     }
 }
 
@@ -404,7 +462,14 @@ extern "C" fn ext_auth_start_callback(
             );
             MOSQ_ERR_SUCCESS
         }
-        Err(_) => MOSQ_ERR_AUTH,
+        Err(AuthError::Expired) => {
+            log_debug("Enhanced auth rejected: token expired");
+            MOSQ_ERR_AUTH
+        }
+        Err(AuthError::Invalid(msg)) => {
+            log_debug(&format!("Enhanced auth rejected: {msg}"));
+            MOSQ_ERR_AUTH
+        }
     }
 }
 
@@ -450,8 +515,13 @@ extern "C" fn acl_check_callback(
             http_tls_insecure: state.config.policy.http_tls_insecure,
         };
         
-        if check_authorization(&token_type, params) {
-            return MOSQ_ERR_SUCCESS;
+        match check_authorization(&token_type, params) {
+            AuthzOutcome::Allowed => return MOSQ_ERR_SUCCESS,
+            AuthzOutcome::Expired => {
+                log_debug("ACL check rejected: token expired");
+                return MOSQ_ERR_ACL_DENIED;
+            }
+            AuthzOutcome::Denied => {}
         }
     }
 
@@ -466,7 +536,7 @@ extern "C" fn message_callback(
     if event_data.is_null() || userdata.is_null() {
         return MOSQ_ERR_INVAL;
     }
-    let evt = unsafe { &*(event_data as *mut MosquittoEvtMessage) };
+    let evt = unsafe { &mut *(event_data as *mut MosquittoEvtMessage) };
     let state = unsafe { &*(userdata as *mut PluginState) };
     if evt.topic.is_null() {
         return MOSQ_ERR_INVAL;
@@ -490,8 +560,14 @@ extern "C" fn message_callback(
             http_tls_insecure: state.config.policy.http_tls_insecure,
         };
         
-        if check_authorization(&token_type, params) {
-            return MOSQ_ERR_SUCCESS;
+        match check_authorization(&token_type, params) {
+            AuthzOutcome::Allowed => return MOSQ_ERR_SUCCESS,
+            AuthzOutcome::Expired => {
+                set_auth_reauth_signal(evt, "token expired; reauthenticate");
+                log_debug("Message delivery rejected: token expired");
+                return MOSQ_ERR_ACL_DENIED;
+            }
+            AuthzOutcome::Denied => {}
         }
     }
     MOSQ_ERR_ACL_DENIED
@@ -505,7 +581,7 @@ extern "C" fn control_callback(
     if event_data.is_null() || userdata.is_null() {
         return MOSQ_ERR_INVAL;
     }
-    let evt = unsafe { &*(event_data as *mut MosquittoEvtControl) };
+    let evt = unsafe { &mut *(event_data as *mut MosquittoEvtControl) };
     let state = unsafe { &*(userdata as *mut PluginState) };
     if evt.topic.is_null() {
         return MOSQ_ERR_INVAL;
@@ -529,8 +605,14 @@ extern "C" fn control_callback(
             http_tls_insecure: state.config.policy.http_tls_insecure,
         };
         
-        if check_authorization(&token_type, params) {
-            return MOSQ_ERR_SUCCESS;
+        match check_authorization(&token_type, params) {
+            AuthzOutcome::Allowed => return MOSQ_ERR_SUCCESS,
+            AuthzOutcome::Expired => {
+                set_control_reauth_signal(evt, "token expired; reauthenticate");
+                log_debug("Control message rejected: token expired");
+                return MOSQ_ERR_ACL_DENIED;
+            }
+            AuthzOutcome::Denied => {}
         }
     }
     MOSQ_ERR_ACL_DENIED

@@ -220,7 +220,8 @@ impl PluginConfigBuilder {
             let _ = self.biscuit_root_key_file;
             return Err(ConfigError::MissingBiscuitKey);
         }
-        
+
+        #[cfg(not(miri))]
         let pub_hex = match self.biscuit_root_key_file {
             Some(path) => {
                 let raw = fs::read_to_string(&path)

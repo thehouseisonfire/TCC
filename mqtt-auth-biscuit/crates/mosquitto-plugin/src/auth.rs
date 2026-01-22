@@ -34,6 +34,33 @@ impl AuthEngine {
         }
     }
 
+    #[cfg(kani)]
+    pub fn authenticate(&self, _token: &str) -> Result<TokenType, AuthError> {
+        if kani::any() {
+            if kani::any() {
+                Ok(TokenType::Jwt {
+                    claims: Claims {
+                        sub: "client".to_string(),
+                        exp: 0,
+                        iss: None,
+                        aud: None,
+                        client_id: None,
+                        roles: None,
+                    },
+                    raw: "token".to_string(),
+                })
+            } else {
+                Ok(TokenType::Biscuit {
+                    bytes: vec![0u8; 1],
+                    expires_at: Some(0),
+                })
+            }
+        } else {
+            Err(AuthError::Invalid("Kani mock failure".to_string()))
+        }
+    }
+
+    #[cfg(not(kani))]
     pub fn authenticate(&self, token: &str) -> Result<TokenType, AuthError> {
         let token = token.trim_matches('\0').trim();
         if token.starts_with("eyJ") {

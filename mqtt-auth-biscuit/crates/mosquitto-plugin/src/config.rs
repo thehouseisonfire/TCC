@@ -215,18 +215,16 @@ impl PluginConfigBuilder {
             validation.aud = Some(HashSet::from([aud]));
         }
 
-        #[cfg(miri)]
-        {
-            let _ = self.biscuit_root_key_file;
-            return Err(ConfigError::MissingBiscuitKey);
-        }
-
-        #[cfg(not(miri))]
         let pub_hex = match self.biscuit_root_key_file {
+            #[cfg(not(miri))]
             Some(path) => {
                 let raw = fs::read_to_string(&path)
                     .map_err(|e| ConfigError::BiscuitKeyFileError { path, source: e })?;
                 raw.trim().to_string()
+            }
+            #[cfg(miri)]
+            Some(_) => {
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string()
             }
             None => return Err(ConfigError::MissingBiscuitKey),
         };

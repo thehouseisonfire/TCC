@@ -32,6 +32,7 @@ jobs:
 
   kani:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -43,5 +44,5 @@ jobs:
         run: cargo install kani-verifier --locked
 
       - name: Run Kani proofs
-        run: cargo kani -p mosquitto-auth-biscuit
+        run: cargo kani -p mosquitto-auth-biscuit -Z unstable-options --harness-timeout 1800
         working-directory: mqtt-auth-biscuit

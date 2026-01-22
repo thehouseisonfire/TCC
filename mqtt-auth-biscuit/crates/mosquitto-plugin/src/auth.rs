@@ -1,4 +1,8 @@
+#[cfg(not(kani))]
 use crate::jwt_handler::{verify_jwt_token, Claims};
+#[cfg(kani)]
+use crate::jwt_handler::Claims;
+#[cfg(not(kani))]
 use jsonwebtoken::errors::ErrorKind;
 use jsonwebtoken::DecodingKey;
 use jsonwebtoken::Validation;
@@ -16,11 +20,13 @@ pub enum TokenType {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum AuthError {
     Expired,
     Invalid(String),
 }
 
+#[allow(dead_code)]
 pub struct AuthEngine {
     jwt_key: DecodingKey,
     jwt_validation: Validation,

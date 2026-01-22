@@ -11,6 +11,7 @@ pub struct Claims {
     pub roles: Option<Vec<String>>,
 }
 
+#[allow(dead_code)]
 pub fn verify_jwt_token(
     token: &str,
     public_key: &DecodingKey,

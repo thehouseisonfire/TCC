@@ -133,7 +133,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    #[ignore = "Miri timeout: Biscuit verification under Miri hits interpreter timeout"]
+    #[ignore = "Miri timeout: Biscuit verification under Miri hits interpreter timeout. Tested through `cargo test`"]
     fn extracts_min_expiry_from_multiple_facts() {
         let keypair = root_keypair();
         let biscuit = Biscuit::builder()

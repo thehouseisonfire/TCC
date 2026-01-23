@@ -381,8 +381,11 @@ machine and record the first results/known issues).
     a policy model that is comparable to Biscuit rights (e.g., encode
     topic/action grants as structured claims, or route JWT through SQLite/HTTP
     for fine-grained checks).
-  - Current gap: `authz.rs` still uses `roles == admin` and topic substring
-    matching, and ignores `access` in token-only mode.
+  - Current state: JWT token-only uses demo `roles == "admin"` check and topic
+    substring matching in `authz.rs`, and ignores the `access` parameter.
+    Token issuer defaults to `roles: ["admin"]` unless `no_default_roles` is set.
+  - Code pointers: @/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/authz.rs#37-52,
+    @/home/eagle/TCC2/mqtt-auth-biscuit/crates/token-issuer/src/main.rs#221-225.
   - Deliverable:
     - Updated claim schema + token generator support
     - Updated `authz.rs` JWT enforcement that matches the chosen schema
@@ -393,7 +396,7 @@ machine and record the first results/known issues).
   - Goal: make the HTTP backend robust and well-specified for experiments.
   - Status update:
     - Implemented: strict JSON parsing (`allow` field only), content-type
-      validation, response size limit, 2s read timeout, TLS support + optional
+      validation, response size limit, 2s read timeout, TLS support
       insecure mode in `http_policy.rs`.
     - Missing: documented request/response schema in repo docs, configurable
       timeout/size limits, and explicit failure semantics documented for hybrid
@@ -401,15 +404,16 @@ machine and record the first results/known issues).
   - Deliverable:
     - Clear request/response schema (documented) and stricter parsing
     - Configurable timeouts and error semantics (what triggers hybrid fallback)
-    - Optional support for HTTPS (if required by the environment)
 
 - [ ] **Issue 5: Avoid per-message Biscuit re-verification**
   - Goal: avoid re-verifying/deserializing the Biscuit token on every
     authorization check to match JWT behavior (verify once, evaluate policies
     only).
-  - Current issue: Biscuit verification cryptographically verifies and runs
-    policies during each authorization check (`verify_biscuit_token` in
-    `authz.rs`), while JWT is only verified once per session.
+  - Current state: `verify_biscuit_token` is called on every ACL_CHECK for
+    Biscuit tokens, performing full cryptographic verification and Datalog
+    evaluation each time. JWT is only verified once during authentication.
+  - Code pointers: @/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/authz.rs#130-142,
+    @/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/biscuit_handler.rs#80-120.
   - Deliverable: a documented change (and rerun) showing the impact on
     authorization latency/CPU.
 
@@ -433,24 +437,17 @@ machine and record the first results/known issues).
      delegation**
   - Goal: replace the simulated delegation in `gen_tokens.rs` with true
     client-to-client delegation.
-  - Current issue: the "delegation" scenario uses pre-attenuated tokens created
+  - Current state: the "delegation" scenario uses pre-attenuated tokens created
     by the token generator, not actual master clients attenuating rights for
     worker clients.
+  - Code pointers: `biscuit_delegated` token in `crates/benchmarks/src/main.rs#109-136`,
+    `DELEGATION-TEMP-ONLY` scenario in `benchmarks/run_scenarios.py#456-464`.
   - Deliverable:
     - Real master client implementation that can attenuate and delegate tokens
       to workers
     - Worker client logic to receive and use delegated tokens
     - Updated delegation benchmark scenario with actual client-side delegation
     - Performance comparison between simulated and real delegation flows
-
-- [ ] **Issue 8: Implement a long-running Token Issuer service (JWT + Biscuit)**
-  - Goal: Complete token issuer service with HTTP endpoints for JWT/Biscuit
-    issuance, proper security separation, Docker integration, and token refresh
-    support in benchmark scenarios.
-  - Deliverable:
-    - Token issuer service with JWT/Biscuit issuance endpoints
-    - Security separation via Docker containerization
-    - Integration with benchmark scenarios for token refresh support
 
 - [ ] **Issue 9: Document and analyze scenario policies**
   - Goal: create comprehensive documentation of all Biscuit and JWT policies
@@ -497,6 +494,8 @@ machine and record the first results/known issues).
     industry-standard MQTT benchmarking tools, and `emqtt-bench` provides
     comprehensive capabilities while aligning with Issue 8.2's
     client-per-container architecture.
+  - Current state: No `emqtt-bench` integration exists; only custom Python
+    `loadgen.py` is used.
   - Deliverable:
     - Add `--loadgen` flag to `benchmarks/run_scenarios.py` to select between:
       - `custom` (current Python implementation)
@@ -516,6 +515,8 @@ machine and record the first results/known issues).
     specified in ARTICLE.MD methodology.
   - Rationale: Establishing baseline network capacity before experiments is
     essential for interpreting throughput results and ensuring fair comparisons.
+  - Current state: No `iperf3` integration exists; Docker Compose does not
+    include an iperf3 service.
   - Deliverable:
     - Add `iperf3` service to docker-compose.yml for network capacity
       measurement
@@ -531,6 +532,7 @@ machine and record the first results/known issues).
   - Rationale: ARTICLE.MD specifically mentions fragmentation analysis, and
     packet-level data is essential for understanding how token size affects
     network behavior under MTU constraints.
+  - Current state: No `tcpdump` service or capture integration exists.
   - Deliverable:
     - Add `tcpdump` service to docker-compose.yml with appropriate capabilities
     - Packet capture integration for MTU scenarios (200B, 500B, 1500B, 9000B)
@@ -547,6 +549,7 @@ machine and record the first results/known issues).
     characteristics; host-targeted `perf` provides instruction-level profiling
     needed for understanding computational costs of JWT vs Biscuit verification
     while maintaining container isolation.
+  - Current state: No `perf` integration or host-targeted profiling exists.
   - Deliverable:
     - Host-level `perf` installation and configuration script
     - Container PID discovery mechanism to find Mosquitto process within
@@ -567,6 +570,8 @@ machine and record the first results/known issues).
   - Current gap: All scenarios currently use QoS 1 exclusively, despite
     BENCHMARK_PLAN.md specifying QoS 0 for BASE-01 and missing QoS 2 testing
     entirely (scenarios rely on `--qos` CLI arg, default 1).
+  - Code pointers: `loadgen.py` supports `--qos` but `run_scenarios.py` and
+    `metrics_collector.py` hardcode QoS 1; BASE-01 scenario does not override to QoS 0.
   - Rationale: QoS levels significantly impact MQTT broker behavior and token
     verification overhead:
     - QoS 0: Fire-and-forget, minimal broker state
@@ -602,9 +607,12 @@ machine and record the first results/known issues).
       at constant token size
 
 - [ ] **Issue 18: Avoid Base64 encoding for Biscuit tokens (use native bytes /
-    Protobuf wire format)**
+   Protobuf wire format)**
   - Goal: Stop wrapping Biscuit tokens in Base64 for transport where possible,
     using the token's native binary serialization.
+  - Current state: `token-issuer` can emit Base64URL (parity flag), but the
+    plugin still expects Base64 `STANDARD` in `auth.rs`, and MQTT CONNECT uses
+    string password transport only (no binary AUTH data path).
   - Investigation note: confirm whether `biscuit-auth` serialization
     (`Biscuit::to_vec`) is already Protobuf-encoded on the wire (expected), and
     whether Base64 is currently only a _transport_ layer artifact.
@@ -664,9 +672,12 @@ machine and record the first results/known issues).
   - Goal: Make `MOSQ_EVT_CONTROL` authorization decisions reflect control-plane
     semantics and document how control-triggered enforcement is applied.
   - Current gap: CONTROL is not a generic policy-change hook unless
-    `$CONTROL/<feature>/v1` messages are explicitly published (current
+    `$CONTROL/.../v1` messages are explicitly published (current
     `control_callback` uses the same authz path as data-plane topics and does not
     check for `$CONTROL/...` topics).
+  - Current state: `control_callback` reuses `check_authorization` with a hard
+    coded access value and does not gate on `$CONTROL/...` topics. It sets
+    `access=2` and calls the same authz path as ACL_CHECK.
   - Code pointers: `control_callback` reuses `check_authorization` with a hard
     coded access value and does not gate on `$CONTROL/...` topics. See
     @/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/lib.rs#695-738.
@@ -681,7 +692,7 @@ machine and record the first results/known issues).
   - Goal: Confirm all policy modes apply authorization correctly for each
     `MOSQ_EVT_ACL_CHECK` access subtype (`MOSQ_ACL_WRITE`, `MOSQ_ACL_READ`,
     `MOSQ_ACL_SUBSCRIBE`).
-  - Current gap: Access discrimination varies by policy mode (e.g., JWT
+  - Current state: Access discrimination varies by policy mode (e.g., JWT
     token-only ignores `access`), and correctness per subtype has not been
     validated.
   - Code pointers: ACL access is passed from the Mosquitto callback in
@@ -733,6 +744,8 @@ machine and record the first results/known issues).
   - Goal: On expired tokens, rely on `MOSQ_EVT_ACL_CHECK` to deny access and
     forcibly disconnect the client, since ACL checks do not support MQTT v5
     reason codes/strings for explicit expiry signaling.
+  - Current state: `ACL_CHECK` returns `MOSQ_ERR_ACL_DENIED` on
+    `AuthzOutcome::Expired` but does **not** disconnect the client.
   - Constraints:
     - Do not send or depend on reason codes in ACL checks.
     - Avoid full token signature verification in `ACL_CHECK`; only validate

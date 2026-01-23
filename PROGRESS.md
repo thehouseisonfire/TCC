@@ -2,7 +2,7 @@
 
 **Project**: Eclipse Mosquitto Auth Biscuit Plugin (Rust)\
 **Started**: 2026-01-04\
-**Last Updated**: 2026-01-19\
+**Last Updated**: 2026-01-22\
 **Current Focus**: Reproducible benchmark/scenario harness aligned with
 `ARTICLE.MD`
 
@@ -260,7 +260,44 @@ machine and record the first results/known issues).
 
 ---
 
-## 8) Open Issues (Next Steps, Grouped)
+## 8 Authorization Enforcement Matrix
+
+### Static policies (no runtime changes)
+
+**Backends**: Static ACL, Dynamic Security, SQLite, HTTP endpoint.
+
+| Hook | Required? | Notes |
+| --- | --- | --- |
+| `ACL_READ` | Optional | Can be skipped if `ACL_SUBSCRIBE` is authoritative and policies are static; still needed for fan-out enforcement if you want per-message checking. |
+| `ACL_WRITE` | ✅ | Check policy (Biscuit Datalog; JWT via the backend under test). |
+| `ACL_SUBSCRIBE` | ✅ | Check policy (Biscuit Datalog; JWT via the backend under test). |
+| `EVT_CONTROL` | N/A | Only relevant if `$CONTROL/<feature>/v1` is explicitly used. |
+
+### Dynamic policies — ACL_READ enforcement version
+
+**Backends**: Dynamic Security, SQLite.
+
+| Hook | Required? | Notes |
+| --- | --- | --- |
+| `ACL_READ` | ✅ | Enforce dynamic policy changes for existing subscribers (fan-out checks). |
+| `ACL_WRITE` | ✅ | Check policy (Biscuit Datalog + backend query; JWT backend query). |
+| `ACL_SUBSCRIBE` | ✅ | Check policy (Biscuit Datalog + backend query; JWT backend query). |
+| `EVT_CONTROL` | N/A | Dynamic enforcement handled via `ACL_CHECK` only. |
+
+### Dynamic policies — CONTROL-triggered enforcement version
+
+**Backends**: Dynamic Security.
+
+| Hook | Required? | Notes |
+| --- | --- | --- |
+| `ACL_READ` | Conditional | Test both variants: **(A)** kick/re-auth affected clients on policy change (no `ACL_READ`), **(B)** keep sessions and deny fan-out with `ACL_READ`, plus publish a warning (e.g., `system_notification/<client_id>`) so clients learn privileges were reduced. |
+| `ACL_WRITE` | ✅ | Check policy (Biscuit Datalog + backend query; JWT backend query). |
+| `ACL_SUBSCRIBE` | ✅ | Check policy (Biscuit Datalog + backend query; JWT backend query). |
+| `EVT_CONTROL` | ✅ | Authorize control-plane requests and trigger cache invalidation / kick or notification flow. |
+
+---
+
+## 9) Open Issues (Next Steps, Grouped)
 
 #### A) Policy Source Parity
 
@@ -592,16 +629,17 @@ machine and record the first results/known issues).
       demonstrate per-subscriber fan-out cost
     - Add a results field capturing subscriber count and observed scaling trend
 
-- [ ] **Issue 20: Fix CONTROL callback semantics (not publish-only)**
-  - Goal: Make `MOSQ_EVT_CONTROL` authorization decisions reflect the correct
-    control-plane access semantics rather than hardcoding publish.
-  - Current issue: `control_callback` currently passes `access=2`
-    unconditionally.
+- [ ] **Issue 20: Define CONTROL callback semantics + enforcement paths**
+  - Goal: Make `MOSQ_EVT_CONTROL` authorization decisions reflect control-plane
+    semantics and document how control-triggered enforcement is applied.
+  - Current gap: CONTROL is not a generic policy-change hook unless
+    `$CONTROL/<feature>/v1` messages are explicitly published.
   - Deliverable:
-    - Define correct access semantics for the CONTROL callback (control-plane)
-    - Replace hardcoded `access` values with correct values derived from
-      Mosquitto event data / API expectations
-    - Add targeted scenarios for control-topic enforcement behavior (CONTROL)
+    - Use a dedicated control-plane access flag (no publish hardcoding)
+    - Document when CONTROL is used (only for `$CONTROL/.../v1` topics)
+    - Add scenarios for control-triggered enforcement with both variants:
+      - Kick/re-auth affected clients (no `ACL_READ` fan-out checks)
+      - Keep sessions; enforce via `ACL_READ` + publish client warnings
 
 - [ ] **Issue 20.1: Verify ACL_CHECK subtype handling across policy modes**
   - Goal: Confirm all policy modes apply authorization correctly for each
@@ -616,6 +654,39 @@ machine and record the first results/known issues).
     - Add targeted tests or benchmark scenarios that exercise each subtype
       under each policy mode
     - Document expected outcomes and any deviations from Mosquitto ACL semantics
+
+#### F) Matrix Coverage (Benchmark Verification)
+
+- [ ] **Issue 28: Verify static-policy benchmark coverage (ACL_SUBSCRIBE/WRITE)**
+  - Goal: Confirm scenarios exist for static policies where `ACL_SUBSCRIBE` and
+    `ACL_WRITE` are enforced, and `ACL_READ` is either disabled or documented
+    when used.
+  - Deliverable:
+    - Inventory scenarios for Static ACL, Dynamic Security, SQLite, HTTP
+    - Add missing scenarios if any backend lacks static-policy coverage
+
+- [ ] **Issue 29: Verify dynamic-policy coverage with ACL_READ fan-out checks**
+  - Goal: Ensure dynamic policy scenarios enforce changes via `ACL_READ` for
+    existing subscribers (fan-out), not just on subscribe.
+  - Deliverable:
+    - Scenario(s) for Dynamic Security with `ACL_READ` checks enabled
+    - Scenario(s) for SQLite with policy churn + `ACL_READ` checks enabled
+    - Results include subscriber counts to observe scaling effects
+
+- [ ] **Issue 30: Verify control-triggered dynamic enforcement (kick/re-auth)**
+  - Goal: Implement/control scenarios where `$CONTROL/.../v1` triggers
+    enforcement via kicking/re-auth (no `ACL_READ` fan-out checks).
+  - Deliverable:
+    - Control message publisher used during scenario
+    - Evidence of client re-auth or reconnect behavior
+
+- [ ] **Issue 31: Verify control-triggered dynamic enforcement (ACL_READ + notify)**
+  - Goal: Implement/control scenarios where `$CONTROL/.../v1` triggers cache
+    invalidation and clients are informed via a notification topic while
+    `ACL_READ` denies fan-out.
+  - Deliverable:
+    - Notification topic publishing (e.g., `system_notification/<client_id>`)
+    - Scenario capturing denial after privilege reduction
 
 - [ ] **Issue 21: Expiry enforcement in ACL_CHECK with disconnect (no reason codes)**
   - Goal: On expired tokens, rely on `MOSQ_EVT_ACL_CHECK` to deny access and
@@ -729,7 +800,7 @@ machine and record the first results/known issues).
 
 ---
 
-### 10) Last Phase: Data Analysis & Validation
+### 11) Last Phase: Data Analysis & Validation
 
 - [ ] **Aggregate results**
   - Collect scenario JSONs and generate a summary table (latency p50/p95/p99,
@@ -742,7 +813,7 @@ machine and record the first results/known issues).
 
 ---
 
-## 11) Known Risks / Things to Watch
+## 12) Known Risks / Things to Watch
 
 - **Docker permissions**: `tc netem` requires `CAP_NET_ADMIN` (already
   configured in compose).
@@ -753,7 +824,7 @@ machine and record the first results/known issues).
 
 ---
 
-## 12) Dependency Optimization Note
+## 13) Dependency Optimization Note
 
 Optimize dependency features in `Cargo.toml` by disabling unused default
 features to ensure accurate performance measurements. This should be done
@@ -766,7 +837,7 @@ features to ensure accurate performance measurements. This should be done
 
 ---
 
-## 13) Research Footnotes
+## 14) Research Footnotes
 
 ### Why `netem` runs in a separate container with `network_mode: service:mosquitto`
 

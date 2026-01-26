@@ -69,6 +69,8 @@ described in `ARTICLE.MD`, including a controllable HTTP authz service and a
   - HTTP policy backend
   - Hybrid backend: HTTP policy when available, with token-only fallback on HTTP
     errors/timeouts
+  - Dynamic Security (file-backed): current implementation replays a local
+    `dynamic-security.json` snapshot (not the live Mosquitto dynsec module/API).
 
 **Key files**:
 
@@ -715,9 +717,26 @@ machine and record the first results/known issues).
     when used.
   - Deliverable:
     - Inventory scenarios for Static ACL, Dynamic Security, SQLite, HTTP
-    - Add missing scenarios if any backend lacks static-policy coverage
 
-- [ ] **Issue 29: Verify dynamic-policy coverage with ACL_READ fan-out checks**
+- [ ] **Issue 29: Add anonymous flow scenario via anonymousGroup policy**
+  - Goal: Enable and benchmark anonymous MQTT clients using Mosquitto’s
+    `allow_anonymous true` with a Dynamic Security `anonymousGroup` policy.
+  - Rationale: Demonstrates how Dynamic Security can enforce policies for
+    unauthenticated clients, useful for public/telemetry use cases and to
+    validate that the authz plugin correctly handles `None` usernames.
+  - Current state: Plugin now supports optional usernames in DynamicSecurity
+    checks; broker configs and a minimal anonymousGroup fixture are in place.
+  - Deliverables:
+    - Add `ANON-BASE` scenario to `benchmarks/run_scenarios.py` using
+      `mosquitto_anon.conf` and `dynamic-security-anon.json`.
+    - Clients connect without username/password and publish/subscribe to
+      `public/announce`.
+    - Verify authorization decisions (allow/deny) match the anonymousGroup
+      policy.
+    - Capture latency/throughput metrics for anonymous access vs token-based.
+    - Document when anonymous flows are realistic and their security trade-offs.
+
+- [ ] **Issue 30: Verify dynamic-policy coverage with ACL_READ fan-out checks**
   - Goal: Ensure dynamic policy scenarios enforce changes via `ACL_READ` for
     existing subscribers (fan-out), not just on subscribe.
   - Deliverable:
@@ -725,14 +744,14 @@ machine and record the first results/known issues).
     - Scenario(s) for SQLite with policy churn + `ACL_READ` checks enabled
     - Results include subscriber counts to observe scaling effects
 
-- [ ] **Issue 30: Verify control-triggered dynamic enforcement (kick/re-auth)**
+- [ ] **Issue 31: Verify control-triggered dynamic enforcement (kick/re-auth)**
   - Goal: Implement/control scenarios where `$CONTROL/.../v1` triggers
     enforcement via kicking/re-auth (no `ACL_READ` fan-out checks).
   - Deliverable:
     - Control message publisher used during scenario
     - Evidence of client re-auth or reconnect behavior
 
-- [ ] **Issue 31: Verify control-triggered dynamic enforcement (ACL_READ + notify)**
+- [ ] **Issue 32: Verify control-triggered dynamic enforcement (ACL_READ + notify)**
   - Goal: Implement/control scenarios where `$CONTROL/.../v1` triggers cache
     invalidation and clients are informed via a notification topic while
     `ACL_READ` denies fan-out.

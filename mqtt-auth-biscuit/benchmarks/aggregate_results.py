@@ -188,6 +188,8 @@ def _build_summary(input_dir):
             "parity": data.get("parity"),
             "loadgen": {
                 "throughput_mps": _aggregate_scalar(runs, "throughput_mps"),
+                "publish_throughput_mps": _aggregate_scalar(runs, "publish_throughput_mps"),
+                "receive_throughput_mps": _aggregate_scalar(runs, "receive_throughput_mps"),
                 "connect": _aggregate_metric(runs, "connect"),
                 "publish": _aggregate_metric(runs, "publish"),
                 "token_refresh": _aggregate_metric(runs, "token_refresh"),
@@ -222,6 +224,8 @@ def _write_csv(summary, path):
         "token_len",
         "tls_enabled",
         "throughput_avg",
+        "publish_throughput_avg",
+        "receive_throughput_avg",
         "connect_p50_avg",
         "connect_p95_avg",
         "connect_p99_avg",
@@ -265,6 +269,12 @@ def _write_csv(summary, path):
                 "token_len": scenario.get("token_len"),
                 "tls_enabled": (scenario.get("tls") or {}).get("enabled"),
                 "throughput_avg": (loadgen.get("throughput_mps") or {}).get("avg"),
+                "publish_throughput_avg": (loadgen.get("publish_throughput_mps") or {}).get(
+                    "avg"
+                ),
+                "receive_throughput_avg": (loadgen.get("receive_throughput_mps") or {}).get(
+                    "avg"
+                ),
                 "connect_p50_avg": (connect.get("p50_ms") or {}).get("avg"),
                 "connect_p95_avg": (connect.get("p95_ms") or {}).get("avg"),
                 "connect_p99_avg": (connect.get("p99_ms") or {}).get("avg"),

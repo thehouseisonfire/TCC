@@ -88,6 +88,10 @@ pub struct PluginConfigBuilder {
     http_url: Option<String>,
     http_ca_file: Option<String>,
     http_tls_insecure: Option<bool>,
+    dynamic_security_url: Option<String>,
+    dynamic_security_username: Option<String>,
+    dynamic_security_password: Option<String>,
+    dynamic_security_reload_interval_seconds: Option<u64>,
     cache_ttl_seconds: Option<u64>,
     ext_auth_method: Option<String>,
 }
@@ -111,6 +115,10 @@ impl PluginConfigBuilder {
             http_url: None,
             http_ca_file: None,
             http_tls_insecure: None,
+            dynamic_security_url: None,
+            dynamic_security_username: None,
+            dynamic_security_password: None,
+            dynamic_security_reload_interval_seconds: None,
             cache_ttl_seconds: None,
             ext_auth_method: None,
         }
@@ -163,6 +171,26 @@ impl PluginConfigBuilder {
 
     pub fn http_tls_insecure(mut self, enabled: bool) -> Self {
         self.http_tls_insecure = Some(enabled);
+        self
+    }
+
+    pub fn dynamic_security_url(mut self, url: impl Into<String>) -> Self {
+        self.dynamic_security_url = Some(url.into());
+        self
+    }
+
+    pub fn dynamic_security_username(mut self, username: impl Into<String>) -> Self {
+        self.dynamic_security_username = Some(username.into());
+        self
+    }
+
+    pub fn dynamic_security_password(mut self, password: impl Into<String>) -> Self {
+        self.dynamic_security_password = Some(password.into());
+        self
+    }
+
+    pub fn dynamic_security_reload_interval_seconds(mut self, seconds: u64) -> Self {
+        self.dynamic_security_reload_interval_seconds = Some(seconds);
         self
     }
 
@@ -243,6 +271,10 @@ impl PluginConfigBuilder {
             http_url: self.http_url,
             http_ca_file: self.http_ca_file,
             http_tls_insecure: self.http_tls_insecure.unwrap_or(false),
+            dynamic_security_url: self.dynamic_security_url,
+            dynamic_security_reload_interval_seconds: self.dynamic_security_reload_interval_seconds,
+            dynamic_security_username: self.dynamic_security_username,
+            dynamic_security_password: self.dynamic_security_password,
         };
 
         Ok(PluginConfig {
@@ -307,6 +339,7 @@ pub fn parse_options(
                     "sqlite" => PolicyMode::Sqlite,
                     "http" => PolicyMode::Http,
                     "hybrid" => PolicyMode::Hybrid,
+                    "dynamic_security" => PolicyMode::DynamicSecurity,
                     _ => return Err(format!("Invalid policy_mode: {value}")),
                 };
                 builder.policy_mode(mode)
@@ -319,6 +352,15 @@ pub fn parse_options(
                     .parse::<bool>()
                     .map_err(|e| format!("Invalid http_tls_insecure: {e}"))?;
                 builder.http_tls_insecure(enabled)
+            }
+            "dynamic_security_url" => builder.dynamic_security_url(value),
+            "dynamic_security_username" => builder.dynamic_security_username(value),
+            "dynamic_security_password" => builder.dynamic_security_password(value),
+            "dynamic_security_reload_interval_seconds" => {
+                let seconds = value.parse::<u64>().map_err(|e| {
+                    format!("Invalid dynamic_security_reload_interval_seconds: {e}")
+                })?;
+                builder.dynamic_security_reload_interval_seconds(seconds)
             }
             "cache_ttl_seconds" => {
                 let ttl = value

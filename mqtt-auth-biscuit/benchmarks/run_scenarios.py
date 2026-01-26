@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import shutil
 import ssl
 import subprocess
 import sys
@@ -140,9 +141,13 @@ def _run_loadgen(
     port: int,
     username: str,
     password: str,
+    fanout_publisher_username: str | None,
+    fanout_publisher_password: str | None,
     clients: int,
     messages: int,
     topic: str,
+    mode: str | None,
+    fanout_topic: str | None,
     qos: int,
     message_size: int,
     sync_connect: bool,
@@ -180,6 +185,14 @@ def _run_loadgen(
     ]
     if sync_connect:
         cmd.append("--sync-connect")
+    if mode:
+        cmd.extend(["--mode", mode])
+    if fanout_topic:
+        cmd.extend(["--fanout-topic", fanout_topic])
+    if fanout_publisher_username:
+        cmd.extend(["--fanout-publisher-username", fanout_publisher_username])
+    if fanout_publisher_password:
+        cmd.extend(["--fanout-publisher-password", fanout_publisher_password])
     if token_issuer_url:
         cmd.extend(["--token-issuer-url", token_issuer_url])
     if token_issuer_kind:
@@ -199,6 +212,28 @@ def _run_loadgen(
 
     out = subprocess.check_output(cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
     return json.loads(out.decode("utf-8"))
+
+
+def _apply_dynsec_config(source_path: str):
+    repo_root = os.path.dirname(os.path.dirname(__file__))
+    src = os.path.join(repo_root, source_path)
+    dest = os.path.join(repo_root, "docker", "dynamic-security.json")
+    shutil.copyfile(src, dest)
+    tls_dest = os.path.join(repo_root, "docker", "tls", "dynamic-security.json")
+    if os.path.exists(os.path.dirname(tls_dest)):
+        shutil.copyfile(src, tls_dest)
+
+
+def _expand_tls_matrix(scenarios: dict[str, dict]) -> dict[str, dict]:
+    expanded: dict[str, dict] = {}
+    for scenario_id, scenario in scenarios.items():
+        expanded[scenario_id] = scenario
+        if scenario_id.endswith("-TLS"):
+            continue
+        tls_scenario = scenario.copy()
+        tls_scenario["tls"] = True
+        expanded[f"{scenario_id}-TLS"] = tls_scenario
+    return expanded
 
 
 def _write_result(out_dir: str, name: str, payload: dict):
@@ -486,6 +521,64 @@ def main():
                 "sleep_between": 2,
                 "token_refresh": {"kind": "biscuit", "ttl_seconds": 5},
             },
+            "DYNSEC-BASE": {
+                "mosquitto_conf": "./mosquitto_dynsec.conf",
+                "username": "dynsec_client_1",
+                "password": tokens["jwt"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+                "dynsec_config": "docker/dynamic-security.json",
+            },
+            "DYNSEC-CHURN": {
+                "mosquitto_conf": "./mosquitto_dynsec.conf",
+                "username": "dynsec_client_1",
+                "password": tokens["jwt"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+                "repeat": 2,
+                "sleep_between": 2,
+                "dynsec_churn": [
+                    "docker/dynamic-security.json",
+                    "docker/dynamic-security-churn.json",
+                ],
+            },
+            "DYNSEC-READ-FANOUT": {
+                "mosquitto_conf": "./mosquitto_dynsec.conf",
+                "username": "dynsec_client_1",
+                "password": tokens["jwt"],
+                "fanout_publisher_username": "dynsec_publisher",
+                "fanout_publisher_password": tokens["jwt"],
+                "topic": "fanout/broadcast",
+                "mode": "fanout",
+                "fanout_topic": "fanout/broadcast",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+                "dynsec_config": "docker/dynamic-security.json",
+            },
+            "DYNSEC-READ-FANOUT-CHURN": {
+                "mosquitto_conf": "./mosquitto_dynsec.conf",
+                "username": "dynsec_client_1",
+                "password": tokens["jwt"],
+                "fanout_publisher_username": "dynsec_publisher",
+                "fanout_publisher_password": tokens["jwt"],
+                "topic": "fanout/broadcast",
+                "mode": "fanout",
+                "fanout_topic": "fanout/broadcast",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+                "repeat": 2,
+                "sleep_between": 2,
+                "dynsec_churn": [
+                    "docker/dynamic-security.json",
+                    "docker/dynamic-security-fanout-churn.json",
+                ],
+            },
         }
 
         # Add dynamic MTU scenarios
@@ -508,6 +601,8 @@ def main():
                 "netem": {"mtu": mtu},
                 "message_size": 0,
             }
+
+        available_scenarios = _expand_tls_matrix(available_scenarios)
 
         # Select requested scenarios
         for scenario_id in scenario_ids:
@@ -533,27 +628,33 @@ def main():
         print("LIFECYCLE-JWT-SHORT-RECONNECT, LIFECYCLE-BIS-SHORT-RECONNECT")
         print("MTU-500-BIS-25, MTU-1500-BIS-25, MTU-9000-BIS-25")
         print("MTU-500-JWT, MTU-1500-JWT, MTU-9000-JWT")
+        print("DYNSEC-BASE, DYNSEC-CHURN, DYNSEC-READ-FANOUT")
+        print("DYNSEC-READ-FANOUT-CHURN")
+        print("Append -TLS to any scenario id for TLS variants.")
         return
 
     if any("mqtt5_auth" not in s for s in scenarios):
         _ensure_paho_mqtt()
 
     for s in scenarios:
+        scenario_tls = bool(s.get("tls")) or tls_enabled
         mosq_conf = s["mosquitto_conf"]
-        if tls_enabled:
+        if scenario_tls:
             mosq_conf = mosq_conf.replace("./", "./tls/")
         extra_env = {"MOSQUITTO_CONF": mosq_conf}
         authz_base = (
-            "https://localhost:8443" if tls_enabled else "http://localhost:8081"
+            "https://localhost:8443" if scenario_tls else "http://localhost:8081"
         )
-        prom_base = "https://localhost:9443" if tls_enabled else "http://localhost:9090"
+        prom_base = (
+            "https://localhost:9443" if scenario_tls else "http://localhost:9090"
+        )
         token_issuer_base = (
-            "https://localhost:8444" if tls_enabled else "http://localhost:8082"
+            "https://localhost:8444" if scenario_tls else "http://localhost:8082"
         )
         mqtt_host = "localhost"
-        mqtt_port = 8883 if tls_enabled else 1883
+        mqtt_port = 8883 if scenario_tls else 1883
         compose_files = ["docker/docker-compose.yml"]
-        if tls_enabled:
+        if scenario_tls:
             compose_files.append("docker/docker-compose.tls.yml")
 
         netem = s.get("netem")
@@ -625,7 +726,7 @@ def main():
             "scenario": s["id"],
             "token_len": token_len,
             "tls": {
-                "enabled": tls_enabled,
+                "enabled": scenario_tls,
                 "ca_file": tls_ca,
                 "insecure": tls_insecure,
             },
@@ -641,7 +742,12 @@ def main():
             _compose(["restart", "mosquitto"], extra_env=extra_env)
             time.sleep(1)
 
-        for _ in range(repeats):
+        for idx in range(repeats):
+            if s.get("dynsec_config"):
+                _apply_dynsec_config(s["dynsec_config"])
+            elif s.get("dynsec_churn"):
+                churn_list = s["dynsec_churn"]
+                _apply_dynsec_config(churn_list[idx % len(churn_list)])
             if s.get("mqtt5_auth") is not None:
                 cfg = s["mqtt5_auth"]
                 res = _run_mqtt5_auth(
@@ -649,7 +755,7 @@ def main():
                     mqtt_port,
                     cfg["token1"],
                     cfg["token2"],
-                    tls_enabled,
+                    scenario_tls,
                     tls_ca,
                     tls_insecure,
                 )
@@ -661,9 +767,13 @@ def main():
                     port=mqtt_port,
                     username=s.get("username", ""),
                     password=s.get("password", ""),
+                    fanout_publisher_username=s.get("fanout_publisher_username"),
+                    fanout_publisher_password=s.get("fanout_publisher_password"),
                     clients=args.clients,
                     messages=args.messages,
                     topic=s.get("topic", "sensors/{client_id}/temp"),
+                    mode=s.get("mode"),
+                    fanout_topic=s.get("fanout_topic"),
                     qos=args.qos,
                     message_size=int(s.get("message_size", 0)),
                     sync_connect=bool(s.get("sync_connect", False)),
@@ -672,7 +782,7 @@ def main():
                     token_issuer_ttl=token_refresh.get("ttl_seconds"),
                     token_issuer_no_default_roles=args.token_issuer_no_default_roles,
                     token_refresh_codes=args.token_refresh_codes,
-                    tls_enabled=tls_enabled,
+                    tls_enabled=scenario_tls,
                     tls_ca_file=tls_ca,
                     tls_insecure=tls_insecure,
                 )

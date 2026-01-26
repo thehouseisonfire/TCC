@@ -3,6 +3,7 @@ use crate::authz::{check_authorization, AuthzOutcome, AuthzParams};
 use crate::biscuit_handler::{expiry_stats, extract_min_expiry};
 use crate::cache::SessionCache;
 use crate::config::{parse_options, PluginConfig};
+use crate::dynamic_security_policy::DynamicSecurityPolicy;
 use crate::policy::PolicyMode;
 use crate::sqlite_policy::SqlitePolicy;
 use chrono::Utc;
@@ -18,6 +19,7 @@ mod biscuit_handler;
 /// The stubbed cache exposes the same API surface without stateful behavior.
 #[cfg(not(kani))]
 mod cache;
+mod dynamic_security_policy;
 #[cfg(kani)]
 mod cache {
     use std::marker::PhantomData;
@@ -178,6 +180,7 @@ extern "C" {
 
     pub fn mosquitto_log_printf(level: c_int, fmt: *const c_char, ...);
     pub fn mosquitto_client_id(client: *const c_void) -> *const c_char;
+    pub fn mosquitto_client_username(client: *const c_void) -> *const c_char;
     pub fn mosquitto_malloc(size: usize) -> *mut c_void;
 }
 
@@ -197,9 +200,18 @@ pub extern "C" fn mosquitto_callback_register(
 static TEST_CLIENT_ID: &[u8; 12] = b"test_client\0";
 
 #[cfg(any(test, miri, kani))]
+static TEST_USERNAME: &[u8; 10] = b"test_user\0";
+
+#[cfg(any(test, miri, kani))]
 #[no_mangle]
 pub extern "C" fn mosquitto_client_id(_client: *const c_void) -> *const c_char {
     TEST_CLIENT_ID.as_ptr() as *const c_char
+}
+
+#[cfg(any(test, miri, kani))]
+#[no_mangle]
+pub extern "C" fn mosquitto_client_username(_client: *const c_void) -> *const c_char {
+    TEST_USERNAME.as_ptr() as *const c_char
 }
 
 #[cfg(any(test, miri, kani))]
@@ -305,6 +317,14 @@ fn mosq_client_id_string(client: *const c_void) -> Option<String> {
     cstr_to_string(ptr)
 }
 
+fn mosq_client_username_string(client: *const c_void) -> Option<String> {
+    if client.is_null() {
+        return None;
+    }
+    let ptr = mosquitto_client_username_ptr(client);
+    cstr_to_string(ptr)
+}
+
 #[cfg(not(any(test, miri, kani)))]
 fn mosquitto_client_id_ptr(client: *const c_void) -> *const c_char {
     unsafe { mosquitto_client_id(client) }
@@ -315,11 +335,22 @@ fn mosquitto_client_id_ptr(client: *const c_void) -> *const c_char {
     mosquitto_client_id(client)
 }
 
+#[cfg(not(any(test, miri, kani)))]
+fn mosquitto_client_username_ptr(client: *const c_void) -> *const c_char {
+    unsafe { mosquitto_client_username(client) }
+}
+
+#[cfg(any(test, miri, kani))]
+fn mosquitto_client_username_ptr(client: *const c_void) -> *const c_char {
+    mosquitto_client_username(client)
+}
+
 pub struct PluginState {
     auth_engine: Arc<AuthEngine>,
     cache: Arc<SessionCache<String, TokenType>>,
     config: PluginConfig,
     sqlite_policy: Option<SqlitePolicy>,
+    dynamic_security_policy: Option<DynamicSecurityPolicy>,
 }
 
 fn set_reason_string(target: *mut *mut c_char, message: &str) {
@@ -407,6 +438,29 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
         _ => None,
     };
 
+    let dynamic_security_policy = match config.policy.mode {
+        PolicyMode::DynamicSecurity => {
+            let Some(path) = config.policy.dynamic_security_url.as_deref() else {
+                return MOSQ_ERR_INVAL;
+            };
+            let interval = config
+                .policy
+                .dynamic_security_reload_interval_seconds
+                .unwrap_or(1)
+                .max(1);
+            match DynamicSecurityPolicy::new(path, Duration::from_secs(interval)) {
+                Ok(policy) => Some(policy),
+                Err(err) => {
+                    log_info(&format!(
+                        "Dynamic security config load failed ({path}): {err}"
+                    ));
+                    return MOSQ_ERR_INVAL;
+                }
+            }
+        }
+        _ => None,
+    };
+
     let state = Box::new(PluginState {
         auth_engine: Arc::new(AuthEngine::new(
             config.jwt.decoding_key.clone(),
@@ -415,6 +469,7 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
         cache: Arc::new(SessionCache::new(1000)),
         config,
         sqlite_policy,
+        dynamic_security_policy,
     });
     *userdata = Box::into_raw(state) as *mut c_void;
 
@@ -649,16 +704,19 @@ extern "C" fn acl_check_callback(
     let Some(client_id) = mosq_client_id_string(evt.client) else {
         return MOSQ_ERR_ACL_DENIED;
     };
+    let username = mosq_client_username_string(evt.client);
     let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
 
     if let Some(token_type) = state.cache.get(&client_id) {
         let params = AuthzParams {
+            username: username.as_deref(),
             client_id: &client_id,
             topic: &topic,
             access: evt.access,
             biscuit_root_key: &state.config.biscuit.root_public_key,
             policy_mode: state.config.policy.mode,
             sqlite_policy: state.sqlite_policy.as_ref(),
+            dynamic_security_policy: state.dynamic_security_policy.as_ref(),
             http_url: state.config.policy.http_url.as_deref(),
             http_ca_file: state.config.policy.http_ca_file.as_deref(),
             http_tls_insecure: state.config.policy.http_tls_insecure,
@@ -709,16 +767,19 @@ extern "C" fn control_callback(
     let Some(client_id) = mosq_client_id_string(evt.client) else {
         return MOSQ_ERR_ACL_DENIED;
     };
+    let username = mosq_client_username_string(evt.client);
     let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
 
     if let Some(token_type) = state.cache.get(&client_id) {
         let params = AuthzParams {
+            username: username.as_deref(),
             client_id: &client_id,
             topic: &topic,
             access: 2,
             biscuit_root_key: &state.config.biscuit.root_public_key,
             policy_mode: state.config.policy.mode,
             sqlite_policy: state.sqlite_policy.as_ref(),
+            dynamic_security_policy: state.dynamic_security_policy.as_ref(),
             http_url: state.config.policy.http_url.as_deref(),
             http_ca_file: state.config.policy.http_ca_file.as_deref(),
             http_tls_insecure: state.config.policy.http_tls_insecure,

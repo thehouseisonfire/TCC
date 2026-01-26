@@ -69,6 +69,9 @@ class WorkerConfig:
     tls_enabled: bool
     tls_ca_file: str | None
     tls_insecure: bool
+    mode: str
+    subscribe_topic: str | None
+    expect_messages: int
 
 
 @dataclass
@@ -76,6 +79,7 @@ class WorkerResult:
     client_id: str
     connect_ms: float | None
     publish_ms: list[float]
+    receive_ms: list[float]
     token_refresh_ms: float | None
     token_refresh_len: int | None
     errors: list[str]
@@ -127,6 +131,7 @@ def _fetch_token(
 def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queue):
     errors: list[str] = []
     publish_ms: list[float] = []
+    receive_ms: list[float] = []
     connect_ms = None
     token_refresh_ms = None
     token_refresh_len = None
@@ -149,6 +154,17 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
         def on_disconnect(client, ud, disconnect_flags, reason_code, properties=None):
             ud["disconnected"] = True
 
+        def on_message(client, ud, msg):
+            if cfg.mode != "fanout":
+                return
+            payload = msg.payload or b""
+            try:
+                prefix = payload.split(b"|", 1)[0]
+                sent_ts = float(prefix.decode("utf-8"))
+                receive_ms.append((time.perf_counter() - sent_ts) * 1000.0)
+            except Exception:
+                errors.append("message_parse_failed")
+
         client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id=cfg.client_id,
@@ -165,6 +181,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                 client.tls_insecure_set(True)
         client.on_connect = on_connect
         client.on_disconnect = on_disconnect
+        client.on_message = on_message
 
         if cfg.sync_connect:
             start_evt.wait()
@@ -216,7 +233,13 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
             errors.append(err)
             out_q.put(
                 WorkerResult(
-                    cfg.client_id, None, [], token_refresh_ms, token_refresh_len, errors
+                    cfg.client_id,
+                    None,
+                    [],
+                    [],
+                    token_refresh_ms,
+                    token_refresh_len,
+                    errors,
                 )
             )
             return
@@ -249,6 +272,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                         cfg.client_id,
                         None,
                         [],
+                        [],
                         token_refresh_ms,
                         token_refresh_len,
                         errors,
@@ -259,7 +283,13 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
         errors.append(err)
         out_q.put(
             WorkerResult(
-                cfg.client_id, None, [], token_refresh_ms, token_refresh_len, errors
+                cfg.client_id,
+                None,
+                [],
+                [],
+                token_refresh_ms,
+                token_refresh_len,
+                errors,
             )
         )
         return
@@ -268,7 +298,13 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
         errors.append("connect_failed")
         out_q.put(
             WorkerResult(
-                cfg.client_id, None, [], token_refresh_ms, token_refresh_len, errors
+                cfg.client_id,
+                None,
+                [],
+                [],
+                token_refresh_ms,
+                token_refresh_len,
+                errors,
             )
         )
         return
@@ -278,20 +314,35 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
     if not cfg.sync_connect:
         start_evt.wait()
 
-    payload = _mk_payload(cfg.message_size)
+    if cfg.mode == "fanout":
+        if not cfg.subscribe_topic:
+            errors.append("fanout_missing_topic")
+        else:
+            try:
+                res, _ = client.subscribe(cfg.subscribe_topic, qos=cfg.qos)
+                if res != mqtt.MQTT_ERR_SUCCESS:
+                    errors.append(f"subscribe_rc:{res}")
+            except Exception as e:
+                errors.append(f"subscribe_failed:{e}")
 
-    for _ in range(cfg.message_count):
-        try:
-            t0 = time.perf_counter()
-            info = client.publish(cfg.topic, payload, qos=cfg.qos)
-            info.wait_for_publish(timeout=10)
-            t1 = time.perf_counter()
-            publish_ms.append((t1 - t0) * 1000.0)
-            if info.rc != mqtt.MQTT_ERR_SUCCESS:
-                errors.append(f"publish_rc:{info.rc}")
-        except Exception as e:
-            errors.append(f"publish_failed:{e}")
-            break
+        start_evt.wait()
+        deadline = time.time() + max(10.0, cfg.expect_messages * 0.2)
+        while len(receive_ms) < cfg.expect_messages and time.time() < deadline:
+            time.sleep(0.01)
+    else:
+        payload = _mk_payload(cfg.message_size)
+        for _ in range(cfg.message_count):
+            try:
+                t0 = time.perf_counter()
+                info = client.publish(cfg.topic, payload, qos=cfg.qos)
+                info.wait_for_publish(timeout=10)
+                t1 = time.perf_counter()
+                publish_ms.append((t1 - t0) * 1000.0)
+                if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                    errors.append(f"publish_rc:{info.rc}")
+            except Exception as e:
+                errors.append(f"publish_failed:{e}")
+                break
 
     try:
         client.disconnect()
@@ -312,6 +363,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
             cfg.client_id,
             connect_ms,
             publish_ms,
+            receive_ms,
             token_refresh_ms,
             token_refresh_len,
             errors,
@@ -319,11 +371,82 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
     )
 
 
+def _run_fanout_publisher(
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    client_id: str,
+    topic: str,
+    message_count: int,
+    qos: int,
+    message_size: int,
+    protocol: int,
+    tls_enabled: bool,
+    tls_ca_file: str | None,
+    tls_insecure: bool,
+):
+    publish_ms: list[float] = []
+    errors: list[str] = []
+
+    client = mqtt.Client(
+        mqtt.CallbackAPIVersion.VERSION2,
+        client_id=client_id,
+        protocol=protocol,
+    )
+    client.username_pw_set(username, password)
+    if tls_enabled:
+        if tls_ca_file:
+            client.tls_set(ca_certs=tls_ca_file)
+        else:
+            client.tls_set()
+        if tls_insecure:
+            client.tls_insecure_set(True)
+
+    try:
+        client.connect(host, port, 30)
+    except Exception as e:
+        return publish_ms, [f"fanout_connect_failed:{e}"]
+
+    client.loop_start()
+    time.sleep(0.2)
+
+    for _ in range(message_count):
+        try:
+            sent_ts = time.perf_counter()
+            payload = f"{sent_ts:.9f}|".encode("utf-8")
+            if message_size > len(payload):
+                payload += b"A" * (message_size - len(payload))
+            t0 = time.perf_counter()
+            info = client.publish(topic, payload, qos=qos)
+            info.wait_for_publish(timeout=10)
+            t1 = time.perf_counter()
+            publish_ms.append((t1 - t0) * 1000.0)
+            if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                errors.append(f"fanout_publish_rc:{info.rc}")
+        except Exception as e:
+            errors.append(f"fanout_publish_failed:{e}")
+            break
+
+    try:
+        client.disconnect()
+    except Exception:
+        pass
+    try:
+        client.loop_stop()
+    except Exception:
+        pass
+
+    return publish_ms, errors
+
+
 def run_load(
     host: str,
     port: int,
     username: str,
     password: str,
+    fanout_publisher_username: str | None,
+    fanout_publisher_password: str | None,
     topic_template: str,
     clients: int,
     message_count: int,
@@ -339,6 +462,8 @@ def run_load(
     tls_enabled: bool,
     tls_ca_file: str | None,
     tls_insecure: bool,
+    mode: str = "publish",
+    fanout_topic: str | None = None,
 ):
     start_evt = threading.Event()
     out_q: queue.Queue = queue.Queue()
@@ -368,6 +493,9 @@ def run_load(
             tls_enabled=tls_enabled,
             tls_ca_file=tls_ca_file,
             tls_insecure=tls_insecure,
+            mode=mode,
+            subscribe_topic=fanout_topic,
+            expect_messages=message_count if mode == "fanout" else 0,
         )
         t = threading.Thread(
             target=_run_worker, args=(cfg, start_evt, out_q), daemon=True
@@ -381,6 +509,27 @@ def run_load(
     t_start = time.perf_counter()
     start_evt.set()
 
+    fanout_publish_ms: list[float] = []
+    fanout_errors: list[str] = []
+    if mode == "fanout":
+        publisher_username = fanout_publisher_username or username
+        publisher_password = fanout_publisher_password or password
+        fanout_publish_ms, fanout_errors = _run_fanout_publisher(
+            host=host,
+            port=port,
+            username=publisher_username,
+            password=publisher_password,
+            client_id="fanout_publisher",
+            topic=fanout_topic or "fanout/broadcast",
+            message_count=message_count,
+            qos=qos,
+            message_size=message_size,
+            protocol=protocol,
+            tls_enabled=tls_enabled,
+            tls_ca_file=tls_ca_file,
+            tls_insecure=tls_insecure,
+        )
+
     results: list[WorkerResult] = []
     for _ in threads:
         results.append(out_q.get())
@@ -392,6 +541,7 @@ def run_load(
 
     connect_lat = [r.connect_ms for r in results if r.connect_ms is not None]
     publish_lat = [x for r in results for x in r.publish_ms]
+    receive_lat = [x for r in results for x in r.receive_ms]
     refresh_lat = [
         r.token_refresh_ms for r in results if r.token_refresh_ms is not None
     ]
@@ -400,15 +550,20 @@ def run_load(
     ]
 
     errors = [e for r in results for e in r.errors]
+    errors.extend(fanout_errors)
 
     duration_s = max(1e-9, t_end - t_start)
-    throughput_mps = len(publish_lat) / duration_s
+    publish_lat.extend(fanout_publish_ms)
+    publish_throughput_mps = len(publish_lat) / duration_s
+    receive_throughput_mps = len(receive_lat) / duration_s
+    throughput_mps = publish_throughput_mps if mode != "fanout" else receive_throughput_mps
 
     return {
         "inputs": {
             "host": host,
             "port": port,
             "username": username,
+            "fanout_publisher_username": fanout_publisher_username,
             "clients": clients,
             "message_count": message_count,
             "qos": qos,
@@ -418,12 +573,21 @@ def run_load(
             "token_issuer_kind": token_issuer_kind,
             "token_issuer_no_default_roles": token_issuer_no_default_roles,
             "token_refresh_codes": sorted(token_refresh_codes),
+            "mode": mode,
+            "fanout_topic": fanout_topic,
         },
         "connect": _summarize_ms(connect_lat),
         "token_refresh": _summarize_ms(refresh_lat),
         "token_refresh_len": _summarize_ms(refresh_len),
         "publish": _summarize_ms(publish_lat),
+        "receive": _summarize_ms(receive_lat),
         "throughput_mps": throughput_mps,
+        "publish_throughput_mps": publish_throughput_mps,
+        "receive_throughput_mps": receive_throughput_mps,
+        "received_messages": {
+            "count": len(receive_lat),
+            "expected": message_count * clients if mode == "fanout" else 0,
+        },
         "errors": errors,
     }
 
@@ -464,6 +628,23 @@ def main():
     p.add_argument("--tls", action="store_true")
     p.add_argument("--tls-ca-file")
     p.add_argument("--tls-insecure", action="store_true")
+    p.add_argument(
+        "--mode",
+        default=os.environ.get("MQTT_MODE", "publish"),
+        choices=["publish", "fanout"],
+    )
+    p.add_argument(
+        "--fanout-topic",
+        default=os.environ.get("MQTT_FANOUT_TOPIC", "fanout/broadcast"),
+    )
+    p.add_argument(
+        "--fanout-publisher-username",
+        default=os.environ.get("MQTT_FANOUT_PUBLISHER_USERNAME"),
+    )
+    p.add_argument(
+        "--fanout-publisher-password",
+        default=os.environ.get("MQTT_FANOUT_PUBLISHER_PASSWORD"),
+    )
     p.add_argument("--json", action="store_true")
     args = p.parse_args()
 
@@ -484,6 +665,8 @@ def main():
         port=args.port,
         username=args.username,
         password=args.password,
+        fanout_publisher_username=args.fanout_publisher_username,
+        fanout_publisher_password=args.fanout_publisher_password,
         topic_template=args.topic,
         clients=args.clients,
         message_count=args.messages,
@@ -499,6 +682,8 @@ def main():
         tls_enabled=args.tls,
         tls_ca_file=args.tls_ca_file,
         tls_insecure=args.tls_insecure,
+        mode=args.mode,
+        fanout_topic=args.fanout_topic,
     )
 
     if args.json:

@@ -1,0 +1,36 @@
+{
+  "clients": [
+    {
+      "username": "dynsec_client_1",
+      "clientid": "client_1",
+      "roles": [],
+      "disabled": false
+    }
+  ],
+  "groups": [
+    {
+      "groupname": "sensors",
+      "roles": [{"rolename": "sensor_reader", "priority": 0}],
+      "clients": [{"username": "dynsec_client_1", "priority": 0}]
+    }
+  ],
+  "roles": [
+    {
+      "rolename": "sensor_reader",
+      "acls": [
+        {
+          "acltype": "publishClientReceive",
+          "topic": "sensors/+/#",
+          "priority": 0,
+          "allow": true
+        }
+      ]
+    }
+  ],
+  "defaultACLAccess": {
+    "publishClientSend": false,
+    "publishClientReceive": false,
+    "subscribe": false,
+    "unsubscribe": false
+  }
+}

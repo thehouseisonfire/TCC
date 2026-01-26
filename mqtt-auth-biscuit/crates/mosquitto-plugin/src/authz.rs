@@ -1,5 +1,6 @@
 use crate::auth::TokenType;
 use crate::biscuit_handler::{verify_biscuit_token, BiscuitAuthOutcome};
+use crate::dynamic_security_policy::DynamicSecurityPolicy;
 use crate::http_policy;
 use crate::policy::PolicyMode;
 use crate::sqlite_policy::SqlitePolicy;
@@ -9,12 +10,14 @@ use chrono::Utc;
 /// Lightweight authorization parameters using references to avoid allocations
 #[derive(Copy, Clone)]
 pub struct AuthzParams<'a> {
+    pub username: Option<&'a str>,
     pub client_id: &'a str,
     pub topic: &'a str,
     pub access: i32,
     pub biscuit_root_key: &'a BiscuitPublicKey,
     pub policy_mode: PolicyMode,
     pub sqlite_policy: Option<&'a SqlitePolicy>,
+    pub dynamic_security_policy: Option<&'a DynamicSecurityPolicy>,
     pub http_url: Option<&'a str>,
     pub http_ca_file: Option<&'a str>,
     pub http_tls_insecure: bool,
@@ -110,6 +113,24 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
                         Err(_) => token_only(),
                     }
                 }
+                PolicyMode::DynamicSecurity => {
+                    let Some(policy) = params.dynamic_security_policy else {
+                        return AuthzOutcome::Denied;
+                    };
+                    if policy
+                        .check(
+                            params.username,
+                            Some(params.client_id),
+                            params.topic,
+                            params.access,
+                        )
+                        .unwrap_or(false)
+                    {
+                        AuthzOutcome::Allowed
+                    } else {
+                        AuthzOutcome::Denied
+                    }
+                }
             }
         }
         TokenType::Biscuit { bytes, expires_at } => {
@@ -198,6 +219,24 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
                             }
                         }
                         Err(_) => token_only(),
+                    }
+                }
+                PolicyMode::DynamicSecurity => {
+                    let Some(policy) = params.dynamic_security_policy else {
+                        return AuthzOutcome::Denied;
+                    };
+                    if policy
+                        .check(
+                            params.username,
+                            Some(params.client_id),
+                            params.topic,
+                            params.access,
+                        )
+                        .unwrap_or(false)
+                    {
+                        AuthzOutcome::Allowed
+                    } else {
+                        AuthzOutcome::Denied
                     }
                 }
             }

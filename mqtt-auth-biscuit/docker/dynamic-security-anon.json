@@ -1,0 +1,38 @@
+{
+  "clients": [],
+  "groups": [
+    {
+      "groupname": "anonymous",
+      "roles": [
+        {"rolename": "anonymous_reader", "priority": 0}
+      ],
+      "clients": []
+    }
+  ],
+  "roles": [
+    {
+      "rolename": "anonymous_reader",
+      "acls": [
+        {
+          "acltype": "subscribeLiteral",
+          "topic": "public/announce",
+          "priority": 0,
+          "allow": true
+        },
+        {
+          "acltype": "publishClientReceive",
+          "topic": "public/announce",
+          "priority": 0,
+          "allow": true
+        }
+      ]
+    }
+  ],
+  "defaultACLAccess": {
+    "publishClientSend": false,
+    "publishClientReceive": false,
+    "subscribe": false,
+    "unsubscribe": false
+  },
+  "anonymousGroup": "anonymous"
+}

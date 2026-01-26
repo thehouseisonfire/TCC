@@ -325,41 +325,8 @@ machine and record the first results/known issues).
 
 #### A) Policy Source Parity
 
-- [ ] **Issue 1: Add Dynamic Security module comparison**
-  - Goal: Implement Mosquitto's Dynamic Security module as an authorization
-    source to provide a comprehensive comparison against token-based approaches.
-  - Current gap: ARTICLE.MD mentions "Dynamic ACLs (via the Dynamic Security
-    module)" as a policy source, but current implementation lacks this native
-    Mosquitto authorization mechanism.
-  - Code pointers: Policy modes only include TokenOnly/Sqlite/Http/Hybrid in
-    `policy.rs`, and config parsing accepts only these modes (no dynamic security
-    config). See @/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/policy.rs#1-7
-    and @/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/config.rs#298-331.
-  - Rationale: Dynamic Security is Mosquitto's built-in role-based access
-    control system that provides runtime management of users, roles, and ACLs
-    via MQTT control messages or HTTP API, representing a production-grade
-    alternative to external policy backends.
-  - Deliverable:
-    - Add `DynamicSecurity` variant to `PolicyMode` enum in `src/policy.rs`
-    - Implement Dynamic Security client integration in
-      `src/dynamic_security_policy.rs` using Mosquitto's HTTP API or control
-      message interface
-    - Update plugin configuration to support `dynamic_security_url` and
-      `dynamic_security_username/password` options
-    - Create Dynamic Security setup scripts for benchmark scenarios
-      (user/role/ACL provisioning matching test patterns)
-    - Add Dynamic Security scenarios to `benchmarks/run_scenarios.py` with
-      comparable load patterns to existing policy modes
-    - At least one scenario run captured with Dynamic Security enabled,
-      including latency measurements for authorization checks via the Dynamic
-      Security API. The scenario should be configurable to measure the impact of
-      runtime management of users, roles, and ACLs, perhaps with a special
-      client pushing periodic, deterministic ACL changes.
-    - Performance comparison analysis between Dynamic Security and token-based
-      authorization modes
-
-- [ ] **Issue 2: Add static ACLs as PDP source of truth**
-  - Goal: implement native Mosquitto static ACL file support as a policy source
+- [ ] **Issue 2: Add static ACLs as PDP source of truth (backend)**
+  - Goal: implement native Mosquitto static ACL file support as a policy backend
     to align with the evaluation matrix proposed in ARTICLE.MD (line 59).
   - Current gap: ARTICLE.MD explicitly mentions testing against "static ACLs
     native to Mosquitto" as a PDP source, but current implementation only
@@ -818,6 +785,10 @@ machine and record the first results/known issues).
 ---
 
 ## 9) Completed Issues (Backlog)
+
+- [x] **Issue 1: Add Dynamic Security module comparison** ✅
+  - **Completed**: Full Dynamic Security module implementation with JSON-based policy loading, role-based access control, and comprehensive ACL support. Added anonymous access, benchmark scenarios, and Docker configurations. Provides production-grade comparison against token-based approaches.
+
 
 - [x] **Issue 8: Implement a long-running Token Issuer service (JWT + Biscuit)**
   - Summary: Complete token issuer service with HTTP endpoints for JWT/Biscuit

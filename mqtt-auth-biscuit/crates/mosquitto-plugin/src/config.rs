@@ -47,6 +47,9 @@ pub enum ConfigError {
     #[error("Biscuit root public key is required")]
     MissingBiscuitKey,
 
+    #[error("Invalid biscuit role fact predicate: {0}")]
+    InvalidBiscuitRoleFact(String),
+
     #[allow(dead_code)]
     #[error("Invalid policy mode: {0}")]
     InvalidPolicyMode(String),
@@ -67,6 +70,17 @@ pub struct BiscuitConfig {
     pub root_public_key: biscuit_auth::PublicKey,
 }
 
+fn is_simple_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
 #[derive(Clone)]
 pub struct PluginConfig {
     pub jwt: JwtConfig,
@@ -74,6 +88,8 @@ pub struct PluginConfig {
     pub policy: PolicyBackendConfig,
     pub cache_ttl_seconds: u64,
     pub ext_auth_method: Option<String>,
+    pub role_username_prefix: String,
+    pub biscuit_role_fact: String,
 }
 
 /// Builder for PluginConfig with fluent interface and validation
@@ -94,6 +110,8 @@ pub struct PluginConfigBuilder {
     dynamic_security_reload_interval_seconds: Option<u64>,
     cache_ttl_seconds: Option<u64>,
     ext_auth_method: Option<String>,
+    role_username_prefix: Option<String>,
+    biscuit_role_fact: Option<String>,
 }
 
 impl Default for PluginConfigBuilder {
@@ -121,6 +139,8 @@ impl PluginConfigBuilder {
             dynamic_security_reload_interval_seconds: None,
             cache_ttl_seconds: None,
             ext_auth_method: None,
+            role_username_prefix: None,
+            biscuit_role_fact: None,
         }
     }
 
@@ -204,6 +224,16 @@ impl PluginConfigBuilder {
         self
     }
 
+    pub fn role_username_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.role_username_prefix = Some(prefix.into());
+        self
+    }
+
+    pub fn biscuit_role_fact(mut self, fact: impl Into<String>) -> Self {
+        self.biscuit_role_fact = Some(fact.into());
+        self
+    }
+
     pub fn build(self) -> Result<PluginConfig, ConfigError> {
         let jwt_alg = self.jwt_alg.ok_or(ConfigError::MissingJwtAlgorithm)?;
 
@@ -277,6 +307,13 @@ impl PluginConfigBuilder {
             dynamic_security_password: self.dynamic_security_password,
         };
 
+        let cache_ttl_seconds = self.cache_ttl_seconds.unwrap_or(3600);
+
+        let biscuit_role_fact = self.biscuit_role_fact.unwrap_or_else(|| "role".to_string());
+        if !is_simple_identifier(&biscuit_role_fact) {
+            return Err(ConfigError::InvalidBiscuitRoleFact(biscuit_role_fact));
+        }
+
         Ok(PluginConfig {
             jwt: JwtConfig {
                 decoding_key,
@@ -286,8 +323,12 @@ impl PluginConfigBuilder {
                 root_public_key: biscuit_root_public_key,
             },
             policy,
-            cache_ttl_seconds: self.cache_ttl_seconds.unwrap_or(3600),
+            cache_ttl_seconds,
             ext_auth_method: self.ext_auth_method.or_else(|| Some("token".to_string())),
+            role_username_prefix: self
+                .role_username_prefix
+                .unwrap_or_else(|| "role:".to_string()),
+            biscuit_role_fact,
         })
     }
 }
@@ -336,6 +377,7 @@ pub fn parse_options(
             "policy_mode" => {
                 let mode = match value.as_str() {
                     "token" => PolicyMode::TokenOnly,
+                    "static_acl" => PolicyMode::StaticAcl,
                     "sqlite" => PolicyMode::Sqlite,
                     "http" => PolicyMode::Http,
                     "hybrid" => PolicyMode::Hybrid,
@@ -369,9 +411,57 @@ pub fn parse_options(
                 builder.cache_ttl_seconds(ttl)
             }
             "ext_auth_method" => builder.ext_auth_method(value),
+            "role_username_prefix" => builder.role_username_prefix(value),
+            "biscuit_role_fact" => builder.biscuit_role_fact(value),
             _ => builder,
         };
     }
 
     builder.build().map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConfigError, PluginConfigBuilder};
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn rejects_invalid_biscuit_role_fact() {
+        let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
+        let biscuit_root_key_file = format!(
+            "{}/../../docker/biscuit_public.key",
+            env!("CARGO_MANIFEST_DIR")
+        );
+
+        let result = PluginConfigBuilder::new()
+            .jwt_algorithm("ES256")
+            .jwt_key_file(jwt_pub_pem)
+            .biscuit_root_key_file(biscuit_root_key_file)
+            .biscuit_role_fact("role($x)")
+            .build();
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidBiscuitRoleFact(_))
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn accepts_valid_biscuit_role_fact() {
+        let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
+        let biscuit_root_key_file = format!(
+            "{}/../../docker/biscuit_public.key",
+            env!("CARGO_MANIFEST_DIR")
+        );
+
+        let result = PluginConfigBuilder::new()
+            .jwt_algorithm("ES256")
+            .jwt_key_file(jwt_pub_pem)
+            .biscuit_root_key_file(biscuit_root_key_file)
+            .biscuit_role_fact("device_role")
+            .build();
+
+        assert!(result.is_ok());
+    }
 }

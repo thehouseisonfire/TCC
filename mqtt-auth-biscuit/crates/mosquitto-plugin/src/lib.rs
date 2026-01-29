@@ -1,6 +1,6 @@
 use crate::auth::{AuthEngine, AuthError, TokenType};
 use crate::authz::{check_authorization, AuthzOutcome, AuthzParams};
-use crate::biscuit_handler::{expiry_stats, extract_min_expiry};
+use crate::biscuit_handler::{expiry_stats, extract_min_expiry, extract_roles, has_right_facts};
 use crate::cache::SessionCache;
 use crate::config::{parse_options, PluginConfig};
 use crate::dynamic_security_policy::DynamicSecurityPolicy;
@@ -9,7 +9,7 @@ use crate::sqlite_policy::SqlitePolicy;
 use chrono::Utc;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use std::time::Duration;
 
 mod auth;
@@ -64,6 +64,51 @@ mod http_policy;
 mod jwt_handler;
 mod policy;
 mod sqlite_policy;
+
+static STATIC_ACL_BIAS_WARN_ONCE: Once = Once::new();
+
+fn log_static_acl_policy_bias(token_type: &TokenType, config: &PluginConfig) {
+    if config.policy.mode != PolicyMode::StaticAcl {
+        return;
+    }
+    let warn_message = match token_type {
+        TokenType::Jwt { claims, .. } => {
+            let has_roles = claims
+                .roles
+                .as_ref()
+                .map(|roles| roles.iter().any(|role| !role.trim().is_empty()))
+                .unwrap_or(false);
+            if !has_roles {
+                Some(
+                    "StaticAcl warning: JWT token missing roles; token-only rules may allow beyond ACL identity."
+                        .to_string(),
+                )
+            } else {
+                None
+            }
+        }
+        TokenType::Biscuit { bytes, .. } => {
+            match has_right_facts(bytes, &config.biscuit.root_public_key) {
+                Ok(true) => {
+                    Some(
+                        "StaticAcl warning: Biscuit token includes right(...) facts; token-only rules may allow beyond ACL identity."
+                            .to_string(),
+                    )
+                }
+                Ok(false) => None,
+                Err(err) => {
+                    Some(format!(
+                        "StaticAcl warning: failed to inspect Biscuit rights facts: {err}"
+                    ))
+                }
+            }
+        }
+    };
+
+    if let Some(message) = warn_message {
+        STATIC_ACL_BIAS_WARN_ONCE.call_once(|| log_debug(&message));
+    }
+}
 
 // Mosquitto Error Codes
 pub const MOSQ_ERR_SUCCESS: c_int = 0;
@@ -182,6 +227,12 @@ extern "C" {
     pub fn mosquitto_client_id(client: *const c_void) -> *const c_char;
     pub fn mosquitto_client_username(client: *const c_void) -> *const c_char;
     pub fn mosquitto_malloc(size: usize) -> *mut c_void;
+    pub fn mosquitto_set_username(client: *mut c_void, username: *const c_char) -> c_int;
+}
+
+#[cfg(not(any(test, miri, kani)))]
+fn set_username_raw(client: *mut c_void, username: *const c_char) -> c_int {
+    unsafe { mosquitto_set_username(client, username) }
 }
 
 #[cfg(any(test, miri, kani))]
@@ -194,6 +245,17 @@ pub extern "C" fn mosquitto_callback_register(
     _userdata: *mut c_void,
 ) -> c_int {
     MOSQ_ERR_SUCCESS
+}
+
+#[cfg(any(test, miri, kani))]
+#[no_mangle]
+pub extern "C" fn mosquitto_set_username(_client: *mut c_void, _username: *const c_char) -> c_int {
+    MOSQ_ERR_SUCCESS
+}
+
+#[cfg(any(test, miri, kani))]
+fn set_username_raw(client: *mut c_void, username: *const c_char) -> c_int {
+    mosquitto_set_username(client, username)
 }
 
 #[cfg(any(test, miri, kani))]
@@ -381,14 +443,116 @@ fn attach_biscuit_expiry(
     root_public_key: &biscuit_auth::PublicKey,
 ) -> Result<TokenType, biscuit_auth::error::Token> {
     match token_type {
-        TokenType::Biscuit { bytes, expires_at } => {
+        TokenType::Biscuit {
+            bytes,
+            expires_at,
+            roles,
+        } => {
             let expires_at = match expires_at {
                 Some(value) => Some(value),
                 None => extract_min_expiry(&bytes, root_public_key)?,
             };
-            Ok(TokenType::Biscuit { bytes, expires_at })
+            Ok(TokenType::Biscuit {
+                bytes,
+                expires_at,
+                roles,
+            })
         }
         other => Ok(other),
+    }
+}
+
+fn attach_biscuit_roles(token_type: TokenType, config: &PluginConfig) -> TokenType {
+    match token_type {
+        TokenType::Biscuit {
+            bytes,
+            expires_at,
+            roles,
+        } => {
+            if roles.is_some() {
+                return TokenType::Biscuit {
+                    bytes,
+                    expires_at,
+                    roles,
+                };
+            }
+            let roles = extract_roles(
+                &bytes,
+                &config.biscuit.root_public_key,
+                &config.biscuit_role_fact,
+            )
+            .ok();
+            TokenType::Biscuit {
+                bytes,
+                expires_at,
+                roles,
+            }
+        }
+        other => other,
+    }
+}
+
+fn select_preferred_role(roles: &[String]) -> Option<String> {
+    if roles.is_empty() {
+        return None;
+    }
+    if roles.len() > 1 {
+        log_debug(&format!(
+            "Static ACL role selection prefers a single role; candidates={:?}",
+            roles
+        ));
+    }
+    if let Some(role) = roles.iter().find(|r| r.trim() == "admin") {
+        return Some(role.clone());
+    }
+    roles.iter().find(|r| !r.trim().is_empty()).cloned()
+}
+
+fn role_to_username(token_type: &TokenType, config: &PluginConfig) -> Option<String> {
+    match token_type {
+        TokenType::Jwt { claims, .. } => claims
+            .roles
+            .as_ref()
+            .and_then(|roles| select_preferred_role(&roles[..]))
+            .map(|role| format!("{}{}", config.role_username_prefix, role)),
+        TokenType::Biscuit { bytes, roles, .. } => {
+            let roles = roles.as_ref().cloned().or_else(|| {
+                extract_roles(
+                    bytes,
+                    &config.biscuit.root_public_key,
+                    &config.biscuit_role_fact,
+                )
+                .ok()
+            });
+            roles
+                .and_then(|roles| select_preferred_role(&roles[..]))
+                .map(|role| format!("{}{}", config.role_username_prefix, role))
+        }
+    }
+}
+
+/// Synthetic usernames are derived once during auth callbacks for static ACLs.
+fn set_synthetic_username(
+    client: *mut c_void,
+    token_type: &TokenType,
+    config: &PluginConfig,
+) -> Result<(), String> {
+    if config.policy.mode != PolicyMode::StaticAcl {
+        return Ok(());
+    }
+    if client.is_null() {
+        return Ok(());
+    }
+    let Some(username) = role_to_username(token_type, config) else {
+        return Ok(());
+    };
+    let c_username = CString::new(username).map_err(|e| e.to_string())?;
+    // mosquitto_set_username duplicates the provided string (mosquitto__strdup).
+    let rc = set_username_raw(client, c_username.as_ptr());
+    if rc == MOSQ_ERR_SUCCESS {
+        Ok(())
+    } else {
+        Err(format!("mosquitto_set_username failed: {rc}"))
     }
 }
 
@@ -460,6 +624,10 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
         }
         _ => None,
     };
+
+    if config.policy.mode == PolicyMode::StaticAcl {
+        log_info("StaticAcl mode enabled: tokens should carry only role identity to avoid bias.");
+    }
 
     let state = Box::new(PluginState {
         auth_engine: Arc::new(AuthEngine::new(
@@ -582,6 +750,12 @@ extern "C" fn basic_auth_callback(
                         return MOSQ_ERR_AUTH;
                     }
                 };
+            let token_type = attach_biscuit_roles(token_type, &state.config);
+            log_static_acl_policy_bias(&token_type, &state.config);
+            if let Err(err) = set_synthetic_username(evt.client, &token_type, &state.config) {
+                log_debug(&format!("Authentication rejected: {err}"));
+                return MOSQ_ERR_AUTH;
+            }
             let cache_ttl = match cache_ttl_for_token(&token_type, state.config.cache_ttl_seconds) {
                 Ok(ttl) => ttl,
                 Err(err) => {
@@ -653,6 +827,12 @@ extern "C" fn ext_auth_start_callback(
                         return MOSQ_ERR_AUTH;
                     }
                 };
+            let token_type = attach_biscuit_roles(token_type, &state.config);
+            log_static_acl_policy_bias(&token_type, &state.config);
+            if let Err(err) = set_synthetic_username(evt.client, &token_type, &state.config) {
+                log_debug(&format!("Enhanced auth rejected: {err}"));
+                return MOSQ_ERR_AUTH;
+            }
             let cache_ttl = match cache_ttl_for_token(&token_type, state.config.cache_ttl_seconds) {
                 Ok(ttl) => ttl,
                 Err(err) => {
@@ -723,12 +903,18 @@ extern "C" fn acl_check_callback(
         };
 
         match check_authorization(&token_type, params) {
-            AuthzOutcome::Allowed => return MOSQ_ERR_SUCCESS,
+            AuthzOutcome::Allowed => {
+                return MOSQ_ERR_SUCCESS;
+            }
             AuthzOutcome::Expired => {
                 log_debug("ACL check rejected: token expired");
                 return MOSQ_ERR_ACL_DENIED;
             }
-            AuthzOutcome::Denied => {}
+            AuthzOutcome::Denied => {
+                if state.config.policy.mode == PolicyMode::StaticAcl {
+                    return MOSQ_ERR_PLUGIN_DEFER;
+                }
+            }
         }
     }
 
@@ -786,13 +972,19 @@ extern "C" fn control_callback(
         };
 
         match check_authorization(&token_type, params) {
-            AuthzOutcome::Allowed => return MOSQ_ERR_SUCCESS,
+            AuthzOutcome::Allowed => {
+                return MOSQ_ERR_SUCCESS;
+            }
             AuthzOutcome::Expired => {
                 set_control_reauth_signal(evt, "token expired; reauthenticate");
                 log_debug("Control message rejected: token expired");
                 return MOSQ_ERR_ACL_DENIED;
             }
-            AuthzOutcome::Denied => {}
+            AuthzOutcome::Denied => {
+                if state.config.policy.mode == PolicyMode::StaticAcl {
+                    return MOSQ_ERR_PLUGIN_DEFER;
+                }
+            }
         }
     }
     MOSQ_ERR_ACL_DENIED

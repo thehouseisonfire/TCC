@@ -9,6 +9,7 @@ services:
       - ${MOSQUITTO_CONF:-./mosquitto.conf}:/mosquitto/config/mosquitto.conf
       - ./jwt_public.pem:/mosquitto/config/jwt_public.pem:ro
       - ./biscuit_public.key:/mosquitto/config/biscuit_public.key:ro
+      - ./static-acl.conf:/mosquitto/config/static-acl.conf
       - ./dynamic-security.json:/mosquitto/config/dynamic-security.json
       - ./dynamic-security-churn.json:/mosquitto/config/dynamic-security-churn.json
     cpuset: "0-1"

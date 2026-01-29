@@ -16,6 +16,7 @@ pub enum TokenType {
     Biscuit {
         bytes: Vec<u8>,
         expires_at: Option<i64>,
+        roles: Option<Vec<String>>,
     },
 }
 
@@ -59,6 +60,7 @@ impl AuthEngine {
                 Ok(TokenType::Biscuit {
                     bytes: vec![0u8; 1],
                     expires_at: Some(0),
+                    roles: None,
                 })
             }
         } else {
@@ -91,6 +93,7 @@ impl AuthEngine {
             Ok(TokenType::Biscuit {
                 bytes,
                 expires_at: None,
+                roles: None,
             })
         }
     }

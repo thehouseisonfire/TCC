@@ -56,6 +56,7 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
 
             match params.policy_mode {
                 PolicyMode::TokenOnly => token_only(),
+                PolicyMode::StaticAcl => token_only(),
                 PolicyMode::Sqlite => {
                     let Some(sqlite_policy) = params.sqlite_policy else {
                         return AuthzOutcome::Denied;
@@ -133,7 +134,11 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
                 }
             }
         }
-        TokenType::Biscuit { bytes, expires_at } => {
+        TokenType::Biscuit {
+            bytes,
+            expires_at,
+            roles: _,
+        } => {
             if let Some(expires_at) = expires_at {
                 if Utc::now().timestamp() >= *expires_at {
                     return AuthzOutcome::Expired;
@@ -164,6 +169,7 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
 
             match params.policy_mode {
                 PolicyMode::TokenOnly => token_only(),
+                PolicyMode::StaticAcl => token_only(),
                 PolicyMode::Sqlite => {
                     let Some(sqlite_policy) = params.sqlite_policy else {
                         return AuthzOutcome::Denied;

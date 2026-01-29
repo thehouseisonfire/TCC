@@ -72,6 +72,34 @@ You can run the benchmark script to measure latency and throughput:
 python3 benchmarks/metrics_collector.py
 ```
 
+### Static ACL scenarios (compound gate with two authorization sources)
+
+Static ACL scenarios (`STATIC-ACL-*`) use a **compound gate** with **two authorization sources**:
+
+1. **Token-side policies** (JWT claims or Biscuit Datalog rules) are evaluated first.
+2. **Mosquitto’s native ACL file** is evaluated second, using a synthetic username derived from the token’s role.
+
+**Resolution model (StaticAcl = OR):**
+- If the token **allows**, the plugin returns `MOSQ_ERR_SUCCESS` and Mosquitto **does not** consult the ACL.
+- If the token **denies**, the plugin returns `MOSQ_ERR_PLUGIN_DEFER` so the ACL file decides.
+
+**Control-plane note:** the same OR resolution is applied in `MOSQ_EVT_CONTROL` for StaticAcl runs (token allow short-circuits ACL; token deny defers to ACL).
+
+This means authorization decisions come from **two sources of truth**:
+- The token can grant access even when the ACL would deny.
+- The ACL can still grant access when the token does not include an allow rule.
+
+For fair benchmark comparison, static ACL tokens should carry only role identity (JWT `roles` claim or Biscuit `role(<value>)` fact) without extra policy rules. This isolates ACL cost while still validating each token format. If you want stricter-than-ACL behavior, add extra facts/rules to the token.
+
+**Role selection simplification**: static ACL scenarios are designed for **single-role tokens**. If multiple roles are present, the plugin prefers `admin` first and otherwise the first non-empty role. Avoid multi-role tokens in `STATIC-ACL-*` runs to prevent ambiguity.
+
+Relevant plugin options (set in `mosquitto_*.conf`):
+
+- `plugin_opt_role_username_prefix` (default: `role:`)
+- `plugin_opt_biscuit_role_fact` (default: `role`, must be a simple predicate identifier like `role` or `device_role`)
+
+Ensure the ACL file (`docker/static-acl.conf`) uses the same role names.
+
 ### Smoke test
 
 Run a lightweight health check + single publish for JWT and Biscuit:

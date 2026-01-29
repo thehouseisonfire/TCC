@@ -399,6 +399,50 @@ def main():
                 "netem": {"clear": True},
                 "message_size": 0,
             },
+            "STATIC-ACL-JWT": {
+                "mosquitto_conf": "./mosquitto_static.conf",
+                "username": "jwt",
+                "password": tokens["jwt"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+            },
+            "STATIC-ACL-BIS": {
+                "mosquitto_conf": "./mosquitto_static.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+            },
+            "STATIC-ACL-FANOUT": {
+                "mosquitto_conf": "./mosquitto_static.conf",
+                "username": "jwt",
+                "password": tokens["jwt"],
+                "fanout_publisher_username": "jwt",
+                "fanout_publisher_password": tokens["jwt"],
+                "topic": "fanout/broadcast",
+                "mode": "fanout",
+                "fanout_topic": "fanout/broadcast",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+            },
+            "STATIC-ACL-FANOUT-BIS": {
+                "mosquitto_conf": "./mosquitto_static.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit"],
+                "fanout_publisher_username": "biscuit",
+                "fanout_publisher_password": tokens["biscuit"],
+                "topic": "fanout/broadcast",
+                "mode": "fanout",
+                "fanout_topic": "fanout/broadcast",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+            },
             "JWT-HTTP-200MS": {
                 "mosquitto_conf": "./mosquitto_http.conf",
                 "username": "jwt",
@@ -630,6 +674,7 @@ def main():
         print("MTU-500-JWT, MTU-1500-JWT, MTU-9000-JWT")
         print("DYNSEC-BASE, DYNSEC-CHURN, DYNSEC-READ-FANOUT")
         print("DYNSEC-READ-FANOUT-CHURN")
+        print("STATIC-ACL-JWT, STATIC-ACL-BIS, STATIC-ACL-FANOUT, STATIC-ACL-FANOUT-BIS")
         print("Append -TLS to any scenario id for TLS variants.")
         return
 

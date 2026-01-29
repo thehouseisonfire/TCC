@@ -1,6 +1,7 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PolicyMode {
     TokenOnly,
+    StaticAcl,
     Sqlite,
     Http,
     Hybrid,

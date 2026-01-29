@@ -325,25 +325,6 @@ machine and record the first results/known issues).
 
 #### A) Policy Source Parity
 
-- [ ] **Issue 2: Add static ACLs as PDP source of truth (backend)**
-  - Goal: implement native Mosquitto static ACL file support as a policy backend
-    to align with the evaluation matrix proposed in ARTICLE.MD (line 59).
-  - Current gap: ARTICLE.MD explicitly mentions testing against "static ACLs
-    native to Mosquitto" as a PDP source, but current implementation only
-    supports token-only, SQLite, HTTP, and hybrid modes.
-  - Code pointers: No `StaticAcl` policy variant in @/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/policy.rs#1-7
-    and no ACL config option parsing in @/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/config.rs#298-331.
-  - Deliverable:
-    - Add `StaticAcl` variant to `PolicyMode` enum in `src/policy.rs`
-    - Implement ACL file parsing and evaluation logic in
-      `src/static_acl_policy.rs`
-    - Update plugin configuration to support `acl_file` option in Mosquitto
-      config
-    - Add static ACL scenarios to `benchmarks/run_scenarios.py` comparable to
-      existing policy modes (token-only, SQLite, HTTP, hybrid)
-    - Create sample ACL files for benchmark scenarios matching the test patterns
-    - At least one scenario run captured with static ACL mode enabled
-
 - [ ] **Issue 3: Implement proper JWT access logic (replace demo token-only
      authz)**
   - Goal: replace the current heuristic JWT token-only authorization rules with
@@ -558,23 +539,6 @@ machine and record the first results/known issues).
     - At least one scenario run captured for each QoS level and mixed
       configurations
 
-- [ ] **Issue 21: Strengthen Biscuit authorizer template complexity**
-  - Goal: Expand the Biscuit authorizer template beyond the minimal
-    `right(op,res)` match to represent more realistic policy complexity (while
-    preserving request-context injection and Biscuit scoping constraints).
-  - Rationale: current template is too "thin" and may under-represent the
-    cost/benefit of Biscuit's Datalog evaluation compared to intended research
-    scenarios.
-  - Deliverable:
-    - Add configurable authorizer "profiles" (e.g., `simple`, `rbac`,
-      `contextual`) or a template file option
-    - Include policies with:
-      - role membership / derived permissions
-      - topic prefix/wildcard patterns
-      - time-based constraints using authorizer-provided `time(...)`
-    - Add at least one scenario that measures increasing authorizer complexity
-      at constant token size
-
 - [ ] **Issue 18: Avoid Base64 encoding for Biscuit tokens (use native bytes /
    Protobuf wire format)**
   - Goal: Stop wrapping Biscuit tokens in Base64 for transport where possible,
@@ -602,24 +566,6 @@ machine and record the first results/known issues).
       for both token types
     - Add at least one scenario that exercises the binary transport path for
       Biscuit (and documents parity constraints vs JWT)
-
-- [ ] **Issue 22: Strengthen `seed_demo_rules` (RBAC), make it optional, and add
-    runtime policy churn scenarios**
-  - Goal: Turn SQLite demo seeding into a realistic RBAC policy set, allow it to
-    be turned off, and add scenarios where policies change periodically at
-    runtime.
-  - Current issue: seeding is unconditional when `PolicyMode::Sqlite` is used,
-    and policies are too simple for RBAC fairness studies (see
-    `sqlite_policy.rs`).
-  - Deliverable:
-    - Add a configuration flag to enable/disable demo seeding (e.g.,
-      `sqlite_seed_demo_rules=true|false`)
-    - Extend SQLite schema and seeding to include RBAC-like structure
-      (users/roles/role_acls), plus more realistic topic/action grants
-    - Add a benchmark scenario where SQLite rules are updated deterministically
-      during the run (e.g., every N seconds), to simulate dynamic policy updates
-    - Ensure scenarios document when policy churn is enabled and how it affects
-      cache validity
 
 - [ ] **Issue 19: Implement/validate `MOSQ_EVT_MESSAGE` fan-out per subscriber
     authorization**
@@ -676,7 +622,97 @@ machine and record the first results/known issues).
       under each policy mode
     - Document expected outcomes and any deviations from Mosquitto ACL semantics
 
+- [ ] **Issue 22: Strengthen `seed_demo_rules` (RBAC), make it optional, and add
+    runtime policy churn scenarios**
+  - Goal: Turn SQLite demo seeding into a realistic RBAC policy set, allow it to
+    be turned off, and add scenarios where policies change periodically at
+    runtime.
+  - Current issue: seeding is unconditional when `PolicyMode::Sqlite` is used,
+    and policies are too simple for RBAC fairness studies (see
+    `sqlite_policy.rs`).
+  - Deliverable:
+    - Add a configuration flag to enable/disable demo seeding (e.g.,
+      `sqlite_seed_demo_rules=true|false`)
+    - Extend SQLite schema and seeding to include RBAC-like structure
+      (users/roles/role_acls), plus more realistic topic/action grants
+    - Add a benchmark scenario where SQLite rules are updated deterministically
+      during the run (e.g., every N seconds), to simulate dynamic policy updates
+    - Ensure scenarios document when policy churn is enabled and how it affects
+      cache validity
+
+- [ ] **Issue 21: Strengthen Biscuit authorizer template complexity**
+  - Goal: Expand the Biscuit authorizer template beyond the minimal
+    `right(op,res)` match to represent more realistic policy complexity (while
+    preserving request-context injection and Biscuit scoping constraints).
+  - Rationale: current template is too "thin" and may under-represent the
+    cost/benefit of Biscuit's Datalog evaluation compared to intended research
+    scenarios.
+  - Deliverable:
+    - Add configurable authorizer "profiles" (e.g., `simple`, `rbac`,
+      `contextual`) or a template file option
+    - Include policies with:
+      - role membership / derived permissions
+      - topic prefix/wildcard patterns
+      - time-based constraints using authorizer-provided `time(...)`
+    - Add at least one scenario that measures increasing authorizer complexity
+      at constant token size
+
 #### F) Matrix Coverage (Benchmark Verification)
+
+- [ ] **Issue 22: Expiry enforcement in ACL_CHECK with disconnect (no reason codes)**
+  - Goal: On expired tokens, rely on `MOSQ_EVT_ACL_CHECK` to deny access and
+    forcibly disconnect the client, since ACL checks do not support MQTT v5
+    reason codes/strings for explicit expiry signaling.
+  - Current state: `ACL_CHECK` returns `MOSQ_ERR_ACL_DENIED` on
+    `AuthzOutcome::Expired` but does **not** disconnect the client.
+  - Constraints:
+    - Do not send or depend on reason codes in ACL checks.
+    - Avoid full token signature verification in `ACL_CHECK`; only validate
+      expiry and policy evaluation (authz). Cryptographic verification should
+      remain in auth/enhanced-auth entrypoints.
+  - Deliverable:
+    - Add explicit disconnect path when `AuthzOutcome::Expired` is returned in
+      `ACL_CHECK` (document which Mosquitto API is used).
+    - Document rationale: ACL_CHECK is the authoritative access gate; expiry
+      means immediate disconnect without reason codes.
+
+- [ ] **Issue 23: Proactive client reauthentication before expiry**
+  - Goal: Clients refresh tokens proactively and initiate MQTT v5 reauth at
+    least one minute before token expiration, minimizing ACL denials.
+  - Deliverable:
+    - Client-side refresh timer logic using the token `exp` claim.
+    - Request a new token from the Token Issuer and send an AUTH packet with
+      fresh credentials at least 60 seconds before expiry.
+    - Update benchmark clients/scenarios to exercise proactive refresh flow.
+
+- [ ] **Issue 24: Decide whether multi-step `MOSQ_EVT_EXT_AUTH_CONTINUE` is in
+     research scope**
+  - Goal: Determine whether implementing true multi-step enhanced authentication
+    (state machine across multiple AUTH packets) is required for the paper's
+    hypotheses, or whether the single-step "token refresh" model is sufficient.
+  - Notes:
+    - Current implementation treats enhanced auth as single-step (CONTINUE
+      delegates to START).
+    - Multi-step flows add state-management complexity that may not affect
+      JWT-vs-Biscuit comparison unless explicitly tested.
+  - Deliverable:
+    - Document a decision: in-scope vs out-of-scope, with justification tied to
+      hypotheses/metrics
+    - If in-scope:
+      - Implement multi-step auth state handling (per client/session) and add at
+        least one scenario measuring multi-step overhead
+
+- [ ] **Issue 25: Optional full authz on ACL_READ behind a flag (default expiry-only)**
+  - Goal: Support full authorization checks on `MOSQ_EVT_ACL_CHECK` +
+    `MOSQ_ACL_READ` behind a config flag (disabled by default) to avoid
+    per-subscriber performance penalties in high fan-out scenarios.
+  - Rationale: Full Datalog/HTTP/SQLite checks on every read can be too costly;
+    default behavior should only validate token expiry for read fan-out, while
+    leaving the full authz path available for correctness experiments.
+  - Deliverable:
+    - Add a config option (e.g., `acl_read_full_authz`) defaulting to false.
+    - When false, `ACL_READ` only validates expiry (no full authz).
+    - When true, run full authz checks and document the expected performance hit.
 
 - [ ] **Issue 28: Verify static-policy benchmark coverage (ACL_SUBSCRIBE/WRITE)**
   - Goal: Confirm scenarios exist for static policies where `ACL_SUBSCRIBE` and
@@ -726,69 +762,16 @@ machine and record the first results/known issues).
     - Notification topic publishing (e.g., `system_notification/<client_id>`)
     - Scenario capturing denial after privilege reduction
 
-- [ ] **Issue 21.1: Expiry enforcement in ACL_CHECK with disconnect (no reason codes)**
-  - Goal: On expired tokens, rely on `MOSQ_EVT_ACL_CHECK` to deny access and
-    forcibly disconnect the client, since ACL checks do not support MQTT v5
-    reason codes/strings for explicit expiry signaling.
-  - Current state: `ACL_CHECK` returns `MOSQ_ERR_ACL_DENIED` on
-    `AuthzOutcome::Expired` but does **not** disconnect the client.
-  - Constraints:
-    - Do not send or depend on reason codes in ACL checks.
-    - Avoid full token signature verification in `ACL_CHECK`; only validate
-      expiry and policy evaluation (authz). Cryptographic verification should
-      remain in auth/enhanced-auth entrypoints.
-  - Deliverable:
-    - Add explicit disconnect path when `AuthzOutcome::Expired` is returned in
-      `ACL_CHECK` (document which Mosquitto API is used).
-    - Document rationale: ACL_CHECK is the authoritative access gate; expiry
-      means immediate disconnect without reason codes.
-
-- [ ] **Issue 22.1: Proactive client reauthentication before expiry**
-  - Goal: Clients refresh tokens proactively and initiate MQTT v5 reauth at
-    least one minute before token expiration, minimizing ACL denials.
-  - Deliverable:
-    - Client-side refresh timer logic using the token `exp` claim.
-    - Request a new token from the Token Issuer and send an AUTH packet with
-      fresh credentials at least 60 seconds before expiry.
-    - Update benchmark clients/scenarios to exercise proactive refresh flow.
-
-- [ ] **Issue 24: Decide whether multi-step `MOSQ_EVT_EXT_AUTH_CONTINUE` is in
-     research scope**
-  - Goal: Determine whether implementing true multi-step enhanced authentication
-    (state machine across multiple AUTH packets) is required for the paper's
-    hypotheses, or whether the single-step "token refresh" model is sufficient.
-  - Notes:
-    - Current implementation treats enhanced auth as single-step (CONTINUE
-      delegates to START).
-    - Multi-step flows add state-management complexity that may not affect
-      JWT-vs-Biscuit comparison unless explicitly tested.
-  - Deliverable:
-    - Document a decision: in-scope vs out-of-scope, with justification tied to
-      hypotheses/metrics
-    - If in-scope:
-      - Implement multi-step auth state handling (per client/session) and add at
-        least one scenario measuring multi-step overhead
-
-- [ ] **Issue 26: Optional full authz on ACL_READ behind a flag (default expiry-only)**
-  - Goal: Support full authorization checks on `MOSQ_EVT_ACL_CHECK` +
-    `MOSQ_ACL_READ` behind a config flag (disabled by default) to avoid
-    per-subscriber performance penalties in high fan-out scenarios.
-  - Rationale: Full Datalog/HTTP/SQLite checks on every read can be too costly;
-    default behavior should only validate token expiry for read fan-out, while
-    leaving the full authz path available for correctness experiments.
-  - Deliverable:
-    - Add a config option (e.g., `acl_read_full_authz`) defaulting to false.
-    - When false, `ACL_READ` only validates expiry (no full authz).
-    - When true, run full authz checks and document the expected performance hit.
-
-
 ---
 
 ## 9) Completed Issues (Backlog)
 
-- [x] **Issue 1: Add Dynamic Security module comparison** ✅
+
+- [x] **Issue 1: Add Dynamic Security module comparison**
   - **Completed**: Full Dynamic Security module implementation with JSON-based policy loading, role-based access control, and comprehensive ACL support. Added anonymous access, benchmark scenarios, and Docker configurations. Provides production-grade comparison against token-based approaches.
 
+- [x] **Issue 2: Add static ACLs as PDP source of truth (backend)**
+  - **Completed**: Implemented hybrid static ACL compounding with Mosquitto's built‑in ACLs. Added role-to-synthetic-username mapping for JWT/Biscuit tokens, configured plugin to allow when the token authorizes and defer to native ACL checks when the token denies (`StaticAcl` OR semantics), and created benchmark scenarios. **Pivot**: Instead of plugin-loaded ACL files, uses Mosquitto's native `acl_file` with compound authorization (token allow OR ACL allow). Removed plugin-side static ACL backend. Updated Docker configs and sample ACL files for role-based usernames and fallback patterns.
 
 - [x] **Issue 8: Implement a long-running Token Issuer service (JWT + Biscuit)**
   - Summary: Complete token issuer service with HTTP endpoints for JWT/Biscuit
@@ -809,38 +792,11 @@ machine and record the first results/known issues).
   - Summary: Kani proofs for init/cleanup + all callbacks (null safety,
     lifetimes).
 
-- [x] **Issue 23: Implement real LRU eviction in `SessionCache`**
-  - Summary: Enforced cache capacity with true LRU eviction, added capacity tracking, edge case handling, and comprehensive unit tests.
-
 - [x] **Issue 27: Cache Biscuit expiry via min `expires_at` fact (remove brittle parsing)**
   - Summary: Replaced brittle error-message parsing with structured Datalog query to extract the minimum `expires_at` from Biscuit tokens. Updated `TokenType::Biscuit` to cache the expiry timestamp per session, clamped cache TTL to token expiry with a 5-minute fallback, and rejected already-expired tokens at auth time. Token issuer and benchmark generators now embed `expires_at` facts in authority and attenuation blocks to support stable expiry extraction.
 
-- [-] **Issue 25: Add configurable parity scenarios and token size alignment (half implemented)**
-  - Goal: Implement configurable scenario flags to ensure fair JWT vs Biscuit
-    comparisons by controlling token size, claim structure, and encoding parity.
-  - Current gaps identified in code review:
-    - JWT issuance includes default `roles: ["admin"]` while Biscuit issues only
-      rights facts, creating token size asymmetry in refresh scenarios
-    - Biscuit uses Base64 standard encoding while JWT uses Base64URL,
-      potentially affecting MTU/fragmentation behavior
-    - Token refresh latency is excluded from connect metrics, hiding lifecycle
-      costs
-  - Status update:
-    - Implemented: `token-issuer` parity flags for `--jwt-no-default-roles` and
-      `--biscuit-base64url`, and scenario runner plumbing to pass them through.
-  - Deliverable:
-    - Add CLI flags to `token-issuer` for parity modes:
-      - ✅ `--jwt-no-default-roles` to match Biscuit minimal rights
-      - ✅ `--biscuit-base64url` to match JWT URL-safe encoding
-      - `--pad-to-size` to align token byte sizes for MTU tests
-    - Update `run_scenarios.py` to accept parity configuration flags and pass
-      them to token-issuer (✅ done for the two flags above)
-    - ✅ Add `token_refresh_ms` metric to `loadgen.py` to capture refresh latency
-      separately from connect latency
-    - Create documentation of parity modes and their impact on experimental
-      validity
-    - Add at least one scenario run demonstrating parity-aligned token
-      comparison
+- [x] **Issue 34: Implement real LRU eviction in `SessionCache`**
+  - Summary: Enforced cache capacity with true LRU eviction, added capacity tracking, edge case handling, and comprehensive unit tests.
 
 ---
 

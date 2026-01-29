@@ -1,12 +1,18 @@
 use biscuit_auth::{Biscuit, PublicKey};
 use chrono::Utc;
+use std::collections::HashMap;
+use std::sync::Arc;
+#[cfg(feature = "expiry_stats")]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+#[cfg(feature = "expiry_stats")]
 use std::time::Instant;
 
 // Pre-compiled authorizer template to avoid recompilation overhead
 // This is a small, acceptable use of global state, as the template is immutable
 static AUTHORIZER_TEMPLATE: OnceLock<String> = OnceLock::new();
+static ROLE_AUTHORIZER_TEMPLATE: OnceLock<String> = OnceLock::new();
+static ROLE_QUERY_CACHE: OnceLock<Mutex<HashMap<String, Arc<str>>>> = OnceLock::new();
 
 fn get_authorizer_template() -> &'static str {
     AUTHORIZER_TEMPLATE.get_or_init(|| {
@@ -18,6 +24,29 @@ fn get_authorizer_template() -> &'static str {
         "#
         .to_string()
     })
+}
+
+fn get_role_authorizer_template() -> &'static str {
+    ROLE_AUTHORIZER_TEMPLATE.get_or_init(|| {
+        r#"
+        role({role});
+        allow if role($role);
+        "#
+        .to_string()
+    })
+}
+
+fn cached_role_query(role_fact: &str) -> Arc<str> {
+    let cache = ROLE_QUERY_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut cache) = cache.lock() {
+        if let Some(query) = cache.get(role_fact) {
+            return Arc::clone(query);
+        }
+        let query: Arc<str> = format!("data($role) <- {}($role)", role_fact).into();
+        cache.insert(role_fact.to_string(), Arc::clone(&query));
+        return query;
+    }
+    format!("data($role) <- {}($role)", role_fact).into()
 }
 
 pub enum BiscuitAuthOutcome {
@@ -34,6 +63,7 @@ pub struct ExpiryStats {
     pub total_nanos: u64,
 }
 
+#[cfg(feature = "expiry_stats")]
 #[derive(Debug, Default)]
 struct ExpiryMetrics {
     calls: AtomicU64,
@@ -41,6 +71,7 @@ struct ExpiryMetrics {
     total_nanos: AtomicU64,
 }
 
+#[cfg(feature = "expiry_stats")]
 static EXPIRY_METRICS: ExpiryMetrics = ExpiryMetrics {
     calls: AtomicU64::new(0),
     failures: AtomicU64::new(0),
@@ -48,6 +79,7 @@ static EXPIRY_METRICS: ExpiryMetrics = ExpiryMetrics {
 };
 
 /// Returns a snapshot of expiry extraction performance.
+#[cfg(feature = "expiry_stats")]
 pub fn expiry_stats() -> ExpiryStats {
     ExpiryStats {
         calls: EXPIRY_METRICS.calls.load(Ordering::Relaxed),
@@ -56,11 +88,18 @@ pub fn expiry_stats() -> ExpiryStats {
     }
 }
 
+#[cfg(not(feature = "expiry_stats"))]
+pub fn expiry_stats() -> ExpiryStats {
+    ExpiryStats::default()
+}
+
 pub fn extract_min_expiry(
     token_bytes: &[u8],
     root_public_key: &PublicKey,
 ) -> Result<Option<i64>, biscuit_auth::error::Token> {
+    #[cfg(feature = "expiry_stats")]
     EXPIRY_METRICS.calls.fetch_add(1, Ordering::Relaxed);
+    #[cfg(feature = "expiry_stats")]
     let start = Instant::now();
     let result = (|| {
         let biscuit = Biscuit::from(token_bytes, root_public_key)?;
@@ -68,13 +107,39 @@ pub fn extract_min_expiry(
         let expiries: Vec<(i64,)> = authorizer.query_all("data($ts) <- expires_at($ts)")?;
         Ok(expiries.into_iter().map(|(ts,)| ts).min())
     })();
+    #[cfg(feature = "expiry_stats")]
     if result.is_err() {
         EXPIRY_METRICS.failures.fetch_add(1, Ordering::Relaxed);
     }
+    #[cfg(feature = "expiry_stats")]
     EXPIRY_METRICS
         .total_nanos
         .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
     result
+}
+
+pub fn extract_roles(
+    token_bytes: &[u8],
+    root_public_key: &PublicKey,
+    role_fact: &str,
+) -> Result<Vec<String>, biscuit_auth::error::Token> {
+    // Template caching is advisory; authorizer queries are constructed explicitly below.
+    let _template = get_role_authorizer_template();
+    let biscuit = Biscuit::from(token_bytes, root_public_key)?;
+    let mut authorizer = biscuit.authorizer()?;
+    let query = cached_role_query(role_fact);
+    let roles: Vec<(String,)> = authorizer.query_all(query.as_ref())?;
+    Ok(roles.into_iter().map(|(role,)| role).collect())
+}
+
+pub fn has_right_facts(
+    token_bytes: &[u8],
+    root_public_key: &PublicKey,
+) -> Result<bool, biscuit_auth::error::Token> {
+    let biscuit = Biscuit::from(token_bytes, root_public_key)?;
+    let mut authorizer = biscuit.authorizer()?;
+    let rights: Vec<(String, String)> = authorizer.query_all("data($op, $res) <- right($op, $res)")?;
+    Ok(!rights.is_empty())
 }
 
 pub fn verify_biscuit_token(

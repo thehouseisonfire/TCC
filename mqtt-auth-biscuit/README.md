@@ -27,6 +27,11 @@ cargo build --release -p mosquitto-auth-biscuit
 
 The plugin will be generated at `target/release/libmosquitto_auth_biscuit.so`.
 
+#### Developer feature flags
+
+- `expiry_stats`: enable Biscuit expiry extraction metrics logged at plugin cleanup.
+  Example: `cargo build -p mosquitto-auth-biscuit --features expiry_stats`
+
 ### Running with Docker
 
 ```bash

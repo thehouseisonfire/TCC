@@ -76,6 +76,19 @@ matching deny will reject access even if a grant matches. If no `read` rule is
 present for a topic, the plugin falls back to matching `subscribe` grants for
 `ACL_READ` checks.
 
+Evaluation order (token-only):
+1. Apply deny rules (`deny`/`denies`) for the requested operation (with `read`
+   falling back to `subscribe` when no explicit read rule is present).
+2. If no deny matches, apply allow rules (`right`/`grants`) using the same
+   operation mapping.
+3. Default is deny when no allow matches.
+
+Subscribe/read semantics:
+- `subscribe` implies `read` for all messages on the topic filter.
+- `read` rules are used as explicit exceptions or refinements. Example: grant
+  `subscribe` to a topic, then add a `read` deny rule for messages
+  with particular contexts (e.g. the time it was sent or the sender)
+ 
 Biscuit policy parity: `deny("op", "res")` facts are evaluated before allow
 rules, and a `deny("subscribe", ...)` fact also blocks `ACL_READ` when the
 read operation is evaluated via the subscribe fallback.

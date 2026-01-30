@@ -1,6 +1,6 @@
 {
   "scenario": "JWT-01",
-  "token_len": 338,
+  "token_len": 195,
   "tls": {
     "enabled": false,
     "ca_file": null,
@@ -18,9 +18,8 @@
           "host": "localhost",
           "port": 1883,
           "username": "jwt",
-          "fanout_publisher_username": null,
-          "clients": 50,
-          "message_count": 20,
+          "clients": 5,
+          "message_count": 10,
           "qos": 1,
           "message_size": 0,
           "protocol": "mqttv5",
@@ -30,19 +29,17 @@
           "token_refresh_codes": [
             5,
             135
-          ],
-          "mode": "publish",
-          "fanout_topic": "fanout/broadcast"
+          ]
         },
         "connect": {
-          "count": 50,
-          "min_ms": 3.8555510000151116,
-          "p50_ms": 30.353139499879944,
-          "p95_ms": 36.60138810004128,
-          "p99_ms": 37.82870107004783,
-          "max_ms": 38.04873900003258,
-          "mean_ms": 27.120901759990375,
-          "median_ms": 30.353139499879944
+          "count": 5,
+          "min_ms": 2.6400830029160716,
+          "p50_ms": 3.428210999118164,
+          "p95_ms": 4.05930519773392,
+          "p99_ms": 4.178186637291219,
+          "max_ms": 4.207906997180544,
+          "mean_ms": 3.3466780005255714,
+          "median_ms": 3.428210999118164
         },
         "token_refresh": {
           "count": 0
@@ -51,25 +48,16 @@
           "count": 0
         },
         "publish": {
-          "count": 1000,
-          "min_ms": 0.9928140000283747,
-          "p50_ms": 13.698884000064027,
-          "p95_ms": 27.108655500012446,
-          "p99_ms": 33.15745049001861,
-          "max_ms": 39.829635999922175,
-          "mean_ms": 14.903158481998389,
-          "median_ms": 13.698884000064027
+          "count": 50,
+          "min_ms": 0.5288609972922131,
+          "p50_ms": 1.0668424984032754,
+          "p95_ms": 1.893043948439299,
+          "p99_ms": 2.2441738300403804,
+          "max_ms": 2.501244001905434,
+          "mean_ms": 1.1814342801517341,
+          "median_ms": 1.0668424984032754
         },
-        "receive": {
-          "count": 0
-        },
-        "throughput_mps": 3045.2185291133837,
-        "publish_throughput_mps": 3045.2185291133837,
-        "receive_throughput_mps": 0.0,
-        "received_messages": {
-          "count": 0,
-          "expected": 0
-        },
+        "throughput_mps": 2119.7844399590062,
         "errors": []
       },
       "resources": {

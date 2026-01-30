@@ -171,6 +171,10 @@ fn is_valid_filter(filter: &str) -> bool {
                 return false;
             }
             saw_hash = true;
+            continue;
+        }
+        if part.contains('+') && *part != "+" {
+            return false;
         }
     }
     true

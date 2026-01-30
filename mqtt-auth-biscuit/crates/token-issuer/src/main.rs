@@ -42,10 +42,19 @@ struct JwtIssueRequest {
     client_id: Option<String>,
     subject: Option<String>,
     roles: Option<Vec<String>>,
+    grants: Option<Vec<JwtGrant>>,
+    denies: Option<Vec<JwtGrant>>,
     ttl_seconds: Option<i64>,
     issuer: Option<String>,
     audience: Option<String>,
     no_default_roles: Option<bool>,
+    no_default_grants: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct JwtGrant {
+    op: String,
+    res: String,
 }
 
 fn load_tls_config(enabled: bool) -> Result<Option<Arc<ServerConfig>>, String> {
@@ -89,6 +98,8 @@ fn escape_datalog_str(value: &str) -> String {
 struct BiscuitIssueRequest {
     client_id: Option<String>,
     topic: Option<String>,
+    roles: Option<Vec<String>>,
+    denies: Option<Vec<JwtGrant>>,
     ttl_seconds: Option<i64>,
 }
 
@@ -110,6 +121,7 @@ struct IssuerConfig {
     jwt_default_audience: Option<String>,
     biscuit_keypair: KeyPair,
     jwt_no_default_roles: bool,
+    jwt_no_default_grants: bool,
     biscuit_base64url: bool,
     tls_config: Option<Arc<ServerConfig>>,
 }
@@ -211,7 +223,12 @@ fn handle_jwt(req: JwtIssueRequest, cfg: &IssuerConfig) -> Result<TokenResponse,
     struct Claims {
         sub: String,
         exp: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
         roles: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        grants: Option<Vec<JwtGrant>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        denies: Option<Vec<JwtGrant>>,
         iss: Option<String>,
         aud: Option<String>,
         client_id: Option<String>,
@@ -224,10 +241,33 @@ fn handle_jwt(req: JwtIssueRequest, cfg: &IssuerConfig) -> Result<TokenResponse,
         req.roles.or_else(|| Some(vec!["admin".to_string()]))
     };
 
+    let no_default_grants = req.no_default_grants.unwrap_or(cfg.jwt_no_default_grants);
+    let grants = if no_default_grants {
+        req.grants
+    } else {
+        req.grants.or_else(|| {
+            let topic = format!("sensors/{subject}/temp");
+            Some(vec![
+                JwtGrant {
+                    op: "publish".to_string(),
+                    res: topic.clone(),
+                },
+                JwtGrant {
+                    op: "subscribe".to_string(),
+                    res: topic,
+                },
+            ])
+        })
+    };
+
+    let denies = req.denies;
+
     let claims = Claims {
         sub: subject,
         exp,
         roles,
+        grants,
+        denies,
         iss: req.issuer.or_else(|| cfg.jwt_default_issuer.clone()),
         aud: req.audience.or_else(|| cfg.jwt_default_audience.clone()),
         client_id: req.client_id,
@@ -257,13 +297,36 @@ fn handle_biscuit(req: BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<TokenR
     let publish_fact = format!("right(\"publish\", \"{topic}\")");
     let subscribe_fact = format!("right(\"subscribe\", \"{topic}\")");
     let expires_fact = format!("expires_at({exp})");
-    let biscuit = Biscuit::builder()
+    let mut builder = Biscuit::builder()
         .fact(publish_fact.as_str())
         .map_err(|e| format!("biscuit fact publish: {e}"))?
         .fact(subscribe_fact.as_str())
         .map_err(|e| format!("biscuit fact subscribe: {e}"))?
         .fact(expires_fact.as_str())
-        .map_err(|e| format!("biscuit fact expires_at: {e}"))?
+        .map_err(|e| format!("biscuit fact expires_at: {e}"))?;
+
+    if let Some(roles) = req.roles {
+        for role in roles {
+            let role = escape_datalog_str(&role);
+            let role_fact = format!("role(\"{role}\")");
+            builder = builder
+                .fact(role_fact.as_str())
+                .map_err(|e| format!("biscuit fact role: {e}"))?;
+        }
+    }
+
+    if let Some(denies) = req.denies {
+        for deny in denies {
+            let op = escape_datalog_str(&deny.op);
+            let res = escape_datalog_str(&deny.res);
+            let deny_fact = format!("deny(\"{op}\", \"{res}\")");
+            builder = builder
+                .fact(deny_fact.as_str())
+                .map_err(|e| format!("biscuit fact deny: {e}"))?;
+        }
+    }
+
+    let biscuit = builder
         .build(&cfg.biscuit_keypair)
         .map_err(|e| format!("biscuit build: {e}"))?;
 
@@ -380,6 +443,7 @@ async fn main() {
     let port = env_default("TOKEN_ISSUER_PORT", "8082");
     let allow_default_keys = env_flag("TOKEN_ISSUER_ALLOW_DEFAULT_KEYS");
     let jwt_no_default_roles = env_flag("JWT_NO_DEFAULT_ROLES");
+    let jwt_no_default_grants = env_flag("JWT_NO_DEFAULT_GRANTS");
     let biscuit_base64url = env_flag("BISCUIT_BASE64URL");
     let tls_enabled = env_flag("TOKEN_ISSUER_TLS");
 
@@ -410,6 +474,7 @@ async fn main() {
         jwt_default_audience,
         biscuit_keypair,
         jwt_no_default_roles,
+        jwt_no_default_grants,
         biscuit_base64url,
         tls_config: match load_tls_config(tls_enabled) {
             Ok(cfg) => cfg,

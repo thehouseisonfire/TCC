@@ -222,6 +222,9 @@ def _write_csv(summary, path):
         "scenario",
         "runs",
         "token_len",
+        "jwt_grants_schema_version",
+        "jwt_default_grants_enabled",
+        "jwt_denies_schema_version",
         "tls_enabled",
         "throughput_avg",
         "publish_throughput_avg",
@@ -263,10 +266,20 @@ def _write_csv(summary, path):
             refresh = loadgen.get("token_refresh", {})
             mqtt5 = scenario.get("mqtt5_auth") or {}
             resources = scenario.get("resources", {})
+            token_metadata = scenario.get("token_metadata") or {}
             row = {
                 "scenario": scenario.get("scenario"),
                 "runs": scenario.get("runs"),
                 "token_len": scenario.get("token_len"),
+                "jwt_grants_schema_version": token_metadata.get(
+                    "jwt_grants_schema_version"
+                ),
+                "jwt_default_grants_enabled": token_metadata.get(
+                    "jwt_default_grants_enabled"
+                ),
+                "jwt_denies_schema_version": token_metadata.get(
+                    "jwt_denies_schema_version"
+                ),
                 "tls_enabled": (scenario.get("tls") or {}).get("enabled"),
                 "throughput_avg": (loadgen.get("throughput_mps") or {}).get("avg"),
                 "publish_throughput_avg": (loadgen.get("publish_throughput_mps") or {}).get(

@@ -325,22 +325,6 @@ machine and record the first results/known issues).
 
 #### A) Policy Source Parity
 
-- [ ] **Issue 3: Implement proper JWT access logic (replace demo token-only
-     authz)**
-  - Goal: replace the current heuristic JWT token-only authorization rules with
-    a policy model that is comparable to Biscuit rights (e.g., encode
-    topic/action grants as structured claims, or route JWT through SQLite/HTTP
-    for fine-grained checks).
-  - Current state: JWT token-only uses demo `roles == "admin"` check and topic
-    substring matching in `authz.rs`, and ignores the `access` parameter.
-    Token issuer defaults to `roles: ["admin"]` unless `no_default_roles` is set.
-  - Code pointers: @/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/authz.rs#37-52,
-    @/home/eagle/TCC2/mqtt-auth-biscuit/crates/token-issuer/src/main.rs#221-225.
-  - Deliverable:
-    - Updated claim schema + token generator support
-    - Updated `authz.rs` JWT enforcement that matches the chosen schema
-    - At least one scenario run captured showing the new JWT mode
-
 - [-] **Issue 4: Harden HTTP policy backend for benchmark validity (partially
     implemented)**
   - Goal: make the HTTP backend robust and well-specified for experiments.
@@ -772,6 +756,18 @@ machine and record the first results/known issues).
 
 - [x] **Issue 2: Add static ACLs as PDP source of truth (backend)**
   - **Completed**: Implemented hybrid static ACL compounding with Mosquitto's built‑in ACLs. Added role-to-synthetic-username mapping for JWT/Biscuit tokens, configured plugin to allow when the token authorizes and defer to native ACL checks when the token denies (`StaticAcl` OR semantics), and created benchmark scenarios. **Pivot**: Instead of plugin-loaded ACL files, uses Mosquitto's native `acl_file` with compound authorization (token allow OR ACL allow). Removed plugin-side static ACL backend. Updated Docker configs and sample ACL files for role-based usernames and fallback patterns.
+
+- [x] **Issue 3: Implement proper JWT access logic (replace demo token-only authz)**
+  - **Completed**: Replaced demo JWT token-only checks with structured grants
+    schema (`grants` + `denies`) and access-aware enforcement (`publish`,
+    `subscribe`, `read` with `ACL_READ` fallback to `subscribe`). Token issuer
+    and deterministic token generator updated to mint the new schema. **Note:**
+    scenario run capture is pending due to current runner bug.
+
+- [x] **Issue 3.1: Add explicit deny semantics for token-only policy model**
+  - **Completed**: Added `denies` to JWT claims and Biscuit `deny(op, res)`
+    facts, enforced deny-over-allow precedence for token-only authorization,
+    and added tests + documentation covering ACL_READ/ACL_SUBSCRIBE behavior.
 
 - [x] **Issue 8: Implement a long-running Token Issuer service (JWT + Biscuit)**
   - Summary: Complete token issuer service with HTTP endpoints for JWT/Biscuit

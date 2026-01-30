@@ -12,7 +12,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 struct Claims {
     sub: String,
     exp: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     roles: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grants: Option<Vec<JwtGrant>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    denies: Option<Vec<JwtGrant>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct JwtGrant {
+    op: String,
+    res: String,
 }
 
 fn main() {
@@ -34,10 +45,46 @@ fn main() {
     let jwt_encoding_key = EncodingKey::from_ec_pem(jwt_private_pem.as_bytes()).unwrap();
 
     let jwt_long = {
+        let topic = "sensors/client_1/temp".to_string();
         let claims = Claims {
             sub: "client_1".to_string(),
             exp: 2000000000, // Year 2033
             roles: Some(vec!["admin".to_string()]),
+            grants: Some(vec![
+                JwtGrant {
+                    op: "publish".to_string(),
+                    res: topic.clone(),
+                },
+                JwtGrant {
+                    op: "subscribe".to_string(),
+                    res: topic,
+                },
+            ]),
+            denies: None,
+        };
+        encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
+    };
+
+    let jwt_deny = {
+        let topic = "sensors/client_1/temp".to_string();
+        let claims = Claims {
+            sub: "client_1".to_string(),
+            exp: 2000000000, // Year 2033
+            roles: Some(vec!["admin".to_string()]),
+            grants: Some(vec![
+                JwtGrant {
+                    op: "publish".to_string(),
+                    res: topic.clone(),
+                },
+                JwtGrant {
+                    op: "subscribe".to_string(),
+                    res: topic.clone(),
+                },
+            ]),
+            denies: Some(vec![JwtGrant {
+                op: "read".to_string(),
+                res: topic,
+            }]),
         };
         encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
     };
@@ -47,10 +94,22 @@ fn main() {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
+        let topic = "sensors/client_1/temp".to_string();
         let claims = Claims {
             sub: "client_1".to_string(),
             exp: now + 5,
             roles: Some(vec!["admin".to_string()]),
+            grants: Some(vec![
+                JwtGrant {
+                    op: "publish".to_string(),
+                    res: topic.clone(),
+                },
+                JwtGrant {
+                    op: "subscribe".to_string(),
+                    res: topic,
+                },
+            ]),
+            denies: None,
         };
         encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
     };
@@ -125,6 +184,13 @@ fn main() {
         master.append(b).unwrap()
     };
 
+    let biscuit_deny = {
+        let deny_block = BlockBuilder::new()
+            .fact("deny(\"read\", \"sensors/client_1/temp\")")
+            .unwrap();
+        biscuit_base.append(deny_block).unwrap()
+    };
+
     // We want the token as base64 for the MQTT password field
     let biscuit_bytes = biscuit_1_block.to_vec().unwrap();
     use base64::{engine::general_purpose, Engine as _};
@@ -134,19 +200,37 @@ fn main() {
     let biscuit_25_b64 = general_purpose::STANDARD.encode(biscuit_25_blocks.to_vec().unwrap());
     let biscuit_delegated_b64 =
         general_purpose::STANDARD.encode(biscuit_delegated.to_vec().unwrap());
+    let biscuit_deny_b64 = general_purpose::STANDARD.encode(biscuit_deny.to_vec().unwrap());
     let biscuit_short_b64 = general_purpose::STANDARD.encode(biscuit_short.to_vec().unwrap());
 
     let biscuit_pubkey_hex = hex::encode(root_keypair.public().to_bytes());
     std::fs::write("docker/biscuit_public.key", biscuit_pubkey_hex.as_bytes()).unwrap();
 
+    let jwt_grants_schema = json!({
+        "version": "v1",
+        "default_grants": [
+            {"op": "publish", "res": "sensors/{subject}/temp"},
+            {"op": "subscribe", "res": "sensors/{subject}/temp"}
+        ]
+    });
+
+    let jwt_denies_schema = json!({
+        "version": "v1",
+        "rules": []
+    });
+
     let tokens = json!({
         "jwt": jwt_long,
         "jwt_short": jwt_short,
+        "jwt_deny": jwt_deny,
         "jwt_alg": "ES256",
+        "jwt_grants_schema": jwt_grants_schema,
+        "jwt_denies_schema": jwt_denies_schema,
         "biscuit": biscuit_b64,
         "biscuit_5": biscuit_5_b64,
         "biscuit_25": biscuit_25_b64,
         "biscuit_delegated": biscuit_delegated_b64,
+        "biscuit_deny": biscuit_deny_b64,
         "biscuit_short": biscuit_short_b64,
         "biscuit_root_key_hex": biscuit_pubkey_hex
     });

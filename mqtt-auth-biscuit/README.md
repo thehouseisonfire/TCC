@@ -44,6 +44,67 @@ docker compose -f docker/docker-compose.yml up --build
 cargo run --release -p gen-tokens
 ```
 
+### JWT grant schema
+
+JWTs can carry structured `grants` for token-only authorization. Each grant
+defines the MQTT operation (`publish`, `subscribe`, or `read`) and a topic
+filter using standard MQTT wildcards (`+`, `#`).
+
+Example issuer request payload:
+
+```json
+{
+  "client_id": "client_1",
+  "roles": ["admin", "sensor"],
+  "grants": [
+    {"op": "publish", "res": "sensors/client_1/temp"},
+    {"op": "subscribe", "res": "sensors/client_1/+"}
+  ],
+  "denies": [
+    {"op": "read", "res": "sensors/client_1/humidity"}
+  ]
+}
+```
+
+The resulting JWT claim set embeds `roles`, `grants`, and `denies`. For Biscuit,
+`roles` are emitted as `role("<name>")` facts, `grants` as `right("<op>", "<res>")`,
+and `denies` as `deny("<op>", "<res>")` facts.
+
+Optional deny rules can be provided under `denies`, using the same `op`/`res`
+shape. Deny rules take precedence over allow rules (deny-over-allow), so a
+matching deny will reject access even if a grant matches. If no `read` rule is
+present for a topic, the plugin falls back to matching `subscribe` grants for
+`ACL_READ` checks.
+
+Biscuit policy parity: `deny("op", "res")` facts are evaluated before allow
+rules, and a `deny("subscribe", ...)` fact also blocks `ACL_READ` when the
+read operation is evaluated via the subscribe fallback.
+
+Clients may also attenuate Biscuits by appending `deny` facts in new blocks. A
+deny added in an attenuation block further restricts the token (never expands
+rights) and is enforced by the same deny-over-allow rules as issuer facts.
+
+Example client-side attenuation (Rust):
+
+```rust
+use biscuit_auth::{Biscuit, BlockBuilder, PublicKey};
+
+fn attenuate_with_deny(token_b64: &str, public_key: &PublicKey) -> Biscuit {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(token_b64)
+        .expect("token base64");
+    let biscuit = Biscuit::from(&bytes, public_key).expect("token parse");
+    let deny_block = BlockBuilder::new()
+        .fact("deny(\"read\", \"sensors/client_1/temp\")")
+        .expect("deny fact");
+    biscuit.append(deny_block).expect("append")
+}
+```
+
+By default, the token issuer adds grants for `publish`/`subscribe` on
+`sensors/{subject}/temp` unless `no_default_grants` is set in the request or
+`JWT_NO_DEFAULT_GRANTS=1` is set in the environment.
+
 ## Benchmarking
 
 See [benchmarks/RUNNING_BENCHMARKS.md](benchmarks/RUNNING_BENCHMARKS.md) for how

@@ -155,6 +155,7 @@ def _run_loadgen(
     token_issuer_kind: str | None,
     token_issuer_ttl: int | None,
     token_issuer_no_default_roles: bool,
+    token_issuer_no_default_grants: bool,
     token_refresh_codes: str | None,
     tls_enabled: bool,
     tls_ca_file: str | None,
@@ -201,6 +202,8 @@ def _run_loadgen(
         cmd.extend(["--token-issuer-ttl", str(token_issuer_ttl)])
     if token_issuer_no_default_roles:
         cmd.append("--token-issuer-no-default-roles")
+    if token_issuer_no_default_grants:
+        cmd.append("--token-issuer-no-default-grants")
     if token_refresh_codes:
         cmd.extend(["--token-refresh-codes", token_refresh_codes])
     if tls_enabled:
@@ -295,6 +298,7 @@ def main():
     p.add_argument("--qos", type=int, default=1)
     p.add_argument("--scenarios", help="Comma-separated list of scenario IDs to run")
     p.add_argument("--token-issuer-no-default-roles", action="store_true")
+    p.add_argument("--token-issuer-no-default-grants", action="store_true")
     p.add_argument("--biscuit-base64url", action="store_true")
     p.add_argument(
         "--token-refresh-codes", default=os.environ.get("TOKEN_REFRESH_CODES")
@@ -363,10 +367,28 @@ def main():
                 "netem": {"clear": True},
                 "message_size": 0,
             },
+            "JWT-DENY": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "username": "jwt",
+                "password": tokens["jwt_deny"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+            },
             "BIS-01": {
                 "mosquitto_conf": "./mosquitto.conf",
                 "username": "biscuit",
                 "password": tokens["biscuit"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+            },
+            "BIS-DENY-ATTENUATED": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit_deny"],
                 "topic": "sensors/{client_id}/temp",
                 "authz": None,
                 "netem": {"clear": True},
@@ -587,7 +609,7 @@ def main():
                 "sleep_between": 2,
                 "dynsec_churn": [
                     "docker/dynamic-security.json",
-                    "docker/dynamic-security-churn.json",
+                    "docker/dynamic-security-alt.json",
                 ],
             },
             "DYNSEC-READ-FANOUT": {
@@ -645,6 +667,14 @@ def main():
                 "netem": {"mtu": mtu},
                 "message_size": 0,
             }
+
+        for scenario in available_scenarios.values():
+            scenario.setdefault(
+                "token_issuer_no_default_roles", args.token_issuer_no_default_roles
+            )
+            scenario.setdefault(
+                "token_issuer_no_default_grants", args.token_issuer_no_default_grants
+            )
 
         available_scenarios = _expand_tls_matrix(available_scenarios)
 
@@ -725,13 +755,20 @@ def main():
                     {"NETEM_CLEAR": "1", "NETEM_LOSS_PCT": str(netem["loss_pct"])}
                 )
 
+        token_issuer_no_default_grants = s.get(
+            "token_issuer_no_default_grants", args.token_issuer_no_default_grants
+        )
+        token_issuer_no_default_roles = s.get(
+            "token_issuer_no_default_roles", args.token_issuer_no_default_roles
+        )
         extra_env.update(
             {
                 "TOKEN_ISSUER_ALLOW_DEFAULT_KEYS": os.environ.get(
                     "TOKEN_ISSUER_ALLOW_DEFAULT_KEYS", "1"
                 ),
-                "JWT_NO_DEFAULT_ROLES": "1"
-                if args.token_issuer_no_default_roles
+                "JWT_NO_DEFAULT_ROLES": "1" if token_issuer_no_default_roles else "0",
+                "JWT_NO_DEFAULT_GRANTS": "1"
+                if token_issuer_no_default_grants
                 else "0",
                 "BISCUIT_BASE64URL": "1" if args.biscuit_base64url else "0",
             }
@@ -767,18 +804,48 @@ def main():
 
         repeats = int(s.get("repeat", 1))
         token_len = len(s.get("password", "")) if s.get("password") else 0
+        token_issuer_no_default_grants = s.get(
+            "token_issuer_no_default_grants", args.token_issuer_no_default_grants
+        )
+        token_issuer_no_default_roles = s.get(
+            "token_issuer_no_default_roles", args.token_issuer_no_default_roles
+        )
+        token_schema = tokens.get("jwt_grants_schema")
+        token_schema_version = token_schema.get("version") if token_schema else None
+        token_denies_schema = tokens.get("jwt_denies_schema")
+        token_denies_schema_version = (
+            token_denies_schema.get("version") if token_denies_schema else None
+        )
+        grants_default_enabled = None
+        if s.get("username") == "jwt" and token_schema is not None:
+            grants_default_enabled = not token_issuer_no_default_grants
+
         out_payload = {
             "scenario": s["id"],
             "token_len": token_len,
+            "token_schema": token_schema,
+            "token_metadata": {
+                "jwt_grants_schema_version": token_schema_version,
+                "jwt_default_grants_enabled": grants_default_enabled,
+                "jwt_denies_schema_version": token_denies_schema_version,
+            },
             "tls": {
                 "enabled": scenario_tls,
                 "ca_file": tls_ca,
                 "insecure": tls_insecure,
             },
             "parity": {
-                "token_issuer_no_default_roles": args.token_issuer_no_default_roles,
+                "token_issuer_no_default_roles": token_issuer_no_default_roles,
+                "token_issuer_no_default_grants": token_issuer_no_default_grants,
                 "biscuit_base64url": args.biscuit_base64url,
                 "token_refresh_codes": args.token_refresh_codes,
+            },
+            "scenario_config": {
+                "clients": args.clients,
+                "messages": args.messages,
+                "qos": args.qos,
+                "token_issuer_no_default_roles": token_issuer_no_default_roles,
+                "token_issuer_no_default_grants": token_issuer_no_default_grants,
             },
             "runs": [],
         }
@@ -825,7 +892,8 @@ def main():
                     token_issuer_url=token_issuer_base if token_refresh else None,
                     token_issuer_kind=token_refresh.get("kind"),
                     token_issuer_ttl=token_refresh.get("ttl_seconds"),
-                    token_issuer_no_default_roles=args.token_issuer_no_default_roles,
+                    token_issuer_no_default_roles=token_issuer_no_default_roles,
+                    token_issuer_no_default_grants=token_issuer_no_default_grants,
                     token_refresh_codes=args.token_refresh_codes,
                     tls_enabled=scenario_tls,
                     tls_ca_file=tls_ca,

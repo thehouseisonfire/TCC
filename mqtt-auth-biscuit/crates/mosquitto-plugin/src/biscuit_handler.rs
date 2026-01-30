@@ -20,6 +20,9 @@ fn get_authorizer_template() -> &'static str {
         resource({topic});
         operation({operation});
         time({time});
+        deny if deny("subscribe", $res), operation("read"), resource($res);
+        deny if deny($op, $res), operation($op), resource($res);
+        allow if right("subscribe", $res), operation("read"), resource($res);
         allow if right($op, $res), operation($op), resource($res);
         "#
         .to_string()
@@ -165,6 +168,9 @@ pub fn verify_biscuit_token(
         resource({topic});
         operation({operation});
         time({time});
+        deny if deny("subscribe", $res), operation("read"), resource($res);
+        deny if deny($op, $res), operation($op), resource($res);
+        allow if right("subscribe", $res), operation("read"), resource($res);
         allow if right($op, $res), operation($op), resource($res);
         "#,
         topic = topic,
@@ -188,6 +194,7 @@ pub fn verify_biscuit_token(
 #[cfg(test)]
 mod tests {
     use super::extract_min_expiry;
+    use super::{verify_biscuit_token, BiscuitAuthOutcome};
     use biscuit_auth::{Biscuit, KeyPair, PrivateKey};
 
     fn root_keypair() -> KeyPair {
@@ -227,5 +234,63 @@ mod tests {
 
         let result = extract_min_expiry(&bytes, &keypair.public());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn deny_facts_override_allow() {
+        let keypair = root_keypair();
+        let biscuit = Biscuit::builder()
+            .fact("right(\"read\", \"sensors/client_1/temp\")")
+            .unwrap()
+            .fact("deny(\"read\", \"sensors/client_1/temp\")")
+            .unwrap()
+            .build(&keypair)
+            .unwrap();
+        let bytes = biscuit.to_vec().unwrap();
+
+        let outcome =
+            verify_biscuit_token(&bytes, &keypair.public(), "sensors/client_1/temp", "read");
+        match outcome {
+            BiscuitAuthOutcome::Denied => {}
+            _ => panic!("deny fact should override allow"),
+        }
+    }
+
+    #[test]
+    fn subscribe_right_allows_read() {
+        let keypair = root_keypair();
+        let biscuit = Biscuit::builder()
+            .fact("right(\"subscribe\", \"sensors/client_1/#\")")
+            .unwrap()
+            .build(&keypair)
+            .unwrap();
+        let bytes = biscuit.to_vec().unwrap();
+
+        let outcome =
+            verify_biscuit_token(&bytes, &keypair.public(), "sensors/client_1/temp", "read");
+        match outcome {
+            BiscuitAuthOutcome::Allowed => {}
+            _ => panic!("subscribe right should allow read"),
+        }
+    }
+
+    #[test]
+    fn subscribe_deny_blocks_read() {
+        let keypair = root_keypair();
+        let biscuit = Biscuit::builder()
+            .fact("right(\"subscribe\", \"sensors/client_1/#\")")
+            .unwrap()
+            .fact("deny(\"subscribe\", \"sensors/client_1/#\")")
+            .unwrap()
+            .build(&keypair)
+            .unwrap();
+        let bytes = biscuit.to_vec().unwrap();
+
+        let outcome =
+            verify_biscuit_token(&bytes, &keypair.public(), "sensors/client_1/temp", "read");
+        match outcome {
+            BiscuitAuthOutcome::Denied => {}
+            _ => panic!("subscribe deny should block read"),
+        }
     }
 }

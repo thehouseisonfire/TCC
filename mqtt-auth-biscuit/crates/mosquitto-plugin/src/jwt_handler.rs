@@ -2,6 +2,12 @@ use jsonwebtoken::{decode, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct JwtGrant {
+    pub op: String,
+    pub res: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
     pub sub: String,         // Subject (client ID)
     pub exp: i64,            // Expiration timestamp
@@ -9,6 +15,8 @@ pub struct Claims {
     pub aud: Option<String>, // Audience
     pub client_id: Option<String>,
     pub roles: Option<Vec<String>>,
+    pub grants: Option<Vec<JwtGrant>>,
+    pub denies: Option<Vec<JwtGrant>>,
 }
 
 #[allow(dead_code)]

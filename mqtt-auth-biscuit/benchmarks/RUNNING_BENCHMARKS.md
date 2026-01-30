@@ -51,6 +51,64 @@ This will create/update `benchmarks/tokens.json` and write `docker/biscuit_publi
 The Docker Mosquitto configuration is pre-wired to the deterministic keys used
 by `gen-tokens` (see `docker/mosquitto.conf`).
 
+### JWT grants schema (token-only authz)
+
+Token-only JWT authorization relies on a `grants` claim. Each grant defines the
+MQTT operation (`publish`, `subscribe`, or `read`) and a topic filter using
+standard MQTT wildcards (`+`, `#`).
+
+Example issuer request payload:
+
+```json
+{
+  "client_id": "client_1",
+  "roles": ["admin", "sensor"],
+  "grants": [
+    {"op": "publish", "res": "sensors/client_1/temp"},
+    {"op": "subscribe", "res": "sensors/client_1/+"}
+  ],
+  "denies": [
+    {"op": "read", "res": "sensors/client_1/humidity"}
+  ]
+}
+```
+
+The resulting JWT claim set embeds `roles`, `grants`, and `denies`. For Biscuit,
+`roles` are emitted as `role("<name>")` facts, `grants` as `right("<op>", "<res>")`,
+and `denies` as `deny("<op>", "<res>")` facts.
+
+Optional deny rules can be provided under `denies`, using the same `op`/`res`
+shape. Deny rules take precedence over allow rules (deny-over-allow), so a
+matching deny will reject access even if a grant matches. If no `read` rule is
+present for a topic, the plugin falls back to matching `subscribe` grants for
+`ACL_READ` checks.
+
+Biscuit parity: `deny("op", "res")` facts are evaluated before allow rules, and
+`deny("subscribe", ...)` blocks `ACL_READ` when the read operation is evaluated
+via the subscribe fallback.
+
+Attenuation note: clients may append `deny` facts in attenuation blocks to
+further restrict rights. The `BIS-DENY-ATTENUATED` scenario uses a token where
+the deny is in an appended block to exercise this path.
+
+Default grants are added by the token issuer for `publish`/`subscribe` on
+`sensors/{subject}/temp` unless `no_default_grants` (request) or
+`JWT_NO_DEFAULT_GRANTS=1` (env) is set.
+
+**MTU note:** the `grants` claim increases JWT size. If you are running MTU
+fragmentation scenarios, record whether default grants are enabled (or disable
+them with `--token-issuer-no-default-grants`) so that JWT size shifts are
+explicit in the results. If you use `jwt_deny` or `biscuit_deny`, capture their
+token lengths in the MTU run metadata so deny overhead is visible in the
+fragmentation analysis.
+
+The deterministic token bundle (`benchmarks/tokens.json`) includes a
+`jwt_grants_schema` marker that records the default grant template for the
+generated JWTs.
+
+The bundle also includes `jwt_deny` and `biscuit_deny` deterministic tokens to
+exercise deny-over-allow behavior in a controlled way.
+
 ## Step 3: Start the Environment
 
 Start the Mosquitto broker and metrics collector (Prometheus) using Docker

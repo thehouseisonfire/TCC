@@ -65,6 +65,7 @@ class WorkerConfig:
     token_issuer_kind: str | None
     token_issuer_ttl: int | None
     token_issuer_no_default_roles: bool
+    token_issuer_no_default_grants: bool
     token_refresh_codes: set[int]
     tls_enabled: bool
     tls_ca_file: str | None
@@ -98,6 +99,7 @@ def _fetch_token(
     topic: str,
     ttl: int | None,
     no_default_roles: bool,
+    no_default_grants: bool,
     tls_ca_file: str | None,
     tls_insecure: bool,
 ) -> str:
@@ -106,6 +108,8 @@ def _fetch_token(
         payload["topic"] = topic
     if no_default_roles:
         payload["no_default_roles"] = True
+    if no_default_grants:
+        payload["no_default_grants"] = True
 
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
@@ -258,6 +262,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                     cfg.topic,
                     cfg.token_issuer_ttl,
                     cfg.token_issuer_no_default_roles,
+                    cfg.token_issuer_no_default_grants,
                     cfg.tls_ca_file,
                     cfg.tls_insecure,
                 )
@@ -458,6 +463,7 @@ def run_load(
     token_issuer_kind: str | None,
     token_issuer_ttl: int | None,
     token_issuer_no_default_roles: bool,
+    token_issuer_no_default_grants: bool,
     token_refresh_codes: set[int],
     tls_enabled: bool,
     tls_ca_file: str | None,
@@ -489,6 +495,7 @@ def run_load(
             token_issuer_kind=token_issuer_kind,
             token_issuer_ttl=token_issuer_ttl,
             token_issuer_no_default_roles=token_issuer_no_default_roles,
+            token_issuer_no_default_grants=token_issuer_no_default_grants,
             token_refresh_codes=token_refresh_codes,
             tls_enabled=tls_enabled,
             tls_ca_file=tls_ca_file,
@@ -572,6 +579,7 @@ def run_load(
             "token_issuer_url": token_issuer_url,
             "token_issuer_kind": token_issuer_kind,
             "token_issuer_no_default_roles": token_issuer_no_default_roles,
+            "token_issuer_no_default_grants": token_issuer_no_default_grants,
             "token_refresh_codes": sorted(token_refresh_codes),
             "mode": mode,
             "fanout_topic": fanout_topic,
@@ -620,6 +628,7 @@ def main():
         "--token-issuer-ttl", type=int, default=os.environ.get("TOKEN_ISSUER_TTL")
     )
     p.add_argument("--token-issuer-no-default-roles", action="store_true")
+    p.add_argument("--token-issuer-no-default-grants", action="store_true")
     p.add_argument(
         "--token-refresh-codes",
         default=os.environ.get("TOKEN_REFRESH_CODES", "5,135"),
@@ -678,6 +687,7 @@ def main():
         token_issuer_kind=args.token_issuer_kind,
         token_issuer_ttl=args.token_issuer_ttl,
         token_issuer_no_default_roles=args.token_issuer_no_default_roles,
+        token_issuer_no_default_grants=args.token_issuer_no_default_grants,
         token_refresh_codes=token_refresh_codes,
         tls_enabled=args.tls,
         tls_ca_file=args.tls_ca_file,

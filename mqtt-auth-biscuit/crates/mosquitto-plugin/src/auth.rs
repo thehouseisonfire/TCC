@@ -53,6 +53,8 @@ impl AuthEngine {
                         aud: None,
                         client_id: None,
                         roles: None,
+                        grants: None,
+                        denies: None,
                     },
                     raw: "token".to_string(),
                 })

@@ -68,7 +68,10 @@ mod sqlite_policy;
 static STATIC_ACL_BIAS_WARN_ONCE: Once = Once::new();
 
 fn log_static_acl_policy_bias(token_type: &TokenType, config: &PluginConfig) {
-    if config.policy.mode != PolicyMode::StaticAcl {
+    if !matches!(
+        config.policy.mode,
+        PolicyMode::StaticAcl | PolicyMode::StaticAclStrict
+    ) {
         return;
     }
     let warn_message = match token_type {
@@ -537,7 +540,10 @@ fn set_synthetic_username(
     token_type: &TokenType,
     config: &PluginConfig,
 ) -> Result<(), String> {
-    if config.policy.mode != PolicyMode::StaticAcl {
+    if !matches!(
+        config.policy.mode,
+        PolicyMode::StaticAcl | PolicyMode::StaticAclStrict
+    ) {
         return Ok(());
     }
     if client.is_null() {
@@ -625,7 +631,10 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
         _ => None,
     };
 
-    if config.policy.mode == PolicyMode::StaticAcl {
+    if matches!(
+        config.policy.mode,
+        PolicyMode::StaticAcl | PolicyMode::StaticAclStrict
+    ) {
         log_info("StaticAcl mode enabled: tokens should carry only role identity to avoid bias.");
     }
 
@@ -904,6 +913,9 @@ extern "C" fn acl_check_callback(
 
         match check_authorization(&token_type, params) {
             AuthzOutcome::Allowed => {
+                if state.config.policy.mode == PolicyMode::StaticAclStrict {
+                    return MOSQ_ERR_PLUGIN_DEFER;
+                }
                 return MOSQ_ERR_SUCCESS;
             }
             AuthzOutcome::Expired => {
@@ -913,6 +925,9 @@ extern "C" fn acl_check_callback(
             AuthzOutcome::Denied => {
                 if state.config.policy.mode == PolicyMode::StaticAcl {
                     return MOSQ_ERR_PLUGIN_DEFER;
+                }
+                if state.config.policy.mode == PolicyMode::StaticAclStrict {
+                    return MOSQ_ERR_ACL_DENIED;
                 }
             }
         }
@@ -973,6 +988,9 @@ extern "C" fn control_callback(
 
         match check_authorization(&token_type, params) {
             AuthzOutcome::Allowed => {
+                if state.config.policy.mode == PolicyMode::StaticAclStrict {
+                    return MOSQ_ERR_PLUGIN_DEFER;
+                }
                 return MOSQ_ERR_SUCCESS;
             }
             AuthzOutcome::Expired => {
@@ -983,6 +1001,9 @@ extern "C" fn control_callback(
             AuthzOutcome::Denied => {
                 if state.config.policy.mode == PolicyMode::StaticAcl {
                     return MOSQ_ERR_PLUGIN_DEFER;
+                }
+                if state.config.policy.mode == PolicyMode::StaticAclStrict {
+                    return MOSQ_ERR_ACL_DENIED;
                 }
             }
         }

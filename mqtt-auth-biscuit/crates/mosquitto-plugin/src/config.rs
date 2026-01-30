@@ -378,6 +378,7 @@ pub fn parse_options(
                 let mode = match value.as_str() {
                     "token" => PolicyMode::TokenOnly,
                     "static_acl" => PolicyMode::StaticAcl,
+                    "static_acl_strict" => PolicyMode::StaticAclStrict,
                     "sqlite" => PolicyMode::Sqlite,
                     "http" => PolicyMode::Http,
                     "hybrid" => PolicyMode::Hybrid,

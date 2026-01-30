@@ -1,9 +1,9 @@
 use biscuit_auth::{Biscuit, PublicKey};
 use chrono::Utc;
 use std::collections::HashMap;
-use std::sync::Arc;
 #[cfg(feature = "expiry_stats")]
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 #[cfg(feature = "expiry_stats")]
 use std::time::Instant;
@@ -138,7 +138,8 @@ pub fn has_right_facts(
 ) -> Result<bool, biscuit_auth::error::Token> {
     let biscuit = Biscuit::from(token_bytes, root_public_key)?;
     let mut authorizer = biscuit.authorizer()?;
-    let rights: Vec<(String, String)> = authorizer.query_all("data($op, $res) <- right($op, $res)")?;
+    let rights: Vec<(String, String)> =
+        authorizer.query_all("data($op, $res) <- right($op, $res)")?;
     Ok(!rights.is_empty())
 }
 

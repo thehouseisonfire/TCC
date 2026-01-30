@@ -2,6 +2,7 @@
 pub enum PolicyMode {
     TokenOnly,
     StaticAcl,
+    StaticAclStrict,
     Sqlite,
     Http,
     Hybrid,

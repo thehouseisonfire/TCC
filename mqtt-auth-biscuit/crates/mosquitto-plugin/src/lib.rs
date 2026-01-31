@@ -1,6 +1,9 @@
 use crate::auth::{AuthEngine, AuthError, TokenType};
 use crate::authz::{check_authorization, AuthzOutcome, AuthzParams};
-use crate::biscuit_handler::{expiry_stats, extract_min_expiry, extract_roles, has_right_facts};
+use crate::biscuit_handler::{
+    expiry_stats, extract_min_expiry_from_biscuit, extract_roles_from_biscuit, has_right_facts,
+    parse_biscuit,
+};
 use crate::cache::SessionCache;
 use crate::config::{parse_options, PluginConfig};
 use crate::dynamic_security_policy::DynamicSecurityPolicy;
@@ -66,6 +69,7 @@ mod policy;
 mod sqlite_policy;
 
 static STATIC_ACL_BIAS_WARN_ONCE: Once = Once::new();
+static STATIC_ACL_ROLE_MISSING_WARN_ONCE: Once = Once::new();
 
 fn log_static_acl_policy_bias(token_type: &TokenType, config: &PluginConfig) {
     if !matches!(
@@ -450,15 +454,21 @@ fn attach_biscuit_expiry(
             bytes,
             expires_at,
             roles,
+            biscuit,
         } => {
+            let biscuit = match biscuit {
+                Some(token) => token,
+                None => parse_biscuit(&bytes, root_public_key)?,
+            };
             let expires_at = match expires_at {
                 Some(value) => Some(value),
-                None => extract_min_expiry(&bytes, root_public_key)?,
+                None => extract_min_expiry_from_biscuit(&biscuit)?,
             };
             Ok(TokenType::Biscuit {
                 bytes,
                 expires_at,
                 roles,
+                biscuit: Some(biscuit),
             })
         }
         other => Ok(other),
@@ -471,24 +481,27 @@ fn attach_biscuit_roles(token_type: TokenType, config: &PluginConfig) -> TokenTy
             bytes,
             expires_at,
             roles,
+            biscuit,
         } => {
             if roles.is_some() {
                 return TokenType::Biscuit {
                     bytes,
                     expires_at,
                     roles,
+                    biscuit,
                 };
             }
-            let roles = extract_roles(
-                &bytes,
-                &config.biscuit.root_public_key,
-                &config.biscuit_role_fact,
-            )
-            .ok();
+            let roles = match biscuit.as_ref() {
+                Some(token) => {
+                    extract_roles_from_biscuit(token.as_ref(), &config.biscuit_role_fact).ok()
+                }
+                None => None,
+            };
             TokenType::Biscuit {
                 bytes,
                 expires_at,
                 roles,
+                biscuit,
             }
         }
         other => other,
@@ -518,14 +531,29 @@ fn role_to_username(token_type: &TokenType, config: &PluginConfig) -> Option<Str
             .as_ref()
             .and_then(|roles| select_preferred_role(&roles[..]))
             .map(|role| format!("{}{}", config.role_username_prefix, role)),
-        TokenType::Biscuit { bytes, roles, .. } => {
-            let roles = roles.as_ref().cloned().or_else(|| {
-                extract_roles(
-                    bytes,
-                    &config.biscuit.root_public_key,
-                    &config.biscuit_role_fact,
+        TokenType::Biscuit {
+            bytes: _,
+            roles,
+            biscuit,
+            ..
+        } => {
+            if roles.is_none()
+                && biscuit.is_none()
+                && matches!(
+                    config.policy.mode,
+                    PolicyMode::StaticAcl | PolicyMode::StaticAclStrict
                 )
-                .ok()
+            {
+                STATIC_ACL_ROLE_MISSING_WARN_ONCE.call_once(|| {
+                    log_debug(
+                        "StaticAcl warning: Biscuit roles unavailable because token was not parsed; ACL role mapping skipped.",
+                    );
+                });
+            }
+            let roles = roles.as_ref().cloned().or_else(|| {
+                biscuit.as_ref().and_then(|token| {
+                    extract_roles_from_biscuit(token.as_ref(), &config.biscuit_role_fact).ok()
+                })
             });
             roles
                 .and_then(|roles| select_preferred_role(&roles[..]))

@@ -96,20 +96,15 @@ pub fn expiry_stats() -> ExpiryStats {
     ExpiryStats::default()
 }
 
-pub fn extract_min_expiry(
-    token_bytes: &[u8],
-    root_public_key: &PublicKey,
-) -> Result<Option<i64>, biscuit_auth::error::Token> {
+fn with_expiry_metrics<F>(f: F) -> Result<Option<i64>, biscuit_auth::error::Token>
+where
+    F: FnOnce() -> Result<Option<i64>, biscuit_auth::error::Token>,
+{
     #[cfg(feature = "expiry_stats")]
     EXPIRY_METRICS.calls.fetch_add(1, Ordering::Relaxed);
     #[cfg(feature = "expiry_stats")]
     let start = Instant::now();
-    let result = (|| {
-        let biscuit = Biscuit::from(token_bytes, root_public_key)?;
-        let mut authorizer = biscuit.authorizer()?;
-        let expiries: Vec<(i64,)> = authorizer.query_all("data($ts) <- expires_at($ts)")?;
-        Ok(expiries.into_iter().map(|(ts,)| ts).min())
-    })();
+    let result = f();
     #[cfg(feature = "expiry_stats")]
     if result.is_err() {
         EXPIRY_METRICS.failures.fetch_add(1, Ordering::Relaxed);
@@ -121,6 +116,37 @@ pub fn extract_min_expiry(
     result
 }
 
+fn extract_min_expiry_query(biscuit: &Biscuit) -> Result<Option<i64>, biscuit_auth::error::Token> {
+    let mut authorizer = biscuit.authorizer()?;
+    let expiries: Vec<(i64,)> = authorizer.query_all("data($ts) <- expires_at($ts)")?;
+    Ok(expiries.into_iter().map(|(ts,)| ts).min())
+}
+
+pub fn parse_biscuit(
+    token_bytes: &[u8],
+    root_public_key: &PublicKey,
+) -> Result<Arc<Biscuit>, biscuit_auth::error::Token> {
+    Biscuit::from(token_bytes, root_public_key).map(Arc::new)
+}
+
+#[allow(dead_code)]
+pub fn extract_min_expiry(
+    token_bytes: &[u8],
+    root_public_key: &PublicKey,
+) -> Result<Option<i64>, biscuit_auth::error::Token> {
+    with_expiry_metrics(|| {
+        let biscuit = Biscuit::from(token_bytes, root_public_key)?;
+        extract_min_expiry_query(&biscuit)
+    })
+}
+
+pub fn extract_min_expiry_from_biscuit(
+    biscuit: &Biscuit,
+) -> Result<Option<i64>, biscuit_auth::error::Token> {
+    with_expiry_metrics(|| extract_min_expiry_query(biscuit))
+}
+
+#[allow(dead_code)]
 pub fn extract_roles(
     token_bytes: &[u8],
     root_public_key: &PublicKey,
@@ -129,6 +155,17 @@ pub fn extract_roles(
     // Template caching is advisory; authorizer queries are constructed explicitly below.
     let _template = get_role_authorizer_template();
     let biscuit = Biscuit::from(token_bytes, root_public_key)?;
+    let mut authorizer = biscuit.authorizer()?;
+    let query = cached_role_query(role_fact);
+    let roles: Vec<(String,)> = authorizer.query_all(query.as_ref())?;
+    Ok(roles.into_iter().map(|(role,)| role).collect())
+}
+
+pub fn extract_roles_from_biscuit(
+    biscuit: &Biscuit,
+    role_fact: &str,
+) -> Result<Vec<String>, biscuit_auth::error::Token> {
+    let _template = get_role_authorizer_template();
     let mut authorizer = biscuit.authorizer()?;
     let query = cached_role_query(role_fact);
     let roles: Vec<(String,)> = authorizer.query_all(query.as_ref())?;
@@ -158,6 +195,14 @@ pub fn verify_biscuit_token(
         Err(err) => return BiscuitAuthOutcome::Error(err),
     };
 
+    authorize_biscuit(&biscuit, topic, operation)
+}
+
+pub fn authorize_biscuit(
+    biscuit: &Biscuit,
+    topic: &str,
+    operation: &str, // "publish" or "subscribe"
+) -> BiscuitAuthOutcome {
     use biscuit_auth::macros::authorizer;
     // The authorizer! macro requires a string literal at compile time
     // Template caching is preserved for documentation and potential future use
@@ -177,7 +222,7 @@ pub fn verify_biscuit_token(
         operation = operation,
         time = Utc::now().timestamp()
     )
-    .build(&biscuit)
+    .build(biscuit)
     .map_err(|_| biscuit_auth::error::Token::InternalError);
     let mut authorizer = match authorizer {
         Ok(authorizer) => authorizer,

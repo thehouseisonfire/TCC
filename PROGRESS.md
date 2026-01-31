@@ -339,18 +339,6 @@ machine and record the first results/known issues).
     - Clear request/response schema (documented) and stricter parsing
     - Configurable timeouts and error semantics (what triggers hybrid fallback)
 
-- [ ] **Issue 5: Avoid per-message Biscuit re-verification**
-  - Goal: avoid re-verifying/deserializing the Biscuit token on every
-    authorization check to match JWT behavior (verify once, evaluate policies
-    only).
-  - Current state: `verify_biscuit_token` is called on every ACL_CHECK for
-    Biscuit tokens, performing full cryptographic verification and Datalog
-    evaluation each time. JWT is only verified once during authentication.
-  - Code pointers: @/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/authz.rs#130-142,
-    @/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/biscuit_handler.rs#80-120.
-  - Deliverable: a documented change (and rerun) showing the impact on
-    authorization latency/CPU.
-
 - [ ] **Issue 6: Implement online attenuation capabilities for MQTT clients**
   - Goal: enable MQTT clients to perform runtime biscuit attenuation and
     delegation, moving beyond pre-generated tokens to dynamic rights
@@ -791,6 +779,10 @@ machine and record the first results/known issues).
 - [x] **Issue 27: Cache Biscuit expiry via min `expires_at` fact (remove brittle parsing)**
   - Summary: Replaced brittle error-message parsing with structured Datalog query to extract the minimum `expires_at` from Biscuit tokens. Updated `TokenType::Biscuit` to cache the expiry timestamp per session, clamped cache TTL to token expiry with a 5-minute fallback, and rejected already-expired tokens at auth time. Token issuer and benchmark generators now embed `expires_at` facts in authority and attenuation blocks to support stable expiry extraction.
 
+- [x] **Issue 5: Avoid per-message Biscuit re-verification**
+  - Summary: Cache parsed Biscuit at authentication time and reuse it for ACL checks, avoiding per-message cryptographic verification while preserving per-request Datalog evaluation. Authorization now mirrors JWT behavior (verify once, evaluate policies per message).
+  - Note: benchmark rerun + documentation update still pending to quantify latency/CPU impact.
+
 - [x] **Issue 34: Implement real LRU eviction in `SessionCache`**
   - Summary: Enforced cache capacity with true LRU eviction, added capacity tracking, edge case handling, and comprehensive unit tests.
 
@@ -834,6 +826,12 @@ features to ensure accurate performance measurements. This should be done
 ---
 
 ## 14) Research Footnotes
+
+### Biscuit parsing cache vs per-message verification
+
+- **Decision**: Parse/verify Biscuit tokens once during authentication, cache the parsed token in session state, and reuse it for per-message authorization checks.
+- **Rationale**: JWT verification is already performed once at auth time; per-message Biscuit re-verification would bias latency/CPU comparisons. Caching preserves fairness while still running Datalog authorization for each ACL check.
+- **Validity guardrail**: Only cryptographic verification is cached; policy evaluation still occurs on every request (ACL defers to authorizer), preserving per-message cost measurement and policy semantics.
 
 ### Why `netem` runs in a separate container with `network_mode: service:mosquitto`
 

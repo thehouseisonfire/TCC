@@ -6,6 +6,7 @@ use crate::jwt_handler::{verify_jwt_token, Claims};
 use jsonwebtoken::errors::ErrorKind;
 use jsonwebtoken::DecodingKey;
 use jsonwebtoken::Validation;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub enum TokenType {
@@ -17,6 +18,7 @@ pub enum TokenType {
         bytes: Vec<u8>,
         expires_at: Option<i64>,
         roles: Option<Vec<String>>,
+        biscuit: Option<Arc<biscuit_auth::Biscuit>>,
     },
 }
 
@@ -63,6 +65,7 @@ impl AuthEngine {
                     bytes: vec![0u8; 1],
                     expires_at: Some(0),
                     roles: None,
+                    biscuit: None,
                 })
             }
         } else {
@@ -96,6 +99,7 @@ impl AuthEngine {
                 bytes,
                 expires_at: None,
                 roles: None,
+                biscuit: None,
             })
         }
     }

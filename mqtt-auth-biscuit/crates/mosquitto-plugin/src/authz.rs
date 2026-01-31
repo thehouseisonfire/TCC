@@ -1,5 +1,5 @@
 use crate::auth::TokenType;
-use crate::biscuit_handler::{verify_biscuit_token, BiscuitAuthOutcome};
+use crate::biscuit_handler::{authorize_biscuit, verify_biscuit_token, BiscuitAuthOutcome};
 use crate::dynamic_security_policy::DynamicSecurityPolicy;
 use crate::http_policy;
 use crate::jwt_handler::JwtGrant;
@@ -379,6 +379,7 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
             bytes,
             expires_at,
             roles: _,
+            biscuit,
         } => {
             if let Some(expires_at) = expires_at {
                 if Utc::now().timestamp() >= *expires_at {
@@ -388,17 +389,19 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
 
             let operation = access_to_operation(params.access);
 
-            let token_only = || match verify_biscuit_token(
-                bytes,
-                params.biscuit_root_key,
-                params.topic,
-                operation,
-            ) {
-                BiscuitAuthOutcome::Allowed => AuthzOutcome::Allowed,
-                BiscuitAuthOutcome::Denied => AuthzOutcome::Denied,
-                BiscuitAuthOutcome::Error(err) => {
-                    let _ = err;
-                    AuthzOutcome::Denied
+            let token_only = || {
+                let outcome = if let Some(biscuit) = biscuit {
+                    authorize_biscuit(biscuit.as_ref(), params.topic, operation)
+                } else {
+                    verify_biscuit_token(bytes, params.biscuit_root_key, params.topic, operation)
+                };
+                match outcome {
+                    BiscuitAuthOutcome::Allowed => AuthzOutcome::Allowed,
+                    BiscuitAuthOutcome::Denied => AuthzOutcome::Denied,
+                    BiscuitAuthOutcome::Error(err) => {
+                        let _ = err;
+                        AuthzOutcome::Denied
+                    }
                 }
             };
 

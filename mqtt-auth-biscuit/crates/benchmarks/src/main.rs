@@ -27,6 +27,23 @@ struct JwtGrant {
 }
 
 fn main() {
+    const FIXED_NOW: i64 = 2_000_000_000; // 2033-05-18, deterministic fixture time.
+    let mut use_fixed_now = true;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--fixed-now" => use_fixed_now = true,
+            "--no-fixed-now" | "--real-now" => use_fixed_now = false,
+            _ => {}
+        }
+    }
+    let now = if use_fixed_now {
+        FIXED_NOW
+    } else {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    };
     // JWT (ES256)
     // Deterministic private key material for reproducible tokens.
     // This private key is held by the token issuer (this generator) and is
@@ -90,10 +107,6 @@ fn main() {
     };
 
     let jwt_short = {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
         let topic = "sensors/client_1/temp".to_string();
         let claims = Claims {
             sub: "client_1".to_string(),
@@ -131,10 +144,6 @@ fn main() {
         .unwrap();
 
     let biscuit_short = {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
         let exp = now + 5;
         let check_src = format!("check if time($t), $t < {exp}");
         let b = BlockBuilder::new()

@@ -160,6 +160,31 @@ def _run_loadgen(
     tls_enabled: bool,
     tls_ca_file: str | None,
     tls_insecure: bool,
+    biscuit_attenuate: bool,
+    biscuit_attenuate_denies: list[str] | None,
+    biscuit_attenuate_checks: list[str] | None,
+    biscuit_attenuate_topic: str | None,
+    biscuit_attenuate_op: str | None,
+    biscuit_attenuate_ttl: int | None,
+    biscuit_public_key_hex: str | None,
+    biscuit_public_key_file: str | None,
+    biscuit_base64url: bool,
+    biscuit_attenuate_bin: str | None,
+    biscuit_delegate: bool,
+    biscuit_delegate_denies: list[str] | None,
+    biscuit_delegate_checks: list[str] | None,
+    biscuit_delegate_topic: str | None,
+    biscuit_delegate_op: str | None,
+    biscuit_delegate_ttl: int | None,
+    biscuit_delegate_public_key_hex: str | None,
+    biscuit_delegate_public_key_file: str | None,
+    biscuit_delegate_base64url: bool,
+    biscuit_delegate_bin: str | None,
+    biscuit_delegate_handoff: bool,
+    biscuit_delegate_handoff_topic: str | None,
+    biscuit_delegate_handoff_token: str | None,
+    biscuit_delegate_handoff_qos: int | None,
+    biscuit_delegate_handoff_retain: bool | None,
 ):
     cmd = [
         "python3",
@@ -212,6 +237,56 @@ def _run_loadgen(
         cmd.extend(["--tls-ca-file", tls_ca_file])
     if tls_insecure:
         cmd.append("--tls-insecure")
+    if biscuit_attenuate:
+        cmd.append("--biscuit-attenuate")
+    for deny in biscuit_attenuate_denies or []:
+        cmd.extend(["--biscuit-attenuate-deny", deny])
+    for check in biscuit_attenuate_checks or []:
+        cmd.extend(["--biscuit-attenuate-check", check])
+    if biscuit_attenuate_topic:
+        cmd.extend(["--biscuit-attenuate-topic", biscuit_attenuate_topic])
+    if biscuit_attenuate_op:
+        cmd.extend(["--biscuit-attenuate-op", biscuit_attenuate_op])
+    if biscuit_attenuate_ttl is not None:
+        cmd.extend(["--biscuit-attenuate-ttl", str(biscuit_attenuate_ttl)])
+    if biscuit_public_key_hex:
+        cmd.extend(["--biscuit-public-key-hex", biscuit_public_key_hex])
+    if biscuit_public_key_file:
+        cmd.extend(["--biscuit-public-key-file", biscuit_public_key_file])
+    if biscuit_base64url:
+        cmd.append("--biscuit-base64url")
+    if biscuit_attenuate_bin:
+        cmd.extend(["--biscuit-attenuate-bin", biscuit_attenuate_bin])
+    if biscuit_delegate:
+        cmd.append("--biscuit-delegate")
+    for deny in biscuit_delegate_denies or []:
+        cmd.extend(["--biscuit-delegate-deny", deny])
+    for check in biscuit_delegate_checks or []:
+        cmd.extend(["--biscuit-delegate-check", check])
+    if biscuit_delegate_topic:
+        cmd.extend(["--biscuit-delegate-topic", biscuit_delegate_topic])
+    if biscuit_delegate_op:
+        cmd.extend(["--biscuit-delegate-op", biscuit_delegate_op])
+    if biscuit_delegate_ttl is not None:
+        cmd.extend(["--biscuit-delegate-ttl", str(biscuit_delegate_ttl)])
+    if biscuit_delegate_public_key_hex:
+        cmd.extend(["--biscuit-delegate-public-key-hex", biscuit_delegate_public_key_hex])
+    if biscuit_delegate_public_key_file:
+        cmd.extend(["--biscuit-delegate-public-key-file", biscuit_delegate_public_key_file])
+    if biscuit_delegate_base64url:
+        cmd.append("--biscuit-delegate-base64url")
+    if biscuit_delegate_bin:
+        cmd.extend(["--biscuit-delegate-bin", biscuit_delegate_bin])
+    if biscuit_delegate_handoff:
+        cmd.append("--biscuit-delegate-handoff")
+    if biscuit_delegate_handoff_topic:
+        cmd.extend(["--biscuit-delegate-handoff-topic", biscuit_delegate_handoff_topic])
+    if biscuit_delegate_handoff_token:
+        cmd.extend(["--biscuit-delegate-handoff-token", biscuit_delegate_handoff_token])
+    if biscuit_delegate_handoff_qos is not None:
+        cmd.extend(["--biscuit-delegate-handoff-qos", str(biscuit_delegate_handoff_qos)])
+    if biscuit_delegate_handoff_retain is False:
+        cmd.append("--biscuit-delegate-handoff-no-retain")
 
     out = subprocess.check_output(cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
     return json.loads(out.decode("utf-8"))
@@ -394,6 +469,54 @@ def main():
                 "netem": {"clear": True},
                 "message_size": 0,
             },
+            "BIS-ATTENUATE-CLIENT": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+                "biscuit_attenuate": {
+                    "denies": ["publish:sensors/{client_id}/temp"],
+                    "ttl_seconds": 300,
+                    "topic": "sensors/{client_id}/temp",
+                    "op": "publish",
+                },
+            },
+            "BIS-ATTENUATE-TTL": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+                "biscuit_attenuate": {"ttl_seconds": 120},
+            },
+            "BIS-ATTENUATE-DENY": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+                "biscuit_attenuate": {
+                    "denies": ["subscribe:sensors/{client_id}/temp"],
+                    "checks": ["resource(\"sensors/{client_id}/temp\")"],
+                },
+            },
+            "BIS-ATTENUATE-OP-ONLY": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+                "biscuit_attenuate": {"op": "publish"},
+            },
             "POLICY-COMPLEX-1": {
                 "mosquitto_conf": "./mosquitto.conf",
                 "username": "biscuit",
@@ -557,6 +680,40 @@ def main():
             "DELEGATION-TEMP-ONLY": {
                 "mosquitto_conf": "./mosquitto.conf",
                 "username": "biscuit",
+                "password": tokens["biscuit"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+                "biscuit_delegate": {
+                    "topic": "sensors/{client_id}/temp",
+                    "op": "publish",
+                    "ttl_seconds": 300,
+                },
+            },
+            "DELEGATION-HANDOFF": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+                "biscuit_delegate": {
+                    "topic": "sensors/{client_id}/temp",
+                    "op": "publish",
+                    "ttl_seconds": 300,
+                    "handoff": {
+                        "topic": "delegation/handoff",
+                        "token": tokens["biscuit_delegation_handoff"],
+                        "qos": 1,
+                        "retain": True,
+                    },
+                },
+            },
+            "DELEGATION-SIMULATED": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "username": "biscuit",
                 "password": tokens["biscuit_delegated"],
                 "topic": "sensors/{client_id}/temp",
                 "authz": None,
@@ -692,12 +849,12 @@ def main():
         )
         print("Available scenarios:")
         print(
-            "BASE-01, JWT-01, BIS-01, POLICY-COMPLEX-1, POLICY-COMPLEX-5, POLICY-COMPLEX-25"
+            "BASE-01, JWT-01, BIS-01, BIS-ATTENUATE-CLIENT, BIS-ATTENUATE-TTL, BIS-ATTENUATE-DENY, BIS-ATTENUATE-OP-ONLY, POLICY-COMPLEX-1, POLICY-COMPLEX-5, POLICY-COMPLEX-25"
         )
         print("JWT-HTTP-200MS, JWT-HTTP-1000MS, HYBRID-AUTHZ-DOWN, MTU-200-JWT")
         print("BIS-HTTP-200MS, JWT-HTTP-200MS-LOSS1, JWT-HTTP-200MS-LOSS5")
         print(
-            "MQTT5-REAUTH-JWT, MQTT5-REAUTH-BISCUIT, THUNDERING-HERD, DELEGATION-TEMP-ONLY"
+            "MQTT5-REAUTH-JWT, MQTT5-REAUTH-BISCUIT, THUNDERING-HERD, DELEGATION-TEMP-ONLY, DELEGATION-HANDOFF, DELEGATION-SIMULATED"
         )
         print("LIFECYCLE-JWT-SHORT-RECONNECT, LIFECYCLE-BIS-SHORT-RECONNECT")
         print("MTU-500-BIS-25, MTU-1500-BIS-25, MTU-9000-BIS-25")
@@ -820,6 +977,7 @@ def main():
         if s.get("username") == "jwt" and token_schema is not None:
             grants_default_enabled = not token_issuer_no_default_grants
 
+        biscuit_only = bool(s.get("biscuit_attenuate") or s.get("biscuit_delegate"))
         out_payload = {
             "scenario": s["id"],
             "token_len": token_len,
@@ -840,6 +998,11 @@ def main():
                 "biscuit_base64url": args.biscuit_base64url,
                 "token_refresh_codes": args.token_refresh_codes,
             },
+            "capability_flags": {
+                "biscuit_only": biscuit_only,
+            },
+            "attenuation": s.get("biscuit_attenuate"),
+            "delegation": s.get("biscuit_delegate"),
             "scenario_config": {
                 "clients": args.clients,
                 "messages": args.messages,
@@ -898,6 +1061,95 @@ def main():
                     tls_enabled=scenario_tls,
                     tls_ca_file=tls_ca,
                     tls_insecure=tls_insecure,
+                    biscuit_attenuate=bool(s.get("biscuit_attenuate")),
+                    biscuit_attenuate_denies=(
+                        s.get("biscuit_attenuate", {}).get("denies")
+                        if s.get("biscuit_attenuate")
+                        else None
+                    ),
+                    biscuit_attenuate_checks=(
+                        s.get("biscuit_attenuate", {}).get("checks")
+                        if s.get("biscuit_attenuate")
+                        else None
+                    ),
+                    biscuit_attenuate_topic=(
+                        s.get("biscuit_attenuate", {}).get("topic")
+                        if s.get("biscuit_attenuate")
+                        else None
+                    ),
+                    biscuit_attenuate_op=(
+                        s.get("biscuit_attenuate", {}).get("op")
+                        if s.get("biscuit_attenuate")
+                        else None
+                    ),
+                    biscuit_attenuate_ttl=(
+                        s.get("biscuit_attenuate", {}).get("ttl_seconds")
+                        if s.get("biscuit_attenuate")
+                        else None
+                    ),
+                    biscuit_public_key_hex=s.get("biscuit_public_key_hex"),
+                    biscuit_public_key_file=s.get(
+                        "biscuit_public_key_file", "docker/biscuit_public.key"
+                    ),
+                    biscuit_base64url=args.biscuit_base64url,
+                    biscuit_attenuate_bin=s.get("biscuit_attenuate_bin"),
+                    biscuit_delegate=bool(s.get("biscuit_delegate")),
+                    biscuit_delegate_denies=(
+                        s.get("biscuit_delegate", {}).get("denies")
+                        if s.get("biscuit_delegate")
+                        else None
+                    ),
+                    biscuit_delegate_checks=(
+                        s.get("biscuit_delegate", {}).get("checks")
+                        if s.get("biscuit_delegate")
+                        else None
+                    ),
+                    biscuit_delegate_topic=(
+                        s.get("biscuit_delegate", {}).get("topic")
+                        if s.get("biscuit_delegate")
+                        else None
+                    ),
+                    biscuit_delegate_op=(
+                        s.get("biscuit_delegate", {}).get("op")
+                        if s.get("biscuit_delegate")
+                        else None
+                    ),
+                    biscuit_delegate_ttl=(
+                        s.get("biscuit_delegate", {}).get("ttl_seconds")
+                        if s.get("biscuit_delegate")
+                        else None
+                    ),
+                    biscuit_delegate_public_key_hex=s.get("biscuit_public_key_hex"),
+                    biscuit_delegate_public_key_file=s.get(
+                        "biscuit_public_key_file", "docker/biscuit_public.key"
+                    ),
+                    biscuit_delegate_base64url=args.biscuit_base64url,
+                    biscuit_delegate_bin=s.get("biscuit_delegate_bin"),
+                    biscuit_delegate_handoff=bool(
+                        s.get("biscuit_delegate", {}).get("handoff")
+                        if s.get("biscuit_delegate")
+                        else False
+                    ),
+                    biscuit_delegate_handoff_topic=(
+                        s.get("biscuit_delegate", {}).get("handoff", {}).get("topic")
+                        if s.get("biscuit_delegate")
+                        else None
+                    ),
+                    biscuit_delegate_handoff_token=(
+                        s.get("biscuit_delegate", {}).get("handoff", {}).get("token")
+                        if s.get("biscuit_delegate")
+                        else None
+                    ),
+                    biscuit_delegate_handoff_qos=(
+                        s.get("biscuit_delegate", {}).get("handoff", {}).get("qos")
+                        if s.get("biscuit_delegate")
+                        else None
+                    ),
+                    biscuit_delegate_handoff_retain=(
+                        s.get("biscuit_delegate", {}).get("handoff", {}).get("retain")
+                        if s.get("biscuit_delegate")
+                        else None
+                    ),
                 )
             # Small delay to ensure container metrics are available after loadgen
             time.sleep(2)

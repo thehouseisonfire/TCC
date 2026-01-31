@@ -339,38 +339,6 @@ machine and record the first results/known issues).
     - Clear request/response schema (documented) and stricter parsing
     - Configurable timeouts and error semantics (what triggers hybrid fallback)
 
-- [ ] **Issue 6: Implement online attenuation capabilities for MQTT clients**
-  - Goal: enable MQTT clients to perform runtime biscuit attenuation and
-    delegation, moving beyond pre-generated tokens to dynamic rights
-    restriction.
-  - Current limitation: clients can only use pre-attenuated tokens from
-    `gen_tokens.rs`; they cannot create new attenuation blocks or delegate
-    rights at runtime.
-  - Deliverable:
-    - Client library/API for biscuit attenuation (add blocks, restrict rights,
-      delegate)
-    - Integration with MQTT client workflows to support dynamic token
-      modification
-    - Benchmark scenarios that test client-side attenuation performance and
-      behavior
-    - Documentation of attenuation patterns and use cases for IoT deployments
-
-- [ ] **Issue 7: Fix delegation scenario simulation vs actual client
-     delegation**
-  - Goal: replace the simulated delegation in `gen_tokens.rs` with true
-    client-to-client delegation.
-  - Current state: the "delegation" scenario uses pre-attenuated tokens created
-    by the token generator, not actual master clients attenuating rights for
-    worker clients.
-  - Code pointers: `biscuit_delegated` token in `crates/benchmarks/src/main.rs#109-136`,
-    `DELEGATION-TEMP-ONLY` scenario in `benchmarks/run_scenarios.py#456-464`.
-  - Deliverable:
-    - Real master client implementation that can attenuate and delegate tokens
-      to workers
-    - Worker client logic to receive and use delegated tokens
-    - Updated delegation benchmark scenario with actual client-side delegation
-    - Performance comparison between simulated and real delegation flows
-
 - [ ] **Issue 9: Document and analyze scenario policies**
   - Goal: create comprehensive documentation of all Biscuit and JWT policies
     used across test scenarios to ensure fair comparison and research validity.
@@ -763,11 +731,19 @@ machine and record the first results/known issues).
     support in benchmark scenarios.
 
 - [x] **Issue 8.1: Implement comprehensive TLS support for all network
-     communications**
+    communications**
   - Summary: TLS support implemented for all external network paths (MQTT, Token
     Issuer, Authz PDP, Prometheus/cAdvisor UIs). Internal Prometheus-cAdvisor
     scraping remains HTTP-only as TLS would provide minimal security benefit for
     internal Docker network traffic.
+
+- [x] **Issue 6: Implement online attenuation capabilities for MQTT clients**
+  - Summary: Added client-side Biscuit attenuation tooling, integrated it into
+    loadgen/scenarios with metrics, and documented attenuation patterns.
+
+- [x] **Issue 7: Fix delegation scenario simulation vs actual client delegation**
+  - Summary: Implemented runtime client-to-client delegation with MQTT handoff,
+    added a handoff token and scenarios, and captured delegation metrics.
 
 - [x] **Issue 11: MIRI verification for FFI memory safety**
   - Summary: MIRI CI + tests cover FFI pointer safety and lifecycle invariants.

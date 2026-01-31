@@ -200,6 +200,16 @@ fn main() {
         biscuit_base.append(deny_block).unwrap()
     };
 
+    let biscuit_handoff = Biscuit::builder()
+        .fact("right(\"publish\", \"delegation/handoff\")")
+        .unwrap()
+        .fact("right(\"subscribe\", \"delegation/handoff\")")
+        .unwrap()
+        .fact("expires_at(2000000000)")
+        .unwrap()
+        .build(&root_keypair)
+        .unwrap();
+
     // We want the token as base64 for the MQTT password field
     let biscuit_bytes = biscuit_1_block.to_vec().unwrap();
     use base64::{engine::general_purpose, Engine as _};
@@ -211,6 +221,7 @@ fn main() {
         general_purpose::STANDARD.encode(biscuit_delegated.to_vec().unwrap());
     let biscuit_deny_b64 = general_purpose::STANDARD.encode(biscuit_deny.to_vec().unwrap());
     let biscuit_short_b64 = general_purpose::STANDARD.encode(biscuit_short.to_vec().unwrap());
+    let biscuit_handoff_b64 = general_purpose::STANDARD.encode(biscuit_handoff.to_vec().unwrap());
 
     let biscuit_pubkey_hex = hex::encode(root_keypair.public().to_bytes());
     std::fs::write("docker/biscuit_public.key", biscuit_pubkey_hex.as_bytes()).unwrap();
@@ -241,6 +252,7 @@ fn main() {
         "biscuit_delegated": biscuit_delegated_b64,
         "biscuit_deny": biscuit_deny_b64,
         "biscuit_short": biscuit_short_b64,
+        "biscuit_delegation_handoff": biscuit_handoff_b64,
         "biscuit_root_key_hex": biscuit_pubkey_hex
     });
 

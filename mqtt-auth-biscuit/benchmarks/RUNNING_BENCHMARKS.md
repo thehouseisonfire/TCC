@@ -91,6 +91,66 @@ Attenuation note: clients may append `deny` facts in attenuation blocks to
 further restrict rights. The `BIS-DENY-ATTENUATED` scenario uses a token where
 the deny is in an appended block to exercise this path.
 
+### Client-side (online) attenuation
+
+To exercise **online attenuation** (client-side block append), use the new
+`biscuit-attenuate` helper and the `BIS-ATTENUATE-CLIENT` scenario.
+
+**Requirement:** build the helper before running benchmarks:
+`cargo build -p gen-tokens --bin biscuit-attenuate`.
+
+`biscuit-attenuate` takes a base64 Biscuit token and appends an attenuation
+block with checks or deny facts. It mirrors how a constrained MQTT client would
+restrict a token before connecting.
+
+Example (deny publish + restrict to a single topic + add TTL):
+
+```bash
+cargo run -p gen-tokens --bin biscuit-attenuate -- \
+  --token "<B64_TOKEN>" \
+  --public-key-file docker/biscuit_public.key \
+  --deny publish:sensors/client_1/temp \
+  --restrict-topic sensors/client_1/temp \
+  --restrict-op publish \
+  --ttl-seconds 300
+```
+
+Scenario coverage:
+
+- `BIS-ATTENUATE-CLIENT` performs the same attenuation automatically inside the
+  load generator before each client connects, measuring attenuation latency and
+  token length growth in the scenario results.
+- `BIS-ATTENUATE-TTL` tests a TTL-only attenuation block.
+- `BIS-ATTENUATE-DENY` adds a deny fact plus a resource check (template-driven
+  on the client id).
+- `BIS-ATTENUATE-OP-ONLY` restricts only the operation without a topic check.
+
+**Analysis note:** attenuation/delegation scenarios are Biscuit-only capability
+tests. Scenario outputs include `capability_flags.biscuit_only=true` to mark
+them as non-parity comparisons in downstream analysis.
+
+### Client-to-client delegation
+
+The delegation benchmark now exercises **real client-side delegation** instead
+of pre-generated delegated tokens.
+
+- `DELEGATION-TEMP-ONLY` uses a base Biscuit token and delegates a restricted
+  token per client at runtime (topic + operation + TTL). Delegation latency and
+  resulting token length are recorded as `delegation` metrics.
+- `DELEGATION-HANDOFF` adds a broker-mediated handoff: a master client delegates
+  tokens, then publishes them to `delegation/handoff` over MQTT. Workers
+  subscribe with a handoff token (`biscuit_delegation_handoff` from
+  `tokens.json`) to receive their delegated token before connecting with their
+  actual publish credentials. The default handoff uses QoS 1 with retained
+  messages.
+- `DELEGATION-SIMULATED` keeps the previous pre-generated delegated token to
+  compare runtime delegation against the simulated baseline.
+
+Handoff-specific knobs (loadgen):
+
+- `--biscuit-delegate-handoff-qos` (default: 1)
+- `--biscuit-delegate-handoff-no-retain` (disable retained handoff messages)
+
 Default grants are added by the token issuer for `publish`/`subscribe` on
 `sensors/{subject}/temp` unless `no_default_grants` (request) or
 `JWT_NO_DEFAULT_GRANTS=1` (env) is set.

@@ -3,6 +3,8 @@ import json
 import os
 import queue
 import ssl
+import uuid
+import subprocess
 import threading
 import time
 import urllib.request
@@ -73,6 +75,34 @@ class WorkerConfig:
     mode: str
     subscribe_topic: str | None
     expect_messages: int
+    biscuit_attenuate: bool
+    biscuit_attenuate_denies: list[str]
+    biscuit_attenuate_checks: list[str]
+    biscuit_attenuate_topic: str | None
+    biscuit_attenuate_operation: str | None
+    biscuit_attenuate_ttl: int | None
+    biscuit_public_key_hex: str | None
+    biscuit_public_key_file: str | None
+    biscuit_base64url: bool
+    biscuit_attenuate_bin: str | None
+    biscuit_delegate: bool
+    biscuit_delegate_denies: list[str]
+    biscuit_delegate_checks: list[str]
+    biscuit_delegate_topic: str | None
+    biscuit_delegate_operation: str | None
+    biscuit_delegate_ttl: int | None
+    biscuit_delegate_public_key_hex: str | None
+    biscuit_delegate_public_key_file: str | None
+    biscuit_delegate_base64url: bool
+    biscuit_delegate_bin: str | None
+    biscuit_delegate_handoff: bool
+    biscuit_delegate_handoff_topic: str | None
+    biscuit_delegate_handoff_token: str | None
+    biscuit_delegate_handoff_qos: int
+    biscuit_delegate_handoff_retain: bool
+    biscuit_delegate_handoff_nonce: str | None
+    delegation_ms: float | None
+    delegation_len: int | None
 
 
 @dataclass
@@ -83,6 +113,10 @@ class WorkerResult:
     receive_ms: list[float]
     token_refresh_ms: float | None
     token_refresh_len: int | None
+    delegation_ms: float | None
+    delegation_len: int | None
+    attenuation_ms: float | None
+    attenuation_len: int | None
     errors: list[str]
 
 
@@ -132,6 +166,255 @@ def _fetch_token(
     return token
 
 
+def _resolve_attenuate_cmd(custom_bin: str | None) -> list[str]:
+    if custom_bin:
+        return [custom_bin]
+    env_bin = os.environ.get("BISCUIT_ATTENUATE_BIN")
+    if env_bin:
+        return [env_bin]
+    repo_root = os.path.dirname(os.path.dirname(__file__))
+    for candidate in [
+        os.path.join(repo_root, "target", "release", "biscuit-attenuate"),
+        os.path.join(repo_root, "target", "debug", "biscuit-attenuate"),
+    ]:
+        if os.path.exists(candidate):
+            return [candidate]
+    raise FileNotFoundError(
+        "biscuit-attenuate binary not found; build it first (cargo build -p gen-tokens --bin biscuit-attenuate)"
+    )
+
+
+def _build_biscuit_attenuate_cmd(
+    token: str,
+    *,
+    custom_bin: str | None,
+    public_key_hex: str | None,
+    public_key_file: str | None,
+    base64url: bool,
+    restrict_topic: str | None,
+    restrict_operation: str | None,
+    ttl_seconds: int | None,
+    denies: list[str],
+    checks: list[str],
+) -> list[str]:
+    cmd = _resolve_attenuate_cmd(custom_bin)
+    cmd.extend(["--token", token])
+    if public_key_hex:
+        cmd.extend(["--public-key-hex", public_key_hex])
+    if public_key_file:
+        cmd.extend(["--public-key-file", public_key_file])
+    if base64url:
+        cmd.append("--base64url")
+    if restrict_topic:
+        cmd.extend(["--restrict-topic", restrict_topic])
+    if restrict_operation:
+        cmd.extend(["--restrict-op", restrict_operation])
+    if ttl_seconds is not None:
+        cmd.extend(["--ttl-seconds", str(ttl_seconds)])
+    for deny in denies:
+        cmd.extend(["--deny", deny])
+    for check in checks:
+        cmd.extend(["--check", check])
+    return cmd
+
+
+def _attenuate_biscuit_token(token: str, cfg: WorkerConfig) -> tuple[str, float, int]:
+    cmd = _build_biscuit_attenuate_cmd(
+        token,
+        custom_bin=cfg.biscuit_attenuate_bin,
+        public_key_hex=cfg.biscuit_public_key_hex,
+        public_key_file=cfg.biscuit_public_key_file,
+        base64url=cfg.biscuit_base64url,
+        restrict_topic=cfg.biscuit_attenuate_topic,
+        restrict_operation=cfg.biscuit_attenuate_operation,
+        ttl_seconds=cfg.biscuit_attenuate_ttl,
+        denies=cfg.biscuit_attenuate_denies,
+        checks=cfg.biscuit_attenuate_checks,
+    )
+
+    t0 = time.perf_counter()
+    output = subprocess.check_output(
+        cmd,
+        cwd=os.path.dirname(os.path.dirname(__file__)),
+    ).decode("utf-8")
+    t1 = time.perf_counter()
+    token_out = output.strip()
+    if not token_out:
+        raise ValueError("attenuation produced empty token")
+    return token_out, (t1 - t0) * 1000.0, len(token_out)
+
+
+def _delegate_biscuit_token(
+    token: str,
+    *,
+    custom_bin: str | None,
+    public_key_hex: str | None,
+    public_key_file: str | None,
+    base64url: bool,
+    restrict_topic: str | None,
+    restrict_operation: str | None,
+    ttl_seconds: int | None,
+    denies: list[str],
+    checks: list[str],
+) -> tuple[str, float, int]:
+    cmd = _build_biscuit_attenuate_cmd(
+        token,
+        custom_bin=custom_bin,
+        public_key_hex=public_key_hex,
+        public_key_file=public_key_file,
+        base64url=base64url,
+        restrict_topic=restrict_topic,
+        restrict_operation=restrict_operation,
+        ttl_seconds=ttl_seconds,
+        denies=denies,
+        checks=checks,
+    )
+
+    t0 = time.perf_counter()
+    output = subprocess.check_output(
+        cmd,
+        cwd=os.path.dirname(os.path.dirname(__file__)),
+    ).decode("utf-8")
+    t1 = time.perf_counter()
+    token_out = output.strip()
+    if not token_out:
+        raise ValueError("delegation produced empty token")
+    return token_out, (t1 - t0) * 1000.0, len(token_out)
+
+
+def _publish_delegated_tokens(
+    host: str,
+    port: int,
+    username: str,
+    password: str,
+    tokens_by_client: dict[str, str],
+    topic: str,
+    qos: int,
+    retain: bool,
+    nonce: str | None,
+    protocol: int,
+    tls_enabled: bool,
+    tls_ca_file: str | None,
+    tls_insecure: bool,
+) -> list[str]:
+    errors: list[str] = []
+    client = mqtt.Client(
+        mqtt.CallbackAPIVersion.VERSION2,
+        client_id="delegation_master",
+        protocol=protocol,
+    )
+    client.username_pw_set(username, password)
+    if tls_enabled:
+        if tls_ca_file:
+            client.tls_set(ca_certs=tls_ca_file)
+        else:
+            client.tls_set()
+        if tls_insecure:
+            client.tls_insecure_set(True)
+
+    try:
+        client.connect(host, port, 30)
+    except Exception as e:
+        return [f"delegation_master_connect_failed:{e}"]
+
+    client.loop_start()
+    time.sleep(0.2)
+
+    for client_id, token in tokens_by_client.items():
+        payload = json.dumps(
+            {"client_id": client_id, "token": token, "nonce": nonce}
+        ).encode("utf-8")
+        try:
+            info = client.publish(topic, payload, qos=qos, retain=retain)
+            info.wait_for_publish(timeout=10)
+            if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                errors.append(f"delegation_master_publish_rc:{info.rc}")
+        except Exception as e:
+            errors.append(f"delegation_master_publish_failed:{e}")
+
+    try:
+        client.disconnect()
+    except Exception:
+        pass
+    try:
+        client.loop_stop()
+    except Exception:
+        pass
+    return errors
+
+
+def _receive_delegated_token(
+    cfg: WorkerConfig,
+    timeout_s: float = 10.0,
+) -> str:
+    token_holder: dict[str, str | None] = {"token": None}
+    errors: list[str] = []
+    event = threading.Event()
+
+    def on_message(client, ud, msg):
+        try:
+            payload = json.loads((msg.payload or b"").decode("utf-8"))
+        except Exception:
+            return
+        if payload.get("client_id") != cfg.client_id:
+            return
+        if cfg.biscuit_delegate_handoff_nonce:
+            if payload.get("nonce") != cfg.biscuit_delegate_handoff_nonce:
+                return
+        token = payload.get("token")
+        if token:
+            token_holder["token"] = token
+            event.set()
+
+    client = mqtt.Client(
+        mqtt.CallbackAPIVersion.VERSION2,
+        client_id=f"handoff_{cfg.client_id}",
+        protocol=cfg.protocol,
+    )
+    client.username_pw_set(cfg.username, cfg.biscuit_delegate_handoff_token)
+    if cfg.tls_enabled:
+        if cfg.tls_ca_file:
+            client.tls_set(ca_certs=cfg.tls_ca_file)
+        else:
+            client.tls_set()
+        if cfg.tls_insecure:
+            client.tls_insecure_set(True)
+    client.on_message = on_message
+
+    try:
+        client.connect(cfg.host, cfg.port, 30)
+    except Exception as e:
+        raise ValueError(f"delegation_handoff_connect_failed:{e}")
+
+    client.loop_start()
+    try:
+        res, _ = client.subscribe(
+            cfg.biscuit_delegate_handoff_topic,
+            qos=cfg.biscuit_delegate_handoff_qos,
+        )
+        if res != mqtt.MQTT_ERR_SUCCESS:
+            errors.append(f"delegation_handoff_subscribe_rc:{res}")
+    except Exception as e:
+        errors.append(f"delegation_handoff_subscribe_failed:{e}")
+
+    event.wait(timeout_s)
+    try:
+        client.disconnect()
+    except Exception:
+        pass
+    try:
+        client.loop_stop()
+    except Exception:
+        pass
+
+    if errors:
+        raise ValueError(",".join(errors))
+    token = token_holder["token"]
+    if not token:
+        raise ValueError("delegation_handoff_timeout")
+    return token
+
+
 def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queue):
     errors: list[str] = []
     publish_ms: list[float] = []
@@ -139,6 +422,10 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
     connect_ms = None
     token_refresh_ms = None
     token_refresh_len = None
+    delegation_ms = cfg.delegation_ms
+    delegation_len = cfg.delegation_len
+    attenuation_ms = None
+    attenuation_len = None
 
     def attempt_connect(password: str):
         userdata = {
@@ -227,6 +514,52 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
     client = None
     userdata = None
 
+    if cfg.biscuit_attenuate:
+        try:
+            password, attenuation_ms, attenuation_len = _attenuate_biscuit_token(
+                password, cfg
+            )
+        except Exception as e:
+            errors.append(f"attenuation_failed:{e}")
+            out_q.put(
+                WorkerResult(
+                    cfg.client_id,
+                    None,
+                    [],
+                    [],
+                    token_refresh_ms,
+                    token_refresh_len,
+                    delegation_ms,
+                    delegation_len,
+                    attenuation_ms,
+                    attenuation_len,
+                    errors,
+                )
+            )
+            return
+
+    if cfg.biscuit_delegate_handoff:
+        try:
+            password = _receive_delegated_token(cfg)
+        except Exception as e:
+            errors.append(str(e))
+            out_q.put(
+                WorkerResult(
+                    cfg.client_id,
+                    None,
+                    [],
+                    [],
+                    token_refresh_ms,
+                    token_refresh_len,
+                    delegation_ms,
+                    delegation_len,
+                    attenuation_ms,
+                    attenuation_len,
+                    errors,
+                )
+            )
+            return
+
     for _ in range(2):
         client, err, reason, connect_userdata = attempt_connect(password)
         if client is not None:
@@ -243,6 +576,10 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                     [],
                     token_refresh_ms,
                     token_refresh_len,
+                    delegation_ms,
+                    delegation_len,
+                    attenuation_ms,
+                    attenuation_len,
                     errors,
                 )
             )
@@ -280,6 +617,10 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                         [],
                         token_refresh_ms,
                         token_refresh_len,
+                        delegation_ms,
+                        delegation_len,
+                        attenuation_ms,
+                        attenuation_len,
                         errors,
                     )
                 )
@@ -294,6 +635,10 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                 [],
                 token_refresh_ms,
                 token_refresh_len,
+                delegation_ms,
+                delegation_len,
+                attenuation_ms,
+                attenuation_len,
                 errors,
             )
         )
@@ -309,6 +654,10 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                 [],
                 token_refresh_ms,
                 token_refresh_len,
+                delegation_ms,
+                delegation_len,
+                attenuation_ms,
+                attenuation_len,
                 errors,
             )
         )
@@ -371,6 +720,10 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
             receive_ms,
             token_refresh_ms,
             token_refresh_len,
+            cfg.delegation_ms,
+            cfg.delegation_len,
+            attenuation_ms,
+            attenuation_len,
             errors,
         )
     )
@@ -470,21 +823,118 @@ def run_load(
     tls_insecure: bool,
     mode: str = "publish",
     fanout_topic: str | None = None,
+    biscuit_attenuate: bool = False,
+    biscuit_attenuate_denies: list[str] | None = None,
+    biscuit_attenuate_checks: list[str] | None = None,
+    biscuit_attenuate_topic: str | None = None,
+    biscuit_attenuate_operation: str | None = None,
+    biscuit_attenuate_ttl: int | None = None,
+    biscuit_public_key_hex: str | None = None,
+    biscuit_public_key_file: str | None = None,
+    biscuit_base64url: bool = False,
+    biscuit_attenuate_bin: str | None = None,
+    biscuit_delegate: bool = False,
+    biscuit_delegate_denies: list[str] | None = None,
+    biscuit_delegate_checks: list[str] | None = None,
+    biscuit_delegate_topic: str | None = None,
+    biscuit_delegate_operation: str | None = None,
+    biscuit_delegate_ttl: int | None = None,
+    biscuit_delegate_public_key_hex: str | None = None,
+    biscuit_delegate_public_key_file: str | None = None,
+    biscuit_delegate_base64url: bool = False,
+    biscuit_delegate_bin: str | None = None,
+    biscuit_delegate_handoff: bool = False,
+    biscuit_delegate_handoff_topic: str | None = None,
+    biscuit_delegate_handoff_token: str | None = None,
+    biscuit_delegate_handoff_qos: int | None = 1,
+    biscuit_delegate_handoff_retain: bool = True,
 ):
     start_evt = threading.Event()
     out_q: queue.Queue = queue.Queue()
 
     threads: list[threading.Thread] = []
+    expected_results = clients
 
+    attenuate_denies = biscuit_attenuate_denies or []
+    attenuate_checks = biscuit_attenuate_checks or []
+    delegate_denies = biscuit_delegate_denies or []
+    delegate_checks = biscuit_delegate_checks or []
+    handoff_topic = (
+        biscuit_delegate_handoff_topic or "delegation/handoff"
+        if biscuit_delegate_handoff
+        else None
+    )
+    handoff_qos = biscuit_delegate_handoff_qos or 1
+    handoff_retain = True if biscuit_delegate_handoff_retain is None else biscuit_delegate_handoff_retain
+    handoff_nonce = uuid.uuid4().hex if biscuit_delegate_handoff else None
+    if biscuit_delegate_handoff and not biscuit_delegate_handoff_token:
+        raise ValueError("biscuit_delegate_handoff_token is required")
+
+    delegated_tokens_by_client: dict[str, str] = {}
     for i in range(clients):
         client_id = f"client_{i + 1}"
         topic = topic_template.format(client_id=client_id)
+        formatted_denies = [spec.format(client_id=client_id) for spec in attenuate_denies]
+        formatted_checks = [spec.format(client_id=client_id) for spec in attenuate_checks]
+        formatted_delegate_denies = [
+            spec.format(client_id=client_id) for spec in delegate_denies
+        ]
+        formatted_delegate_checks = [
+            spec.format(client_id=client_id) for spec in delegate_checks
+        ]
+        formatted_topic = (
+            biscuit_attenuate_topic.format(client_id=client_id)
+            if biscuit_attenuate_topic
+            else None
+        )
+        formatted_delegate_topic = (
+            biscuit_delegate_topic.format(client_id=client_id)
+            if biscuit_delegate_topic
+            else None
+        )
+        delegation_ms = None
+        delegation_len = None
+        delegated_password = password
+        if biscuit_delegate:
+            try:
+                delegated_password, delegation_ms, delegation_len = _delegate_biscuit_token(
+                    password,
+                    custom_bin=biscuit_delegate_bin,
+                    public_key_hex=biscuit_delegate_public_key_hex,
+                    public_key_file=biscuit_delegate_public_key_file,
+                    base64url=biscuit_delegate_base64url,
+                    restrict_topic=formatted_delegate_topic,
+                    restrict_operation=biscuit_delegate_operation,
+                    ttl_seconds=biscuit_delegate_ttl,
+                    denies=formatted_delegate_denies,
+                    checks=formatted_delegate_checks,
+                )
+            except Exception as e:
+                out_q.put(
+                    WorkerResult(
+                        client_id,
+                        None,
+                        [],
+                        [],
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        [f"delegation_failed:{e}"],
+                    )
+                )
+                continue
+        if biscuit_delegate and biscuit_delegate_handoff:
+            delegated_tokens_by_client[client_id] = delegated_password
+            delegated_password = password
         cfg = WorkerConfig(
             host=host,
             port=port,
             client_id=client_id,
             username=username,
-            password=password,
+            password=delegated_password,
             topic=topic,
             qos=qos,
             message_count=message_count,
@@ -503,6 +953,34 @@ def run_load(
             mode=mode,
             subscribe_topic=fanout_topic,
             expect_messages=message_count if mode == "fanout" else 0,
+            biscuit_attenuate=biscuit_attenuate,
+            biscuit_attenuate_denies=formatted_denies,
+            biscuit_attenuate_checks=formatted_checks,
+            biscuit_attenuate_topic=formatted_topic,
+            biscuit_attenuate_operation=biscuit_attenuate_operation,
+            biscuit_attenuate_ttl=biscuit_attenuate_ttl,
+            biscuit_public_key_hex=biscuit_public_key_hex,
+            biscuit_public_key_file=biscuit_public_key_file,
+            biscuit_base64url=biscuit_base64url,
+            biscuit_attenuate_bin=biscuit_attenuate_bin,
+            biscuit_delegate=biscuit_delegate,
+            biscuit_delegate_denies=formatted_delegate_denies,
+            biscuit_delegate_checks=formatted_delegate_checks,
+            biscuit_delegate_topic=formatted_delegate_topic,
+            biscuit_delegate_operation=biscuit_delegate_operation,
+            biscuit_delegate_ttl=biscuit_delegate_ttl,
+            biscuit_delegate_public_key_hex=biscuit_delegate_public_key_hex,
+            biscuit_delegate_public_key_file=biscuit_delegate_public_key_file,
+            biscuit_delegate_base64url=biscuit_delegate_base64url,
+            biscuit_delegate_bin=biscuit_delegate_bin,
+            biscuit_delegate_handoff=biscuit_delegate_handoff,
+            biscuit_delegate_handoff_topic=handoff_topic,
+            biscuit_delegate_handoff_token=biscuit_delegate_handoff_token,
+            biscuit_delegate_handoff_qos=handoff_qos,
+            biscuit_delegate_handoff_retain=handoff_retain,
+            biscuit_delegate_handoff_nonce=handoff_nonce,
+            delegation_ms=delegation_ms,
+            delegation_len=delegation_len,
         )
         t = threading.Thread(
             target=_run_worker, args=(cfg, start_evt, out_q), daemon=True
@@ -511,6 +989,24 @@ def run_load(
 
     for t in threads:
         t.start()
+
+    delegation_errors: list[str] = []
+    if biscuit_delegate and biscuit_delegate_handoff and delegated_tokens_by_client:
+        delegation_errors = _publish_delegated_tokens(
+            host=host,
+            port=port,
+            username=username,
+            password=biscuit_delegate_handoff_token or password,
+            tokens_by_client=delegated_tokens_by_client,
+            topic=handoff_topic or "delegation/handoff",
+            qos=handoff_qos,
+            retain=handoff_retain,
+            nonce=handoff_nonce,
+            protocol=protocol,
+            tls_enabled=tls_enabled,
+            tls_ca_file=tls_ca_file,
+            tls_insecure=tls_insecure,
+        )
 
     time.sleep(0.2)
     t_start = time.perf_counter()
@@ -538,7 +1034,7 @@ def run_load(
         )
 
     results: list[WorkerResult] = []
-    for _ in threads:
+    for _ in range(expected_results):
         results.append(out_q.get())
 
     for t in threads:
@@ -555,9 +1051,18 @@ def run_load(
     refresh_len = [
         r.token_refresh_len for r in results if r.token_refresh_len is not None
     ]
+    delegation_lat = [r.delegation_ms for r in results if r.delegation_ms is not None]
+    delegation_len = [r.delegation_len for r in results if r.delegation_len is not None]
+    attenuation_lat = [
+        r.attenuation_ms for r in results if r.attenuation_ms is not None
+    ]
+    attenuation_len = [
+        r.attenuation_len for r in results if r.attenuation_len is not None
+    ]
 
     errors = [e for r in results for e in r.errors]
     errors.extend(fanout_errors)
+    errors.extend(delegation_errors)
 
     duration_s = max(1e-9, t_end - t_start)
     publish_lat.extend(fanout_publish_ms)
@@ -583,10 +1088,36 @@ def run_load(
             "token_refresh_codes": sorted(token_refresh_codes),
             "mode": mode,
             "fanout_topic": fanout_topic,
+            "biscuit_attenuate": biscuit_attenuate,
+            "biscuit_attenuate_denies": attenuate_denies,
+            "biscuit_attenuate_checks": attenuate_checks,
+            "biscuit_attenuate_topic": biscuit_attenuate_topic,
+            "biscuit_attenuate_operation": biscuit_attenuate_operation,
+            "biscuit_attenuate_ttl": biscuit_attenuate_ttl,
+            "biscuit_public_key_hex": biscuit_public_key_hex,
+            "biscuit_public_key_file": biscuit_public_key_file,
+            "biscuit_base64url": biscuit_base64url,
+            "biscuit_delegate": biscuit_delegate,
+            "biscuit_delegate_denies": delegate_denies,
+            "biscuit_delegate_checks": delegate_checks,
+            "biscuit_delegate_topic": biscuit_delegate_topic,
+            "biscuit_delegate_operation": biscuit_delegate_operation,
+            "biscuit_delegate_ttl": biscuit_delegate_ttl,
+            "biscuit_delegate_public_key_hex": biscuit_delegate_public_key_hex,
+            "biscuit_delegate_public_key_file": biscuit_delegate_public_key_file,
+            "biscuit_delegate_base64url": biscuit_delegate_base64url,
+            "biscuit_delegate_bin": biscuit_delegate_bin,
+            "biscuit_delegate_handoff": biscuit_delegate_handoff,
+            "biscuit_delegate_handoff_topic": handoff_topic,
+            "biscuit_delegate_handoff_nonce": handoff_nonce,
         },
         "connect": _summarize_ms(connect_lat),
         "token_refresh": _summarize_ms(refresh_lat),
         "token_refresh_len": _summarize_ms(refresh_len),
+        "delegation": _summarize_ms(delegation_lat),
+        "delegation_len": _summarize_ms(delegation_len),
+        "attenuation": _summarize_ms(attenuation_lat),
+        "attenuation_len": _summarize_ms(attenuation_len),
         "publish": _summarize_ms(publish_lat),
         "receive": _summarize_ms(receive_lat),
         "throughput_mps": throughput_mps,
@@ -637,6 +1168,60 @@ def main():
     p.add_argument("--tls", action="store_true")
     p.add_argument("--tls-ca-file")
     p.add_argument("--tls-insecure", action="store_true")
+    p.add_argument("--biscuit-attenuate", action="store_true")
+    p.add_argument(
+        "--biscuit-attenuate-deny",
+        action="append",
+        default=[],
+        help="Append deny fact (op:res), repeatable",
+    )
+    p.add_argument(
+        "--biscuit-attenuate-check",
+        action="append",
+        default=[],
+        help="Append check expression, repeatable",
+    )
+    p.add_argument("--biscuit-attenuate-topic")
+    p.add_argument("--biscuit-attenuate-op")
+    p.add_argument("--biscuit-attenuate-ttl", type=int)
+    p.add_argument("--biscuit-public-key-hex")
+    p.add_argument("--biscuit-public-key-file")
+    p.add_argument("--biscuit-base64url", action="store_true")
+    p.add_argument("--biscuit-attenuate-bin")
+    p.add_argument("--biscuit-delegate", action="store_true")
+    p.add_argument(
+        "--biscuit-delegate-deny",
+        action="append",
+        default=[],
+        help="Append deny fact (op:res), repeatable",
+    )
+    p.add_argument(
+        "--biscuit-delegate-check",
+        action="append",
+        default=[],
+        help="Append check expression, repeatable",
+    )
+    p.add_argument("--biscuit-delegate-topic")
+    p.add_argument("--biscuit-delegate-op")
+    p.add_argument("--biscuit-delegate-ttl", type=int)
+    p.add_argument("--biscuit-delegate-public-key-hex")
+    p.add_argument("--biscuit-delegate-public-key-file")
+    p.add_argument("--biscuit-delegate-base64url", action="store_true")
+    p.add_argument("--biscuit-delegate-bin")
+    p.add_argument("--biscuit-delegate-handoff", action="store_true")
+    p.add_argument("--biscuit-delegate-handoff-topic")
+    p.add_argument("--biscuit-delegate-handoff-token")
+    p.add_argument(
+        "--biscuit-delegate-handoff-qos",
+        type=int,
+        default=1,
+        choices=[0, 1, 2],
+    )
+    p.add_argument(
+        "--biscuit-delegate-handoff-no-retain",
+        action="store_true",
+        help="Disable retained handoff publications",
+    )
     p.add_argument(
         "--mode",
         default=os.environ.get("MQTT_MODE", "publish"),
@@ -694,6 +1279,31 @@ def main():
         tls_insecure=args.tls_insecure,
         mode=args.mode,
         fanout_topic=args.fanout_topic,
+        biscuit_attenuate=args.biscuit_attenuate,
+        biscuit_attenuate_denies=args.biscuit_attenuate_deny,
+        biscuit_attenuate_checks=args.biscuit_attenuate_check,
+        biscuit_attenuate_topic=args.biscuit_attenuate_topic,
+        biscuit_attenuate_operation=args.biscuit_attenuate_op,
+        biscuit_attenuate_ttl=args.biscuit_attenuate_ttl,
+        biscuit_public_key_hex=args.biscuit_public_key_hex,
+        biscuit_public_key_file=args.biscuit_public_key_file,
+        biscuit_base64url=args.biscuit_base64url,
+        biscuit_attenuate_bin=args.biscuit_attenuate_bin,
+        biscuit_delegate=args.biscuit_delegate,
+        biscuit_delegate_denies=args.biscuit_delegate_deny,
+        biscuit_delegate_checks=args.biscuit_delegate_check,
+        biscuit_delegate_topic=args.biscuit_delegate_topic,
+        biscuit_delegate_operation=args.biscuit_delegate_op,
+        biscuit_delegate_ttl=args.biscuit_delegate_ttl,
+        biscuit_delegate_public_key_hex=args.biscuit_delegate_public_key_hex,
+        biscuit_delegate_public_key_file=args.biscuit_delegate_public_key_file,
+        biscuit_delegate_base64url=args.biscuit_delegate_base64url,
+        biscuit_delegate_bin=args.biscuit_delegate_bin,
+        biscuit_delegate_handoff=args.biscuit_delegate_handoff,
+        biscuit_delegate_handoff_topic=args.biscuit_delegate_handoff_topic,
+        biscuit_delegate_handoff_token=args.biscuit_delegate_handoff_token,
+        biscuit_delegate_handoff_qos=args.biscuit_delegate_handoff_qos,
+        biscuit_delegate_handoff_retain=not args.biscuit_delegate_handoff_no_retain,
     )
 
     if args.json:

@@ -194,6 +194,10 @@ def _build_summary(input_dir):
                 "publish": _aggregate_metric(runs, "publish"),
                 "token_refresh": _aggregate_metric(runs, "token_refresh"),
                 "token_refresh_len": _aggregate_metric(runs, "token_refresh_len"),
+                "delegation": _aggregate_metric(runs, "delegation"),
+                "delegation_len": _aggregate_metric(runs, "delegation_len"),
+                "attenuation": _aggregate_metric(runs, "attenuation"),
+                "attenuation_len": _aggregate_metric(runs, "attenuation_len"),
             },
             "mqtt5_auth": mqtt5,
             "resources": _aggregate_resources(runs),
@@ -237,6 +241,12 @@ def _write_csv(summary, path):
         "publish_p99_avg",
         "token_refresh_p50_avg",
         "token_refresh_count_total",
+        "delegation_p50_avg",
+        "delegation_count_total",
+        "delegation_len_p50_avg",
+        "attenuation_p50_avg",
+        "attenuation_count_total",
+        "attenuation_len_p50_avg",
         "errors_total",
         "cpu_avg",
         "memory_avg",
@@ -264,6 +274,10 @@ def _write_csv(summary, path):
             connect = loadgen.get("connect", {})
             publish = loadgen.get("publish", {})
             refresh = loadgen.get("token_refresh", {})
+            delegation = loadgen.get("delegation", {})
+            delegation_len = loadgen.get("delegation_len", {})
+            attenuation = loadgen.get("attenuation", {})
+            attenuation_len = loadgen.get("attenuation_len", {})
             mqtt5 = scenario.get("mqtt5_auth") or {}
             resources = scenario.get("resources", {})
             token_metadata = scenario.get("token_metadata") or {}
@@ -296,6 +310,12 @@ def _write_csv(summary, path):
                 "publish_p99_avg": (publish.get("p99_ms") or {}).get("avg"),
                 "token_refresh_p50_avg": (refresh.get("p50_ms") or {}).get("avg"),
                 "token_refresh_count_total": refresh.get("count_total"),
+                "delegation_p50_avg": (delegation.get("p50_ms") or {}).get("avg"),
+                "delegation_count_total": delegation.get("count_total"),
+                "delegation_len_p50_avg": (delegation_len.get("p50_ms") or {}).get("avg"),
+                "attenuation_p50_avg": (attenuation.get("p50_ms") or {}).get("avg"),
+                "attenuation_count_total": attenuation.get("count_total"),
+                "attenuation_len_p50_avg": (attenuation_len.get("p50_ms") or {}).get("avg"),
                 "errors_total": (scenario.get("errors") or {}).get("total"),
                 "cpu_avg": (resources.get("cpu") or {}).get("avg"),
                 "memory_avg": (resources.get("memory") or {}).get("avg"),

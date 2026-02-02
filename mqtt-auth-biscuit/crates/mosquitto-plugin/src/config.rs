@@ -6,6 +6,9 @@ use std::ffi::CStr;
 use std::fs;
 use thiserror::Error;
 
+const MIN_HTTP_TIMEOUT_SECONDS: u64 = 1;
+const MAX_HTTP_RESPONSE_BYTES: u64 = 1024 * 1024;
+
 /// Configuration errors using thiserror for better error handling
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -104,6 +107,8 @@ pub struct PluginConfigBuilder {
     http_url: Option<String>,
     http_ca_file: Option<String>,
     http_tls_insecure: Option<bool>,
+    http_timeout_seconds: Option<u64>,
+    http_max_response_bytes: Option<u64>,
     dynamic_security_url: Option<String>,
     dynamic_security_username: Option<String>,
     dynamic_security_password: Option<String>,
@@ -133,6 +138,8 @@ impl PluginConfigBuilder {
             http_url: None,
             http_ca_file: None,
             http_tls_insecure: None,
+            http_timeout_seconds: None,
+            http_max_response_bytes: None,
             dynamic_security_url: None,
             dynamic_security_username: None,
             dynamic_security_password: None,
@@ -191,6 +198,16 @@ impl PluginConfigBuilder {
 
     pub fn http_tls_insecure(mut self, enabled: bool) -> Self {
         self.http_tls_insecure = Some(enabled);
+        self
+    }
+
+    pub fn http_timeout_seconds(mut self, seconds: u64) -> Self {
+        self.http_timeout_seconds = Some(seconds);
+        self
+    }
+
+    pub fn http_max_response_bytes(mut self, bytes: u64) -> Self {
+        self.http_max_response_bytes = Some(bytes);
         self
     }
 
@@ -301,6 +318,8 @@ impl PluginConfigBuilder {
             http_url: self.http_url,
             http_ca_file: self.http_ca_file,
             http_tls_insecure: self.http_tls_insecure.unwrap_or(false),
+            http_timeout_seconds: self.http_timeout_seconds.unwrap_or(2),
+            http_max_response_bytes: self.http_max_response_bytes.unwrap_or(64 * 1024),
             dynamic_security_url: self.dynamic_security_url,
             dynamic_security_reload_interval_seconds: self.dynamic_security_reload_interval_seconds,
             dynamic_security_username: self.dynamic_security_username,
@@ -395,6 +414,29 @@ pub fn parse_options(
                     .parse::<bool>()
                     .map_err(|e| format!("Invalid http_tls_insecure: {e}"))?;
                 builder.http_tls_insecure(enabled)
+            }
+            "http_timeout_seconds" => {
+                let seconds = value
+                    .parse::<u64>()
+                    .map_err(|e| format!("Invalid http_timeout_seconds: {e}"))?;
+                if seconds < MIN_HTTP_TIMEOUT_SECONDS {
+                    return Err("http_timeout_seconds must be >= 1".to_string());
+                }
+                builder.http_timeout_seconds(seconds)
+            }
+            "http_max_response_bytes" => {
+                let bytes = value
+                    .parse::<u64>()
+                    .map_err(|e| format!("Invalid http_max_response_bytes: {e}"))?;
+                if bytes == 0 {
+                    return Err("http_max_response_bytes must be > 0".to_string());
+                }
+                if bytes > MAX_HTTP_RESPONSE_BYTES {
+                    return Err(format!(
+                        "http_max_response_bytes must be <= {MAX_HTTP_RESPONSE_BYTES}"
+                    ));
+                }
+                builder.http_max_response_bytes(bytes)
             }
             "dynamic_security_url" => builder.dynamic_security_url(value),
             "dynamic_security_username" => builder.dynamic_security_username(value),

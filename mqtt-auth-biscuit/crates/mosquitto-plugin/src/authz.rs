@@ -261,6 +261,8 @@ pub struct AuthzParams<'a> {
     pub http_url: Option<&'a str>,
     pub http_ca_file: Option<&'a str>,
     pub http_tls_insecure: bool,
+    pub http_timeout_seconds: u64,
+    pub http_max_response_bytes: u64,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -323,6 +325,8 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
                         Some(raw),
                         params.http_ca_file,
                         params.http_tls_insecure,
+                        params.http_timeout_seconds,
+                        params.http_max_response_bytes,
                     )
                     .unwrap_or(false);
                     if allowed {
@@ -344,6 +348,8 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
                         Some(raw),
                         params.http_ca_file,
                         params.http_tls_insecure,
+                        params.http_timeout_seconds,
+                        params.http_max_response_bytes,
                     ) {
                         Ok(allowed) => {
                             if allowed {
@@ -434,6 +440,8 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
                         None,
                         params.http_ca_file,
                         params.http_tls_insecure,
+                        params.http_timeout_seconds,
+                        params.http_max_response_bytes,
                     )
                     .unwrap_or(false);
                     if allowed {
@@ -455,6 +463,8 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
                         None,
                         params.http_ca_file,
                         params.http_tls_insecure,
+                        params.http_timeout_seconds,
+                        params.http_max_response_bytes,
                     ) {
                         Ok(allowed) => {
                             if allowed {

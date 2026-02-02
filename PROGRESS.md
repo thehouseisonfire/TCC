@@ -323,21 +323,37 @@ machine and record the first results/known issues).
 
 ## 9) Open Issues (Next Steps, Grouped)
 
-#### A) Policy Source Parity
+### **Priority Tier 1: Core Functionality**
+1. Issue 4: Harden HTTP policy backend (used in many scenarios, partially implemented)
+2. Issue 9: Document scenario policies (ensure fair comparison)
+3. Issue 17: QoS 0/2 implementation (ARTICLE.MD requirements)
+4. Issue 20.1: Verify ACL_CHECK subtypes (authorization correctness)
 
-- [-] **Issue 4: Harden HTTP policy backend for benchmark validity (partially
-    implemented)**
-  - Goal: make the HTTP backend robust and well-specified for experiments.
-  - Status update:
-    - Implemented: strict JSON parsing (`allow` field only), content-type
-      validation, response size limit, 2s read timeout, TLS support
-      insecure mode in `http_policy.rs`.
-    - Missing: documented request/response schema in repo docs, configurable
-      timeout/size limits, and explicit failure semantics documented for hybrid
-      fallback.
-  - Deliverable:
-    - Clear request/response schema (documented) and stricter parsing
-    - Configurable timeouts and error semantics (what triggers hybrid fallback)
+### **Priority Tier 2: Measurement Accuracy**  
+5. Issue 14: Add iperf3 baseline (throughput interpretation)
+6. Issue 18: Remove Biscuit Base64 (MTU fragmentation bias)
+7. Issue 19: MOSQ_EVT_MESSAGE fan-out validation (per-subscriber costs)
+
+### **Priority Tier 3: Enhanced Analysis**
+8. Issue 16: Add perf profiling (CPU analysis)
+9. Issue 8.2: Containerized benchmark topology
+10. Issue 13: emqtt-bench integration
+11. Issue 15: tcpdump fragmentation analysis
+12. Issue 20: Define CONTROL callback semantics
+13. Issue 21: Expand Biscuit authorizer (if current template insufficient)
+14. Issue 22: Strengthen SQLite RBAC (if policies too simple)
+15. Issue 23: Proactive client reauthentication
+16. Issue 24: Multi-step enhanced auth decision
+17. Issue 25: Optional ACL_READ full authz flag
+18. Issue 28: Verify static-policy coverage
+19. Issue 29: Anonymous flow scenario
+20. Issue 30: Dynamic-policy ACL_READ fan-out
+21. Issue 31: Control-triggered kick/re-auth
+22. Issue 32: Control-triggered ACL_READ + notify
+
+---
+
+#### A) Policy Source Parity
 
 - [ ] **Issue 9: Document and analyze scenario policies**
   - Goal: create comprehensive documentation of all Biscuit and JWT policies
@@ -761,6 +777,9 @@ machine and record the first results/known issues).
 
 - [x] **Issue 34: Implement real LRU eviction in `SessionCache`**
   - Summary: Enforced cache capacity with true LRU eviction, added capacity tracking, edge case handling, and comprehensive unit tests.
+
+- [x] **Issue 4: Harden HTTP policy backend for benchmark validity**
+  - Summary: Made HTTP backend robust and well-specified for experiments. Added configurable timeout (`http_timeout_seconds`) and response size limits (`http_max_response_bytes`), documented request/response schema and hybrid fallback semantics in RUNNING_BENCHMARKS.md and README.md. Enforced strict JSON parsing, content-type validation, 200-only responses, and TLS support with insecure mode for testing.
 
 ---
 

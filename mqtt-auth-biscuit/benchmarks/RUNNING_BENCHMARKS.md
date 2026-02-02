@@ -267,6 +267,49 @@ To select a different Mosquitto configuration for a run (e.g. HTTP policy or hyb
 MOSQUITTO_CONF=docker/mosquitto_http.conf python3 benchmarks/run_scenarios.py
 ```
 
+### HTTP policy backend schema (HTTP/Hybrid modes)
+
+When `policy_mode` is `http` or `hybrid`, the plugin POSTs JSON to the policy endpoint:
+
+```json
+{
+  "client_id": "client_1",
+  "topic": "sensors/client_1/temp",
+  "access": 2,
+  "token": "<optional JWT string>"
+}
+```
+
+- `access` is the numeric Mosquitto ACL access value (e.g., 1 = subscribe, 2 = publish, 3 = read).
+- `token` is only included for JWT requests; Biscuit requests omit it.
+
+The endpoint must respond with **HTTP 200** and `Content-Type: application/json`:
+
+```json
+{ "allow": true }
+```
+
+Any non-200 status, invalid JSON, missing/invalid content-type, or oversized response is treated as an error.
+
+#### Hybrid fallback semantics
+
+In `hybrid` mode, HTTP errors trigger **token-only** evaluation. An explicit `allow=false` response is still a denial (no fallback).
+
+#### Plugin options (HTTP)
+
+```conf
+plugin_opt_http_url <http(s)://host:port/path>
+plugin_opt_http_ca_file <path/to/ca.pem>
+plugin_opt_http_tls_insecure <true|false>
+plugin_opt_http_timeout_seconds <u64>
+plugin_opt_http_max_response_bytes <u64>
+```
+
+Defaults:
+
+- `http_timeout_seconds`: `2` (min: `1`)
+- `http_max_response_bytes`: `65536` (max: `1048576`)
+
 For the MQTT `AUTH` reauthentication microbenchmark only:
 
 ```bash

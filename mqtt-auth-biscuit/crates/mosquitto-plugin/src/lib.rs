@@ -937,6 +937,8 @@ extern "C" fn acl_check_callback(
             http_url: state.config.policy.http_url.as_deref(),
             http_ca_file: state.config.policy.http_ca_file.as_deref(),
             http_tls_insecure: state.config.policy.http_tls_insecure,
+            http_timeout_seconds: state.config.policy.http_timeout_seconds,
+            http_max_response_bytes: state.config.policy.http_max_response_bytes,
         };
 
         match check_authorization(&token_type, params) {
@@ -1012,6 +1014,8 @@ extern "C" fn control_callback(
             http_url: state.config.policy.http_url.as_deref(),
             http_ca_file: state.config.policy.http_ca_file.as_deref(),
             http_tls_insecure: state.config.policy.http_tls_insecure,
+            http_timeout_seconds: state.config.policy.http_timeout_seconds,
+            http_max_response_bytes: state.config.policy.http_max_response_bytes,
         };
 
         match check_authorization(&token_type, params) {

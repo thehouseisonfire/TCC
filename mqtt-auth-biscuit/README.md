@@ -89,9 +89,20 @@ Subscribe/read semantics:
   `subscribe` to a topic, then add a `read` deny rule for messages
   with particular contexts (e.g. the time it was sent or the sender)
  
-Biscuit policy parity: `deny("op", "res")` facts are evaluated before allow
-rules, and a `deny("subscribe", ...)` fact also blocks `ACL_READ` when the
-read operation is evaluated via the subscribe fallback.
+Biscuit policy parity: `deny("op", "res")` facts are evaluated before allow rules, and
+`deny("subscribe", ...)` blocks `ACL_READ` when the read operation is evaluated
+via the subscribe fallback.
+
+### HTTP policy backend options
+
+When using `policy_mode=http` or `policy_mode=hybrid`, the plugin can be tuned:
+
+- `plugin_opt_http_timeout_seconds <u64>`: request timeout (default: 2, min: 1)
+- `plugin_opt_http_max_response_bytes <u64>`: max response size (default: 65536, max: 1048576)
+- `plugin_opt_http_ca_file <path>`: CA bundle for HTTPS
+- `plugin_opt_http_tls_insecure <true|false>`: disable cert verification (testing only)
+
+The endpoint must respond with `{ "allow": true|false }` and HTTP 200.
 
 Clients may also attenuate Biscuits by appending `deny` facts in new blocks. A
 deny added in an attenuation block further restricts the token (never expands

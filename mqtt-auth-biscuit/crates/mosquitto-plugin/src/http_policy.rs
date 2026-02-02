@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,12 +12,19 @@ use rustls::{DigitallySignedStruct, SignatureScheme};
 use rustls_pemfile::certs;
 use webpki_roots::TLS_SERVER_ROOTS;
 
-const MAX_HTTP_RESPONSE_BYTES: usize = 64 * 1024;
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AuthzResponse {
     allow: bool,
+}
+
+fn resolve_socket_addr(host: &str, port: u16) -> Result<SocketAddr, String> {
+    let mut addrs = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("http resolve failed: {e}"))?;
+    addrs
+        .next()
+        .ok_or_else(|| "http resolve failed: no addresses".to_string())
 }
 
 fn split_host_port(host_port: &str, default_port: u16) -> Result<(String, u16), String> {
@@ -49,13 +56,13 @@ fn split_host_port(host_port: &str, default_port: u16) -> Result<(String, u16), 
     Ok((host_port.to_string(), default_port))
 }
 
-fn read_limited_response<R: Read>(reader: &mut R) -> Result<Vec<u8>, String> {
+fn read_limited_response<R: Read>(reader: &mut R, max_bytes: usize) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
-    let mut limited = reader.take((MAX_HTTP_RESPONSE_BYTES + 1) as u64);
+    let mut limited = reader.take((max_bytes + 1) as u64);
     limited
         .read_to_end(&mut buf)
         .map_err(|e| format!("http read failed: {e}"))?;
-    if buf.len() > MAX_HTTP_RESPONSE_BYTES {
+    if buf.len() > max_bytes {
         return Err("http response too large".to_string());
     }
     Ok(buf)
@@ -199,6 +206,8 @@ pub fn check_http(
     token: Option<&str>,
     ca_file: Option<&str>,
     tls_insecure: bool,
+    timeout_seconds: u64,
+    max_response_bytes: u64,
 ) -> Result<bool, String> {
     let (scheme, rest) = if let Some(url) = http_url.strip_prefix("https://") {
         ("https", url)
@@ -230,10 +239,14 @@ pub fn check_http(
     let body = serde_json::to_vec(&Value::Object(payload))
         .map_err(|e| format!("http json encode failed: {e}"))?;
 
-    let mut stream = TcpStream::connect((host.as_str(), port))
+    let max_bytes = usize::try_from(max_response_bytes)
+        .map_err(|_| "http max response bytes too large".to_string())?;
+
+    let addr = resolve_socket_addr(host.as_str(), port)?;
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(timeout_seconds))
         .map_err(|e| format!("http connect failed: {e}"))?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
+        .set_read_timeout(Some(Duration::from_secs(timeout_seconds)))
         .map_err(|e| format!("http set timeout failed: {e}"))?;
 
     let req = format!(
@@ -257,7 +270,7 @@ pub fn check_http(
         tls_stream
             .write_all(&body)
             .map_err(|e| format!("https write failed: {e}"))?;
-        read_limited_response(&mut tls_stream)?
+        read_limited_response(&mut tls_stream, max_bytes)?
     } else {
         stream
             .write_all(req.as_bytes())
@@ -265,7 +278,7 @@ pub fn check_http(
         stream
             .write_all(&body)
             .map_err(|e| format!("http write failed: {e}"))?;
-        read_limited_response(&mut stream)?
+        read_limited_response(&mut stream, max_bytes)?
     };
 
     let json = parse_http_response(&resp)?;

@@ -1,18 +1,23 @@
-import argparse
 import json
 import os
 import shutil
-import ssl
 import subprocess
-import sys
 import time
-import urllib.parse
-import urllib.request
+
+import httpx
+import typer
+from pydantic import BaseModel, ConfigDict
+
+from logging_utils import get_logger, setup_logging
 
 
 def _read_tokens(path: str):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+logger = get_logger(__name__)
+app = typer.Typer(add_completion=False)
 
 
 def _compose_bin():
@@ -35,14 +40,13 @@ def _compose(
     subprocess.check_call(cmd, cwd=os.path.dirname(os.path.dirname(__file__)), env=env)
 
 
-def _ssl_context(ca_file: str | None, insecure: bool) -> ssl.SSLContext | None:
-    if not insecure and not ca_file:
-        return None
-    ctx = ssl.create_default_context(cafile=ca_file)
+def _http_client(ca_file: str | None, insecure: bool) -> httpx.Client:
+    verify: bool | str = True
     if insecure:
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+        verify = False
+    elif ca_file:
+        verify = ca_file
+    return httpx.Client(verify=verify, timeout=5.0)
 
 
 def _authz_config(
@@ -61,16 +65,14 @@ def _authz_config(
     if fail_rate is not None:
         body["fail_rate"] = fail_rate
 
-    data = json.dumps(body).encode("utf-8")
-    req = urllib.request.Request(
-        authz_url.rstrip("/") + "/config",
-        method="POST",
-        data=data,
-        headers={"Content-Type": "application/json"},
-    )
-    ctx = _ssl_context(ca_file, insecure)
-    with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    with _http_client(ca_file, insecure) as client:
+        resp = client.post(
+            authz_url.rstrip("/") + "/config",
+            json=body,
+            headers={"Content-Type": "application/json"},
+        )
+        resp.raise_for_status()
+        return resp.json()
 
 
 # Prometheus query templates
@@ -79,14 +81,13 @@ CURRENT_DOCKER_COMPOSE_MEM_QUERY = 'max(container_memory_working_set_bytes{conta
 
 
 def _prom_query(base_url: str, query: str, ca_file: str | None, insecure: bool):
-    url = (
-        base_url.rstrip("/")
-        + "/api/v1/query?query="
-        + urllib.parse.quote(query, safe="")
-    )
-    ctx = _ssl_context(ca_file, insecure)
-    with urllib.request.urlopen(url, timeout=5, context=ctx) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    with _http_client(ca_file, insecure) as client:
+        resp = client.get(
+            base_url.rstrip("/") + "/api/v1/query",
+            params={"query": query},
+        )
+        resp.raise_for_status()
+        return resp.json()
 
 
 def _resource_snapshot(
@@ -364,52 +365,46 @@ def _run_mqtt5_auth(
     return json.loads(out.decode("utf-8"))
 
 
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--tokens", default="benchmarks/tokens.json")
-    p.add_argument("--out", default="benchmarks/results")
-    p.add_argument("--clients", type=int, default=50)
-    p.add_argument("--messages", type=int, default=20)
-    p.add_argument("--qos", type=int, default=1)
-    p.add_argument("--scenarios", help="Comma-separated list of scenario IDs to run")
-    p.add_argument("--token-issuer-no-default-roles", action="store_true")
-    p.add_argument("--token-issuer-no-default-grants", action="store_true")
-    p.add_argument("--biscuit-base64url", action="store_true")
-    p.add_argument(
-        "--token-refresh-codes", default=os.environ.get("TOKEN_REFRESH_CODES")
-    )
-    p.add_argument(
-        "--tls", action="store_true", help="Enable TLS for all supported services"
-    )
-    p.add_argument(
-        "--tls-insecure",
-        action="store_true",
-        help="Disable TLS certificate verification",
-    )
-    p.add_argument("--tls-ca-file", help="CA bundle path for TLS verification")
-    p.add_argument(
-        "--summary-json",
-        default="summary.json",
-        help="Summary JSON filename (relative to --out)",
-    )
-    p.add_argument(
-        "--summary-csv",
-        default="summary.csv",
-        help="Summary CSV filename (relative to --out)",
-    )
-    p.add_argument(
-        "--no-summary-csv", action="store_true", help="Disable CSV summary output"
-    )
-    args = p.parse_args()
+class ScenarioModel(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    id: str | None = None
+    mosquitto_conf: str | None = None
+    username: str | None = None
+    password: str | None = None
+    topic: str | None = None
+
+
+@app.command()
+def main(
+    tokens: str = "benchmarks/tokens.json",
+    out: str = "benchmarks/results",
+    clients: int = 50,
+    messages: int = 20,
+    qos: int = 1,
+    scenarios_arg: str | None = None,
+    token_issuer_no_default_roles: bool = False,
+    token_issuer_no_default_grants: bool = False,
+    biscuit_base64url: bool = False,
+    token_refresh_codes: str | None = typer.Option(
+        None, envvar="TOKEN_REFRESH_CODES"
+    ),
+    tls: bool = False,
+    tls_insecure: bool = False,
+    tls_ca_file: str | None = None,
+    summary_json: str = "summary.json",
+    summary_csv: str = "summary.csv",
+    no_summary_csv: bool = False,
+    log_level: str = typer.Option("INFO", "--log-level"),
+):
+    setup_logging(log_level)
 
     tokens = _read_tokens(
-        os.path.join(os.path.dirname(os.path.dirname(__file__)), args.tokens)
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), tokens)
     )
 
     scenarios = []
-    tls_enabled = args.tls
-    tls_insecure = args.tls_insecure
-    tls_ca = args.tls_ca_file or ("docker/tls/ca.pem" if tls_enabled else None)
+    tls_enabled = tls
+    tls_ca = tls_ca_file or ("docker/tls/ca.pem" if tls_enabled else None)
     if (
         tls_enabled
         and tls_ca
@@ -420,8 +415,8 @@ def main():
         raise SystemExit(
             f"TLS enabled but CA file not found at {tls_ca}. Run docker/tls/generate_certs.sh"
         )
-    if args.scenarios:
-        scenario_ids = [s.strip() for s in args.scenarios.split(",")]
+    if scenarios_arg:
+        scenario_ids = [s.strip() for s in scenarios_arg.split(",")]
         # Define available scenarios mapping
         available_scenarios = {
             "BASE-01": {
@@ -827,10 +822,10 @@ def main():
 
         for scenario in available_scenarios.values():
             scenario.setdefault(
-                "token_issuer_no_default_roles", args.token_issuer_no_default_roles
+                "token_issuer_no_default_roles", token_issuer_no_default_roles
             )
             scenario.setdefault(
-                "token_issuer_no_default_grants", args.token_issuer_no_default_grants
+                "token_issuer_no_default_grants", token_issuer_no_default_grants
             )
 
         available_scenarios = _expand_tls_matrix(available_scenarios)
@@ -840,29 +835,31 @@ def main():
             if scenario_id in available_scenarios:
                 scenario = available_scenarios[scenario_id].copy()
                 scenario["id"] = scenario_id
-                scenarios.append(scenario)
+                scenarios.append(ScenarioModel.model_validate(scenario).model_dump())
             else:
-                print(f"Warning: Unknown scenario '{scenario_id}', skipping")
+                logger.warning("Unknown scenario '%s', skipping", scenario_id)
     else:
-        print(
+        logger.info(
             "No scenarios specified. Use --scenarios to specify which scenarios to run."
         )
-        print("Available scenarios:")
-        print(
+        logger.info("Available scenarios:")
+        logger.info(
             "BASE-01, JWT-01, BIS-01, BIS-ATTENUATE-CLIENT, BIS-ATTENUATE-TTL, BIS-ATTENUATE-DENY, BIS-ATTENUATE-OP-ONLY, POLICY-COMPLEX-1, POLICY-COMPLEX-5, POLICY-COMPLEX-25"
         )
-        print("JWT-HTTP-200MS, JWT-HTTP-1000MS, HYBRID-AUTHZ-DOWN, MTU-200-JWT")
-        print("BIS-HTTP-200MS, JWT-HTTP-200MS-LOSS1, JWT-HTTP-200MS-LOSS5")
-        print(
+        logger.info("JWT-HTTP-200MS, JWT-HTTP-1000MS, HYBRID-AUTHZ-DOWN, MTU-200-JWT")
+        logger.info("BIS-HTTP-200MS, JWT-HTTP-200MS-LOSS1, JWT-HTTP-200MS-LOSS5")
+        logger.info(
             "MQTT5-REAUTH-JWT, MQTT5-REAUTH-BISCUIT, THUNDERING-HERD, DELEGATION-TEMP-ONLY, DELEGATION-HANDOFF, DELEGATION-SIMULATED"
         )
-        print("LIFECYCLE-JWT-SHORT-RECONNECT, LIFECYCLE-BIS-SHORT-RECONNECT")
-        print("MTU-500-BIS-25, MTU-1500-BIS-25, MTU-9000-BIS-25")
-        print("MTU-500-JWT, MTU-1500-JWT, MTU-9000-JWT")
-        print("DYNSEC-BASE, DYNSEC-CHURN, DYNSEC-READ-FANOUT")
-        print("DYNSEC-READ-FANOUT-CHURN")
-        print("STATIC-ACL-JWT, STATIC-ACL-BIS, STATIC-ACL-FANOUT, STATIC-ACL-FANOUT-BIS")
-        print("Append -TLS to any scenario id for TLS variants.")
+        logger.info("LIFECYCLE-JWT-SHORT-RECONNECT, LIFECYCLE-BIS-SHORT-RECONNECT")
+        logger.info("MTU-500-BIS-25, MTU-1500-BIS-25, MTU-9000-BIS-25")
+        logger.info("MTU-500-JWT, MTU-1500-JWT, MTU-9000-JWT")
+        logger.info("DYNSEC-BASE, DYNSEC-CHURN, DYNSEC-READ-FANOUT")
+        logger.info("DYNSEC-READ-FANOUT-CHURN")
+        logger.info(
+            "STATIC-ACL-JWT, STATIC-ACL-BIS, STATIC-ACL-FANOUT, STATIC-ACL-FANOUT-BIS"
+        )
+        logger.info("Append -TLS to any scenario id for TLS variants.")
         return
 
     if any("mqtt5_auth" not in s for s in scenarios):
@@ -913,10 +910,10 @@ def main():
                 )
 
         token_issuer_no_default_grants = s.get(
-            "token_issuer_no_default_grants", args.token_issuer_no_default_grants
+            "token_issuer_no_default_grants", token_issuer_no_default_grants
         )
         token_issuer_no_default_roles = s.get(
-            "token_issuer_no_default_roles", args.token_issuer_no_default_roles
+            "token_issuer_no_default_roles", token_issuer_no_default_roles
         )
         extra_env.update(
             {
@@ -927,7 +924,7 @@ def main():
                 "JWT_NO_DEFAULT_GRANTS": "1"
                 if token_issuer_no_default_grants
                 else "0",
-                "BISCUIT_BASE64URL": "1" if args.biscuit_base64url else "0",
+                "BISCUIT_BASE64URL": "1" if biscuit_base64url else "0",
             }
         )
 
@@ -962,10 +959,10 @@ def main():
         repeats = int(s.get("repeat", 1))
         token_len = len(s.get("password", "")) if s.get("password") else 0
         token_issuer_no_default_grants = s.get(
-            "token_issuer_no_default_grants", args.token_issuer_no_default_grants
+            "token_issuer_no_default_grants", token_issuer_no_default_grants
         )
         token_issuer_no_default_roles = s.get(
-            "token_issuer_no_default_roles", args.token_issuer_no_default_roles
+            "token_issuer_no_default_roles", token_issuer_no_default_roles
         )
         token_schema = tokens.get("jwt_grants_schema")
         token_schema_version = token_schema.get("version") if token_schema else None
@@ -995,8 +992,8 @@ def main():
             "parity": {
                 "token_issuer_no_default_roles": token_issuer_no_default_roles,
                 "token_issuer_no_default_grants": token_issuer_no_default_grants,
-                "biscuit_base64url": args.biscuit_base64url,
-                "token_refresh_codes": args.token_refresh_codes,
+                "biscuit_base64url": biscuit_base64url,
+                "token_refresh_codes": token_refresh_codes,
             },
             "capability_flags": {
                 "biscuit_only": biscuit_only,
@@ -1004,9 +1001,9 @@ def main():
             "attenuation": s.get("biscuit_attenuate"),
             "delegation": s.get("biscuit_delegate"),
             "scenario_config": {
-                "clients": args.clients,
-                "messages": args.messages,
-                "qos": args.qos,
+                "clients": clients,
+                "messages": messages,
+                "qos": qos,
                 "token_issuer_no_default_roles": token_issuer_no_default_roles,
                 "token_issuer_no_default_grants": token_issuer_no_default_grants,
             },
@@ -1044,12 +1041,12 @@ def main():
                     password=s.get("password", ""),
                     fanout_publisher_username=s.get("fanout_publisher_username"),
                     fanout_publisher_password=s.get("fanout_publisher_password"),
-                    clients=args.clients,
-                    messages=args.messages,
+                    clients=clients,
+                    messages=messages,
                     topic=s.get("topic", "sensors/{client_id}/temp"),
                     mode=s.get("mode"),
                     fanout_topic=s.get("fanout_topic"),
-                    qos=args.qos,
+                    qos=qos,
                     message_size=int(s.get("message_size", 0)),
                     sync_connect=bool(s.get("sync_connect", False)),
                     token_issuer_url=token_issuer_base if token_refresh else None,
@@ -1057,7 +1054,7 @@ def main():
                     token_issuer_ttl=token_refresh.get("ttl_seconds"),
                     token_issuer_no_default_roles=token_issuer_no_default_roles,
                     token_issuer_no_default_grants=token_issuer_no_default_grants,
-                    token_refresh_codes=args.token_refresh_codes,
+                    token_refresh_codes=token_refresh_codes,
                     tls_enabled=scenario_tls,
                     tls_ca_file=tls_ca,
                     tls_insecure=tls_insecure,
@@ -1091,7 +1088,7 @@ def main():
                     biscuit_public_key_file=s.get(
                         "biscuit_public_key_file", "docker/biscuit_public.key"
                     ),
-                    biscuit_base64url=args.biscuit_base64url,
+                    biscuit_base64url=biscuit_base64url,
                     biscuit_attenuate_bin=s.get("biscuit_attenuate_bin"),
                     biscuit_delegate=bool(s.get("biscuit_delegate")),
                     biscuit_delegate_denies=(
@@ -1123,7 +1120,7 @@ def main():
                     biscuit_delegate_public_key_file=s.get(
                         "biscuit_public_key_file", "docker/biscuit_public.key"
                     ),
-                    biscuit_delegate_base64url=args.biscuit_base64url,
+                    biscuit_delegate_base64url=biscuit_base64url,
                     biscuit_delegate_bin=s.get("biscuit_delegate_bin"),
                     biscuit_delegate_handoff=bool(
                         s.get("biscuit_delegate", {}).get("handoff")
@@ -1162,36 +1159,36 @@ def main():
             if s.get("sleep_between"):
                 time.sleep(float(s["sleep_between"]))
 
-        path = _write_result(args.out, s["id"], out_payload)
-        print(f"wrote {path}")
+        path = _write_result(out, s["id"], out_payload)
+        logger.info("Wrote %s", path)
 
-    summary_json = args.summary_json
-    if not os.path.isabs(summary_json):
-        summary_json = os.path.join(args.out, summary_json)
-    summary_csv = args.summary_csv
-    if not os.path.isabs(summary_csv):
-        summary_csv = os.path.join(args.out, summary_csv)
+    summary_json_path = summary_json
+    if not os.path.isabs(summary_json_path):
+        summary_json_path = os.path.join(out, summary_json_path)
+    summary_csv_path = summary_csv
+    if not os.path.isabs(summary_csv_path):
+        summary_csv_path = os.path.join(out, summary_csv_path)
 
     agg_cmd = [
         "python3",
         "benchmarks/aggregate_results.py",
         "--input",
-        args.out,
+        out,
         "--out-json",
-        summary_json,
+        summary_json_path,
     ]
-    if args.no_summary_csv:
+    if no_summary_csv:
         agg_cmd.append("--no-csv")
     else:
-        agg_cmd.extend(["--out-csv", summary_csv])
+        agg_cmd.extend(["--out-csv", summary_csv_path])
     try:
         subprocess.check_call(agg_cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
     except subprocess.CalledProcessError as exc:
-        print(
-            f"warning: aggregation failed ({exc}); scenario results preserved",
-            file=sys.stderr,
+        logger.warning(
+            "Aggregation failed (%s); scenario results preserved",
+            exc,
         )
 
 
 if __name__ == "__main__":
-    main()
+    app()

@@ -1,15 +1,14 @@
-import argparse
 import json
 import os
 import queue
-import ssl
-import uuid
 import subprocess
 import threading
 import time
-import urllib.request
 from dataclasses import dataclass
-from statistics import mean, median
+
+import httpx
+import numpy as np
+import typer
 
 try:
     import paho.mqtt.client as mqtt
@@ -18,35 +17,32 @@ except ModuleNotFoundError as exc:
         "Missing dependency 'paho-mqtt'. Install it with: pip install paho-mqtt"
     ) from exc
 
+from logging_utils import get_logger, setup_logging
 
-def _percentile(sorted_vals, p):
-    if not sorted_vals:
+
+logger = get_logger(__name__)
+app = typer.Typer(add_completion=False)
+
+
+def _percentile(values, p):
+    if not values:
         return None
-    if p <= 0:
-        return sorted_vals[0]
-    if p >= 100:
-        return sorted_vals[-1]
-    k = (len(sorted_vals) - 1) * (p / 100.0)
-    f = int(k)
-    c = min(f + 1, len(sorted_vals) - 1)
-    if f == c:
-        return sorted_vals[f]
-    return sorted_vals[f] + (sorted_vals[c] - sorted_vals[f]) * (k - f)
+    return float(np.percentile(values, p))
 
 
 def _summarize_ms(vals):
     if not vals:
         return {"count": 0}
-    s = sorted(vals)
+    arr = np.array(vals, dtype=float)
     return {
-        "count": len(vals),
-        "min_ms": s[0],
-        "p50_ms": _percentile(s, 50),
-        "p95_ms": _percentile(s, 95),
-        "p99_ms": _percentile(s, 99),
-        "max_ms": s[-1],
-        "mean_ms": mean(vals),
-        "median_ms": median(vals),
+        "count": int(arr.size),
+        "min_ms": float(np.min(arr)),
+        "p50_ms": _percentile(arr, 50),
+        "p95_ms": _percentile(arr, 95),
+        "p99_ms": _percentile(arr, 99),
+        "max_ms": float(np.max(arr)),
+        "mean_ms": float(np.mean(arr)),
+        "median_ms": float(np.median(arr)),
     }
 
 
@@ -145,21 +141,19 @@ def _fetch_token(
     if no_default_grants:
         payload["no_default_grants"] = True
 
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        issuer_url.rstrip("/") + f"/{kind}",
-        method="POST",
-        data=data,
-        headers={"Content-Type": "application/json"},
-    )
-    ctx = None
-    if issuer_url.startswith("https://"):
-        ctx = ssl.create_default_context(cafile=tls_ca_file)
-        if tls_insecure:
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-    with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
-        body = json.loads(resp.read().decode("utf-8"))
+    verify: bool | str = True
+    if tls_insecure:
+        verify = False
+    elif tls_ca_file:
+        verify = tls_ca_file
+    with httpx.Client(verify=verify, timeout=5.0) as client:
+        resp = client.post(
+            issuer_url.rstrip("/") + f"/{kind}",
+            json=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        resp.raise_for_status()
+        body = resp.json()
     token = body.get("token")
     if not token:
         raise ValueError("token issuer response missing token")
@@ -521,6 +515,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
             )
         except Exception as e:
             errors.append(f"attenuation_failed:{e}")
+            logger.exception("Biscuit attenuation failed", exc_info=e)
             out_q.put(
                 WorkerResult(
                     cfg.client_id,
@@ -543,6 +538,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
             password = _receive_delegated_token(cfg)
         except Exception as e:
             errors.append(str(e))
+            logger.exception("Delegation handoff failed", exc_info=e)
             out_q.put(
                 WorkerResult(
                     cfg.client_id,
@@ -609,6 +605,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                 continue
             except Exception as e:
                 errors.append(f"token_refresh_failed:{e}")
+                logger.exception("Token refresh failed", exc_info=e)
                 out_q.put(
                     WorkerResult(
                         cfg.client_id,
@@ -1131,186 +1128,146 @@ def run_load(
     }
 
 
-def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--host", default=os.environ.get("MQTT_HOST", "localhost"))
-    p.add_argument("--port", type=int, default=int(os.environ.get("MQTT_PORT", "1883")))
-    p.add_argument("--username", default=os.environ.get("MQTT_USERNAME", "jwt"))
-    p.add_argument("--password", default=os.environ.get("MQTT_PASSWORD", ""))
-    p.add_argument(
-        "--topic", default=os.environ.get("MQTT_TOPIC", "sensors/{client_id}/temp")
-    )
-    p.add_argument(
-        "--clients", type=int, default=int(os.environ.get("MQTT_CLIENTS", "10"))
-    )
-    p.add_argument(
-        "--messages", type=int, default=int(os.environ.get("MQTT_MESSAGES", "50"))
-    )
-    p.add_argument("--qos", type=int, default=int(os.environ.get("MQTT_QOS", "1")))
-    p.add_argument(
-        "--message-size",
-        type=int,
-        default=int(os.environ.get("MQTT_MESSAGE_SIZE", "0")),
-    )
-    p.add_argument("--sync-connect", action="store_true")
-    p.add_argument("--token-issuer-url", default=os.environ.get("TOKEN_ISSUER_URL"))
-    p.add_argument("--token-issuer-kind", default=os.environ.get("TOKEN_ISSUER_KIND"))
-    p.add_argument(
-        "--token-issuer-ttl", type=int, default=os.environ.get("TOKEN_ISSUER_TTL")
-    )
-    p.add_argument("--token-issuer-no-default-roles", action="store_true")
-    p.add_argument("--token-issuer-no-default-grants", action="store_true")
-    p.add_argument(
-        "--token-refresh-codes",
-        default=os.environ.get("TOKEN_REFRESH_CODES", "5,135"),
+@app.command()
+def main(
+    host: str = typer.Option("localhost", envvar="MQTT_HOST"),
+    port: int = typer.Option(1883, envvar="MQTT_PORT"),
+    username: str = typer.Option("jwt", envvar="MQTT_USERNAME"),
+    password: str = typer.Option("", envvar="MQTT_PASSWORD"),
+    topic: str = typer.Option("sensors/{client_id}/temp", envvar="MQTT_TOPIC"),
+    clients: int = typer.Option(10, envvar="MQTT_CLIENTS"),
+    messages: int = typer.Option(50, envvar="MQTT_MESSAGES"),
+    qos: int = typer.Option(1, envvar="MQTT_QOS"),
+    message_size: int = typer.Option(0, envvar="MQTT_MESSAGE_SIZE"),
+    sync_connect: bool = False,
+    token_issuer_url: str | None = typer.Option(None, envvar="TOKEN_ISSUER_URL"),
+    token_issuer_kind: str | None = typer.Option(None, envvar="TOKEN_ISSUER_KIND"),
+    token_issuer_ttl: int | None = typer.Option(None, envvar="TOKEN_ISSUER_TTL"),
+    token_issuer_no_default_roles: bool = False,
+    token_issuer_no_default_grants: bool = False,
+    token_refresh_codes: str = typer.Option(
+        "5,135",
+        envvar="TOKEN_REFRESH_CODES",
         help="Comma-separated MQTT v5 reason codes that should trigger token refresh (e.g., 5/0x87 = Not authorized)",
-    )
-    p.add_argument("--tls", action="store_true")
-    p.add_argument("--tls-ca-file")
-    p.add_argument("--tls-insecure", action="store_true")
-    p.add_argument("--biscuit-attenuate", action="store_true")
-    p.add_argument(
-        "--biscuit-attenuate-deny",
-        action="append",
-        default=[],
-        help="Append deny fact (op:res), repeatable",
-    )
-    p.add_argument(
-        "--biscuit-attenuate-check",
-        action="append",
-        default=[],
-        help="Append check expression, repeatable",
-    )
-    p.add_argument("--biscuit-attenuate-topic")
-    p.add_argument("--biscuit-attenuate-op")
-    p.add_argument("--biscuit-attenuate-ttl", type=int)
-    p.add_argument("--biscuit-public-key-hex")
-    p.add_argument("--biscuit-public-key-file")
-    p.add_argument("--biscuit-base64url", action="store_true")
-    p.add_argument("--biscuit-attenuate-bin")
-    p.add_argument("--biscuit-delegate", action="store_true")
-    p.add_argument(
-        "--biscuit-delegate-deny",
-        action="append",
-        default=[],
-        help="Append deny fact (op:res), repeatable",
-    )
-    p.add_argument(
-        "--biscuit-delegate-check",
-        action="append",
-        default=[],
-        help="Append check expression, repeatable",
-    )
-    p.add_argument("--biscuit-delegate-topic")
-    p.add_argument("--biscuit-delegate-op")
-    p.add_argument("--biscuit-delegate-ttl", type=int)
-    p.add_argument("--biscuit-delegate-public-key-hex")
-    p.add_argument("--biscuit-delegate-public-key-file")
-    p.add_argument("--biscuit-delegate-base64url", action="store_true")
-    p.add_argument("--biscuit-delegate-bin")
-    p.add_argument("--biscuit-delegate-handoff", action="store_true")
-    p.add_argument("--biscuit-delegate-handoff-topic")
-    p.add_argument("--biscuit-delegate-handoff-token")
-    p.add_argument(
-        "--biscuit-delegate-handoff-qos",
-        type=int,
-        default=1,
-        choices=[0, 1, 2],
-    )
-    p.add_argument(
-        "--biscuit-delegate-handoff-no-retain",
-        action="store_true",
-        help="Disable retained handoff publications",
-    )
-    p.add_argument(
-        "--mode",
-        default=os.environ.get("MQTT_MODE", "publish"),
-        choices=["publish", "fanout"],
-    )
-    p.add_argument(
-        "--fanout-topic",
-        default=os.environ.get("MQTT_FANOUT_TOPIC", "fanout/broadcast"),
-    )
-    p.add_argument(
-        "--fanout-publisher-username",
-        default=os.environ.get("MQTT_FANOUT_PUBLISHER_USERNAME"),
-    )
-    p.add_argument(
-        "--fanout-publisher-password",
-        default=os.environ.get("MQTT_FANOUT_PUBLISHER_PASSWORD"),
-    )
-    p.add_argument("--json", action="store_true")
-    args = p.parse_args()
+    ),
+    tls: bool = False,
+    tls_ca_file: str | None = None,
+    tls_insecure: bool = False,
+    biscuit_attenuate: bool = False,
+    biscuit_attenuate_deny: list[str] = typer.Option(
+        None, "--biscuit-attenuate-deny"
+    ),
+    biscuit_attenuate_check: list[str] = typer.Option(
+        None, "--biscuit-attenuate-check"
+    ),
+    biscuit_attenuate_topic: str | None = None,
+    biscuit_attenuate_op: str | None = None,
+    biscuit_attenuate_ttl: int | None = None,
+    biscuit_public_key_hex: str | None = None,
+    biscuit_public_key_file: str | None = None,
+    biscuit_base64url: bool = False,
+    biscuit_attenuate_bin: str | None = None,
+    biscuit_delegate: bool = False,
+    biscuit_delegate_deny: list[str] = typer.Option(
+        None, "--biscuit-delegate-deny"
+    ),
+    biscuit_delegate_check: list[str] = typer.Option(
+        None, "--biscuit-delegate-check"
+    ),
+    biscuit_delegate_topic: str | None = None,
+    biscuit_delegate_op: str | None = None,
+    biscuit_delegate_ttl: int | None = None,
+    biscuit_delegate_public_key_hex: str | None = None,
+    biscuit_delegate_public_key_file: str | None = None,
+    biscuit_delegate_base64url: bool = False,
+    biscuit_delegate_bin: str | None = None,
+    biscuit_delegate_handoff: bool = False,
+    biscuit_delegate_handoff_topic: str | None = None,
+    biscuit_delegate_handoff_token: str | None = None,
+    biscuit_delegate_handoff_qos: int = typer.Option(1, min=0, max=2),
+    biscuit_delegate_handoff_no_retain: bool = False,
+    mode: str = typer.Option("publish", envvar="MQTT_MODE"),
+    fanout_topic: str = typer.Option("fanout/broadcast", envvar="MQTT_FANOUT_TOPIC"),
+    fanout_publisher_username: str | None = typer.Option(
+        None, envvar="MQTT_FANOUT_PUBLISHER_USERNAME"
+    ),
+    fanout_publisher_password: str | None = typer.Option(
+        None, envvar="MQTT_FANOUT_PUBLISHER_PASSWORD"
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+    log_level: str = typer.Option("INFO", "--log-level"),
+):
+    setup_logging(log_level)
 
     protocol = mqtt.MQTTv5  # MQTT v5 only
 
-    token_refresh_codes = set()
-    for part in str(args.token_refresh_codes).split(","):
+    parsed_refresh_codes = set()
+    for part in str(token_refresh_codes).split(","):
         part = part.strip()
         if not part:
             continue
         try:
-            token_refresh_codes.add(int(part, 0))
+            parsed_refresh_codes.add(int(part, 0))
         except ValueError:
-            raise SystemExit(f"invalid token refresh code: {part}")
+            raise typer.BadParameter(f"invalid token refresh code: {part}")
 
     res = run_load(
-        host=args.host,
-        port=args.port,
-        username=args.username,
-        password=args.password,
-        fanout_publisher_username=args.fanout_publisher_username,
-        fanout_publisher_password=args.fanout_publisher_password,
-        topic_template=args.topic,
-        clients=args.clients,
-        message_count=args.messages,
-        qos=args.qos,
-        message_size=args.message_size,
+        host=host,
+        port=port,
+        username=username,
+        password=password,
+        fanout_publisher_username=fanout_publisher_username,
+        fanout_publisher_password=fanout_publisher_password,
+        topic_template=topic,
+        clients=clients,
+        message_count=messages,
+        qos=qos,
+        message_size=message_size,
         protocol=protocol,
-        sync_connect=args.sync_connect,
-        token_issuer_url=args.token_issuer_url,
-        token_issuer_kind=args.token_issuer_kind,
-        token_issuer_ttl=args.token_issuer_ttl,
-        token_issuer_no_default_roles=args.token_issuer_no_default_roles,
-        token_issuer_no_default_grants=args.token_issuer_no_default_grants,
-        token_refresh_codes=token_refresh_codes,
-        tls_enabled=args.tls,
-        tls_ca_file=args.tls_ca_file,
-        tls_insecure=args.tls_insecure,
-        mode=args.mode,
-        fanout_topic=args.fanout_topic,
-        biscuit_attenuate=args.biscuit_attenuate,
-        biscuit_attenuate_denies=args.biscuit_attenuate_deny,
-        biscuit_attenuate_checks=args.biscuit_attenuate_check,
-        biscuit_attenuate_topic=args.biscuit_attenuate_topic,
-        biscuit_attenuate_operation=args.biscuit_attenuate_op,
-        biscuit_attenuate_ttl=args.biscuit_attenuate_ttl,
-        biscuit_public_key_hex=args.biscuit_public_key_hex,
-        biscuit_public_key_file=args.biscuit_public_key_file,
-        biscuit_base64url=args.biscuit_base64url,
-        biscuit_attenuate_bin=args.biscuit_attenuate_bin,
-        biscuit_delegate=args.biscuit_delegate,
-        biscuit_delegate_denies=args.biscuit_delegate_deny,
-        biscuit_delegate_checks=args.biscuit_delegate_check,
-        biscuit_delegate_topic=args.biscuit_delegate_topic,
-        biscuit_delegate_operation=args.biscuit_delegate_op,
-        biscuit_delegate_ttl=args.biscuit_delegate_ttl,
-        biscuit_delegate_public_key_hex=args.biscuit_delegate_public_key_hex,
-        biscuit_delegate_public_key_file=args.biscuit_delegate_public_key_file,
-        biscuit_delegate_base64url=args.biscuit_delegate_base64url,
-        biscuit_delegate_bin=args.biscuit_delegate_bin,
-        biscuit_delegate_handoff=args.biscuit_delegate_handoff,
-        biscuit_delegate_handoff_topic=args.biscuit_delegate_handoff_topic,
-        biscuit_delegate_handoff_token=args.biscuit_delegate_handoff_token,
-        biscuit_delegate_handoff_qos=args.biscuit_delegate_handoff_qos,
-        biscuit_delegate_handoff_retain=not args.biscuit_delegate_handoff_no_retain,
+        sync_connect=sync_connect,
+        token_issuer_url=token_issuer_url,
+        token_issuer_kind=token_issuer_kind,
+        token_issuer_ttl=token_issuer_ttl,
+        token_issuer_no_default_roles=token_issuer_no_default_roles,
+        token_issuer_no_default_grants=token_issuer_no_default_grants,
+        token_refresh_codes=parsed_refresh_codes,
+        tls_enabled=tls,
+        tls_ca_file=tls_ca_file,
+        tls_insecure=tls_insecure,
+        mode=mode,
+        fanout_topic=fanout_topic,
+        biscuit_attenuate=biscuit_attenuate,
+        biscuit_attenuate_denies=biscuit_attenuate_deny or [],
+        biscuit_attenuate_checks=biscuit_attenuate_check or [],
+        biscuit_attenuate_topic=biscuit_attenuate_topic,
+        biscuit_attenuate_operation=biscuit_attenuate_op,
+        biscuit_attenuate_ttl=biscuit_attenuate_ttl,
+        biscuit_public_key_hex=biscuit_public_key_hex,
+        biscuit_public_key_file=biscuit_public_key_file,
+        biscuit_base64url=biscuit_base64url,
+        biscuit_attenuate_bin=biscuit_attenuate_bin,
+        biscuit_delegate=biscuit_delegate,
+        biscuit_delegate_denies=biscuit_delegate_deny or [],
+        biscuit_delegate_checks=biscuit_delegate_check or [],
+        biscuit_delegate_topic=biscuit_delegate_topic,
+        biscuit_delegate_operation=biscuit_delegate_op,
+        biscuit_delegate_ttl=biscuit_delegate_ttl,
+        biscuit_delegate_public_key_hex=biscuit_delegate_public_key_hex,
+        biscuit_delegate_public_key_file=biscuit_delegate_public_key_file,
+        biscuit_delegate_base64url=biscuit_delegate_base64url,
+        biscuit_delegate_bin=biscuit_delegate_bin,
+        biscuit_delegate_handoff=biscuit_delegate_handoff,
+        biscuit_delegate_handoff_topic=biscuit_delegate_handoff_topic,
+        biscuit_delegate_handoff_token=biscuit_delegate_handoff_token,
+        biscuit_delegate_handoff_qos=biscuit_delegate_handoff_qos,
+        biscuit_delegate_handoff_retain=not biscuit_delegate_handoff_no_retain,
     )
 
-    if args.json:
-        print(json.dumps(res, indent=2))
+    if json_output:
+        typer.echo(json.dumps(res, indent=2))
     else:
-        print(res)
+        typer.echo(res)
 
 
 if __name__ == "__main__":
-    main()
+    app()

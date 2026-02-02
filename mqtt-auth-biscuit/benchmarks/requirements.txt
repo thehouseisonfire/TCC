@@ -1,0 +1,7 @@
+httpx
+numpy
+pandas
+pydantic
+typer
+rich
+paho-mqtt

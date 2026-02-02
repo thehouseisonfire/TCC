@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import argparse
 import atexit
 import os
 import shlex
@@ -8,8 +7,19 @@ import subprocess
 import sys
 from typing import List
 
+import typer
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKDIR = os.path.join(SCRIPT_DIR, "mqtt-auth-biscuit")
+BENCHMARKS_DIR = os.path.join(WORKDIR, "benchmarks")
+if BENCHMARKS_DIR not in sys.path:
+    sys.path.append(BENCHMARKS_DIR)
+
+from logging_utils import get_logger, setup_logging
+
+
+logger = get_logger(__name__)
+app = typer.Typer(add_completion=False)
 
 
 def require_cmd(cmd: str) -> None:
@@ -58,25 +68,25 @@ def run(cmd: List[str], cwd: str | None = None, env: dict | None = None) -> None
     subprocess.run(cmd, cwd=cwd, env=env, check=True)
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Run build, token generation, and scenario benchmarks."
-    )
-    parser.add_argument("--skip-build", action="store_true")
-    parser.add_argument("--skip-tokens", action="store_true")
-    parser.add_argument("--scenarios")
-    parser.add_argument("--clients")
-    parser.add_argument("--messages")
-    parser.add_argument("--qos")
-    parser.add_argument("--tls", action="store_true")
-    parser.add_argument("--tls-insecure", action="store_true")
-    parser.add_argument("--tls-ca-file")
-    parser.add_argument("--token-issuer-no-default-roles", action="store_true")
-    parser.add_argument("--biscuit-base64url", action="store_true")
-    parser.add_argument("--token-refresh-codes")
-    parser.add_argument("--compose-bin")
-    parser.add_argument("--no-cleanup", action="store_true")
-    args = parser.parse_args()
+@app.command()
+def main(
+    skip_build: bool = False,
+    skip_tokens: bool = False,
+    scenarios: str | None = None,
+    clients: str | None = None,
+    messages: str | None = None,
+    qos: str | None = None,
+    tls: bool = False,
+    tls_insecure: bool = False,
+    tls_ca_file: str | None = None,
+    token_issuer_no_default_roles: bool = False,
+    biscuit_base64url: bool = False,
+    token_refresh_codes: str | None = None,
+    compose_bin: str | None = None,
+    no_cleanup: bool = False,
+    log_level: str = typer.Option("INFO", "--log-level"),
+) -> None:
+    setup_logging(log_level)
 
     if not os.path.isdir(WORKDIR):
         raise SystemExit(f"Expected mqtt-auth-biscuit directory at {WORKDIR}")
@@ -84,15 +94,15 @@ def main() -> int:
     require_cmd("cargo")
     check_paho()
 
-    compose_bin = detect_compose_bin(args.compose_bin)
+    compose_bin = detect_compose_bin(compose_bin)
     compose_files = ["docker/docker-compose.yml"]
-    if args.tls:
+    if tls:
         compose_files.append("docker/docker-compose.tls.yml")
 
     def cleanup() -> None:
-        if args.no_cleanup:
+        if no_cleanup:
             return
-        print("🧹 Cleaning up Docker services...")
+        logger.info("Cleaning up Docker services...")
         cmd = compose_bin + compose_args(compose_files) + ["down"]
         subprocess.run(
             cmd, cwd=WORKDIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
@@ -100,50 +110,49 @@ def main() -> int:
 
     atexit.register(cleanup)
 
-    print(f"✅ Using docker compose: {' '.join(compose_bin)}")
+    logger.info("Using docker compose: %s", " ".join(compose_bin))
 
-    if not args.skip_build:
-        print("🔧 Building plugin...")
+    if not skip_build:
+        logger.info("Building plugin...")
         run(
             ["cargo", "build", "--release", "-p", "mosquitto-auth-biscuit"], cwd=WORKDIR
         )
     else:
-        print("⚠️  Skipping build (per --skip-build)")
+        logger.info("Skipping build (per --skip-build)")
 
-    if not args.skip_tokens:
-        print("🔑 Generating tokens...")
-        run(["cargo", "run", "-p", "gen-tokens"], cwd=WORKDIR)
+    if not skip_tokens:
+        logger.info("Generating tokens...")
+        run(["cargo", "run", "-p", "gen-tokens", "--bin", "gen-tokens"], cwd=WORKDIR)
     else:
-        print("⚠️  Skipping token generation (per --skip-tokens)")
+        logger.info("Skipping token generation (per --skip-tokens)")
 
     run_args: List[str] = []
-    if args.scenarios:
-        run_args += ["--scenarios", args.scenarios]
-    if args.clients:
-        run_args += ["--clients", args.clients]
-    if args.messages:
-        run_args += ["--messages", args.messages]
-    if args.qos:
-        run_args += ["--qos", args.qos]
-    if args.tls:
+    if scenarios:
+        run_args += ["--scenarios-arg", scenarios]
+    if clients:
+        run_args += ["--clients", clients]
+    if messages:
+        run_args += ["--messages", messages]
+    if qos:
+        run_args += ["--qos", qos]
+    if tls:
         run_args.append("--tls")
-    if args.tls_insecure:
+    if tls_insecure:
         run_args.append("--tls-insecure")
-    if args.tls_ca_file:
-        run_args += ["--tls-ca-file", args.tls_ca_file]
-    if args.token_issuer_no_default_roles:
+    if tls_ca_file:
+        run_args += ["--tls-ca-file", tls_ca_file]
+    if token_issuer_no_default_roles:
         run_args.append("--token-issuer-no-default-roles")
-    if args.biscuit_base64url:
+    if biscuit_base64url:
         run_args.append("--biscuit-base64url")
-    if args.token_refresh_codes:
-        run_args += ["--token-refresh-codes", args.token_refresh_codes]
+    if token_refresh_codes:
+        run_args += ["--token-refresh-codes", token_refresh_codes]
 
-    print("🚀 Running scenarios...")
+    logger.info("Running scenarios...")
     env = os.environ.copy()
     env["DOCKER_COMPOSE_BIN"] = " ".join(compose_bin)
     run(["python3", "benchmarks/run_scenarios.py", *run_args], cwd=WORKDIR, env=env)
-    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    app()

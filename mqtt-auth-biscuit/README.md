@@ -127,6 +127,9 @@ The main entrypoint is:
 
 `benchmarks/run_scenarios.py`
 
+For running the benchmark scripts:
+  - Install dependencies: `uv pip install -r benchmarks/requirements.txt`
+
 `benchmarks/metrics_collector.py` remains available as a legacy single-run
 collector.
 

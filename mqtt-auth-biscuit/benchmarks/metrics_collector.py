@@ -1,9 +1,15 @@
-import argparse
 import json
 import statistics
 import time
 
 import paho.mqtt.client as mqtt
+import typer
+
+from logging_utils import get_logger, setup_logging
+
+
+logger = get_logger(__name__)
+app = typer.Typer(add_completion=False)
 
 
 def run_benchmark(
@@ -21,7 +27,7 @@ def run_benchmark(
 
     def on_connect(client, userdata, flags, rc, properties=None):
         if rc != 0:
-            print(f"      Connection failed with code {rc}")
+            logger.warning("Connection failed with code %s", rc)
 
     def on_publish(client, userdata, mid, reason_code=None, properties=None):
         latencies.append(time.time() - userdata["start_time"])
@@ -44,7 +50,7 @@ def run_benchmark(
     try:
         client.connect(host, port, 60)
     except Exception as e:
-        print(f"      Failed to connect: {e}")
+        logger.error("Failed to connect: %s", e)
         return []
 
     client.loop_start()
@@ -53,7 +59,7 @@ def run_benchmark(
         userdata["start_time"] = time.time()
         res = client.publish(topic, f"msg {i}", qos=1)
         if res.rc != mqtt.MQTT_ERR_SUCCESS:
-            print(f"      Publish error: {res.rc}")
+            logger.warning("Publish error: %s", res.rc)
         time.sleep(0.01)
 
     time.sleep(1)  # Wait for final messages
@@ -63,42 +69,47 @@ def run_benchmark(
     return latencies
 
 
-if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="localhost")
-    ap.add_argument("--port", type=int, default=1883)
-    ap.add_argument("--tls", action="store_true")
-    ap.add_argument("--tls-ca-file")
-    ap.add_argument("--tls-insecure", action="store_true")
-    ap.add_argument("--messages", type=int, default=100)
-    args = ap.parse_args()
-
+@app.command()
+def main(
+    host: str = "localhost",
+    port: int = 1883,
+    tls: bool = False,
+    tls_ca_file: str | None = None,
+    tls_insecure: bool = False,
+    messages: int = 100,
+    log_level: str = typer.Option("INFO", "--log-level"),
+):
+    setup_logging(log_level)
     with open("benchmarks/tokens.json", "r") as f:
         tokens = json.load(f)
 
     results = {}
 
     for token_type in ["jwt", "biscuit"]:
-        print(f"Benchmarking {token_type}...")
+        logger.info("Benchmarking %s...", token_type)
         latencies = run_benchmark(
-            args.host,
-            args.port,
+            host,
+            port,
             token_type,
             tokens[token_type],
             "sensors/client_1/temp",
-            message_count=args.messages,
-            tls_enabled=args.tls,
-            tls_ca_file=args.tls_ca_file,
-            tls_insecure=args.tls_insecure,
+            message_count=messages,
+            tls_enabled=tls,
+            tls_ca_file=tls_ca_file,
+            tls_insecure=tls_insecure,
         )
         results[token_type] = {
             "median": statistics.median(latencies) * 1000,
             "mean": statistics.mean(latencies) * 1000,
             "stdev": statistics.stdev(latencies) * 1000 if len(latencies) > 1 else 0,
         }
-        print(f"  Median: {results[token_type]['median']:.2f} ms")
-        print(f"  Mean:   {results[token_type]['mean']:.2f} ms")
+        logger.info("Median: %.2f ms", results[token_type]["median"])
+        logger.info("Mean:   %.2f ms", results[token_type]["mean"])
 
     with open("benchmarks/results.json", "w") as f:
         json.dump(results, f, indent=2)
-    print("\nResults saved to benchmarks/results.json")
+    logger.info("Results saved to benchmarks/results.json")
+
+
+if __name__ == "__main__":
+    app()

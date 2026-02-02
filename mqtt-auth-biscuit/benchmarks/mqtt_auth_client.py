@@ -1,8 +1,11 @@
-import argparse
 import json
 import socket
 import ssl
 import time
+
+import typer
+
+from logging_utils import get_logger, setup_logging
 
 
 def _enc_varint(n: int) -> bytes:
@@ -117,34 +120,39 @@ def _build_disconnect(reason_code: int = 0) -> bytes:
     return fixed + vh
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="localhost")
-    ap.add_argument("--port", type=int, default=1883)
-    ap.add_argument("--client-id", default="client_auth")
-    ap.add_argument("--auth-method", default="token")
-    ap.add_argument("--token1", required=True)
-    ap.add_argument("--token2", required=True)
-    ap.add_argument("--sleep", type=float, default=6.0)
-    ap.add_argument("--tls", action="store_true")
-    ap.add_argument("--tls-ca-file")
-    ap.add_argument("--tls-insecure", action="store_true")
-    args = ap.parse_args()
+logger = get_logger(__name__)
+app = typer.Typer(add_completion=False)
 
+
+@app.command()
+def main(
+    host: str = "localhost",
+    port: int = 1883,
+    client_id: str = "client_auth",
+    auth_method: str = "token",
+    token1: str = typer.Option(..., "--token1"),
+    token2: str = typer.Option(..., "--token2"),
+    sleep: float = 6.0,
+    tls: bool = False,
+    tls_ca_file: str | None = None,
+    tls_insecure: bool = False,
+    log_level: str = typer.Option("INFO", "--log-level"),
+):
+    setup_logging(log_level)
     raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     raw_sock.settimeout(10)
     sock: socket.socket = raw_sock
-    if args.tls:
-        ctx = ssl.create_default_context(cafile=args.tls_ca_file)
-        if args.tls_insecure:
+    if tls:
+        ctx = ssl.create_default_context(cafile=tls_ca_file)
+        if tls_insecure:
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
-        sock = ctx.wrap_socket(raw_sock, server_hostname=args.host)
+        sock = ctx.wrap_socket(raw_sock, server_hostname=host)
 
     t0 = time.perf_counter()
-    sock.connect((args.host, args.port))
+    sock.connect((host, port))
     sock.sendall(
-        _build_connect(args.client_id, args.auth_method, args.token1.encode("utf-8"))
+        _build_connect(client_id, auth_method, token1.encode("utf-8"))
     )
 
     pkt_type, payload = _recv_packet(sock)
@@ -159,10 +167,10 @@ def main():
 
     connect_ms = (t1 - t0) * 1000.0
 
-    time.sleep(args.sleep)
+    time.sleep(sleep)
 
     t2 = time.perf_counter()
-    sock.sendall(_build_auth(0x19, args.auth_method, args.token2.encode("utf-8")))
+    sock.sendall(_build_auth(0x19, auth_method, token2.encode("utf-8")))
 
     pkt_type2, payload2 = _recv_packet(sock)
     t3 = time.perf_counter()
@@ -182,8 +190,8 @@ def main():
         "reauth_payload_len": len(payload2),
     }
 
-    print(json.dumps(out, indent=2))
+    typer.echo(json.dumps(out, indent=2))
 
 
 if __name__ == "__main__":
-    main()
+    app()

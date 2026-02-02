@@ -1,10 +1,12 @@
-import argparse
 import json
 import os
-import ssl
 import subprocess
 import time
-import urllib.request
+
+import httpx
+import typer
+
+from logging_utils import get_logger, setup_logging
 
 
 def _compose_bin():
@@ -19,20 +21,24 @@ def _compose(args: list[str], compose_files: list[str]):
     subprocess.check_call(cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
 
 
-def _ssl_context(ca_file: str | None, insecure: bool) -> ssl.SSLContext | None:
-    if not insecure and not ca_file:
-        return None
-    ctx = ssl.create_default_context(cafile=ca_file)
+logger = get_logger(__name__)
+app = typer.Typer(add_completion=False)
+
+
+def _http_client(ca_file: str | None, insecure: bool) -> httpx.Client:
+    verify: bool | str = True
     if insecure:
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-    return ctx
+        verify = False
+    elif ca_file:
+        verify = ca_file
+    return httpx.Client(verify=verify, timeout=5.0)
 
 
 def _http_get(url: str, ca_file: str | None, insecure: bool):
-    ctx = _ssl_context(ca_file, insecure)
-    with urllib.request.urlopen(url, timeout=5, context=ctx) as resp:
-        return resp.status, resp.read().decode("utf-8")
+    with _http_client(ca_file, insecure) as client:
+        resp = client.get(url)
+        resp.raise_for_status()
+        return resp.status_code, resp.text
 
 
 def _health_check(name: str, base_url: str, ca_file: str | None, insecure: bool):
@@ -124,33 +130,35 @@ def _run_mqtt5_auth(
     return json.loads(out.decode("utf-8"))
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--tokens", default="benchmarks/tokens.json")
-    ap.add_argument("--clients", type=int, default=1)
-    ap.add_argument("--messages", type=int, default=1)
-    ap.add_argument("--no-docker", action="store_true")
-    ap.add_argument("--skip-mqtt5-auth", action="store_true")
-    ap.add_argument("--tls", action="store_true")
-    ap.add_argument("--tls-ca-file")
-    ap.add_argument("--tls-insecure", action="store_true")
-    ap.add_argument("--authz-base", help="Override Authz base URL")
-    ap.add_argument("--issuer-base", help="Override Token Issuer base URL")
-    ap.add_argument("--mqtt-host", help="Override MQTT broker host")
-    args = ap.parse_args()
+@app.command()
+def main(
+    tokens: str = "benchmarks/tokens.json",
+    clients: int = 1,
+    messages: int = 1,
+    no_docker: bool = False,
+    skip_mqtt5_auth: bool = False,
+    tls: bool = False,
+    tls_ca_file: str | None = None,
+    tls_insecure: bool = False,
+    authz_base: str | None = None,
+    issuer_base: str | None = None,
+    mqtt_host: str | None = None,
+    log_level: str = typer.Option("INFO", "--log-level"),
+):
+    setup_logging(log_level)
 
     repo_root = os.path.dirname(os.path.dirname(__file__))
-    tls_ca = args.tls_ca_file or ("docker/tls/ca.pem" if args.tls else None)
-    if args.tls and tls_ca and not os.path.exists(os.path.join(repo_root, tls_ca)):
+    tls_ca = tls_ca_file or ("docker/tls/ca.pem" if tls else None)
+    if tls and tls_ca and not os.path.exists(os.path.join(repo_root, tls_ca)):
         raise SystemExit(
             f"TLS enabled but CA file not found at {tls_ca}. Run docker/tls/generate_certs.sh"
         )
 
     compose_files = ["docker/docker-compose.yml"]
-    if args.tls:
+    if tls:
         compose_files.append("docker/docker-compose.tls.yml")
 
-    if not args.no_docker:
+    if not no_docker:
         _compose(
             [
                 "up",
@@ -167,27 +175,25 @@ def main():
         )
         time.sleep(1)
 
-    tokens_path = os.path.join(repo_root, args.tokens)
+    tokens_path = os.path.join(repo_root, tokens)
     with open(tokens_path, "r", encoding="utf-8") as f:
         tokens = json.load(f)
 
-    authz_base = args.authz_base or (
-        "https://localhost:8443" if args.tls else "http://localhost:8081"
+    authz_base = authz_base or ("https://localhost:8443" if tls else "http://localhost:8081")
+    issuer_base = issuer_base or (
+        "https://localhost:8444" if tls else "http://localhost:8082"
     )
-    issuer_base = args.issuer_base or (
-        "https://localhost:8444" if args.tls else "http://localhost:8082"
-    )
-    mqtt_host = args.mqtt_host or "localhost"
-    mqtt_port = 8883 if args.tls else 1883
+    mqtt_host = mqtt_host or "localhost"
+    mqtt_port = 8883 if tls else 1883
 
-    _health_check("authz", authz_base, tls_ca, args.tls_insecure)
-    _health_check("token-issuer", issuer_base, tls_ca, args.tls_insecure)
+    _health_check("authz", authz_base, tls_ca, tls_insecure)
+    _health_check("token-issuer", issuer_base, tls_ca, tls_insecure)
 
     results = {
         "tls": {
-            "enabled": args.tls,
+            "enabled": tls,
             "ca_file": tls_ca,
-            "insecure": args.tls_insecure,
+            "insecure": tls_insecure,
         },
         "loadgen": {},
     }
@@ -197,37 +203,37 @@ def main():
         tokens["jwt"],
         mqtt_host,
         mqtt_port,
-        args.clients,
-        args.messages,
-        args.tls,
+        clients,
+        messages,
+        tls,
         tls_ca,
-        args.tls_insecure,
+        tls_insecure,
     )
     results["loadgen"]["biscuit"] = _run_loadgen(
         "biscuit",
         tokens["biscuit"],
         mqtt_host,
         mqtt_port,
-        args.clients,
-        args.messages,
-        args.tls,
+        clients,
+        messages,
+        tls,
         tls_ca,
-        args.tls_insecure,
+        tls_insecure,
     )
 
-    if not args.skip_mqtt5_auth:
+    if not skip_mqtt5_auth:
         results["mqtt5_auth"] = _run_mqtt5_auth(
             mqtt_host,
             mqtt_port,
             tokens.get("jwt_short", tokens["jwt"]),
             tokens["jwt"],
-            args.tls,
+            tls,
             tls_ca,
-            args.tls_insecure,
+            tls_insecure,
         )
 
-    print(json.dumps(results, indent=2))
+    typer.echo(json.dumps(results, indent=2))
 
 
 if __name__ == "__main__":
-    main()
+    app()

@@ -1,10 +1,17 @@
-import argparse
-import csv
 import json
 import os
 from datetime import datetime, timezone
-from statistics import mean
+from typing import Any
 
+import numpy as np
+import pandas as pd
+import typer
+
+from logging_utils import get_logger, setup_logging
+
+
+logger = get_logger(__name__)
+app = typer.Typer(add_completion=False)
 
 METRIC_FIELDS = [
     "min_ms",
@@ -28,42 +35,33 @@ def _aggregate_values(values):
     clean = [v for v in values if v is not None]
     if not clean:
         return {"avg": None, "min": None, "max": None}
+    arr = np.array(clean, dtype=float)
     return {
-        "avg": mean(clean),
-        "min": min(clean),
-        "max": max(clean),
+        "avg": float(np.mean(arr)),
+        "min": float(np.min(arr)),
+        "max": float(np.max(arr)),
     }
 
 
 def _percentile(values, p):
     if not values:
         return None
-    sorted_vals = sorted(values)
-    if len(sorted_vals) == 1:
-        return sorted_vals[0]
-    k = (len(sorted_vals) - 1) * p
-    f = int(k)
-    c = min(f + 1, len(sorted_vals) - 1)
-    if f == c:
-        return sorted_vals[f]
-    d0 = sorted_vals[f] * (c - k)
-    d1 = sorted_vals[c] * (k - f)
-    return d0 + d1
+    return float(np.percentile(values, p * 100))
 
 
 def _aggregate_latency_values(values):
     clean = [v for v in values if v is not None]
     if not clean:
         return {field: None for field in METRIC_FIELDS}
-    clean.sort()
+    arr = np.array(clean, dtype=float)
     return {
-        "min_ms": clean[0],
-        "p50_ms": _percentile(clean, 0.5),
-        "p95_ms": _percentile(clean, 0.95),
-        "p99_ms": _percentile(clean, 0.99),
-        "max_ms": clean[-1],
-        "mean_ms": mean(clean),
-        "median_ms": clean[len(clean) // 2],
+        "min_ms": float(np.min(arr)),
+        "p50_ms": _percentile(arr, 0.5),
+        "p95_ms": _percentile(arr, 0.95),
+        "p99_ms": _percentile(arr, 0.99),
+        "max_ms": float(np.max(arr)),
+        "mean_ms": float(np.mean(arr)),
+        "median_ms": float(np.median(arr)),
     }
 
 
@@ -213,75 +211,22 @@ def _build_summary(input_dir):
     }
 
 
-def _format_csv_value(val):
-    if val is None:
-        return ""
-    if isinstance(val, bool):
-        return "true" if val else "false"
-    return f"{val}"
-
-
 def _write_csv(summary, path):
-    fields = [
-        "scenario",
-        "runs",
-        "token_len",
-        "jwt_grants_schema_version",
-        "jwt_default_grants_enabled",
-        "jwt_denies_schema_version",
-        "tls_enabled",
-        "throughput_avg",
-        "publish_throughput_avg",
-        "receive_throughput_avg",
-        "connect_p50_avg",
-        "connect_p95_avg",
-        "connect_p99_avg",
-        "publish_p50_avg",
-        "publish_p95_avg",
-        "publish_p99_avg",
-        "token_refresh_p50_avg",
-        "token_refresh_count_total",
-        "delegation_p50_avg",
-        "delegation_count_total",
-        "delegation_len_p50_avg",
-        "attenuation_p50_avg",
-        "attenuation_count_total",
-        "attenuation_len_p50_avg",
-        "errors_total",
-        "cpu_avg",
-        "memory_avg",
-        "mqtt5_connect_p50",
-        "mqtt5_connect_p95",
-        "mqtt5_connect_p99",
-        "mqtt5_connect_mean",
-        "mqtt5_connect_median",
-        "mqtt5_connect_min",
-        "mqtt5_connect_max",
-        "mqtt5_reauth_p50",
-        "mqtt5_reauth_p95",
-        "mqtt5_reauth_p99",
-        "mqtt5_reauth_mean",
-        "mqtt5_reauth_median",
-        "mqtt5_reauth_min",
-        "mqtt5_reauth_max",
-    ]
-
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
-        writer.writeheader()
-        for scenario in summary.get("scenarios", []):
-            loadgen = scenario.get("loadgen", {})
-            connect = loadgen.get("connect", {})
-            publish = loadgen.get("publish", {})
-            refresh = loadgen.get("token_refresh", {})
-            delegation = loadgen.get("delegation", {})
-            delegation_len = loadgen.get("delegation_len", {})
-            attenuation = loadgen.get("attenuation", {})
-            attenuation_len = loadgen.get("attenuation_len", {})
-            mqtt5 = scenario.get("mqtt5_auth") or {}
-            resources = scenario.get("resources", {})
-            token_metadata = scenario.get("token_metadata") or {}
-            row = {
+    rows: list[dict[str, Any]] = []
+    for scenario in summary.get("scenarios", []):
+        loadgen = scenario.get("loadgen", {})
+        connect = loadgen.get("connect", {})
+        publish = loadgen.get("publish", {})
+        refresh = loadgen.get("token_refresh", {})
+        delegation = loadgen.get("delegation", {})
+        delegation_len = loadgen.get("delegation_len", {})
+        attenuation = loadgen.get("attenuation", {})
+        attenuation_len = loadgen.get("attenuation_len", {})
+        mqtt5 = scenario.get("mqtt5_auth") or {}
+        resources = scenario.get("resources", {})
+        token_metadata = scenario.get("token_metadata") or {}
+        rows.append(
+            {
                 "scenario": scenario.get("scenario"),
                 "runs": scenario.get("runs"),
                 "token_len": scenario.get("token_len"),
@@ -296,12 +241,12 @@ def _write_csv(summary, path):
                 ),
                 "tls_enabled": (scenario.get("tls") or {}).get("enabled"),
                 "throughput_avg": (loadgen.get("throughput_mps") or {}).get("avg"),
-                "publish_throughput_avg": (loadgen.get("publish_throughput_mps") or {}).get(
-                    "avg"
-                ),
-                "receive_throughput_avg": (loadgen.get("receive_throughput_mps") or {}).get(
-                    "avg"
-                ),
+                "publish_throughput_avg": (
+                    loadgen.get("publish_throughput_mps") or {}
+                ).get("avg"),
+                "receive_throughput_avg": (
+                    loadgen.get("receive_throughput_mps") or {}
+                ).get("avg"),
                 "connect_p50_avg": (connect.get("p50_ms") or {}).get("avg"),
                 "connect_p95_avg": (connect.get("p95_ms") or {}).get("avg"),
                 "connect_p99_avg": (connect.get("p99_ms") or {}).get("avg"),
@@ -312,10 +257,14 @@ def _write_csv(summary, path):
                 "token_refresh_count_total": refresh.get("count_total"),
                 "delegation_p50_avg": (delegation.get("p50_ms") or {}).get("avg"),
                 "delegation_count_total": delegation.get("count_total"),
-                "delegation_len_p50_avg": (delegation_len.get("p50_ms") or {}).get("avg"),
+                "delegation_len_p50_avg": (delegation_len.get("p50_ms") or {}).get(
+                    "avg"
+                ),
                 "attenuation_p50_avg": (attenuation.get("p50_ms") or {}).get("avg"),
                 "attenuation_count_total": attenuation.get("count_total"),
-                "attenuation_len_p50_avg": (attenuation_len.get("p50_ms") or {}).get("avg"),
+                "attenuation_len_p50_avg": (attenuation_len.get("p50_ms") or {}).get(
+                    "avg"
+                ),
                 "errors_total": (scenario.get("errors") or {}).get("total"),
                 "cpu_avg": (resources.get("cpu") or {}).get("avg"),
                 "memory_avg": (resources.get("memory") or {}).get("avg"),
@@ -334,36 +283,36 @@ def _write_csv(summary, path):
                 "mqtt5_reauth_min": (mqtt5.get("reauth") or {}).get("min_ms"),
                 "mqtt5_reauth_max": (mqtt5.get("reauth") or {}).get("max_ms"),
             }
-            writer.writerow({k: _format_csv_value(v) for k, v in row.items()})
+        )
+    df = pd.DataFrame(rows)
+    df.to_csv(path, index=False)
 
 
-def main():
-    p = argparse.ArgumentParser(description="Aggregate scenario JSON results.")
-    p.add_argument(
-        "--input",
-        default="benchmarks/results",
-        help="Directory with scenario JSON files",
-    )
-    p.add_argument("--out-json", default="summary.json", help="Summary JSON filename")
-    p.add_argument("--out-csv", default="summary.csv", help="Summary CSV filename")
-    p.add_argument("--no-csv", action="store_true")
-    args = p.parse_args()
-
-    input_dir = os.path.abspath(args.input)
+@app.command()
+def main(
+    input: str = "benchmarks/results",
+    out_json: str = "summary.json",
+    out_csv: str = "summary.csv",
+    no_csv: bool = False,
+    log_level: str = typer.Option("INFO", "--log-level"),
+):
+    setup_logging(log_level)
+    input_dir = os.path.abspath(input)
     summary = _build_summary(input_dir)
 
-    out_json = args.out_json
-    if not os.path.isabs(out_json):
-        out_json = os.path.join(input_dir, out_json)
-    with open(out_json, "w", encoding="utf-8") as f:
+    out_json_path = out_json
+    if not os.path.isabs(out_json_path):
+        out_json_path = os.path.join(input_dir, out_json_path)
+    with open(out_json_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
-    if not args.no_csv:
-        out_csv = args.out_csv
-        if not os.path.isabs(out_csv):
-            out_csv = os.path.join(input_dir, out_csv)
-        _write_csv(summary, out_csv)
+    if not no_csv:
+        out_csv_path = out_csv
+        if not os.path.isabs(out_csv_path):
+            out_csv_path = os.path.join(input_dir, out_csv_path)
+        _write_csv(summary, out_csv_path)
+    logger.info("Summary written to %s", out_json_path)
 
 
 if __name__ == "__main__":
-    main()
+    app()

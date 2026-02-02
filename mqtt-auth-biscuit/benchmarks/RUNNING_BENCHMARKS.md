@@ -9,8 +9,8 @@ authentication plugin.
 
 - **Rust**: For building the plugin and token generator.
 - **Docker & Docker Compose**: For running the test environment.
-- **Python 3**: For running the metrics collector.
-  - Install dependency: `pip install paho-mqtt`
+- **Python 3**: For running the benchmark scripts.
+  - Install dependencies: `uv pip install -r benchmarks/requirements.txt`
 
 ## One-command run (recommended)
 
@@ -43,7 +43,7 @@ This generates `target/release/libmosquitto_auth_biscuit.so`.
 The benchmarking suite uses predefined tokens. Generate them with:
 
 ```bash
-cargo run -p gen-tokens
+cargo run -p gen-tokens --bin gen-tokens
 ```
 
 This will create/update `benchmarks/tokens.json` and write `docker/biscuit_public.key` for the Mosquitto plugin.

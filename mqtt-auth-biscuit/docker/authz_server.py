@@ -5,6 +5,14 @@ import ssl
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import sys
+
+BENCHMARKS_DIR = os.path.join(os.path.dirname(__file__), "..", "benchmarks")
+if BENCHMARKS_DIR not in sys.path:
+    sys.path.append(BENCHMARKS_DIR)
+
+from logging_utils import get_logger, setup_logging
+
 
 def _env_int(name: str, default: int) -> int:
     v = os.environ.get(name)
@@ -29,6 +37,7 @@ class State:
         self.topic_prefix = os.environ.get("AUTHZ_TOPIC_PREFIX", "sensors/")
 
 
+logger = get_logger(__name__)
 STATE = State()
 
 
@@ -112,10 +121,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         if os.environ.get("AUTHZ_LOG", "0") == "1":
-            super().log_message(fmt, *args)
+            logger.info(fmt, *args)
 
 
 def main() -> None:
+    setup_logging(os.environ.get("AUTHZ_LOG_LEVEL", "INFO"))
     host = os.environ.get("AUTHZ_HOST", "0.0.0.0")
     port = int(os.environ.get("AUTHZ_PORT", "8081"))
     tls_enabled = os.environ.get("AUTHZ_TLS", "0") in {"1", "true", "TRUE"}

@@ -4,9 +4,19 @@ use p256::SecretKey;
 use pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::env;
 use std::fs::File;
 use std::io::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+// Constants for reproducible benchmark fixtures
+const LONG_EXP: i64 = 2_000_000_000; // Year 2033
+const SHORT_TTL_SECS: i64 = 5;
+const BISCUIT_BLOCKS_MEDIUM: usize = 5;
+const BISCUIT_BLOCKS_LARGE: usize = 25;
+const BASE_TOPIC: &str = "sensors/client_1/temp";
+const TEST_JWT_SK_BYTES: [u8; 32] = [1u8; 32];
+const TEST_BISCUIT_ROOT_BYTES: [u8; 32] = [0u8; 32];
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -27,15 +37,20 @@ struct JwtGrant {
 }
 
 fn main() {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    let now = if let Ok(val) = env::var("GEN_TOKENS_FIXED_NOW") {
+        val.parse::<i64>()
+            .expect("GEN_TOKENS_FIXED_NOW must be int")
+    } else {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    };
     // JWT (ES256)
     // Deterministic private key material for reproducible tokens.
     // This private key is held by the token issuer (this generator) and is
     // never mounted into the Mosquitto container.
-    let jwt_sk_bytes = [1u8; 32];
+    let jwt_sk_bytes = TEST_JWT_SK_BYTES;
     let jwt_secret_key = SecretKey::from_slice(&jwt_sk_bytes).unwrap();
     let jwt_private_pem = jwt_secret_key.to_pkcs8_pem(LineEnding::LF).unwrap();
     let jwt_public_pem = jwt_secret_key
@@ -49,10 +64,10 @@ fn main() {
     let jwt_encoding_key = EncodingKey::from_ec_pem(jwt_private_pem.as_bytes()).unwrap();
 
     let jwt_long = {
-        let topic = "sensors/client_1/temp".to_string();
+        let topic = BASE_TOPIC.to_string();
         let claims = Claims {
             sub: "client_1".to_string(),
-            exp: 2000000000, // Year 2033
+            exp: LONG_EXP,
             roles: Some(vec!["admin".to_string()]),
             grants: Some(vec![
                 JwtGrant {
@@ -70,10 +85,10 @@ fn main() {
     };
 
     let jwt_deny = {
-        let topic = "sensors/client_1/temp".to_string();
+        let topic = BASE_TOPIC.to_string();
         let claims = Claims {
             sub: "client_1".to_string(),
-            exp: 2000000000, // Year 2033
+            exp: LONG_EXP,
             roles: Some(vec!["admin".to_string()]),
             grants: Some(vec![
                 JwtGrant {
@@ -94,10 +109,10 @@ fn main() {
     };
 
     let jwt_short = {
-        let topic = "sensors/client_1/temp".to_string();
+        let topic = BASE_TOPIC.to_string();
         let claims = Claims {
             sub: "client_1".to_string(),
-            exp: now + 5,
+            exp: now + SHORT_TTL_SECS,
             roles: Some(vec!["admin".to_string()]),
             grants: Some(vec![
                 JwtGrant {
@@ -115,7 +130,7 @@ fn main() {
     };
 
     // Biscuit
-    let root_bytes = [0u8; 32];
+    let root_bytes = TEST_BISCUIT_ROOT_BYTES;
     let root_keypair = KeyPair::from(
         &PrivateKey::from_bytes(&root_bytes, biscuit_auth::Algorithm::Ed25519).unwrap(),
     );
@@ -131,12 +146,12 @@ fn main() {
         .unwrap();
 
     let biscuit_short = {
-        let exp = now + 5;
-        let check_src = format!("check if time($t), $t < {exp}");
+        let exp = now + SHORT_TTL_SECS;
+        let check_src = format!("check if time($t), $t < {}", exp);
         let b = BlockBuilder::new()
             .check(check_src.as_str())
             .unwrap()
-            .fact(format!("expires_at({exp})").as_str())
+            .fact(format!("expires_at({})", exp).as_str())
             .unwrap();
         biscuit_base.append(b).unwrap()
     };
@@ -145,7 +160,7 @@ fn main() {
 
     let biscuit_5_blocks = {
         let mut t = biscuit_base.clone();
-        for _ in 0..4 {
+        for _ in 0..(BISCUIT_BLOCKS_MEDIUM - 1) {
             let b = BlockBuilder::new();
             t = t.append(b).unwrap();
         }
@@ -154,7 +169,7 @@ fn main() {
 
     let biscuit_25_blocks = {
         let mut t = biscuit_base.clone();
-        for _ in 0..24 {
+        for _ in 0..(BISCUIT_BLOCKS_LARGE - 1) {
             let b = BlockBuilder::new();
             t = t.append(b).unwrap();
         }

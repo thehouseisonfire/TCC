@@ -5,6 +5,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from typing import List
 
 import typer
@@ -122,7 +123,13 @@ def main(
 
     if not skip_tokens:
         logger.info("Generating tokens...")
-        run(["cargo", "run", "-p", "gen-tokens", "--bin", "gen-tokens"], cwd=WORKDIR)
+        token_env = os.environ.copy()
+        token_env["GEN_TOKENS_FIXED_NOW"] = str(int(time.time()))
+        run(
+            ["cargo", "run", "-p", "gen-tokens", "--bin", "gen-tokens"],
+            cwd=WORKDIR,
+            env=token_env,
+        )
     else:
         logger.info("Skipping token generation (per --skip-tokens)")
 

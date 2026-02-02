@@ -132,8 +132,7 @@ fn load_public_key(args: &Args) -> Result<PublicKey, String> {
             .trim()
             .to_string()
     } else {
-        env::var("BISCUIT_PUBLIC_KEY_HEX")
-            .map_err(|_| "public key hex required".to_string())?
+        env::var("BISCUIT_PUBLIC_KEY_HEX").map_err(|_| "public key hex required".to_string())?
     };
 
     let bytes = hex::decode(hex_value.trim()).map_err(|e| format!("invalid hex: {e}"))?;
@@ -162,8 +161,8 @@ fn main() -> Result<(), String> {
     let token_bytes = engine
         .decode(token.trim())
         .map_err(|e| format!("token decode failed: {e}"))?;
-    let biscuit = Biscuit::from(&token_bytes, &public_key)
-        .map_err(|e| format!("token parse failed: {e}"))?;
+    let biscuit =
+        Biscuit::from(&token_bytes, public_key).map_err(|e| format!("token parse failed: {e}"))?;
 
     let mut block = BlockBuilder::new();
     let mut added = false;

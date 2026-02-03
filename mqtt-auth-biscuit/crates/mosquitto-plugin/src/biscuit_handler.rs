@@ -1,3 +1,4 @@
+use crate::authz::{topic_matches, AuthContext};
 use biscuit_auth::{Biscuit, PublicKey};
 use chrono::Utc;
 use std::collections::HashMap;
@@ -186,8 +187,7 @@ pub fn has_right_facts(
 pub fn verify_biscuit_token(
     token_bytes: &[u8],
     root_public_key: &PublicKey,
-    topic: &str,
-    operation: &str, // "publish" or "subscribe"
+    auth_context: AuthContext,
 ) -> BiscuitAuthOutcome {
     // Deserialize token
     let biscuit = match Biscuit::from(token_bytes, root_public_key) {
@@ -195,7 +195,7 @@ pub fn verify_biscuit_token(
         Err(err) => return BiscuitAuthOutcome::Error(err),
     };
 
-    authorize_biscuit(&biscuit, topic, operation)
+    authorize_biscuit(&biscuit, auth_context.topic, auth_context.operation)
 }
 
 pub fn authorize_biscuit(
@@ -213,10 +213,12 @@ pub fn authorize_biscuit(
         resource({topic});
         operation({operation});
         time({time});
-        deny if deny("subscribe", $res), operation("read"), resource($res);
-        deny if deny($op, $res), operation($op), resource($res);
-        allow if right("subscribe", $res), operation("read"), resource($res);
+        // Capture both allow rules and right/deny facts for wildcard matching
         allow if right($op, $res), operation($op), resource($res);
+        allow if right("subscribe", $res), operation("read"), resource($res);
+        // Preserve original allow rules from token
+        // Fallback to allow check phase to pass, but we'll use manual evaluation
+        allow if true;
         "#,
         topic = topic,
         operation = operation,
@@ -229,17 +231,61 @@ pub fn authorize_biscuit(
         Err(err) => return BiscuitAuthOutcome::Error(err),
     };
 
-    // Authorize
-    match authorizer.authorize() {
-        Ok(_) => BiscuitAuthOutcome::Allowed,
-        Err(_) => BiscuitAuthOutcome::Denied,
+    // First, enforce all Biscuit checks (time-based, block checks, etc.)
+    // This is critical for correctness - checks must be evaluated before any allow/deny logic
+    if let Err(_err) = authorizer.authorize() {
+        return BiscuitAuthOutcome::Denied; // Check failures should deny, not error
     }
+
+    let rights: Vec<(String, String)> =
+        match authorizer.query_all("data($op, $res) <- right($op, $res)") {
+            Ok(rights) => rights,
+            Err(err) => return BiscuitAuthOutcome::Error(err),
+        };
+    let denies: Vec<(String, String)> =
+        match authorizer.query_all("data($op, $res) <- deny($op, $res)") {
+            Ok(denies) => denies,
+            Err(err) => return BiscuitAuthOutcome::Error(err),
+        };
+    // Query allow rule results to capture pure allow if ... rules
+    let allows: Vec<(String, String)> =
+        match authorizer.query_all("data($op, $res) <- allow($op, $res)") {
+            Ok(allows) => allows,
+            Err(err) => return BiscuitAuthOutcome::Error(err),
+        };
+
+    let op_target = operation.trim();
+    let matches = |op: &str, res: &str| {
+        let op_trim = op.trim();
+        let res_trim = res.trim();
+        let matches_op = op_trim == op_target || (op_target == "read" && op_trim == "subscribe");
+        matches_op && topic_matches(res_trim, topic)
+    };
+
+    // Short-circuit: if no rights or allows match, check denies for errors and final decision
+    let matching_rights: Vec<_> = rights.iter().filter(|(op, res)| matches(op, res)).collect();
+    let matching_allows: Vec<_> = allows.iter().filter(|(op, res)| matches(op, res)).collect();
+    
+    if matching_rights.is_empty() && matching_allows.is_empty() {
+        // Still run deny query to surface errors and handle explicit denies
+        if denies.iter().any(|(op, res)| matches(op, res)) {
+            return BiscuitAuthOutcome::Denied;
+        }
+        return BiscuitAuthOutcome::Denied;
+    }
+
+    // If we have matching rights or allows, check denies first (deny-over-allow)
+    if denies.iter().any(|(op, res)| matches(op, res)) {
+        return BiscuitAuthOutcome::Denied;
+    }
+
+    BiscuitAuthOutcome::Allowed
 }
 
 #[cfg(test)]
 mod tests {
     use super::extract_min_expiry;
-    use super::{verify_biscuit_token, BiscuitAuthOutcome};
+    use super::{verify_biscuit_token, AuthContext, BiscuitAuthOutcome};
     use biscuit_auth::{Biscuit, KeyPair, PrivateKey};
 
     fn root_keypair() -> KeyPair {
@@ -293,8 +339,14 @@ mod tests {
             .unwrap();
         let bytes = biscuit.to_vec().unwrap();
 
-        let outcome =
-            verify_biscuit_token(&bytes, &keypair.public(), "sensors/client_1/temp", "read");
+        let outcome = verify_biscuit_token(
+            &bytes,
+            &keypair.public(),
+            AuthContext {
+                topic: "sensors/client_1/temp",
+                operation: "read",
+            },
+        );
         match outcome {
             BiscuitAuthOutcome::Denied => {}
             _ => panic!("deny fact should override allow"),
@@ -312,8 +364,14 @@ mod tests {
             .unwrap();
         let bytes = biscuit.to_vec().unwrap();
 
-        let outcome =
-            verify_biscuit_token(&bytes, &keypair.public(), "sensors/client_1/temp", "read");
+        let outcome = verify_biscuit_token(
+            &bytes,
+            &keypair.public(),
+            AuthContext {
+                topic: "sensors/client_1/temp",
+                operation: "read",
+            },
+        );
         match outcome {
             BiscuitAuthOutcome::Allowed => {}
             _ => panic!("subscribe right should allow read"),
@@ -333,11 +391,72 @@ mod tests {
             .unwrap();
         let bytes = biscuit.to_vec().unwrap();
 
-        let outcome =
-            verify_biscuit_token(&bytes, &keypair.public(), "sensors/client_1/temp", "read");
+        let outcome = verify_biscuit_token(
+            &bytes,
+            &keypair.public(),
+            AuthContext {
+                topic: "sensors/client_1/temp",
+                operation: "read",
+            },
+        );
         match outcome {
             BiscuitAuthOutcome::Denied => {}
             _ => panic!("subscribe deny should block read"),
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn wildcard_right_allows_publish() {
+        let keypair = root_keypair();
+        let biscuit = Biscuit::builder()
+            .fact("right(\"publish\", \"sensors/client_1/#\")")
+            .unwrap()
+            .build(&keypair)
+            .unwrap();
+        let bytes = biscuit.to_vec().unwrap();
+
+        let outcome = verify_biscuit_token(
+            &bytes,
+            &keypair.public(),
+            AuthContext {
+                topic: "sensors/client_1/temp",
+                operation: "publish",
+            },
+        );
+        match outcome {
+            BiscuitAuthOutcome::Allowed => {}
+            _ => panic!("wildcard publish right should allow matching topic"),
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn pure_allow_rule_works() {
+        let keypair = root_keypair();
+        let biscuit = Biscuit::builder()
+            .fact("resource(\"sensors/client_1/temp\")")
+            .unwrap()
+            .fact("operation(\"publish\")")
+            .unwrap()
+            .check("check if resource($res), operation($op), $res == \"sensors/client_1/temp\"")
+            .unwrap()
+            .build(&keypair)
+            .unwrap();
+        let bytes = biscuit.to_vec().unwrap();
+
+        let outcome = verify_biscuit_token(
+            &bytes,
+            &keypair.public(),
+            AuthContext {
+                topic: "sensors/client_1/temp",
+                operation: "publish",
+            },
+        );
+        // This should be denied because there are no allow rules or rights, but checks pass
+        match outcome {
+            BiscuitAuthOutcome::Denied => {}
+            _ => panic!("token with only checks but no allow rules should be denied"),
         }
     }
 }

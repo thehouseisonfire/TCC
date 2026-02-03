@@ -124,6 +124,13 @@ Scenario coverage:
 - `BIS-ATTENUATE-DENY` adds a deny fact plus a resource check (template-driven
   on the client id).
 - `BIS-ATTENUATE-OP-ONLY` restricts only the operation without a topic check.
+- `POLICY-COMPLEX-1/5/25` exercise empty-block chain length (signature chain overhead).
+- `POLICY-COMPLEX-LOW/MED/HIGH` exercise richer Datalog rules (role/group, scoped ownership,
+  capability, region/device constraints) with the same topic/operation to isolate authorizer
+  evaluation cost.
+
+Scenario outputs include a `policy_complexity.kind` marker for these runs (currently
+`"datalog"`) to distinguish them from block-chain length scenarios in downstream analysis.
 
 **Analysis note:** attenuation/delegation scenarios are Biscuit-only capability
 tests. Scenario outputs include `capability_flags.biscuit_only=true` to mark

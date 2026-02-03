@@ -180,6 +180,9 @@ MQTT v5 reauthentication microbenchmark:
 | POLICY-COMPLEX-1              | Biscuit    | Pub/Sub          | 50      | 1           | 1               | ✅ Implemented |
 | POLICY-COMPLEX-5              | Biscuit    | Pub/Sub          | 50      | 1           | 1               | ✅ Implemented |
 | POLICY-COMPLEX-25             | Biscuit    | Pub/Sub          | 50      | 1           | 1               | ✅ Implemented |
+| POLICY-COMPLEX-LOW            | Biscuit    | Pub/Sub          | 50      | 1           | 1               | ✅ Implemented |
+| POLICY-COMPLEX-MED            | Biscuit    | Pub/Sub          | 50      | 1           | 1               | ✅ Implemented |
+| POLICY-COMPLEX-HIGH           | Biscuit    | Pub/Sub          | 50      | 1           | 1               | ✅ Implemented |
 | JWT-HTTP-200MS                | JWT        | HTTP Authz       | 50      | 1           | 1               | ✅ Implemented |
 | JWT-HTTP-1000MS               | JWT        | HTTP Authz       | 50      | 1           | 1               | ✅ Implemented |
 | HYBRID-AUTHZ-DOWN             | JWT        | Hybrid           | 50      | 1           | 1               | ✅ Implemented |
@@ -214,7 +217,7 @@ MQTT v5 reauthentication microbenchmark:
 The harness includes scenarios aligned to the proposal themes:
 
 - **Baseline token-only**: JWT vs Biscuit
-- **Policy complexity**: Biscuit block count scaling (e.g., 1/5/25)
+- **Policy complexity**: Biscuit block count scaling (1/5/25) and Datalog rule complexity (LOW/MED/HIGH)
 - **External authorization**: HTTP authz latency and failure injection
 - **Hybrid contingency**: HTTP preferred, fallback on HTTP failure
 - **Network impairment**:
@@ -324,32 +327,32 @@ machine and record the first results/known issues).
 ## 9) Open Issues (Next Steps, Grouped)
 
 ### **Priority Tier 1: Core Functionality**
-1. Issue 4: Harden HTTP policy backend (used in many scenarios, partially implemented)
-2. Issue 9: Document scenario policies (ensure fair comparison)
-3. Issue 17: QoS 0/2 implementation (ARTICLE.MD requirements)
-4. Issue 20.1: Verify ACL_CHECK subtypes (authorization correctness)
+1. Issue 9: Document scenario policies (ensure fair comparison)
+2. Issue 17: QoS 0/2 implementation (ARTICLE.MD requirements)
+3. Issue 20.1: Verify ACL_CHECK subtypes (authorization correctness)
 
 ### **Priority Tier 2: Measurement Accuracy**  
-5. Issue 14: Add iperf3 baseline (throughput interpretation)
-6. Issue 18: Remove Biscuit Base64 (MTU fragmentation bias)
-7. Issue 19: MOSQ_EVT_MESSAGE fan-out validation (per-subscriber costs)
+1. Issue 14: Add iperf3 baseline (throughput interpretation)
+2. Issue 18: Remove Biscuit Base64 (MTU fragmentation bias)
+3. Issue 19: MOSQ_EVT_MESSAGE fan-out validation (per-subscriber costs)
 
 ### **Priority Tier 3: Enhanced Analysis**
-8. Issue 16: Add perf profiling (CPU analysis)
-9. Issue 8.2: Containerized benchmark topology
-10. Issue 13: emqtt-bench integration
-11. Issue 15: tcpdump fragmentation analysis
-12. Issue 20: Define CONTROL callback semantics
-13. Issue 21: Expand Biscuit authorizer (if current template insufficient)
-14. Issue 22: Strengthen SQLite RBAC (if policies too simple)
-15. Issue 23: Proactive client reauthentication
-16. Issue 24: Multi-step enhanced auth decision
-17. Issue 25: Optional ACL_READ full authz flag
-18. Issue 28: Verify static-policy coverage
-19. Issue 29: Anonymous flow scenario
-20. Issue 30: Dynamic-policy ACL_READ fan-out
-21. Issue 31: Control-triggered kick/re-auth
-22. Issue 32: Control-triggered ACL_READ + notify
+1. Issue 16: Add perf profiling (CPU analysis)
+2. Issue 8.2: Containerized benchmark topology
+3. Issue 13: emqtt-bench integration
+4. Issue 15: tcpdump fragmentation analysis
+5. Issue 20: Define CONTROL callback semantics
+6. Issue 21: Expand Biscuit authorizer (if current template insufficient)
+7. Issue 22: Strengthen SQLite RBAC (if policies too simple)
+8. Issue 23: Proactive client reauthentication
+9. Issue 24: Multi-step enhanced auth decision
+10. Issue 25: Optional ACL_READ full authz flag
+11. Issue 28: Verify static-policy coverage
+12. Issue 29: Anonymous flow scenario
+13. Issue 30: Dynamic-policy ACL_READ fan-out
+14. Issue 31: Control-triggered kick/re-auth
+15. Issue 32: Control-triggered ACL_READ + notify
+16. Issue 33: Enhance HTTP policy expressiveness for parity
 
 ---
 
@@ -595,6 +598,30 @@ machine and record the first results/known issues).
       during the run (e.g., every N seconds), to simulate dynamic policy updates
     - Ensure scenarios document when policy churn is enabled and how it affects
       cache validity
+
+- [ ] **Issue 33: Enhance HTTP policy expressiveness for parity with token-based
+    authorization**
+  - Goal: Improve HTTP policy backend to support complex authorization rules
+    comparable to JWT/Biscuit token policies, enabling fair policy complexity
+    comparisons.
+  - Current issue: HTTP policy only supports simple topic prefix matching and
+    lacks operation-specific, client-specific, and deny rule support, making it
+    less expressive than token-based policies (see `docker/authz_server.py`).
+  - Note: HTTP policy complexity scenarios are the recommended parity path for
+    JWT policy complexity comparisons, since JWT grants are otherwise limited to
+    flat `op/res` matches in token-only mode.
+  - Deliverable:
+    - Extend HTTP policy server to support:
+      - Operation-specific rules (different policies for publish/subscribe/read)
+      - Client/role-based access control using JWT claims or client ID
+      - Deny rules that override allow rules
+      - Complex topic patterns beyond simple prefix matching
+    - Add HTTP policy complexity scenarios (HTTP-POLICY-SIMPLE, HTTP-POLICY-MED,
+      HTTP-POLICY-COMPLEX) to test policy evaluation cost vs token-based
+    - Update scenario documentation to reflect HTTP policy capabilities and
+      limitations
+    - Ensure HTTP policy scenarios can be compared directly against equivalent
+      JWT/Biscuit policy scenarios
 
 - [ ] **Issue 21: Strengthen Biscuit authorizer template complexity**
   - Goal: Expand the Biscuit authorizer template beyond the minimal

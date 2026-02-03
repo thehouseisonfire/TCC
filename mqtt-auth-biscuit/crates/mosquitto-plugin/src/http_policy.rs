@@ -118,12 +118,9 @@ fn parse_http_response(resp: &[u8]) -> Result<AuthzResponse, String> {
     serde_json::from_slice(body).map_err(|e| format!("http invalid json: {e}"))
 }
 
-fn build_tls_config(
-    ca_file: Option<&str>,
-    tls_insecure: bool,
-) -> Result<Arc<ClientConfig>, String> {
+fn build_tls_config(tls_config: &TlsConfig) -> Result<Arc<ClientConfig>, String> {
     let mut root_store = RootCertStore::empty();
-    if let Some(path) = ca_file {
+    if let Some(path) = tls_config.ca_file {
         let pem = std::fs::read(path).map_err(|e| format!("read CA file failed: {e}"))?;
         let mut cursor = std::io::Cursor::new(pem);
         let certs = certs(&mut cursor)
@@ -141,7 +138,7 @@ fn build_tls_config(
 
     // SECURITY: tls_insecure disables certificate verification and is intended
     // only for controlled benchmark environments.
-    if tls_insecure {
+    if tls_config.tls_insecure {
         #[derive(Debug)]
         struct NoVerifier;
         impl ServerCertVerifier for NoVerifier {
@@ -179,7 +176,9 @@ fn build_tls_config(
 
             fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
                 vec![
-                    // ECDSA is an NSA psyop, only use ED25519
+                    // Excluding ECDSA (NIST P-curves) due to opaque parameter generation.
+                    // See: https://en.wikipedia.org/wiki/Dual_EC_DRBG.
+                    // I *highly* advise Ed25519 only.
                     SignatureScheme::ED25519,
                 ]
             }
@@ -198,20 +197,28 @@ fn build_tls_config(
     Ok(Arc::new(config))
 }
 
-pub fn check_http(
-    http_url: &str,
-    client_id: &str,
-    topic: &str,
-    access: i32,
-    token: Option<&str>,
-    ca_file: Option<&str>,
-    tls_insecure: bool,
-    timeout_seconds: u64,
-    max_response_bytes: u64,
-) -> Result<bool, String> {
-    let (scheme, rest) = if let Some(url) = http_url.strip_prefix("https://") {
+#[derive(Debug)]
+pub struct HttpCheckParams<'a> {
+    pub http_url: &'a str,
+    pub client_id: &'a str,
+    pub topic: &'a str,
+    pub access: i32,
+    pub token: Option<&'a str>,
+    pub tls_config: TlsConfig<'a>,
+    pub timeout_seconds: u64,
+    pub max_response_bytes: u64,
+}
+
+#[derive(Debug)]
+pub struct TlsConfig<'a> {
+    pub ca_file: Option<&'a str>,
+    pub tls_insecure: bool,
+}
+
+pub fn check_http(params: HttpCheckParams) -> Result<bool, String> {
+    let (scheme, rest) = if let Some(url) = params.http_url.strip_prefix("https://") {
         ("https", url)
-    } else if let Some(url) = http_url.strip_prefix("http://") {
+    } else if let Some(url) = params.http_url.strip_prefix("http://") {
         ("http", url)
     } else {
         return Err("Only http:// or https:// URLs are supported".to_string());
@@ -228,25 +235,25 @@ pub fn check_http(
     let mut payload = serde_json::Map::from_iter([
         (
             "client_id".to_string(),
-            Value::String(client_id.to_string()),
+            Value::String(params.client_id.to_string()),
         ),
-        ("topic".to_string(), Value::String(topic.to_string())),
-        ("access".to_string(), Value::Number(access.into())),
+        ("topic".to_string(), Value::String(params.topic.to_string())),
+        ("access".to_string(), Value::Number(params.access.into())),
     ]);
-    if let Some(t) = token {
+    if let Some(t) = params.token {
         payload.insert("token".to_string(), Value::String(t.to_string()));
     }
     let body = serde_json::to_vec(&Value::Object(payload))
         .map_err(|e| format!("http json encode failed: {e}"))?;
 
-    let max_bytes = usize::try_from(max_response_bytes)
+    let max_bytes = usize::try_from(params.max_response_bytes)
         .map_err(|_| "http max response bytes too large".to_string())?;
 
     let addr = resolve_socket_addr(host.as_str(), port)?;
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(timeout_seconds))
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(params.timeout_seconds))
         .map_err(|e| format!("http connect failed: {e}"))?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(timeout_seconds)))
+        .set_read_timeout(Some(Duration::from_secs(params.timeout_seconds)))
         .map_err(|e| format!("http set timeout failed: {e}"))?;
 
     let req = format!(
@@ -257,7 +264,7 @@ pub fn check_http(
     );
 
     let resp = if scheme == "https" {
-        let config = build_tls_config(ca_file, tls_insecure)?;
+        let config = build_tls_config(&params.tls_config)?;
         let server_name = ServerName::try_from(host.as_str())
             .map_err(|_| "invalid TLS server name".to_string())?
             .to_owned();

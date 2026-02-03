@@ -202,6 +202,102 @@ fn main() {
         biscuit_base.append(deny_block).unwrap()
     };
 
+    let biscuit_complex_base = Biscuit::builder()
+        .fact(r#"role("sensor")"#)
+        .unwrap()
+        .fact(r#"role("writer")"#)
+        .unwrap()
+        .fact(r#"group("telemetry")"#)
+        .unwrap()
+        .fact(r#"op_role("sensor", "publish")"#)
+        .unwrap()
+        .fact(r#"op_role("sensor", "subscribe")"#)
+        .unwrap()
+        .fact(r#"resource_group("sensors/client_1/temp", "telemetry")"#)
+        .unwrap()
+        .fact(r#"allow_group("telemetry")"#)
+        .unwrap()
+        .fact("expires_at(2000000000)")
+        .unwrap()
+        .rule(r#"allow_op($op) <- role("sensor"), op_role("sensor", $op)"#)
+        .unwrap()
+        .rule(r#"allow_res($res) <- resource_group($res, "telemetry"), allow_group("telemetry")"#)
+        .unwrap()
+        .rule(
+            r#"right($op, $res) <- allow_op($op), allow_res($res), operation($op), resource($res)"#,
+        )
+        .unwrap()
+        .build(&root_keypair)
+        .unwrap();
+
+    let biscuit_complex_low = biscuit_complex_base.clone();
+
+    let biscuit_complex_med = {
+        let mut t = biscuit_complex_base.clone();
+        let block_scope = BlockBuilder::new()
+            .fact(r#"scope("client_1")"#)
+            .unwrap()
+            .fact(r#"owner("sensors/client_1/temp", "client_1")"#)
+            .unwrap()
+            .fact(r#"allow_scope("client_1")"#)
+            .unwrap()
+            .rule(r#"scoped_res($res) <- owner($res, $c), allow_scope($c)"#)
+            .unwrap()
+            .rule(r#"allow_res($res) <- scoped_res($res), resource_group($res, "telemetry")"#)
+            .unwrap();
+        t = t.append(block_scope).unwrap();
+
+        let block_caps = BlockBuilder::new()
+            .fact(r#"capability("sensor", "pubsub")"#)
+            .unwrap()
+            .fact(r#"capability_op("pubsub", "publish")"#)
+            .unwrap()
+            .fact(r#"capability_op("pubsub", "subscribe")"#)
+            .unwrap()
+            .rule(
+                r#"allow_op($op) <- role("sensor"), capability("sensor", $cap), capability_op($cap, $op)"#,
+            )
+            .unwrap()
+            .check("check if time($t), $t < 2000000000")
+            .unwrap();
+        t.append(block_caps).unwrap()
+    };
+
+    let biscuit_complex_high = {
+        let mut t = biscuit_complex_med.clone();
+        let block_region = BlockBuilder::new()
+            .fact(r#"region("client_1", "lab")"#)
+            .unwrap()
+            .fact(r#"region_allow("lab")"#)
+            .unwrap()
+            .fact(r#"topic_region("sensors/client_1/temp", "lab")"#)
+            .unwrap()
+            .rule(r#"regional_res($res) <- topic_region($res, $r), region_allow($r)"#)
+            .unwrap()
+            .rule(r#"allow_res($res) <- scoped_res($res), regional_res($res)"#)
+            .unwrap();
+        t = t.append(block_region).unwrap();
+
+        let block_device = BlockBuilder::new()
+            .fact(r#"device("client_1", "sensor")"#)
+            .unwrap()
+            .fact(r#"device_class("sensor", "telemetry")"#)
+            .unwrap()
+            .fact(r#"class_op("telemetry", "publish")"#)
+            .unwrap()
+            .fact(r#"class_op("telemetry", "subscribe")"#)
+            .unwrap()
+            .rule(
+                r#"device_op($op) <- device($c, $class), device_class($class, $group), class_op($group, $op)"#,
+            )
+            .unwrap()
+            .rule(r#"allow_op($op) <- device_op($op), role("sensor")"#)
+            .unwrap()
+            .check("check if time($t), $t < 2000000000")
+            .unwrap();
+        t.append(block_device).unwrap()
+    };
+
     let biscuit_handoff = Biscuit::builder()
         .fact("right(\"publish\", \"delegation/handoff\")")
         .unwrap()
@@ -224,6 +320,12 @@ fn main() {
     let biscuit_deny_b64 = general_purpose::STANDARD.encode(biscuit_deny.to_vec().unwrap());
     let biscuit_short_b64 = general_purpose::STANDARD.encode(biscuit_short.to_vec().unwrap());
     let biscuit_handoff_b64 = general_purpose::STANDARD.encode(biscuit_handoff.to_vec().unwrap());
+    let biscuit_complex_low_b64 =
+        general_purpose::STANDARD.encode(biscuit_complex_low.to_vec().unwrap());
+    let biscuit_complex_med_b64 =
+        general_purpose::STANDARD.encode(biscuit_complex_med.to_vec().unwrap());
+    let biscuit_complex_high_b64 =
+        general_purpose::STANDARD.encode(biscuit_complex_high.to_vec().unwrap());
 
     let biscuit_pubkey_hex = hex::encode(root_keypair.public().to_bytes());
     std::fs::write("docker/biscuit_public.key", biscuit_pubkey_hex.as_bytes()).unwrap();
@@ -255,6 +357,9 @@ fn main() {
         "biscuit_deny": biscuit_deny_b64,
         "biscuit_short": biscuit_short_b64,
         "biscuit_delegation_handoff": biscuit_handoff_b64,
+        "biscuit_complex_low": biscuit_complex_low_b64,
+        "biscuit_complex_med": biscuit_complex_med_b64,
+        "biscuit_complex_high": biscuit_complex_high_b64,
         "biscuit_root_key_hex": biscuit_pubkey_hex
     });
 

@@ -20,9 +20,15 @@ fn access_to_operation(access: i32) -> &'static str {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub struct AuthContext<'a> {
+    pub topic: &'a str,
+    pub operation: &'a str, // "publish" or "subscribe"
+}
+
 #[cfg(test)]
 mod tests {
-    use super::topic_matches;
+    use super::{topic_matches, AuthContext};
 
     #[test]
     fn topic_matches_exact() {
@@ -82,12 +88,26 @@ mod tests {
             },
         ];
 
-        assert!(super::grants_allow(&grants, "read", topic));
-        assert!(super::grants_allow(&grants, "subscribe", topic));
+        assert!(super::grants_allow(
+            &grants,
+            AuthContext {
+                operation: "read",
+                topic
+            }
+        ));
+        assert!(super::grants_allow(
+            &grants,
+            AuthContext {
+                operation: "subscribe",
+                topic
+            }
+        ));
         assert!(!super::grants_allow(
             &grants,
-            "read",
-            "sensors/client_2/temp"
+            AuthContext {
+                operation: "read",
+                topic: "sensors/client_2/temp"
+            }
         ));
 
         let read_grants = vec![
@@ -100,11 +120,19 @@ mod tests {
                 res: "sensors/client_1/#".to_string(),
             },
         ];
-        assert!(super::grants_allow(&read_grants, "read", topic));
+        assert!(super::grants_allow(
+            &read_grants,
+            AuthContext {
+                operation: "read",
+                topic
+            }
+        ));
         assert!(!super::grants_allow(
             &read_grants,
-            "read",
-            "sensors/client_2/temp"
+            AuthContext {
+                operation: "read",
+                topic: "sensors/client_2/temp"
+            }
         ));
     }
 
@@ -128,9 +156,27 @@ mod tests {
             res: "sensors/client_1/temp".to_string(),
         }];
 
-        assert!(super::grants_allow(&grants, "read", topic));
-        assert!(super::grants_deny(&denies, "read", topic));
-        assert!(!super::grants_deny(&denies, "subscribe", topic));
+        assert!(super::grants_allow(
+            &grants,
+            AuthContext {
+                operation: "read",
+                topic
+            }
+        ));
+        assert!(super::grants_deny(
+            &denies,
+            AuthContext {
+                operation: "read",
+                topic
+            }
+        ));
+        assert!(!super::grants_deny(
+            &denies,
+            AuthContext {
+                operation: "subscribe",
+                topic
+            }
+        ));
     }
 
     #[test]
@@ -147,8 +193,20 @@ mod tests {
             res: "sensors/client_1/#".to_string(),
         }];
 
-        assert!(super::grants_allow(&grants, "read", topic));
-        assert!(super::grants_deny(&denies, "read", topic));
+        assert!(super::grants_allow(
+            &grants,
+            AuthContext {
+                operation: "read",
+                topic
+            }
+        ));
+        assert!(super::grants_deny(
+            &denies,
+            AuthContext {
+                operation: "read",
+                topic
+            }
+        ));
     }
 
     #[test]
@@ -180,7 +238,7 @@ fn is_valid_filter(filter: &str) -> bool {
     true
 }
 
-fn topic_matches(filter: &str, topic: &str) -> bool {
+pub(crate) fn topic_matches(filter: &str, topic: &str) -> bool {
     if !is_valid_filter(filter) {
         return false;
     }
@@ -209,42 +267,41 @@ fn topic_matches(filter: &str, topic: &str) -> bool {
     i == topic_parts.len()
 }
 
-fn grants_allow(grants: &[JwtGrant], operation: &str, topic: &str) -> bool {
-    let op = operation.trim();
+fn grants_allow(grants: &[JwtGrant], auth_context: AuthContext) -> bool {
+    let op = auth_context.operation.trim();
     if op == "read" {
-        let has_read = grants
-            .iter()
-            .any(|grant| grant.op.trim() == "read" && topic_matches(grant.res.trim(), topic));
+        let has_read = grants.iter().any(|grant| {
+            grant.op.trim() == "read" && topic_matches(grant.res.trim(), auth_context.topic)
+        });
         if has_read {
             return true;
         }
-        return grants
-            .iter()
-            .any(|grant| grant.op.trim() == "subscribe" && topic_matches(grant.res.trim(), topic));
+        return grants.iter().any(|grant| {
+            grant.op.trim() == "subscribe" && topic_matches(grant.res.trim(), auth_context.topic)
+        });
     }
 
     grants
         .iter()
-        .any(|grant| grant.op.trim() == op && topic_matches(grant.res.trim(), topic))
+        .any(|grant| grant.op.trim() == op && topic_matches(grant.res.trim(), auth_context.topic))
 }
 
-fn grants_deny(denies: &[JwtGrant], operation: &str, topic: &str) -> bool {
-    let op = operation.trim();
+fn grants_deny(denies: &[JwtGrant], auth_context: AuthContext) -> bool {
+    let op = auth_context.operation.trim();
     if op == "read" {
-        if denies
-            .iter()
-            .any(|deny| deny.op.trim() == "read" && topic_matches(deny.res.trim(), topic))
-        {
+        if denies.iter().any(|deny| {
+            deny.op.trim() == "read" && topic_matches(deny.res.trim(), auth_context.topic)
+        }) {
             return true;
         }
-        return denies
-            .iter()
-            .any(|deny| deny.op.trim() == "subscribe" && topic_matches(deny.res.trim(), topic));
+        return denies.iter().any(|deny| {
+            deny.op.trim() == "subscribe" && topic_matches(deny.res.trim(), auth_context.topic)
+        });
     }
 
     denies
         .iter()
-        .any(|deny| deny.op.trim() == op && topic_matches(deny.res.trim(), topic))
+        .any(|deny| deny.op.trim() == op && topic_matches(deny.res.trim(), auth_context.topic))
 }
 
 /// Lightweight authorization parameters using references to avoid allocations
@@ -284,12 +341,16 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
                     return AuthzOutcome::Denied;
                 };
                 let operation = access_to_operation(params.access);
+                let auth_context = AuthContext {
+                    topic: params.topic,
+                    operation,
+                };
                 if let Some(denies) = claims.denies.as_ref() {
-                    if grants_deny(denies, operation, params.topic) {
+                    if grants_deny(denies, auth_context) {
                         return AuthzOutcome::Denied;
                     }
                 }
-                if grants_allow(grants, operation, params.topic) {
+                if grants_allow(grants, auth_context) {
                     AuthzOutcome::Allowed
                 } else {
                     AuthzOutcome::Denied
@@ -317,17 +378,19 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
                     let Some(url) = params.http_url else {
                         return AuthzOutcome::Denied;
                     };
-                    let allowed = http_policy::check_http(
-                        url,
-                        params.client_id,
-                        params.topic,
-                        params.access,
-                        Some(raw),
-                        params.http_ca_file,
-                        params.http_tls_insecure,
-                        params.http_timeout_seconds,
-                        params.http_max_response_bytes,
-                    )
+                    let allowed = http_policy::check_http(http_policy::HttpCheckParams {
+                        http_url: url,
+                        client_id: params.client_id,
+                        topic: params.topic,
+                        access: params.access,
+                        token: Some(raw),
+                        tls_config: http_policy::TlsConfig {
+                            ca_file: params.http_ca_file,
+                            tls_insecure: params.http_tls_insecure,
+                        },
+                        timeout_seconds: params.http_timeout_seconds,
+                        max_response_bytes: params.http_max_response_bytes,
+                    })
                     .unwrap_or(false);
                     if allowed {
                         AuthzOutcome::Allowed
@@ -340,17 +403,19 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
                         return token_only();
                     };
 
-                    match http_policy::check_http(
-                        url,
-                        params.client_id,
-                        params.topic,
-                        params.access,
-                        Some(raw),
-                        params.http_ca_file,
-                        params.http_tls_insecure,
-                        params.http_timeout_seconds,
-                        params.http_max_response_bytes,
-                    ) {
+                    match http_policy::check_http(http_policy::HttpCheckParams {
+                        http_url: url,
+                        client_id: params.client_id,
+                        topic: params.topic,
+                        access: params.access,
+                        token: Some(raw),
+                        tls_config: http_policy::TlsConfig {
+                            ca_file: params.http_ca_file,
+                            tls_insecure: params.http_tls_insecure,
+                        },
+                        timeout_seconds: params.http_timeout_seconds,
+                        max_response_bytes: params.http_max_response_bytes,
+                    }) {
                         Ok(allowed) => {
                             if allowed {
                                 AuthzOutcome::Allowed
@@ -399,7 +464,14 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
                 let outcome = if let Some(biscuit) = biscuit {
                     authorize_biscuit(biscuit.as_ref(), params.topic, operation)
                 } else {
-                    verify_biscuit_token(bytes, params.biscuit_root_key, params.topic, operation)
+                    verify_biscuit_token(
+                        bytes,
+                        params.biscuit_root_key,
+                        AuthContext {
+                            topic: params.topic,
+                            operation,
+                        },
+                    )
                 };
                 match outcome {
                     BiscuitAuthOutcome::Allowed => AuthzOutcome::Allowed,
@@ -432,17 +504,19 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
                     let Some(url) = params.http_url else {
                         return AuthzOutcome::Denied;
                     };
-                    let allowed = http_policy::check_http(
-                        url,
-                        params.client_id,
-                        params.topic,
-                        params.access,
-                        None,
-                        params.http_ca_file,
-                        params.http_tls_insecure,
-                        params.http_timeout_seconds,
-                        params.http_max_response_bytes,
-                    )
+                    let allowed = http_policy::check_http(http_policy::HttpCheckParams {
+                        http_url: url,
+                        client_id: params.client_id,
+                        topic: params.topic,
+                        access: params.access,
+                        token: None,
+                        tls_config: http_policy::TlsConfig {
+                            ca_file: params.http_ca_file,
+                            tls_insecure: params.http_tls_insecure,
+                        },
+                        timeout_seconds: params.http_timeout_seconds,
+                        max_response_bytes: params.http_max_response_bytes,
+                    })
                     .unwrap_or(false);
                     if allowed {
                         AuthzOutcome::Allowed
@@ -455,17 +529,19 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
                         return token_only();
                     };
 
-                    match http_policy::check_http(
-                        url,
-                        params.client_id,
-                        params.topic,
-                        params.access,
-                        None,
-                        params.http_ca_file,
-                        params.http_tls_insecure,
-                        params.http_timeout_seconds,
-                        params.http_max_response_bytes,
-                    ) {
+                    match http_policy::check_http(http_policy::HttpCheckParams {
+                        http_url: url,
+                        client_id: params.client_id,
+                        topic: params.topic,
+                        access: params.access,
+                        token: None,
+                        tls_config: http_policy::TlsConfig {
+                            ca_file: params.http_ca_file,
+                            tls_insecure: params.http_tls_insecure,
+                        },
+                        timeout_seconds: params.http_timeout_seconds,
+                        max_response_bytes: params.http_max_response_bytes,
+                    }) {
                         Ok(allowed) => {
                             if allowed {
                                 AuthzOutcome::Allowed

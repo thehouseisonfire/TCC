@@ -520,6 +520,7 @@ def main(
                 "authz": None,
                 "netem": {"clear": True},
                 "message_size": 0,
+                "policy_complexity_kind": "block_chain",
             },
             "POLICY-COMPLEX-5": {
                 "mosquitto_conf": "./mosquitto.conf",
@@ -529,6 +530,7 @@ def main(
                 "authz": None,
                 "netem": {"clear": True},
                 "message_size": 0,
+                "policy_complexity_kind": "block_chain",
             },
             "POLICY-COMPLEX-25": {
                 "mosquitto_conf": "./mosquitto.conf",
@@ -538,6 +540,37 @@ def main(
                 "authz": None,
                 "netem": {"clear": True},
                 "message_size": 0,
+                "policy_complexity_kind": "block_chain",
+            },
+            "POLICY-COMPLEX-LOW": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit_complex_low"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+                "policy_complexity_kind": "datalog",
+            },
+            "POLICY-COMPLEX-MED": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit_complex_med"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+                "policy_complexity_kind": "datalog",
+            },
+            "POLICY-COMPLEX-HIGH": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit_complex_high"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+                "policy_complexity_kind": "datalog",
             },
             "STATIC-ACL-JWT": {
                 "mosquitto_conf": "./mosquitto_static.conf",
@@ -844,7 +877,7 @@ def main(
         )
         logger.info("Available scenarios:")
         logger.info(
-            "BASE-01, JWT-01, BIS-01, BIS-ATTENUATE-CLIENT, BIS-ATTENUATE-TTL, BIS-ATTENUATE-DENY, BIS-ATTENUATE-OP-ONLY, POLICY-COMPLEX-1, POLICY-COMPLEX-5, POLICY-COMPLEX-25"
+            "BASE-01, JWT-01, BIS-01, BIS-ATTENUATE-CLIENT, BIS-ATTENUATE-TTL, BIS-ATTENUATE-DENY, BIS-ATTENUATE-OP-ONLY, POLICY-COMPLEX-1, POLICY-COMPLEX-5, POLICY-COMPLEX-25, POLICY-COMPLEX-LOW, POLICY-COMPLEX-MED, POLICY-COMPLEX-HIGH"
         )
         logger.info("JWT-HTTP-200MS, JWT-HTTP-1000MS, HYBRID-AUTHZ-DOWN, MTU-200-JWT")
         logger.info("BIS-HTTP-200MS, JWT-HTTP-200MS-LOSS1, JWT-HTTP-200MS-LOSS5")
@@ -975,6 +1008,7 @@ def main(
             grants_default_enabled = not token_issuer_no_default_grants
 
         biscuit_only = bool(s.get("biscuit_attenuate") or s.get("biscuit_delegate"))
+        policy_complexity_kind = s.get("policy_complexity_kind")
         out_payload = {
             "scenario": s["id"],
             "token_len": token_len,
@@ -997,6 +1031,9 @@ def main(
             },
             "capability_flags": {
                 "biscuit_only": biscuit_only,
+            },
+            "policy_complexity": {
+                "kind": policy_complexity_kind,
             },
             "attenuation": s.get("biscuit_attenuate"),
             "delegation": s.get("biscuit_delegate"),

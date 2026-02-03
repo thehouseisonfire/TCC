@@ -178,9 +178,9 @@ be used in JWT-vs-Biscuit parity comparisons.
 
 ### 3.1 Parity gaps
 
-1. **Token-only wildcards:** JWT supports wildcard filters; Biscuit authorizer currently
-   checks exact resource strings. This makes JWT token-only policies more expressive unless
-   Biscuit rights are expanded per-topic.
+1. **Token-only wildcards:** JWT and Biscuit now both honor MQTT wildcard filters in
+   token-only mode via shared topic matching, so parity is achieved as long as
+   equivalent filters are used in both token formats.
 2. **Static ACL compound gate:** tokens currently include allow rules, so ACLs are not the
    sole policy source. This makes ACL performance harder to isolate.
 3. **SQLite policy simplicity:** only a single `acl` row is seeded (`client_1` publish
@@ -190,8 +190,8 @@ be used in JWT-vs-Biscuit parity comparisons.
 
 ### 3.2 Recommendations (for research-valid comparisons)
 
-1. **Token-only parity:** for JWT-vs-Biscuit comparisons, use **exact-match** JWT grants
-   (no `#`/`+` wildcards) that mirror the Biscuit rights to avoid expressiveness skew.
+1. **Token-only parity:** use equivalent topic filters (including wildcards) in both
+   JWT grants and Biscuit rights to avoid expressiveness skew.
 2. **Static ACL isolation:** issue tokens with **roles only** (no grants/rights) so the
    ACL file becomes the sole policy source; document the OR/compound gate if not.
 3. **SQLite parity:** expand the SQLite schema and seed data to mirror the JWT/Biscuit

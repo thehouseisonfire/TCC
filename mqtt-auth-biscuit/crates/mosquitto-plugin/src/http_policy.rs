@@ -6,10 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, ClientConnection, RootCertStore, StreamOwned};
 use rustls::{DigitallySignedStruct, SignatureScheme};
-use rustls_pemfile::certs;
 use webpki_roots::TLS_SERVER_ROOTS;
 
 #[derive(Deserialize)]
@@ -121,9 +121,8 @@ fn parse_http_response(resp: &[u8]) -> Result<AuthzResponse, String> {
 fn build_tls_config(tls_config: &TlsConfig) -> Result<Arc<ClientConfig>, String> {
     let mut root_store = RootCertStore::empty();
     if let Some(path) = tls_config.ca_file {
-        let pem = std::fs::read(path).map_err(|e| format!("read CA file failed: {e}"))?;
-        let mut cursor = std::io::Cursor::new(pem);
-        let certs = certs(&mut cursor)
+        let certs = CertificateDer::pem_file_iter(path)
+            .map_err(|e| format!("parse CA file failed: {e}"))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| format!("parse CA file failed: {e}"))?;
         for cert in certs {

@@ -231,8 +231,9 @@ pub fn authorize_biscuit(
         Err(err) => return BiscuitAuthOutcome::Error(err),
     };
 
-    // First, enforce all Biscuit checks (time-based, block checks, etc.)
-    // This is critical for correctness - checks must be evaluated before any allow/deny logic
+    // Enforce Biscuit checks (time-based, block checks, etc.). We intentionally
+    // ignore authorize()'s allow/deny decision here and perform allow/deny logic
+    // manually below to support MQTT wildcard matching.
     if let Err(_err) = authorizer.authorize() {
         return BiscuitAuthOutcome::Denied; // Check failures should deny, not error
     }
@@ -247,12 +248,6 @@ pub fn authorize_biscuit(
             Ok(denies) => denies,
             Err(err) => return BiscuitAuthOutcome::Error(err),
         };
-    // Query allow rule results to capture pure allow if ... rules
-    let allows: Vec<(String, String)> =
-        match authorizer.query_all("data($op, $res) <- allow($op, $res)") {
-            Ok(allows) => allows,
-            Err(err) => return BiscuitAuthOutcome::Error(err),
-        };
 
     let op_target = operation.trim();
     let matches = |op: &str, res: &str| {
@@ -262,11 +257,10 @@ pub fn authorize_biscuit(
         matches_op && topic_matches(res_trim, topic)
     };
 
-    // Short-circuit: if no rights or allows match, check denies for errors and final decision
+    // Short-circuit: if no rights match, check denies for errors and final decision
     let matching_rights: Vec<_> = rights.iter().filter(|(op, res)| matches(op, res)).collect();
-    let matching_allows: Vec<_> = allows.iter().filter(|(op, res)| matches(op, res)).collect();
-    
-    if matching_rights.is_empty() && matching_allows.is_empty() {
+
+    if matching_rights.is_empty() {
         // Still run deny query to surface errors and handle explicit denies
         if denies.iter().any(|(op, res)| matches(op, res)) {
             return BiscuitAuthOutcome::Denied;
@@ -274,7 +268,7 @@ pub fn authorize_biscuit(
         return BiscuitAuthOutcome::Denied;
     }
 
-    // If we have matching rights or allows, check denies first (deny-over-allow)
+    // If we have matching rights, check denies first (deny-over-allow)
     if denies.iter().any(|(op, res)| matches(op, res)) {
         return BiscuitAuthOutcome::Denied;
     }
@@ -432,7 +426,7 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    fn pure_allow_rule_works() {
+    fn checks_only_without_rights_is_denied() {
         let keypair = root_keypair();
         let biscuit = Biscuit::builder()
             .fact("resource(\"sensors/client_1/temp\")")
@@ -453,7 +447,8 @@ mod tests {
                 operation: "publish",
             },
         );
-        // This should be denied because there are no allow rules or rights, but checks pass
+        // NOTE: This models a token that only supplies checks (no rights), which is not
+        // a typical Biscuit usage pattern. We explicitly deny such tokens for safety.
         match outcome {
             BiscuitAuthOutcome::Denied => {}
             _ => panic!("token with only checks but no allow rules should be denied"),

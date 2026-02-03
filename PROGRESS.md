@@ -327,7 +327,6 @@ machine and record the first results/known issues).
 ## 9) Open Issues (Next Steps, Grouped)
 
 ### **Priority Tier 1: Core Functionality**
-1. Issue 9: Document scenario policies (ensure fair comparison)
 2. Issue 17: QoS 0/2 implementation (ARTICLE.MD requirements)
 3. Issue 20.1: Verify ACL_CHECK subtypes (authorization correctness)
 
@@ -357,19 +356,6 @@ machine and record the first results/known issues).
 ---
 
 #### A) Policy Source Parity
-
-- [ ] **Issue 9: Document and analyze scenario policies**
-  - Goal: create comprehensive documentation of all Biscuit and JWT policies
-    used across test scenarios to ensure fair comparison and research validity.
-  - Current issue: Biscuit uses production-grade Datalog policies while JWT uses
-    demo-like string matching, creating an unfair comparison.
-  - Deliverable:
-    - `SCENARIO_POLICIES.md` documenting all authorization policies per scenario
-    - Analysis of policy complexity and fairness between JWT and Biscuit
-      implementations
-    - Recommendations for policy alignment to ensure valid benchmark comparisons
-    - Mapping of each scenario to its specific policy rules and expected
-      behaviors
 
 - [ ] **Issue 8.2: Containerized benchmark topology (client-per-container +
      service separation)**
@@ -749,6 +735,8 @@ machine and record the first results/known issues).
 
 ## 9) Completed Issues (Backlog)
 
+- [x] **Issue 9: Document and analyze scenario policies** — **COMPLETED 2026-02-03**
+  - **Summary**: Created comprehensive `SCENARIO_POLICIES.md` documenting all authorization policies across test scenarios. Established JWT/Biscuit parity with MQTT wildcard matching in token-only mode, analyzed policy complexity fairness (block-chain vs Datalog complexity), documented 7 scenario categories (baseline, complexity, HTTP, static ACL, dynamic security, lifecycle, biscuit-only), identified 4 parity gaps, and provided 5 recommendations for research-valid comparisons. All deliverables completed including policy-to-scenario mapping, fairness analysis, and cross-referenced file index.
 
 - [x] **Issue 1: Add Dynamic Security module comparison**
   - **Completed**: Full Dynamic Security module implementation with JSON-based policy loading, role-based access control, and comprehensive ACL support. Added anonymous access, benchmark scenarios, and Docker configurations. Provides production-grade comparison against token-based approaches.

@@ -28,7 +28,6 @@ dashmap = "6.1"
 hex = "0.4"
 thiserror = "2.0"
 rustls = "0.23.36"
-rustls-pemfile = "2.2.0"
 webpki-roots = "1.0.5"
 
 [lints.rust]

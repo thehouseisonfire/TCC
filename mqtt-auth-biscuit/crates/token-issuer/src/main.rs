@@ -10,8 +10,9 @@ use hyper_util::rt::TokioIo;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use p256::SecretKey;
 use pkcs8::{EncodePrivateKey, LineEnding};
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
-use rustls_pemfile::{certs, private_key};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::env;
@@ -67,21 +68,15 @@ fn load_tls_config(enabled: bool) -> Result<Option<Arc<ServerConfig>>, String> {
     let key_path = env::var("TOKEN_ISSUER_TLS_KEY").map_err(|_| {
         "TOKEN_ISSUER_TLS_KEY required when TOKEN_ISSUER_TLS is enabled".to_string()
     })?;
-    let cert = std::fs::read(&cert_path).map_err(|e| format!("failed to read {cert_path}: {e}"))?;
-    let key = std::fs::read(&key_path).map_err(|e| format!("failed to read {key_path}: {e}"))?;
-    let mut cert_cursor = std::io::Cursor::new(cert);
-    let certs = certs(&mut cert_cursor)
-        .collect::<Result<Vec<_>, _>>()
+    let certs = CertificateDer::pem_file_iter(&cert_path)
         .map_err(|e| format!("failed to parse TLS cert: {e}"))?
-        .into_iter()
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("failed to parse TLS cert: {e}"))?;
     if certs.is_empty() {
         return Err("no TLS certificates found".to_string());
     }
-    let mut key_cursor = std::io::Cursor::new(key);
-    let key = private_key(&mut key_cursor)
-        .map_err(|e| format!("failed to parse TLS key: {e}"))?
-        .ok_or_else(|| "no TLS private key found".to_string())?;
+    let key = PrivateKeyDer::from_pem_file(&key_path)
+        .map_err(|e| format!("failed to parse TLS key: {e}"))?;
     let mut config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)

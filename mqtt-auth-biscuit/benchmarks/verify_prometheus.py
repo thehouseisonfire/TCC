@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-Phase 6.2 Verification Script - Resource Monitoring Verification
-
 This script verifies that Prometheus snapshots are populated with CPU and memory
-data for the mosquitto container as required by Phase 6.2.
+data for the mosquitto container.
 
-Usage: python3 verify_phase_6_2.py
+Usage: python3 verify_prometheus.py
 """
 
 import json

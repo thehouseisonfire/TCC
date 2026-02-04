@@ -276,6 +276,15 @@ MOSQUITTO_CONF=docker/mosquitto_http.conf python3 benchmarks/run_scenarios.py
 
 ### HTTP policy backend schema (HTTP/Hybrid modes)
 
+> [!IMPORTANT]
+> The authz-server requires **HTTP/2** (h2c for cleartext, h2 for TLS). Clients must support HTTP/2 prior knowledge (no HTTP/1.1 upgrade). Ensure your HTTP client library supports HTTP/2 before running HTTP policy scenarios.
+
+#### Authz-server environment variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `AUTHZ_MAX_CONNS` | Maximum concurrent HTTP/2 connections (backpressure limit) | `1024` |
+
 When `policy_mode` is `http` or `hybrid`, the plugin POSTs JSON to the policy endpoint:
 
 ```json

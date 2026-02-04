@@ -1,7 +1,22 @@
-FROM python:3.12-alpine
+FROM rust:1.93-alpine AS builder
+
+RUN apk add --no-cache musl-dev
 
 WORKDIR /app
-COPY docker/authz_server.py /app/authz_server.py
+
+COPY Cargo.toml Cargo.lock ./
+COPY crates/authz-server ./crates/authz-server
+
+# Create minimal workspace config that only includes authz-server
+RUN printf '[workspace]\nmembers = ["crates/authz-server"]\nresolver = "2"\n' > Cargo.toml
+
+RUN cargo build --release -p authz-server
+
+FROM alpine:3.20
+
+RUN apk add --no-cache ca-certificates
+
+COPY --from=builder /app/target/release/authz-server /usr/local/bin/authz-server
 
 EXPOSE 8081
-CMD ["python", "/app/authz_server.py"]
+CMD ["/usr/local/bin/authz-server"]

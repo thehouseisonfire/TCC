@@ -15,7 +15,7 @@ both JWT and Biscuit tokens, intended as a reproducible research prototype.
 
 ### Prerequisites
 
-- Rust (v1.92+)
+- Rust (v1.93+)
 - Docker and Docker Compose
 - Mosquitto development headers (provided in source if missing)
 

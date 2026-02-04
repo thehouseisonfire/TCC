@@ -11,7 +11,7 @@ import os
 import subprocess
 import sys
 import urllib.parse
-import urllib.request
+import httpx
 
 # Import shared query constants from run_scenarios
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -30,8 +30,10 @@ def query_prometheus(query):
     """Query Prometheus and return the result."""
     try:
         url = f"http://localhost:9090/api/v1/query?query={urllib.parse.quote(query, safe='')}"
-        with urllib.request.urlopen(url, timeout=5) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+        with httpx.Client(timeout=5.0, http2=True) as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            return resp.json()
     except Exception as e:
         return {"error": str(e)}
 

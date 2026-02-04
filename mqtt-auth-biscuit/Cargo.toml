@@ -3,6 +3,7 @@ members = [
   "crates/mosquitto-plugin",
   "crates/token-issuer",
   "crates/benchmarks",
+  "crates/authz-server",
 ]
 resolver = "2"
 

@@ -146,7 +146,7 @@ def _fetch_token(
         verify = False
     elif tls_ca_file:
         verify = tls_ca_file
-    with httpx.Client(verify=verify, timeout=5.0) as client:
+    with httpx.Client(verify=verify, timeout=5.0, http2=True) as client:
         resp = client.post(
             issuer_url.rstrip("/") + f"/{kind}",
             json=payload,

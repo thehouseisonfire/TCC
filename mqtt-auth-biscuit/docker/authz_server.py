@@ -1,18 +1,20 @@
 import json
 import os
 import random
-import ssl
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
-
 import sys
+import asyncio
+from http import HTTPStatus
+
+# Hypercorn is required for HTTP/2 support
+from hypercorn.config import Config
+from hypercorn.asyncio import serve
+
+from logging_utils import get_logger, setup_logging
 
 BENCHMARKS_DIR = os.path.join(os.path.dirname(__file__), "..", "benchmarks")
 if BENCHMARKS_DIR not in sys.path:
     sys.path.append(BENCHMARKS_DIR)
-
-from logging_utils import get_logger, setup_logging
-
 
 def _env_int(name: str, default: int) -> int:
     v = os.environ.get(name)
@@ -20,13 +22,11 @@ def _env_int(name: str, default: int) -> int:
         return default
     return int(v)
 
-
 def _env_float(name: str, default: float) -> float:
     v = os.environ.get(name)
     if v is None or v == "":
         return default
     return float(v)
-
 
 class State:
     def __init__(self) -> None:
@@ -36,32 +36,44 @@ class State:
         self.allow_mode = os.environ.get("AUTHZ_ALLOW_MODE", "topic_prefix")
         self.topic_prefix = os.environ.get("AUTHZ_TOPIC_PREFIX", "sensors/")
 
-
 logger = get_logger(__name__)
 STATE = State()
 
+# Helper to format WSGI response
+def send_json(start_response, code: int, payload: dict):
+    data = json.dumps(payload).encode("utf-8")
+    status_text = HTTPStatus(code).phrase
+    status = f"{code} {status_text}"
+    response_headers = [
+        ("Content-Type", "application/json"),
+        ("Content-Length", str(len(data)))
+    ]
+    start_response(status, response_headers)
+    return [data]
 
-class Handler(BaseHTTPRequestHandler):
-    server_version = "authz/0.1"
+# The blocking WSGI Application
+def application(environ, start_response):
+    path = environ.get('PATH_INFO', '')
+    method = environ.get('REQUEST_METHOD', 'GET')
+    
+    # --- GET Handling ---
+    if method == "GET":
+        if path == "/health":
+            return send_json(start_response, 200, {"ok": True})
+        return send_json(start_response, 404, {"error": "not found"})
 
-    def _send_json(self, code: int, payload: dict) -> None:
-        data = json.dumps(payload).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def do_GET(self):
-        if self.path == "/health":
-            return self._send_json(200, {"ok": True})
-        return self._send_json(404, {"error": "not found"})
-
-    def do_POST(self):
-        if self.path == "/config":
+    # --- POST Handling ---
+    elif method == "POST":
+        if path == "/config":
             try:
-                length = int(self.headers.get("Content-Length", "0"))
-                body = self.rfile.read(length) if length > 0 else b"{}"
+                # Read Content-Length
+                try:
+                    length = int(environ.get('CONTENT_LENGTH', 0))
+                except (ValueError, TypeError):
+                    length = 0
+                
+                # Blocking read from wsgi.input
+                body = environ['wsgi.input'].read(length) if length > 0 else b"{}"
                 req = json.loads(body.decode("utf-8"))
 
                 if "delay_ms" in req:
@@ -75,35 +87,36 @@ class Handler(BaseHTTPRequestHandler):
                 if "topic_prefix" in req:
                     STATE.topic_prefix = str(req["topic_prefix"])
 
-                return self._send_json(
-                    200,
-                    {
-                        "ok": True,
-                        "delay_ms": STATE.delay_ms,
-                        "fail_mode": STATE.fail_mode,
-                        "fail_rate": STATE.fail_rate,
-                        "allow_mode": STATE.allow_mode,
-                        "topic_prefix": STATE.topic_prefix,
-                    },
-                )
+                return send_json(start_response, 200, {
+                    "ok": True,
+                    "delay_ms": STATE.delay_ms,
+                    "fail_mode": STATE.fail_mode,
+                    "fail_rate": STATE.fail_rate,
+                    "allow_mode": STATE.allow_mode,
+                    "topic_prefix": STATE.topic_prefix,
+                })
             except Exception as e:
-                return self._send_json(400, {"ok": False, "error": str(e)})
+                return send_json(start_response, 400, {"ok": False, "error": str(e)})
 
-        if self.path != "/authorize":
-            return self._send_json(404, {"error": "not found"})
+        if path != "/authorize":
+            return send_json(start_response, 404, {"error": "not found"})
 
+        # Blocking logic (Benchmarks rely on this actually blocking the worker)
         if STATE.delay_ms > 0:
             time.sleep(STATE.delay_ms / 1000.0)
 
         if STATE.fail_mode == "always":
-            return self._send_json(503, {"allow": False, "error": "forced failure"})
+            return send_json(start_response, 503, {"allow": False, "error": "forced failure"})
         if STATE.fail_mode == "rate":
             if random.random() < max(0.0, min(1.0, STATE.fail_rate)):
-                return self._send_json(503, {"allow": False, "error": "random failure"})
+                return send_json(start_response, 503, {"allow": False, "error": "random failure"})
 
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            body = self.rfile.read(length) if length > 0 else b"{}"
+            try:
+                length = int(environ.get('CONTENT_LENGTH', 0))
+            except (ValueError, TypeError):
+                length = 0
+            body = environ['wsgi.input'].read(length) if length > 0 else b"{}"
             req = json.loads(body.decode("utf-8"))
         except Exception:
             req = {}
@@ -117,31 +130,46 @@ class Handler(BaseHTTPRequestHandler):
         else:
             allowed = topic.startswith(STATE.topic_prefix)
 
-        return self._send_json(200, {"allow": allowed})
-
-    def log_message(self, fmt, *args):
+        # Logging logic preserved
         if os.environ.get("AUTHZ_LOG", "0") == "1":
-            logger.info(fmt, *args)
+             logger.info(f"POST {path} topic={topic} allowed={allowed}")
+
+        return send_json(start_response, 200, {"allow": allowed})
+
+    return send_json(start_response, 404, {"error": "not found"})
 
 
 def main() -> None:
     setup_logging(os.environ.get("AUTHZ_LOG_LEVEL", "INFO"))
+    
     host = os.environ.get("AUTHZ_HOST", "0.0.0.0")
     port = int(os.environ.get("AUTHZ_PORT", "8081"))
     tls_enabled = os.environ.get("AUTHZ_TLS", "0") in {"1", "true", "TRUE"}
     tls_cert = os.environ.get("AUTHZ_TLS_CERT")
     tls_key = os.environ.get("AUTHZ_TLS_KEY")
-    httpd = HTTPServer((host, port), Handler)
+
+    config = Config()
+    config.bind = [f"{host}:{port}"]
+    
+    # Explicitly enable h2 (HTTP/2)
+    config.alpn_protocols = ["h2"]
+
     if tls_enabled:
         if not tls_cert or not tls_key:
             raise SystemExit(
                 "AUTHZ_TLS_CERT and AUTHZ_TLS_KEY must be set when AUTHZ_TLS=1"
             )
-        ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-        ctx.load_cert_chain(certfile=tls_cert, keyfile=tls_key)
-        httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
-    httpd.serve_forever()
+        config.certfile = tls_cert
+        config.keyfile = tls_key
+    else:
+        # Important for benchmarks: This allows HTTP/2 over Cleartext (h2c)
+        # Note: Browsers generally don't support h2c, but curl/nghttp2 do.
+        pass
 
+    # Hypercorn runs an asyncio loop to handle the network/H2 protocol frames,
+    # but it offloads the 'application' (our WSGI function) to a worker thread
+    # so that our logic can remain blocking without stalling the connection management.
+    asyncio.run(serve(application, config))
 
 if __name__ == "__main__":
     main()

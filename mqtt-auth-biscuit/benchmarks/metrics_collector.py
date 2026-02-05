@@ -19,6 +19,7 @@ def run_benchmark(
     password,
     topic,
     message_count=1000,
+    qos=1,
     tls_enabled=False,
     tls_ca_file=None,
     tls_insecure=False,
@@ -57,7 +58,7 @@ def run_benchmark(
 
     for i in range(message_count):
         userdata["start_time"] = time.time()
-        res = client.publish(topic, f"msg {i}", qos=1)
+        res = client.publish(topic, f"msg {i}", qos=qos)
         if res.rc != mqtt.MQTT_ERR_SUCCESS:
             logger.warning("Publish error: %s", res.rc)
         time.sleep(0.01)
@@ -77,6 +78,7 @@ def main(
     tls_ca_file: str | None = None,
     tls_insecure: bool = False,
     messages: int = 100,
+    qos: int = 1,
     log_level: str = typer.Option("INFO", "--log-level"),
 ):
     setup_logging(log_level)
@@ -94,6 +96,7 @@ def main(
             tokens[token_type],
             "sensors/client_1/temp",
             message_count=messages,
+            qos=qos,
             tls_enabled=tls,
             tls_ca_file=tls_ca_file,
             tls_insecure=tls_insecure,

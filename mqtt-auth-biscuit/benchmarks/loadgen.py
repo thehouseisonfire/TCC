@@ -46,6 +46,55 @@ def _summarize_ms(vals):
     }
 
 
+def _parse_qos_distribution(raw: str | None) -> list[tuple[int, float]] | None:
+    if raw is None:
+        return None
+    entries: list[tuple[int, float]] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" not in part:
+            raise ValueError(f"invalid qos distribution entry: {part}")
+        qos_str, weight_str = part.split(":", 1)
+        qos = int(qos_str.strip())
+        if qos not in (0, 1, 2):
+            raise ValueError(f"invalid qos value: {qos}")
+        weight = float(weight_str.strip())
+        if weight <= 0:
+            raise ValueError(f"invalid qos weight: {weight}")
+        entries.append((qos, weight))
+    if not entries:
+        return None
+    total = sum(weight for _, weight in entries)
+    if total <= 0:
+        raise ValueError("qos distribution weights must sum to a positive value")
+    return [(qos, weight / total) for qos, weight in entries]
+
+
+def _choose_qos(
+    default_qos: int,
+    distribution: list[tuple[int, float]] | None,
+    rng: np.random.Generator,
+) -> int:
+    if not distribution:
+        return default_qos
+    qos_values = [qos for qos, _ in distribution]
+    qos_weights = [weight for _, weight in distribution]
+    return int(rng.choice(qos_values, p=qos_weights))
+
+
+def _effective_subscribe_qos(
+    default_qos: int,
+    distribution: list[tuple[int, float]] | None,
+) -> int:
+    if not distribution:
+        return default_qos
+    # For fan-out reads, subscribe at the highest QoS in the mix to avoid
+    # downgrading deliveries when publishers use higher QoS levels.
+    return max(qos for qos, _ in distribution)
+
+
 @dataclass
 class WorkerConfig:
     host: str
@@ -55,6 +104,7 @@ class WorkerConfig:
     password: str
     topic: str
     qos: int
+    qos_distribution: list[tuple[int, float]] | None
     message_count: int
     message_size: int
     protocol: int
@@ -414,6 +464,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
     publish_ms: list[float] = []
     receive_ms: list[float] = []
     connect_ms = None
+    qos_rng = np.random.default_rng()
     token_refresh_ms = None
     token_refresh_len = None
     delegation_ms = cfg.delegation_ms
@@ -670,7 +721,10 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
             errors.append("fanout_missing_topic")
         else:
             try:
-                res, _ = client.subscribe(cfg.subscribe_topic, qos=cfg.qos)
+                subscribe_qos = _effective_subscribe_qos(
+                    cfg.qos, cfg.qos_distribution
+                )
+                res, _ = client.subscribe(cfg.subscribe_topic, qos=subscribe_qos)
                 if res != mqtt.MQTT_ERR_SUCCESS:
                     errors.append(f"subscribe_rc:{res}")
             except Exception as e:
@@ -685,7 +739,8 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
         for _ in range(cfg.message_count):
             try:
                 t0 = time.perf_counter()
-                info = client.publish(cfg.topic, payload, qos=cfg.qos)
+                publish_qos = _choose_qos(cfg.qos, cfg.qos_distribution, qos_rng)
+                info = client.publish(cfg.topic, payload, qos=publish_qos)
                 info.wait_for_publish(timeout=10)
                 t1 = time.perf_counter()
                 publish_ms.append((t1 - t0) * 1000.0)
@@ -735,6 +790,7 @@ def _run_fanout_publisher(
     topic: str,
     message_count: int,
     qos: int,
+    qos_distribution: list[tuple[int, float]] | None,
     message_size: int,
     protocol: int,
     tls_enabled: bool,
@@ -743,6 +799,7 @@ def _run_fanout_publisher(
 ):
     publish_ms: list[float] = []
     errors: list[str] = []
+    qos_rng = np.random.default_rng()
 
     client = mqtt.Client(
         mqtt.CallbackAPIVersion.VERSION2,
@@ -773,7 +830,8 @@ def _run_fanout_publisher(
             if message_size > len(payload):
                 payload += b"A" * (message_size - len(payload))
             t0 = time.perf_counter()
-            info = client.publish(topic, payload, qos=qos)
+            publish_qos = _choose_qos(qos, qos_distribution, qos_rng)
+            info = client.publish(topic, payload, qos=publish_qos)
             info.wait_for_publish(timeout=10)
             t1 = time.perf_counter()
             publish_ms.append((t1 - t0) * 1000.0)
@@ -806,6 +864,7 @@ def run_load(
     clients: int,
     message_count: int,
     qos: int,
+    qos_distribution: list[tuple[int, float]] | None,
     message_size: int,
     protocol: int,
     sync_connect: bool,
@@ -934,6 +993,7 @@ def run_load(
             password=delegated_password,
             topic=topic,
             qos=qos,
+            qos_distribution=qos_distribution,
             message_count=message_count,
             message_size=message_size,
             protocol=protocol,
@@ -1023,6 +1083,7 @@ def run_load(
             topic=fanout_topic or "fanout/broadcast",
             message_count=message_count,
             qos=qos,
+            qos_distribution=qos_distribution,
             message_size=message_size,
             protocol=protocol,
             tls_enabled=tls_enabled,
@@ -1067,6 +1128,11 @@ def run_load(
     receive_throughput_mps = len(receive_lat) / duration_s
     throughput_mps = publish_throughput_mps if mode != "fanout" else receive_throughput_mps
 
+    qos_distribution_payload = None
+    if qos_distribution:
+        qos_distribution_payload = [
+            {"qos": qos, "weight": weight} for qos, weight in qos_distribution
+        ]
     return {
         "inputs": {
             "host": host,
@@ -1076,6 +1142,7 @@ def run_load(
             "clients": clients,
             "message_count": message_count,
             "qos": qos,
+            "qos_distribution": qos_distribution_payload,
             "message_size": message_size,
             "protocol": "mqttv5",
             "token_issuer_url": token_issuer_url,
@@ -1138,6 +1205,12 @@ def main(
     clients: int = typer.Option(10, envvar="MQTT_CLIENTS"),
     messages: int = typer.Option(50, envvar="MQTT_MESSAGES"),
     qos: int = typer.Option(1, envvar="MQTT_QOS"),
+    qos_distribution: str | None = typer.Option(
+        None,
+        "--qos-distribution",
+        envvar="MQTT_QOS_DISTRIBUTION",
+        help="Comma-separated qos:weight entries (e.g. 0:0.6,1:0.3,2:0.1)",
+    ),
     message_size: int = typer.Option(0, envvar="MQTT_MESSAGE_SIZE"),
     sync_connect: bool = False,
     token_issuer_url: str | None = typer.Option(None, envvar="TOKEN_ISSUER_URL"),
@@ -1211,6 +1284,13 @@ def main(
         except ValueError:
             raise typer.BadParameter(f"invalid token refresh code: {part}")
 
+    parsed_qos_distribution = None
+    if qos_distribution:
+        try:
+            parsed_qos_distribution = _parse_qos_distribution(qos_distribution)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+
     res = run_load(
         host=host,
         port=port,
@@ -1222,6 +1302,7 @@ def main(
         clients=clients,
         message_count=messages,
         qos=qos,
+        qos_distribution=parsed_qos_distribution,
         message_size=message_size,
         protocol=protocol,
         sync_connect=sync_connect,

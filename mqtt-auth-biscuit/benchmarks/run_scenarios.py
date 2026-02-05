@@ -152,6 +152,7 @@ def _run_loadgen(
     mode: str | None,
     fanout_topic: str | None,
     qos: int,
+    qos_distribution: str | None,
     message_size: int,
     sync_connect: bool,
     token_issuer_url: str | None,
@@ -212,6 +213,8 @@ def _run_loadgen(
         str(message_size),
         "--json",
     ]
+    if qos_distribution:
+        cmd.extend(["--qos-distribution", qos_distribution])
     if sync_connect:
         cmd.append("--sync-connect")
     if mode:
@@ -383,6 +386,7 @@ def main(
     clients: int = 50,
     messages: int = 20,
     qos: int = 1,
+    qos_distribution: str | None = None,
     scenarios_arg: str | None = None,
     token_issuer_no_default_roles: bool = False,
     token_issuer_no_default_grants: bool = False,
@@ -429,6 +433,17 @@ def main(
                 "authz": None,
                 "netem": {"clear": True},
                 "message_size": 0,
+                "qos": 0,
+            },
+            "QOS0-BASE-01": {
+                "mosquitto_conf": "./mosquitto_base.conf",
+                "username": "",
+                "password": "",
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+                "qos": 0,
             },
             "JWT-01": {
                 "mosquitto_conf": "./mosquitto.conf",
@@ -438,6 +453,16 @@ def main(
                 "authz": None,
                 "netem": {"clear": True},
                 "message_size": 0,
+            },
+            "QOS2-JWT": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "username": "jwt",
+                "password": tokens["jwt"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+                "qos": 2,
             },
             "JWT-DENY": {
                 "mosquitto_conf": "./mosquitto.conf",
@@ -456,6 +481,38 @@ def main(
                 "authz": None,
                 "netem": {"clear": True},
                 "message_size": 0,
+            },
+            "QOS2-BISCUIT": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+                "qos": 2,
+            },
+            "QOS-MIXED-JWT": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "username": "jwt",
+                "password": tokens["jwt"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+                "qos": 1,
+                "qos_distribution": "0:0.6,1:0.3,2:0.1",
+            },
+            "QOS-MIXED-BISCUIT": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 0,
+                "qos": 1,
+                "qos_distribution": "0:0.6,1:0.3,2:0.1",
             },
             "BIS-DENY-ATTENUATED": {
                 "mosquitto_conf": "./mosquitto.conf",
@@ -879,7 +936,7 @@ def main(
         )
         logger.info("Available scenarios:")
         logger.info(
-            "BASE-01, JWT-01, BIS-01, BIS-ATTENUATE-CLIENT, BIS-ATTENUATE-TTL, BIS-ATTENUATE-DENY, BIS-ATTENUATE-OP-ONLY, POLICY-COMPLEX-1, POLICY-COMPLEX-5, POLICY-COMPLEX-25, POLICY-COMPLEX-LOW, POLICY-COMPLEX-MED, POLICY-COMPLEX-HIGH"
+            "BASE-01, QOS0-BASE-01, JWT-01, BIS-01, QOS2-JWT, QOS2-BISCUIT, QOS-MIXED-JWT, QOS-MIXED-BISCUIT, BIS-ATTENUATE-CLIENT, BIS-ATTENUATE-TTL, BIS-ATTENUATE-DENY, BIS-ATTENUATE-OP-ONLY, POLICY-COMPLEX-1, POLICY-COMPLEX-5, POLICY-COMPLEX-25, POLICY-COMPLEX-LOW, POLICY-COMPLEX-MED, POLICY-COMPLEX-HIGH"
         )
         logger.info("JWT-HTTP-200MS, JWT-HTTP-1000MS, HYBRID-AUTHZ-DOWN, MTU-200-JWT")
         logger.info("BIS-HTTP-200MS, JWT-HTTP-200MS-LOSS1, JWT-HTTP-200MS-LOSS5")
@@ -1043,6 +1100,7 @@ def main(
                 "clients": clients,
                 "messages": messages,
                 "qos": qos,
+                "qos_distribution": qos_distribution,
                 "token_issuer_no_default_roles": token_issuer_no_default_roles,
                 "token_issuer_no_default_grants": token_issuer_no_default_grants,
             },
@@ -1072,6 +1130,8 @@ def main(
                 )
             else:
                 token_refresh = s.get("token_refresh") or {}
+                scenario_qos = int(s.get("qos", qos))
+                scenario_qos_distribution = s.get("qos_distribution", qos_distribution)
                 res = _run_loadgen(
                     tokens=tokens,
                     host=mqtt_host,
@@ -1085,7 +1145,8 @@ def main(
                     topic=s.get("topic", "sensors/{client_id}/temp"),
                     mode=s.get("mode"),
                     fanout_topic=s.get("fanout_topic"),
-                    qos=qos,
+                    qos=scenario_qos,
+                    qos_distribution=scenario_qos_distribution,
                     message_size=int(s.get("message_size", 0)),
                     sync_connect=bool(s.get("sync_connect", False)),
                     token_issuer_url=token_issuer_base if token_refresh else None,

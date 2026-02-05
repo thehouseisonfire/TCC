@@ -123,6 +123,8 @@ There are two benchmark entrypoints now:
 
 - `benchmarks/metrics_collector.py`
   - Single-run style script (legacy-style benchmark runner)
+  - Use for quick, manual spot checks (e.g., simple latency sanity checks)
+  - Prefer `run_scenarios.py` for all reproducible research runs/results
 - `benchmarks/run_scenarios.py`
   - Scenario battery orchestrator (Docker control + authz config + netem
     config + run + metrics snapshot)
@@ -327,7 +329,6 @@ machine and record the first results/known issues).
 ## 9) Open Issues (Next Steps, Grouped)
 
 ### **Priority Tier 1: Core Functionality**
-2. Issue 17: QoS 0/2 implementation (ARTICLE.MD requirements)
 3. Issue 20.1: Verify ACL_CHECK subtypes (authorization correctness)
 
 ### **Priority Tier 2: Measurement Accuracy**  
@@ -457,8 +458,8 @@ machine and record the first results/known issues).
     - Analysis correlating perf data with token type and policy complexity
     - Documentation of profiling methodology for reproducibility
 
-- [ ] **Issue 17: Implement comprehensive QoS configuration and mixing
-     features**
+- [x] **Issue 17: Implement comprehensive QoS configuration and mixing
+    features**
   - Goal: Add support for different QoS levels (0, 1, 2) and mixed QoS workloads
     to enable comprehensive performance analysis across quality of service
     levels.
@@ -472,16 +473,16 @@ machine and record the first results/known issues).
     - QoS 0: Fire-and-forget, minimal broker state
     - QoS 1: At-least-once delivery with acknowledgments
     - QoS 2: Exactly-once delivery with four-step handshake
-  - Deliverable:
-    - Update `loadgen.py` to support QoS distribution configuration (e.g., 60%
+  - Deliverable (implementation complete; execution pending):
+    - [x] Update `loadgen.py` to support QoS distribution configuration (e.g., 60%
       QoS 0, 30% QoS 1, 10% QoS 2)
-    - Add scenario-specific QoS configuration in `run_scenarios.py`
-    - Fix BASE-01 scenario to use QoS 0 as planned
-    - Add dedicated QoS 2 scenarios for both JWT and Biscuit
-    - Add mixed QoS workload scenarios to test realistic IoT traffic patterns
-    - Update `metrics_collector.py` to support configurable QoS
-    - Add QoS-specific performance analysis and reporting
-    - At least one scenario run captured for each QoS level and mixed
+    - [x] Add scenario-specific QoS configuration in `run_scenarios.py`
+    - [x] Fix BASE-01 scenario to use QoS 0 as planned
+    - [x] Add dedicated QoS 2 scenarios for both JWT and Biscuit
+    - [x] Add mixed QoS workload scenarios to test realistic IoT traffic patterns
+    - [x] Update `metrics_collector.py` to support configurable QoS
+    - [ ] Add QoS-specific performance analysis and reporting
+    - [ ] At least one scenario run captured for each QoS level and mixed
       configurations
 
 - [ ] **Issue 18: Avoid Base64 encoding for Biscuit tokens (use native bytes /
@@ -735,9 +736,6 @@ machine and record the first results/known issues).
 
 ## 9) Completed Issues (Backlog)
 
-- [x] **Issue 9: Document and analyze scenario policies** — **COMPLETED 2026-02-03**
-  - **Summary**: Created comprehensive `SCENARIO_POLICIES.md` documenting all authorization policies across test scenarios. Established JWT/Biscuit parity with MQTT wildcard matching in token-only mode, analyzed policy complexity fairness (block-chain vs Datalog complexity), documented 7 scenario categories (baseline, complexity, HTTP, static ACL, dynamic security, lifecycle, biscuit-only), identified 4 parity gaps, and provided 5 recommendations for research-valid comparisons. All deliverables completed including policy-to-scenario mapping, fairness analysis, and cross-referenced file index.
-
 - [x] **Issue 1: Add Dynamic Security module comparison**
   - **Completed**: Full Dynamic Security module implementation with JSON-based policy loading, role-based access control, and comprehensive ACL support. Added anonymous access, benchmark scenarios, and Docker configurations. Provides production-grade comparison against token-based approaches.
 
@@ -756,6 +754,21 @@ machine and record the first results/known issues).
     facts, enforced deny-over-allow precedence for token-only authorization,
     and added tests + documentation covering ACL_READ/ACL_SUBSCRIBE behavior.
 
+- [x] **Issue 4: Harden HTTP policy backend for benchmark validity**
+  - Summary: Made HTTP backend robust and well-specified for experiments. Added configurable timeout (`http_timeout_seconds`) and response size limits (`http_max_response_bytes`), documented request/response schema and hybrid fallback semantics in RUNNING_BENCHMARKS.md and README.md. Enforced strict JSON parsing, content-type validation, 200-only responses, and TLS support with insecure mode for testing.
+
+- [x] **Issue 5: Avoid per-message Biscuit re-verification**
+  - Summary: Cache parsed Biscuit at authentication time and reuse it for ACL checks, avoiding per-message cryptographic verification while preserving per-request Datalog evaluation. Authorization now mirrors JWT behavior (verify once, evaluate policies per message).
+  - Note: benchmark rerun + documentation update still pending to quantify latency/CPU impact.
+
+- [x] **Issue 6: Implement online attenuation capabilities for MQTT clients**
+  - Summary: Added client-side Biscuit attenuation tooling, integrated it into
+    loadgen/scenarios with metrics, and documented attenuation patterns.
+
+- [x] **Issue 7: Fix delegation scenario simulation vs actual client delegation**
+  - Summary: Implemented runtime client-to-client delegation with MQTT handoff,
+    added a handoff token and scenarios, and captured delegation metrics.
+
 - [x] **Issue 8: Implement a long-running Token Issuer service (JWT + Biscuit)**
   - Summary: Complete token issuer service with HTTP endpoints for JWT/Biscuit
     issuance, proper security separation, Docker integration, and token refresh
@@ -768,13 +781,8 @@ machine and record the first results/known issues).
     scraping remains HTTP-only as TLS would provide minimal security benefit for
     internal Docker network traffic.
 
-- [x] **Issue 6: Implement online attenuation capabilities for MQTT clients**
-  - Summary: Added client-side Biscuit attenuation tooling, integrated it into
-    loadgen/scenarios with metrics, and documented attenuation patterns.
-
-- [x] **Issue 7: Fix delegation scenario simulation vs actual client delegation**
-  - Summary: Implemented runtime client-to-client delegation with MQTT handoff,
-    added a handoff token and scenarios, and captured delegation metrics.
+- [x] **Issue 9: Document and analyze scenario policies** — **COMPLETED 2026-02-03**
+  - **Summary**: Created comprehensive `SCENARIO_POLICIES.md` documenting all authorization policies across test scenarios. Established JWT/Biscuit parity with MQTT wildcard matching in token-only mode, analyzed policy complexity fairness (block-chain vs Datalog complexity), documented 7 scenario categories (baseline, complexity, HTTP, static ACL, dynamic security, lifecycle, biscuit-only), identified 4 parity gaps, and provided 5 recommendations for research-valid comparisons. All deliverables completed including policy-to-scenario mapping, fairness analysis, and cross-referenced file index.
 
 - [x] **Issue 11: MIRI verification for FFI memory safety**
   - Summary: MIRI CI + tests cover FFI pointer safety and lifecycle invariants.
@@ -783,18 +791,15 @@ machine and record the first results/known issues).
   - Summary: Kani proofs for init/cleanup + all callbacks (null safety,
     lifetimes).
 
+- [x] **Issue 17: Implement comprehensive QoS configuration and mixing features**
+  - **Completed**: Added full QoS 0/1/2 support with configurable per-scenario QoS levels and mixed QoS workload distribution.
+  - **Summary**: Implemented QoS distribution parsing (`0:0.6,1:0.3,2:0.1` format) in `loadgen.py` with weighted random selection for realistic traffic patterns. Added `--qos-distribution` CLI option and `qos_distribution` field to `WorkerConfig`. Fixed `BASE-01` to use QoS 0 as required. Added new scenarios: `QOS0-BASE-01`, `QOS2-JWT`, `QOS2-BISCUIT`, `QOS-MIXED-JWT`, `QOS-MIXED-BISCUIT` (60% QoS 0, 30% QoS 1, 10% QoS 2). Updated `metrics_collector.py` to support configurable QoS. Subscribe operations use effective QoS (max of distribution) to ensure reliable fan-out delivery. All QoS infrastructure is ready for experimental runs.
+
 - [x] **Issue 27: Cache Biscuit expiry via min `expires_at` fact (remove brittle parsing)**
   - Summary: Replaced brittle error-message parsing with structured Datalog query to extract the minimum `expires_at` from Biscuit tokens. Updated `TokenType::Biscuit` to cache the expiry timestamp per session, clamped cache TTL to token expiry with a 5-minute fallback, and rejected already-expired tokens at auth time. Token issuer and benchmark generators now embed `expires_at` facts in authority and attenuation blocks to support stable expiry extraction.
 
-- [x] **Issue 5: Avoid per-message Biscuit re-verification**
-  - Summary: Cache parsed Biscuit at authentication time and reuse it for ACL checks, avoiding per-message cryptographic verification while preserving per-request Datalog evaluation. Authorization now mirrors JWT behavior (verify once, evaluate policies per message).
-  - Note: benchmark rerun + documentation update still pending to quantify latency/CPU impact.
-
 - [x] **Issue 34: Implement real LRU eviction in `SessionCache`**
   - Summary: Enforced cache capacity with true LRU eviction, added capacity tracking, edge case handling, and comprehensive unit tests.
-
-- [x] **Issue 4: Harden HTTP policy backend for benchmark validity**
-  - Summary: Made HTTP backend robust and well-specified for experiments. Added configurable timeout (`http_timeout_seconds`) and response size limits (`http_max_response_bytes`), documented request/response schema and hybrid fallback semantics in RUNNING_BENCHMARKS.md and README.md. Enforced strict JSON parsing, content-type validation, 200-only responses, and TLS support with insecure mode for testing.
 
 ---
 

@@ -52,10 +52,10 @@ jobs:
         cd mqtt-auth-biscuit
         python3 -m py_compile benchmarks/test_resource_snapshot.py
         
-    - name: Test verification script syntax
+    - name: Test prometheus verification script syntax
       run: |
         cd mqtt-auth-biscuit
-        python3 -m py_compile benchmarks/verify_phase_6_2.py
+        python3 -m py_compile benchmarks/verify_prometheus.py
         
     - name: Test scenario runner syntax
       run: |

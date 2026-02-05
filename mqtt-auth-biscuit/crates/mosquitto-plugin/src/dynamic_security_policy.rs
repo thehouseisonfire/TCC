@@ -104,11 +104,11 @@ impl DynamicSecurityPolicy {
             serde_json::from_str(&raw).map_err(|e| format!("dynsec config parse failed: {e}"))?;
         let state = DynSecState::from_config(cfg);
 
-        if let Ok(mut guard) = self.state.write() {
-            *guard = state;
-        } else {
-            return Err("dynsec state lock poisoned".to_string());
-        }
+        let mut guard = self
+            .state
+            .write()
+            .map_err(|_| "dynsec state lock poisoned".to_string())?;
+        *guard = state;
 
         *last_loaded = Some(now);
         Ok(())

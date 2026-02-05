@@ -221,7 +221,7 @@ pub struct MosquittoEvtAclCheck {
 pub type MosqFuncGenericCallback = extern "C" fn(c_int, *mut c_void, *mut c_void) -> c_int;
 
 #[cfg(not(any(test, miri, kani)))]
-extern "C" {
+unsafe extern "C" {
     pub fn mosquitto_callback_register(
         identifier: *mut MosquittoPluginId,
         event: c_int,
@@ -243,7 +243,7 @@ fn set_username_raw(client: *mut c_void, username: *const c_char) -> c_int {
 }
 
 #[cfg(any(test, miri, kani))]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mosquitto_callback_register(
     _identifier: *mut MosquittoPluginId,
     _event: c_int,
@@ -255,7 +255,7 @@ pub extern "C" fn mosquitto_callback_register(
 }
 
 #[cfg(any(test, miri, kani))]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mosquitto_set_username(_client: *mut c_void, _username: *const c_char) -> c_int {
     MOSQ_ERR_SUCCESS
 }
@@ -272,19 +272,19 @@ static TEST_CLIENT_ID: &[u8; 12] = b"test_client\0";
 static TEST_USERNAME: &[u8; 10] = b"test_user\0";
 
 #[cfg(any(test, miri, kani))]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mosquitto_client_id(_client: *const c_void) -> *const c_char {
     TEST_CLIENT_ID.as_ptr() as *const c_char
 }
 
 #[cfg(any(test, miri, kani))]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mosquitto_client_username(_client: *const c_void) -> *const c_char {
     TEST_USERNAME.as_ptr() as *const c_char
 }
 
 #[cfg(any(test, miri, kani))]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mosquitto_malloc(size: usize) -> *mut c_void {
     unsafe { libc::malloc(size) }
 }
@@ -590,7 +590,7 @@ fn set_synthetic_username(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn mosquitto_plugin_version(
     _supported_version_count: c_int,
     _supported_versions: *const c_int,
@@ -606,13 +606,13 @@ pub extern "C" fn mosquitto_plugin_version(
 /// - `options` must be valid for `option_count` iterations or null if `option_count` is 0
 /// - The caller ensures all pointers are valid and properly aligned
 /// - This function initializes global plugin state and registers callbacks
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mosquitto_plugin_init(
     identifier: *mut MosquittoPluginId,
     userdata: *mut *mut c_void,
     options: *mut MosquittoOpt,
     option_count: c_int,
-) -> c_int {
+) -> c_int { unsafe {
     if identifier.is_null() || userdata.is_null() {
         return MOSQ_ERR_INVAL;
     }
@@ -726,7 +726,7 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
     log_info("Biscuit Auth Plugin initialized");
 
     MOSQ_ERR_SUCCESS
-}
+}}
 
 /// # Safety
 ///
@@ -735,12 +735,12 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
 /// - `options` and `option_count` are ignored in this implementation but may be valid pointers
 /// - The caller ensures all pointers are valid and properly aligned
 /// - This function cleans up plugin state and must be called before plugin unload
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn mosquitto_plugin_cleanup(
     _userdata: *mut c_void,
     _options: *mut MosquittoOpt,
     _option_count: c_int,
-) -> c_int {
+) -> c_int { unsafe {
     if !_userdata.is_null() {
         let state = &*(_userdata as *mut PluginState);
         let cache_stats = state.cache.stats();
@@ -756,7 +756,7 @@ pub unsafe extern "C" fn mosquitto_plugin_cleanup(
         let _ = Box::from_raw(_userdata as *mut PluginState);
     }
     MOSQ_ERR_SUCCESS
-}
+}}
 
 extern "C" fn basic_auth_callback(
     _event: c_int,

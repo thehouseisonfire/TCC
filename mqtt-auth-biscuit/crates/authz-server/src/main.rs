@@ -411,7 +411,8 @@ async fn main() -> anyhow::Result<()> {
 
                     task::spawn(async move {
                         let _permit = permit; // hold permit for lifetime of connection
-                        match acceptor.accept(stream).await {
+                        let accept_result = acceptor.accept(stream).await;
+                        match accept_result {
                             Ok(tls_stream) => {
                                 let executor = TokioExecutor::new();
                                 let mut builder = http2::Builder::new(executor);
@@ -423,7 +424,8 @@ async fn main() -> anyhow::Result<()> {
                                     let state = state_clone.clone();
                                     async move { handle(req, state).await }
                                 });
-                                if let Err(e) = builder.serve_connection(tls_io, service).await {
+                                let serve_result = builder.serve_connection(tls_io, service).await;
+                                if let Err(e) = serve_result {
                                     warn!(%e, "tls h2 connection errored for {}", peer);
                                 }
                             }
@@ -477,7 +479,8 @@ async fn main() -> anyhow::Result<()> {
                             let state = state_clone.clone();
                             async move { handle(req, state).await }
                         });
-                        if let Err(e) = builder.serve_connection(stream_io, service).await {
+                        let serve_result = builder.serve_connection(stream_io, service).await;
+                        if let Err(e) = serve_result {
                             warn!(%e, "h2c connection errored for {}", peer);
                         }
                     });

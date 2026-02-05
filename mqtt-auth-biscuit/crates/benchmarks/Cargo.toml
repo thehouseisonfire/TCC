@@ -5,10 +5,10 @@ edition = "2024"
 
 [dependencies]
 base64 = "0.22"
-biscuit-auth = "6.0"
+biscuit-auth = "6"
 hex = "0.4"
-jsonwebtoken = { version = "10.2.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+jsonwebtoken = { version = "10", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 p256 = { version = "0.13", features = ["arithmetic", "pkcs8", "pem"] }
 pkcs8 = { version = "0.10", features = ["pem"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

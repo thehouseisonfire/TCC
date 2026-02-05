@@ -1,16 +1,16 @@
 use crate::auth::{AuthEngine, AuthError, TokenType};
-use crate::authz::{check_authorization, AuthzOutcome, AuthzParams};
+use crate::authz::{AuthzOutcome, AuthzParams, check_authorization};
 use crate::biscuit_handler::{
     expiry_stats, extract_min_expiry_from_biscuit, extract_roles_from_biscuit, has_right_facts,
     parse_biscuit,
 };
 use crate::cache::SessionCache;
-use crate::config::{parse_options, PluginConfig};
+use crate::config::{PluginConfig, parse_options};
 use crate::dynamic_security_policy::DynamicSecurityPolicy;
 use crate::policy::PolicyMode;
 use crate::sqlite_policy::SqlitePolicy;
 use chrono::Utc;
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
 use std::sync::{Arc, Once};
 use std::time::Duration;
@@ -612,121 +612,125 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
     userdata: *mut *mut c_void,
     options: *mut MosquittoOpt,
     option_count: c_int,
-) -> c_int { unsafe {
-    if identifier.is_null() || userdata.is_null() {
-        return MOSQ_ERR_INVAL;
-    }
-
-    let config = match parse_options(options, option_count) {
-        Ok(c) => c,
-        Err(_) => return MOSQ_ERR_INVAL,
-    };
-
-    let sqlite_policy = match config.policy.mode {
-        PolicyMode::Sqlite => {
-            let Some(path) = config.policy.sqlite_path.as_deref() else {
-                return MOSQ_ERR_INVAL;
-            };
-            let policy = SqlitePolicy::open(path).ok();
-            if let Some(p) = policy.as_ref() {
-                let _ = p.seed_demo_rules();
-            }
-            policy
+) -> c_int {
+    unsafe {
+        if identifier.is_null() || userdata.is_null() {
+            return MOSQ_ERR_INVAL;
         }
-        _ => None,
-    };
 
-    let dynamic_security_policy = match config.policy.mode {
-        PolicyMode::DynamicSecurity => {
-            let Some(path) = config.policy.dynamic_security_url.as_deref() else {
-                return MOSQ_ERR_INVAL;
-            };
-            let interval = config
-                .policy
-                .dynamic_security_reload_interval_seconds
-                .unwrap_or(1)
-                .max(1);
-            match DynamicSecurityPolicy::new(path, Duration::from_secs(interval)) {
-                Ok(policy) => Some(policy),
-                Err(err) => {
-                    log_info(&format!(
-                        "Dynamic security config load failed ({path}): {err}"
-                    ));
+        let config = match parse_options(options, option_count) {
+            Ok(c) => c,
+            Err(_) => return MOSQ_ERR_INVAL,
+        };
+
+        let sqlite_policy = match config.policy.mode {
+            PolicyMode::Sqlite => {
+                let Some(path) = config.policy.sqlite_path.as_deref() else {
                     return MOSQ_ERR_INVAL;
+                };
+                let policy = SqlitePolicy::open(path).ok();
+                if let Some(p) = policy.as_ref() {
+                    let _ = p.seed_demo_rules();
+                }
+                policy
+            }
+            _ => None,
+        };
+
+        let dynamic_security_policy = match config.policy.mode {
+            PolicyMode::DynamicSecurity => {
+                let Some(path) = config.policy.dynamic_security_url.as_deref() else {
+                    return MOSQ_ERR_INVAL;
+                };
+                let interval = config
+                    .policy
+                    .dynamic_security_reload_interval_seconds
+                    .unwrap_or(1)
+                    .max(1);
+                match DynamicSecurityPolicy::new(path, Duration::from_secs(interval)) {
+                    Ok(policy) => Some(policy),
+                    Err(err) => {
+                        log_info(&format!(
+                            "Dynamic security config load failed ({path}): {err}"
+                        ));
+                        return MOSQ_ERR_INVAL;
+                    }
                 }
             }
+            _ => None,
+        };
+
+        if matches!(
+            config.policy.mode,
+            PolicyMode::StaticAcl | PolicyMode::StaticAclStrict
+        ) {
+            log_info(
+                "StaticAcl mode enabled: tokens should carry only role identity to avoid bias.",
+            );
         }
-        _ => None,
-    };
 
-    if matches!(
-        config.policy.mode,
-        PolicyMode::StaticAcl | PolicyMode::StaticAclStrict
-    ) {
-        log_info("StaticAcl mode enabled: tokens should carry only role identity to avoid bias.");
+        let state = Box::new(PluginState {
+            auth_engine: Arc::new(AuthEngine::new(
+                config.jwt.decoding_key.clone(),
+                config.jwt.validation.clone(),
+            )),
+            cache: Arc::new(SessionCache::new(1000)),
+            config,
+            sqlite_policy,
+            dynamic_security_policy,
+        });
+        *userdata = Box::into_raw(state) as *mut c_void;
+
+        mosquitto_callback_register(
+            identifier,
+            MOSQ_EVT_BASIC_AUTH,
+            basic_auth_callback,
+            ptr::null(),
+            *userdata,
+        );
+        mosquitto_callback_register(
+            identifier,
+            MOSQ_EVT_ACL_CHECK,
+            acl_check_callback,
+            ptr::null(),
+            *userdata,
+        );
+
+        mosquitto_callback_register(
+            identifier,
+            MOSQ_EVT_EXT_AUTH_START,
+            ext_auth_start_callback,
+            ptr::null(),
+            *userdata,
+        );
+        mosquitto_callback_register(
+            identifier,
+            MOSQ_EVT_EXT_AUTH_CONTINUE,
+            ext_auth_continue_callback,
+            ptr::null(),
+            *userdata,
+        );
+
+        mosquitto_callback_register(
+            identifier,
+            MOSQ_EVT_MESSAGE,
+            message_callback,
+            ptr::null(),
+            *userdata,
+        );
+        mosquitto_callback_register(
+            identifier,
+            MOSQ_EVT_CONTROL,
+            control_callback,
+            ptr::null(),
+            *userdata,
+        );
+
+        log_info("Biscuit Auth Plugin initialized");
+
+        MOSQ_ERR_SUCCESS
     }
-
-    let state = Box::new(PluginState {
-        auth_engine: Arc::new(AuthEngine::new(
-            config.jwt.decoding_key.clone(),
-            config.jwt.validation.clone(),
-        )),
-        cache: Arc::new(SessionCache::new(1000)),
-        config,
-        sqlite_policy,
-        dynamic_security_policy,
-    });
-    *userdata = Box::into_raw(state) as *mut c_void;
-
-    mosquitto_callback_register(
-        identifier,
-        MOSQ_EVT_BASIC_AUTH,
-        basic_auth_callback,
-        ptr::null(),
-        *userdata,
-    );
-    mosquitto_callback_register(
-        identifier,
-        MOSQ_EVT_ACL_CHECK,
-        acl_check_callback,
-        ptr::null(),
-        *userdata,
-    );
-
-    mosquitto_callback_register(
-        identifier,
-        MOSQ_EVT_EXT_AUTH_START,
-        ext_auth_start_callback,
-        ptr::null(),
-        *userdata,
-    );
-    mosquitto_callback_register(
-        identifier,
-        MOSQ_EVT_EXT_AUTH_CONTINUE,
-        ext_auth_continue_callback,
-        ptr::null(),
-        *userdata,
-    );
-
-    mosquitto_callback_register(
-        identifier,
-        MOSQ_EVT_MESSAGE,
-        message_callback,
-        ptr::null(),
-        *userdata,
-    );
-    mosquitto_callback_register(
-        identifier,
-        MOSQ_EVT_CONTROL,
-        control_callback,
-        ptr::null(),
-        *userdata,
-    );
-
-    log_info("Biscuit Auth Plugin initialized");
-
-    MOSQ_ERR_SUCCESS
-}}
+}
 
 /// # Safety
 ///
@@ -740,23 +744,25 @@ pub unsafe extern "C" fn mosquitto_plugin_cleanup(
     _userdata: *mut c_void,
     _options: *mut MosquittoOpt,
     _option_count: c_int,
-) -> c_int { unsafe {
-    if !_userdata.is_null() {
-        let state = &*(_userdata as *mut PluginState);
-        let cache_stats = state.cache.stats();
-        let expiry_stats = expiry_stats();
-        log_info(&format!(
-            "Session cache stats: hits={}, misses={}",
-            cache_stats.hits, cache_stats.misses
-        ));
-        log_info(&format!(
-            "Biscuit expiry extraction stats: calls={}, failures={}, total_nanos={}",
-            expiry_stats.calls, expiry_stats.failures, expiry_stats.total_nanos
-        ));
-        let _ = Box::from_raw(_userdata as *mut PluginState);
+) -> c_int {
+    unsafe {
+        if !_userdata.is_null() {
+            let state = &*(_userdata as *mut PluginState);
+            let cache_stats = state.cache.stats();
+            let expiry_stats = expiry_stats();
+            log_info(&format!(
+                "Session cache stats: hits={}, misses={}",
+                cache_stats.hits, cache_stats.misses
+            ));
+            log_info(&format!(
+                "Biscuit expiry extraction stats: calls={}, failures={}, total_nanos={}",
+                expiry_stats.calls, expiry_stats.failures, expiry_stats.total_nanos
+            ));
+            let _ = Box::from_raw(_userdata as *mut PluginState);
+        }
+        MOSQ_ERR_SUCCESS
     }
-    MOSQ_ERR_SUCCESS
-}}
+}
 
 extern "C" fn basic_auth_callback(
     _event: c_int,

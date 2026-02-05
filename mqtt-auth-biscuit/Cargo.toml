@@ -17,10 +17,10 @@ overflow-checks = false
 
 [profile.release-maxperf]
 inherits = "release"
-lto = "fat"
 panic = "abort"
-codegen-units = 1
 strip = true
+lto = "fat"
+codegen-units = 1
 overflow-checks = false
 
 [workspace.lints.rust]

@@ -1,5 +1,5 @@
 use crate::auth::TokenType;
-use crate::biscuit_handler::{authorize_biscuit, verify_biscuit_token, BiscuitAuthOutcome};
+use crate::biscuit_handler::{BiscuitAuthOutcome, authorize_biscuit, verify_biscuit_token};
 use crate::dynamic_security_policy::DynamicSecurityPolicy;
 use crate::http_policy;
 use crate::jwt_handler::JwtGrant;
@@ -28,7 +28,7 @@ pub struct AuthContext<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{topic_matches, AuthContext};
+    use super::{AuthContext, topic_matches};
 
     #[test]
     fn topic_matches_exact() {
@@ -346,9 +346,10 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
                     operation,
                 };
                 if let Some(denies) = claims.denies.as_ref()
-                    && grants_deny(denies, auth_context) {
-                        return AuthzOutcome::Denied;
-                    }
+                    && grants_deny(denies, auth_context)
+                {
+                    return AuthzOutcome::Denied;
+                }
                 if grants_allow(grants, auth_context) {
                     AuthzOutcome::Allowed
                 } else {
@@ -452,9 +453,10 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
             biscuit,
         } => {
             if let Some(expires_at) = expires_at
-                && Utc::now().timestamp() >= *expires_at {
-                    return AuthzOutcome::Expired;
-                }
+                && Utc::now().timestamp() >= *expires_at
+            {
+                return AuthzOutcome::Expired;
+            }
 
             let operation = access_to_operation(params.access);
 

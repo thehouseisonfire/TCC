@@ -1,5 +1,5 @@
 use biscuit_auth::{Biscuit, BlockBuilder, KeyPair, PrivateKey};
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use p256::SecretKey;
 use pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 use serde::{Deserialize, Serialize};
@@ -310,7 +310,7 @@ fn main() {
 
     // We want the token as base64 for the MQTT password field
     let biscuit_bytes = biscuit_1_block.to_vec().unwrap();
-    use base64::{engine::general_purpose, Engine as _};
+    use base64::{Engine as _, engine::general_purpose};
     let biscuit_b64 = general_purpose::STANDARD.encode(&biscuit_bytes);
 
     let biscuit_5_b64 = general_purpose::STANDARD.encode(biscuit_5_blocks.to_vec().unwrap());

@@ -6,6 +6,7 @@ both JWT and Biscuit tokens, intended as a reproducible research prototype.
 ## Features
 
 - **Fast and Secure**: Implemented in Rust with a thread-safe LRU cache.
+- **HTTP/2 Native**: All HTTP communication uses HTTP/2 (h2c or h2 with TLS).
 - **Flexible Authorization**: Supports both standard JWT claims and powerful
   Biscuit Datalog policies.
 - **MQTT 5.0 Ready**: Built for modern MQTT environments. **Note: Only MQTT v5 is supported - MQTT v3.1 is not implemented.**

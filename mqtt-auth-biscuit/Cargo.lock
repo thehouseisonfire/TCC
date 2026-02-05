@@ -827,11 +827,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
 dependencies = [
  "bytes",
+ "futures-channel",
  "http",
  "http-body",
  "hyper",
  "pin-project-lite",
  "tokio",
+ "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -1035,10 +1038,14 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "biscuit-auth",
+ "bytes",
  "chrono",
  "dashmap",
  "env_logger",
  "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "jsonwebtoken",
  "libc",
  "log",
@@ -1050,6 +1057,8 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
  "webpki-roots",
 ]
 
@@ -1915,6 +1924,12 @@ dependencies = [
  "pin-project-lite",
  "tokio",
 ]
+
+[[package]]
+name = "tower-service"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
 name = "tracing"

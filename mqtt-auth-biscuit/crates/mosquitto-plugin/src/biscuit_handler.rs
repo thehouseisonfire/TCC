@@ -1,10 +1,10 @@
-use crate::authz::{topic_matches, AuthContext};
+use crate::authz::{AuthContext, topic_matches};
 use biscuit_auth::{Biscuit, PublicKey};
 use chrono::Utc;
 use std::collections::HashMap;
+use std::sync::Arc;
 #[cfg(feature = "expiry_stats")]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 #[cfg(feature = "expiry_stats")]
 use std::time::Instant;
@@ -279,7 +279,7 @@ pub fn authorize_biscuit(
 #[cfg(test)]
 mod tests {
     use super::extract_min_expiry;
-    use super::{verify_biscuit_token, AuthContext, BiscuitAuthOutcome};
+    use super::{AuthContext, BiscuitAuthOutcome, verify_biscuit_token};
     use biscuit_auth::{Biscuit, KeyPair, PrivateKey};
 
     fn root_keypair() -> KeyPair {

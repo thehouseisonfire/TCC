@@ -1,8 +1,8 @@
 use dashmap::DashMap;
 use lru::LruCache;
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 fn nonzero_capacity(capacity: usize) -> NonZeroUsize {

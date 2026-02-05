@@ -17,7 +17,7 @@ openssl genrsa -out server.key 2048
 openssl req -new -key server.key -subj "/CN=localhost" -out server.csr
 
 cat > san.ext <<'EOF'
-subjectAltName=DNS:localhost,IP:127.0.0.1
+subjectAltName=DNS:localhost,DNS:authz,DNS:token-issuer,DNS:mosquitto,IP:127.0.0.1
 EOF
 
 openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial \

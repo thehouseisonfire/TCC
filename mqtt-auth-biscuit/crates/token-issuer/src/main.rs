@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use biscuit_auth::{Biscuit, BlockBuilder, KeyPair, PrivateKey};
 use bytes::Bytes;
 use chrono::Utc;
@@ -7,12 +7,12 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use p256::SecretKey;
 use pkcs8::{EncodePrivateKey, LineEnding};
+use rustls::ServerConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::ServerConfig;
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::env;
@@ -81,7 +81,7 @@ fn load_tls_config(enabled: bool) -> Result<Option<Arc<ServerConfig>>, String> {
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|e| format!("TLS config error: {e}"))?;
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    config.alpn_protocols = vec![b"h2".to_vec()];
     Ok(Some(Arc::new(config)))
 }
 
@@ -424,7 +424,7 @@ where
 {
     let io = TokioIo::new(stream);
     let service = service_fn(move |req| handle_request(req, Arc::clone(&cfg)));
-    if let Err(e) = hyper::server::conn::http1::Builder::new()
+    if let Err(e) = hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
         .serve_connection(io, service)
         .await
     {

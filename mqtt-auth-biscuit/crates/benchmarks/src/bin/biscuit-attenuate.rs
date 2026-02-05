@@ -1,4 +1,4 @@
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use biscuit_auth::{Biscuit, BlockBuilder, PublicKey};
 use std::env;
 use std::fs;

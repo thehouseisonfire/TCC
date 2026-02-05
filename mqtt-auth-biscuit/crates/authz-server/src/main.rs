@@ -13,12 +13,12 @@ use std::{convert::Infallible, env, net::SocketAddr, path::PathBuf, sync::Arc, t
 use arc_swap::ArcSwap;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
-use hyper::{body::Incoming, server::conn::http2, Method, Request, Response, StatusCode};
+use hyper::{Method, Request, Response, StatusCode, body::Incoming, server::conn::http2};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rand::Rng;
+use rustls::ServerConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::ServerConfig;
 use serde::{Deserialize, Serialize};
 use tokio::{net::TcpListener, sync::Semaphore, task};
 use tokio_rustls::TlsAcceptor;

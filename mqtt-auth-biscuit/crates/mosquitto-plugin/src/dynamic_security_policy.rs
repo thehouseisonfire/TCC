@@ -46,9 +46,10 @@ impl DynamicSecurityPolicy {
                 return Ok(false);
             }
             if let (Some(expected), Some(actual)) = (client.client_id.as_deref(), client_id)
-                && expected != actual {
-                    return Ok(false);
-                }
+                && expected != actual
+            {
+                return Ok(false);
+            }
         }
 
         let mut roles = Vec::new();
@@ -60,9 +61,10 @@ impl DynamicSecurityPolicy {
                 }
             }
         } else if let Some(group_name) = state.anonymous_group.as_deref()
-            && let Some(group) = state.groups.get(group_name) {
-                roles.extend(group.roles.iter().cloned());
-            }
+            && let Some(group) = state.groups.get(group_name)
+        {
+            roles.extend(group.roles.iter().cloned());
+        }
 
         roles.sort_by(|a, b| {
             b.priority
@@ -72,9 +74,10 @@ impl DynamicSecurityPolicy {
 
         for role_ref in roles {
             if let Some(role) = state.roles.get(&role_ref.name)
-                && let Some(allow) = role.match_acl(access_kind, topic) {
-                    return Ok(allow);
-                }
+                && let Some(allow) = role.match_acl(access_kind, topic)
+            {
+                return Ok(allow);
+            }
         }
 
         Ok(default_allow)
@@ -89,9 +92,10 @@ impl DynamicSecurityPolicy {
 
         if !force
             && let Some(last) = *last_loaded
-                && now.duration_since(last) < self.reload_interval {
-                    return Ok(());
-                }
+            && now.duration_since(last) < self.reload_interval
+        {
+            return Ok(());
+        }
 
         let raw = fs::read_to_string(&self.config_path)
             .map_err(|e| format!("dynsec config read failed: {e}"))?;

@@ -1,11 +1,11 @@
 #[cfg(kani)]
 use crate::jwt_handler::Claims;
 #[cfg(not(kani))]
-use crate::jwt_handler::{verify_jwt_token, Claims};
-#[cfg(not(kani))]
-use jsonwebtoken::errors::ErrorKind;
+use crate::jwt_handler::{Claims, verify_jwt_token};
 use jsonwebtoken::DecodingKey;
 use jsonwebtoken::Validation;
+#[cfg(not(kani))]
+use jsonwebtoken::errors::ErrorKind;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -89,7 +89,7 @@ impl AuthEngine {
                 })
         } else {
             // Try Biscuit (assuming it's base64 encoded if string)
-            use base64::{engine::general_purpose, Engine as _};
+            use base64::{Engine as _, engine::general_purpose};
             let bytes = general_purpose::STANDARD.decode(token).map_err(|e| {
                 AuthError::Invalid(format!("Invalid token format (base64 error: {e})"))
             })?;

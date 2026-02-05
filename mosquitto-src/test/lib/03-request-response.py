@@ -21,7 +21,9 @@ suback_packet = mosq_test.gen_suback(mid, 0, proto_ver=5)
 
 
 props = mqtt5_props.gen_string_prop(mqtt5_props.PROP_RESPONSE_TOPIC, resp_topic)
-publish1_packet = mosq_test.gen_publish(pub_topic, qos=0, payload="action", proto_ver=5, properties=props)
+publish1_packet = mosq_test.gen_publish(
+    pub_topic, qos=0, payload="action", proto_ver=5, properties=props
+)
 
 publish2_packet = mosq_test.gen_publish(resp_topic, qos=0, payload="a response", proto_ver=5)
 
@@ -29,23 +31,33 @@ publish2_packet = mosq_test.gen_publish(resp_topic, qos=0, payload="a response",
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock.settimeout(10)
-sock.bind(('', port))
+sock.bind(("", port))
 sock.listen(5)
 
 env = dict(os.environ)
-env['LD_LIBRARY_PATH'] = '../../lib:../../lib/cpp'
+env["LD_LIBRARY_PATH"] = "../../lib:../../lib/cpp"
 try:
-    pp = env['PYTHONPATH']
+    pp = env["PYTHONPATH"]
 except KeyError:
-    pp = ''
-env['PYTHONPATH'] = '../../lib/python:'+pp
-client1 = mosq_test.start_client(filename="03-request-response-1.log", cmd=["c/03-request-response-1.test"], env=env, port=port)
+    pp = ""
+env["PYTHONPATH"] = "../../lib/python:" + pp
+client1 = mosq_test.start_client(
+    filename="03-request-response-1.log",
+    cmd=["c/03-request-response-1.test"],
+    env=env,
+    port=port,
+)
 
 try:
     (conn1, address) = sock.accept()
     conn1.settimeout(10)
 
-    client2 = mosq_test.start_client(filename="03-request-response-2.log", cmd=["c/03-request-response-2.test"], env=env, port=port)
+    client2 = mosq_test.start_client(
+        filename="03-request-response-2.log",
+        cmd=["c/03-request-response-2.test"],
+        env=env,
+        port=port,
+    )
     (conn2, address) = sock.accept()
     conn2.settimeout(10)
 

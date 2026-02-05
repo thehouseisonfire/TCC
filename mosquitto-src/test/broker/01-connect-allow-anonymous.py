@@ -4,62 +4,78 @@
 
 from mosq_test_helper import *
 
+
 def write_config1(filename, port):
-    with open(filename, 'w') as f:
-        f.write("max_connections 10\n") # So the file isn't completely empty
+    with open(filename, "w") as f:
+        f.write("max_connections 10\n")  # So the file isn't completely empty
+
 
 def write_config2(filename, port):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("port %d\n" % (port))
+
 
 def write_config3(filename, port):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("listener %d\n" % (port))
 
+
 def write_config4(filename, port):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("port %d\n" % (port))
         f.write("allow_anonymous true\n")
 
+
 def write_config5(filename, port):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("listener %d\n" % (port))
         f.write("allow_anonymous true\n")
 
+
 def write_config6(filename, port):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("allow_anonymous false\n")
 
+
 def write_config7(filename, port):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("allow_anonymous true\n")
 
 
 def do_test(use_conf, write_config, expect_success):
     port = mosq_test.get_port()
     if write_config is not None:
-        conf_file = os.path.basename(__file__).replace('.py', '.conf')
+        conf_file = os.path.basename(__file__).replace(".py", ".conf")
         write_config(conf_file, port)
 
-    broker = mosq_test.start_broker(filename=os.path.basename(__file__), use_conf=use_conf, port=port)
+    broker = mosq_test.start_broker(
+        filename=os.path.basename(__file__), use_conf=use_conf, port=port
+    )
 
     try:
         for proto_ver in [4, 5]:
             rc = 1
             keepalive = 10
-            connect_packet = mosq_test.gen_connect("connect-anon-test-%d" % (proto_ver), keepalive=keepalive, proto_ver=proto_ver)
+            connect_packet = mosq_test.gen_connect(
+                "connect-anon-test-%d" % (proto_ver),
+                keepalive=keepalive,
+                proto_ver=proto_ver,
+            )
 
             if proto_ver == 5:
                 if expect_success == True:
                     connack_packet = mosq_test.gen_connack(rc=0, proto_ver=proto_ver)
                 else:
-                    connack_packet = mosq_test.gen_connack(rc=mqtt5_rc.MQTT_RC_NOT_AUTHORIZED, proto_ver=proto_ver, properties=None)
+                    connack_packet = mosq_test.gen_connack(
+                        rc=mqtt5_rc.MQTT_RC_NOT_AUTHORIZED,
+                        proto_ver=proto_ver,
+                        properties=None,
+                    )
             else:
                 if expect_success == True:
                     connack_packet = mosq_test.gen_connack(rc=0, proto_ver=proto_ver)
                 else:
                     connack_packet = mosq_test.gen_connack(rc=5, proto_ver=proto_ver)
-
 
             sock = mosq_test.do_client_connect(connect_packet, connack_packet, port=port)
             sock.close()
@@ -74,7 +90,7 @@ def do_test(use_conf, write_config, expect_success):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             print("proto_ver=%d" % (proto_ver))
             exit(rc)
 

@@ -4,14 +4,16 @@
 
 from mosq_test_helper import *
 
+
 def write_config(filename, port):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("port %d\n" % (port))
         f.write("auth_plugin c/auth_plugin_msg_params.so\n")
         f.write("allow_anonymous true\n")
 
+
 port = mosq_test.get_port()
-conf_file = os.path.basename(__file__).replace('.py', '.conf')
+conf_file = os.path.basename(__file__).replace(".py", ".conf")
 write_config(conf_file, port)
 
 rc = 1
@@ -24,11 +26,15 @@ subscribe_packet = mosq_test.gen_subscribe(mid, "param/topic", 1)
 suback_packet = mosq_test.gen_suback(mid, 1)
 
 mid = 3
-publish_packet = mosq_test.gen_publish(topic="param/topic", qos=1, payload="payload contents", retain=1, mid=mid)
+publish_packet = mosq_test.gen_publish(
+    topic="param/topic", qos=1, payload="payload contents", retain=1, mid=mid
+)
 puback_packet = mosq_test.gen_puback(mid)
 
 mid = 1
-publish_packet_recv = mosq_test.gen_publish(topic="param/topic", qos=1, payload="payload contents", retain=0, mid=mid)
+publish_packet_recv = mosq_test.gen_publish(
+    topic="param/topic", qos=1, payload="payload contents", retain=0, mid=mid
+)
 
 
 broker = mosq_test.start_broker(filename=os.path.basename(__file__), use_conf=True, port=port)
@@ -50,8 +56,7 @@ finally:
     broker.wait()
     (stdo, stde) = broker.communicate()
     if rc:
-        print(stde.decode('utf-8'))
+        print(stde.decode("utf-8"))
 
 
 exit(rc)
-

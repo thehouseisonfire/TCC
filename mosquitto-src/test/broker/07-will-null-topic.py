@@ -4,10 +4,17 @@ import struct
 
 from mosq_test_helper import *
 
+
 def do_test(proto_ver):
     rc = 1
     keepalive = 60
-    connect_packet = mosq_test.gen_connect("will-null-topic", keepalive=keepalive, will_topic="", will_payload=struct.pack("!4sB7s", b"will", 0, b"message"), proto_ver=proto_ver)
+    connect_packet = mosq_test.gen_connect(
+        "will-null-topic",
+        keepalive=keepalive,
+        will_topic="",
+        will_payload=struct.pack("!4sB7s", b"will", 0, b"message"),
+        proto_ver=proto_ver,
+    )
     connack_packet = mosq_test.gen_connack(rc=2, proto_ver=proto_ver)
 
     port = mosq_test.get_port()
@@ -28,7 +35,7 @@ def do_test(proto_ver):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             print("proto_ver=%d" % (proto_ver))
             exit(rc)
 

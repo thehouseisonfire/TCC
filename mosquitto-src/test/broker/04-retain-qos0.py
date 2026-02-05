@@ -9,10 +9,18 @@ def do_test(proto_ver):
     rc = 1
     keepalive = 60
     mid = 16
-    connect_packet = mosq_test.gen_connect("retain-qos0-test", keepalive=keepalive, proto_ver=proto_ver)
+    connect_packet = mosq_test.gen_connect(
+        "retain-qos0-test", keepalive=keepalive, proto_ver=proto_ver
+    )
     connack_packet = mosq_test.gen_connack(rc=0, proto_ver=proto_ver)
 
-    publish_packet = mosq_test.gen_publish("retain/qos0/test", qos=0, payload="retained message", retain=True, proto_ver=proto_ver)
+    publish_packet = mosq_test.gen_publish(
+        "retain/qos0/test",
+        qos=0,
+        payload="retained message",
+        retain=True,
+        proto_ver=proto_ver,
+    )
     subscribe_packet = mosq_test.gen_subscribe(mid, "retain/qos0/test", 0, proto_ver=proto_ver)
     suback_packet = mosq_test.gen_suback(mid, 0, proto_ver=proto_ver)
 
@@ -35,7 +43,7 @@ def do_test(proto_ver):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             print("proto_ver=%d" % (proto_ver))
             exit(rc)
 

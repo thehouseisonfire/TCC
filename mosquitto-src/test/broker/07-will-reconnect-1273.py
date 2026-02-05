@@ -18,7 +18,15 @@ def do_test(proto_ver):
     subscribe1_packet = mosq_test.gen_subscribe(mid, "will/test", 0, proto_ver=proto_ver)
     suback1_packet = mosq_test.gen_suback(mid, 0, proto_ver=proto_ver)
 
-    connect2_packet = mosq_test.gen_connect("will-1273", keepalive=keepalive, will_topic="will/test", will_payload=b"will msg",clean_session=False, proto_ver=proto_ver, session_expiry=60)
+    connect2_packet = mosq_test.gen_connect(
+        "will-1273",
+        keepalive=keepalive,
+        will_topic="will/test",
+        will_payload=b"will msg",
+        clean_session=False,
+        proto_ver=proto_ver,
+        session_expiry=60,
+    )
     connack2a_packet = mosq_test.gen_connack(rc=0, proto_ver=proto_ver)
     connack2b_packet = mosq_test.gen_connack(rc=0, flags=1, proto_ver=proto_ver)
 
@@ -31,11 +39,19 @@ def do_test(proto_ver):
 
     try:
         # Connect and subscribe will-sub
-        sock1 = mosq_test.do_client_connect(connect1_packet, connack1_packet, timeout=30, port=port, connack_error="connack1")
+        sock1 = mosq_test.do_client_connect(
+            connect1_packet,
+            connack1_packet,
+            timeout=30,
+            port=port,
+            connack_error="connack1",
+        )
         mosq_test.do_send_receive(sock1, subscribe1_packet, suback1_packet, "suback")
 
         # Connect will-1273
-        sock2 = mosq_test.do_client_connect(connect2_packet, connack2a_packet, timeout=30, port=port)
+        sock2 = mosq_test.do_client_connect(
+            connect2_packet, connack2a_packet, timeout=30, port=port
+        )
         # Publish our "alive" message
         sock2.send(publish_packet)
         # Clean disconnect
@@ -47,7 +63,13 @@ def do_test(proto_ver):
         sock2.close()
 
         # Reconnect
-        sock2 = mosq_test.do_client_connect(connect2_packet, connack2b_packet, timeout=30, port=port, connack_error="connack2")
+        sock2 = mosq_test.do_client_connect(
+            connect2_packet,
+            connack2b_packet,
+            timeout=30,
+            port=port,
+            connack_error="connack2",
+        )
         # will-1273 to publish "alive" again, and will-sub to receive it.
         sock2.send(publish_packet)
         mosq_test.expect_packet(sock1, "publish2", publish_packet)
@@ -64,8 +86,9 @@ def do_test(proto_ver):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             exit(rc)
+
 
 do_test(4)
 do_test(5)

@@ -6,24 +6,29 @@ data for the mosquitto container.
 Usage: python3 verify_prometheus.py
 """
 
-import json
-import os
 import subprocess
 import sys
 import urllib.parse
+
 import httpx
 
-# Import shared query constants from run_scenarios
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 try:
-    from run_scenarios import (
+    from benchmarks.run_scenarios import (
         CURRENT_DOCKER_COMPOSE_CPU_QUERY,
         CURRENT_DOCKER_COMPOSE_MEM_QUERY,
     )
 except ImportError:
     # Fallback constants if import fails
-    CURRENT_DOCKER_COMPOSE_CPU_QUERY = 'sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service="mosquitto"}[30s]))'
-    CURRENT_DOCKER_COMPOSE_MEM_QUERY = 'max(container_memory_working_set_bytes{container_label_com_docker_compose_service="mosquitto"})'
+    CURRENT_DOCKER_COMPOSE_CPU_QUERY = (
+        "sum(rate(container_cpu_usage_seconds_total{"
+        'container_label_com_docker_compose_service="mosquitto"'
+        "}[30s]))"
+    )
+    CURRENT_DOCKER_COMPOSE_MEM_QUERY = (
+        "max(container_memory_working_set_bytes{"
+        'container_label_com_docker_compose_service="mosquitto"'
+        "})"
+    )
 
 
 def query_prometheus(query):
@@ -112,9 +117,7 @@ def verify_resource_monitoring():
 
     if not current_cpu_result.get("data", {}).get("result"):
         print("   ⚠️  Current scenario runner CPU query returns empty (expected)")
-        print(
-            "      This is because Docker Compose labels are not available in cAdvisor"
-        )
+        print("      This is because Docker Compose labels are not available in cAdvisor")
     else:
         print("   ✅ Current scenario runner CPU query works")
 
@@ -122,9 +125,7 @@ def verify_resource_monitoring():
 
     if not current_mem_result.get("data", {}).get("result"):
         print("   ⚠️  Current scenario runner memory query returns empty (expected)")
-        print(
-            "      This is because Docker Compose labels are not available in cAdvisor"
-        )
+        print("      This is because Docker Compose labels are not available in cAdvisor")
     else:
         print("   ✅ Current scenario runner memory query works")
 
@@ -133,9 +134,7 @@ def verify_resource_monitoring():
     print("✅ CPU and memory metrics are available for mosquitto container")
     print("⚠️  Current scenario runner queries need to be updated to use container IDs")
     print("\n=== Phase 6.2 Status ===")
-    print(
-        "🔧 RESOURCE MONITORING NEEDS FIX: The Prometheus queries in run_scenarios.py"
-    )
+    print("🔧 RESOURCE MONITORING NEEDS FIX: The Prometheus queries in run_scenarios.py")
     print("   need to be updated to use container ID-based queries instead of Docker")
     print("   Compose labels, which are not available in the current cAdvisor setup.")
 
@@ -151,7 +150,9 @@ def test_fixed_queries():
         return False
 
     # Fixed CPU query (rate over 30s)
-    fixed_cpu_query = f'sum(rate(container_cpu_usage_seconds_total{{id=~".*{container_id[:12]}.*"}}[30s]))'
+    fixed_cpu_query = (
+        f'sum(rate(container_cpu_usage_seconds_total{{id=~".*{container_id[:12]}.*"}}[30s]))'
+    )
     fixed_cpu_result = query_prometheus(fixed_cpu_query)
 
     print(f"Fixed CPU query: {fixed_cpu_query}")
@@ -162,9 +163,7 @@ def test_fixed_queries():
         print("   ⚠️  CPU rate query returned empty (container might be idle)")
 
     # Fixed memory query
-    fixed_mem_query = (
-        f'max(container_memory_working_set_bytes{{id=~".*{container_id[:12]}.*"}})'
-    )
+    fixed_mem_query = f'max(container_memory_working_set_bytes{{id=~".*{container_id[:12]}.*"}})'
     fixed_mem_result = query_prometheus(fixed_mem_query)
 
     print(f"Fixed memory query: {fixed_mem_query}")
@@ -185,9 +184,7 @@ if __name__ == "__main__":
     if success:
         test_fixed_queries()
         print("\n🎯 PHASE 6.2 VERIFICATION COMPLETE")
-        print(
-            "   Resource monitoring infrastructure is working, but queries need fixes."
-        )
+        print("   Resource monitoring infrastructure is working, but queries need fixes.")
         sys.exit(0)
     else:
         print("\n❌ PHASE 6.2 VERIFICATION FAILED")

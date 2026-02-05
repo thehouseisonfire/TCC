@@ -19,21 +19,34 @@
 
 # Disable on Travis for now, too unreliable
 import os
-if os.environ.get('TRAVIS') is not None:
+
+if os.environ.get("TRAVIS") is not None:
     exit(0)
 
-from mosq_test_helper import *
 from collections import namedtuple
 
+from mosq_test_helper import *
+
 # Normally we don't want tests to spew debug, but if you're working on a test, it's useful
-VERBOSE_TEST=False
+VERBOSE_TEST = False
+
+
 def tprint(*args, **kwargs):
     if VERBOSE_TEST:
-        print(" ".join(map(str,args)), **kwargs)
+        print(" ".join(map(str, args)), **kwargs)
+
 
 # this is our "A" broker
-def write_config_edge(filename, persistence_file, remote_port, listen_port, protocol_version, cs=False, lcs=None):
-    with open(filename, 'w') as f:
+def write_config_edge(
+    filename,
+    persistence_file,
+    remote_port,
+    listen_port,
+    protocol_version,
+    cs=False,
+    lcs=None,
+):
+    with open(filename, "w") as f:
         f.write("port %d\n" % (listen_port))
         f.write("allow_anonymous true\n")
         f.write("\n")
@@ -57,7 +70,7 @@ def write_config_edge(filename, persistence_file, remote_port, listen_port, prot
 
 # this is our "B" broker
 def write_config_core(filename, listen_port, persistence_file):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("port %d\n" % (listen_port))
         f.write("allow_anonymous true\n")
         f.write("\n")
@@ -82,14 +95,21 @@ def do_test(proto_ver, cs, lcs=None):
     if cs:
         expect_queued_ba = False
 
-
     (port_a_listen, port_b_listen) = mosq_test.get_port(2)
-    conf_file_a = os.path.basename(__file__).replace('.py', '%d_a_edge.conf'%(port_a_listen))
-    persistence_file_a = os.path.basename(__file__).replace('.py', '%d_a_edge.db'%(port_a_listen))
-    write_config_edge(conf_file_a, persistence_file_a, port_b_listen, port_a_listen, bridge_protocol, cs=cs, lcs=lcs)
+    conf_file_a = os.path.basename(__file__).replace(".py", "%d_a_edge.conf" % (port_a_listen))
+    persistence_file_a = os.path.basename(__file__).replace(".py", "%d_a_edge.db" % (port_a_listen))
+    write_config_edge(
+        conf_file_a,
+        persistence_file_a,
+        port_b_listen,
+        port_a_listen,
+        bridge_protocol,
+        cs=cs,
+        lcs=lcs,
+    )
 
-    conf_file_b = os.path.basename(__file__).replace('.py', '%d_b_core.conf'%(port_b_listen))
-    persistence_file_b = os.path.basename(__file__).replace('.py', '%d_b_core.db'%(port_b_listen))
+    conf_file_b = os.path.basename(__file__).replace(".py", "%d_b_core.conf" % (port_b_listen))
+    persistence_file_b = os.path.basename(__file__).replace(".py", "%d_b_core.db" % (port_b_listen))
     write_config_core(conf_file_b, port_b_listen, persistence_file_b)
 
     AckedPair = namedtuple("AckedPair", "p ack")
@@ -97,10 +117,17 @@ def do_test(proto_ver, cs, lcs=None):
     def make_conn(client_tag, proto, cs, session_present=False):
         client_id = socket.gethostname() + "." + client_tag
         keepalive = 60
-        conn = mosq_test.gen_connect(client_id, keepalive=keepalive, clean_session=cs, proto_ver=proto, session_expiry=0 if cs else 5000)
-        connack = mosq_test.gen_connack(rc=0, proto_ver=proto_ver, flags=1 if session_present else 0)
+        conn = mosq_test.gen_connect(
+            client_id,
+            keepalive=keepalive,
+            clean_session=cs,
+            proto_ver=proto,
+            session_expiry=0 if cs else 5000,
+        )
+        connack = mosq_test.gen_connack(
+            rc=0, proto_ver=proto_ver, flags=1 if session_present else 0
+        )
         return AckedPair(conn, connack)
-
 
     def make_sub(topic, mid, qos, proto):
         if proto_ver == 5:
@@ -111,11 +138,17 @@ def do_test(proto_ver, cs, lcs=None):
         suback = mosq_test.gen_suback(mid, qos, proto_ver=proto)
         return AckedPair(sub, suback)
 
-
     def make_pub(topic, mid, proto, qos=1, payload_tag="message", rc=-1):
         # Using the mid automatically makes it hard to verify messages that might have been retransmitted.
         # encourage users to put sequence numbers in topics instead....
-        pub = mosq_test.gen_publish(topic, mid=mid, qos=qos, retain=False, payload=payload_tag + "-from-" + topic, proto_ver=proto)
+        pub = mosq_test.gen_publish(
+            topic,
+            mid=mid,
+            qos=qos,
+            retain=False,
+            payload=payload_tag + "-from-" + topic,
+            proto_ver=proto,
+        )
         puback = mosq_test.gen_puback(mid, proto_ver=proto, reason_code=rc)
         return AckedPair(pub, puback)
 
@@ -133,12 +166,16 @@ def do_test(proto_ver, cs, lcs=None):
     pub_a1 = make_pub("br_out/test-queued1", mid=1, proto=proto_ver)
     pub_a2 = make_pub("br_out/test-queued2", mid=2, proto=proto_ver)
     pub_a3 = make_pub("br_out/test-queued3", mid=3, proto=proto_ver)
-    pub_a3r = make_pub("br_out/test-queued3", mid=2, proto=proto_ver) # without queueing, there is no a2
+    pub_a3r = make_pub(
+        "br_out/test-queued3", mid=2, proto=proto_ver
+    )  # without queueing, there is no a2
 
     pub_b1 = make_pub("br_in/test-queued1", mid=1, proto=proto_ver)
     pub_b2 = make_pub("br_in/test-queued2", mid=2, proto=proto_ver)
     pub_b3 = make_pub("br_in/test-queued3", mid=3, proto=proto_ver)
-    pub_b3r = make_pub("br_in/test-queued3", mid=2, proto=proto_ver) # without queueing, there is no b2
+    pub_b3r = make_pub(
+        "br_in/test-queued3", mid=2, proto=proto_ver
+    )  # without queueing, there is no b2
 
     success = False
     stde_a1 = stde_b1 = None
@@ -183,7 +220,6 @@ def do_test(proto_ver, cs, lcs=None):
         # should go through
         tprint("(B should be alive again now!) sending (after reconn!) a3 at ", time.time())
         mosq_test.do_send_receive(client_a, pub_a3.p, pub_a3.ack, "puback_a3")
-
 
         if expect_queued_ab:
             tprint("1.expecting a->b queueing")
@@ -246,13 +282,14 @@ def do_test(proto_ver, cs, lcs=None):
         if not success:
             print("Test failed, dumping broker A logs: ")
             if stde_a1:
-                print(stde_a1.decode('utf-8'))
-            print(stde_a.decode('utf-8'))
+                print(stde_a1.decode("utf-8"))
+            print(stde_a.decode("utf-8"))
             print("Test failed, dumping broker B logs: ")
             if stde_b1:
-                print(stde_b1.decode('utf-8'))
-            print(stde_b.decode('utf-8'))
+                print(stde_b1.decode("utf-8"))
+            print(stde_b.decode("utf-8"))
             exit(1)
+
 
 if sys.argv[3] == "True":
     cs = True
@@ -273,6 +310,6 @@ else:
 do_test(proto_ver=4, cs=cs, lcs=lcs)
 # FIXME - v5 clean session bridging doesn't work: see
 # https://github.com/eclipse/mosquitto/issues/1632
-#do_test(proto_ver=5, cs=cs, lcs=lcs)
+# do_test(proto_ver=5, cs=cs, lcs=lcs)
 
 exit(0)

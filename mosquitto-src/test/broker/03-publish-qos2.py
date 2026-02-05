@@ -4,14 +4,19 @@
 
 from mosq_test_helper import *
 
+
 def do_test(proto_ver):
     rc = 1
     keepalive = 60
-    connect_packet = mosq_test.gen_connect("pub-qos2-test", keepalive=keepalive, proto_ver=proto_ver)
+    connect_packet = mosq_test.gen_connect(
+        "pub-qos2-test", keepalive=keepalive, proto_ver=proto_ver
+    )
     connack_packet = mosq_test.gen_connack(rc=0, proto_ver=proto_ver)
 
     mid = 312
-    publish_packet = mosq_test.gen_publish("pub/qos2/test", qos=2, mid=mid, payload="message", proto_ver=proto_ver)
+    publish_packet = mosq_test.gen_publish(
+        "pub/qos2/test", qos=2, mid=mid, payload="message", proto_ver=proto_ver
+    )
     pubrec_packet = mosq_test.gen_pubrec(mid, proto_ver=proto_ver)
     pubrel_packet = mosq_test.gen_pubrel(mid, proto_ver=proto_ver)
     pubcomp_packet = mosq_test.gen_pubcomp(mid, proto_ver=proto_ver)
@@ -34,7 +39,7 @@ def do_test(proto_ver):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             print("proto_ver=%d" % (proto_ver))
             exit(rc)
 
@@ -42,4 +47,3 @@ def do_test(proto_ver):
 do_test(proto_ver=4)
 do_test(proto_ver=5)
 exit(0)
-

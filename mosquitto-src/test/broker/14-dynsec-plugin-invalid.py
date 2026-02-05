@@ -2,19 +2,24 @@
 
 # Check invalid inputs for plugin commands
 
-from mosq_test_helper import *
 import json
 import shutil
 
+from mosq_test_helper import *
+
+
 def write_config(filename, port):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("listener %d\n" % (port))
         f.write("allow_anonymous true\n")
         f.write("plugin ../../plugins/dynamic-security/mosquitto_dynamic_security.so\n")
         f.write("plugin_opt_config_file %d/dynamic-security.json\n" % (port))
 
+
 def command_check(sock, command_payload, expected_response, msg=""):
-    command_packet = mosq_test.gen_publish(topic="$CONTROL/dynamic-security/v1", qos=0, payload=json.dumps(command_payload))
+    command_packet = mosq_test.gen_publish(
+        topic="$CONTROL/dynamic-security/v1", qos=0, payload=json.dumps(command_payload)
+    )
     sock.send(command_packet)
     response = json.loads(mosq_test.read_publish(sock))
     if response != expected_response:
@@ -26,7 +31,9 @@ def command_check(sock, command_payload, expected_response, msg=""):
 
 
 def command_check_text(sock, command_payload, expected_response, msg=""):
-    command_packet = mosq_test.gen_publish(topic="$CONTROL/dynamic-security/v1", qos=0, payload=command_payload)
+    command_packet = mosq_test.gen_publish(
+        topic="$CONTROL/dynamic-security/v1", qos=0, payload=command_payload
+    )
     sock.send(command_packet)
     response = json.loads(mosq_test.read_publish(sock))
     if response != expected_response:
@@ -38,7 +45,7 @@ def command_check_text(sock, command_payload, expected_response, msg=""):
 
 
 port = mosq_test.get_port()
-conf_file = os.path.basename(__file__).replace('.py', '.conf')
+conf_file = os.path.basename(__file__).replace(".py", ".conf")
 write_config(conf_file, port)
 
 # ==========================================================================
@@ -46,57 +53,65 @@ write_config(conf_file, port)
 # ==========================================================================
 
 # Invalid JSON
-bad1_command = 'not json'
-bad1_response = {'responses': [{'command': 'Unknown command', 'error': 'Invalid/missing commands'}]}
+bad1_command = "not json"
+bad1_response = {"responses": [{"command": "Unknown command", "error": "Invalid/missing commands"}]}
 
 # No commands
 bad2_command = {}
-bad2_response = {'responses': [{'command': 'Unknown command', 'error': 'Invalid/missing commands'}]}
+bad2_response = {"responses": [{"command": "Unknown command", "error": "Invalid/missing commands"}]}
 
 # Commands not an array
-bad3_command = {'commands': 'test'}
-bad3_response = {'responses': [{'command': 'Unknown command', 'error': 'Invalid/missing commands'}]}
+bad3_command = {"commands": "test"}
+bad3_response = {"responses": [{"command": "Unknown command", "error": "Invalid/missing commands"}]}
 
 # Empty commands array
-bad4_command = {'commands': []}
-bad4_response = {'responses': []}
+bad4_command = {"commands": []}
+bad4_response = {"responses": []}
 
 # Empty command
-bad5_command = {'commands': ['bad']}
-bad5_response = {'responses': [{'command': 'Unknown command', 'error': 'Command not an object'}]}
+bad5_command = {"commands": ["bad"]}
+bad5_response = {"responses": [{"command": "Unknown command", "error": "Command not an object"}]}
 
 # Bad array type
-bad6_command = {'commands': [{}]}
-bad6_response = {'responses': [{'command': 'Unknown command', 'error': 'Missing command'}]}
+bad6_command = {"commands": [{}]}
+bad6_response = {"responses": [{"command": "Unknown command", "error": "Missing command"}]}
 
 # Bad command type
-bad7_command = {'commands': [{'command':6}]}
-bad7_response = {'responses': [{'command': 'Unknown command', 'error': 'Missing command'}]}
+bad7_command = {"commands": [{"command": 6}]}
+bad7_response = {"responses": [{"command": "Unknown command", "error": "Missing command"}]}
 
 # Bad correlationData type
-bad8_command = {'commands': [{'command':'command', 'correlationData':6}]}
-bad8_response = {'responses': [{'command': 'command', 'error': 'Invalid correlationData data type.'}]}
+bad8_command = {"commands": [{"command": "command", "correlationData": 6}]}
+bad8_response = {
+    "responses": [{"command": "command", "error": "Invalid correlationData data type."}]
+}
 
 # Unknown command
-bad9_command = {'commands': [{'command':'command'}]}
-bad9_response = {'responses': [{'command': 'command', 'error': 'Unknown command'}]}
+bad9_command = {"commands": [{"command": "command"}]}
+bad9_response = {"responses": [{"command": "command", "error": "Unknown command"}]}
 
 # ==========================================================================
 # setDefaultACLAccess
 # ==========================================================================
 
 # Missing actions array
-set_default1_command = {'commands': [{'command':'setDefaultACLAccess'}]}
-set_default1_response = {'responses': [{'command': 'setDefaultACLAccess', 'error': 'Missing/invalid actions array'}]}
+set_default1_command = {"commands": [{"command": "setDefaultACLAccess"}]}
+set_default1_response = {
+    "responses": [{"command": "setDefaultACLAccess", "error": "Missing/invalid actions array"}]
+}
 
 # Actions array not an array
-set_default2_command = {'commands': [{'command':'setDefaultACLAccess', 'actions':'bad'}]}
-set_default2_response = {'responses': [{'command': 'setDefaultACLAccess', 'error': 'Missing/invalid actions array'}]}
+set_default2_command = {"commands": [{"command": "setDefaultACLAccess", "actions": "bad"}]}
+set_default2_response = {
+    "responses": [{"command": "setDefaultACLAccess", "error": "Missing/invalid actions array"}]
+}
 
 
 rc = 1
 keepalive = 10
-connect_packet = mosq_test.gen_connect("ctrl-test", keepalive=keepalive, username="admin", password="admin")
+connect_packet = mosq_test.gen_connect(
+    "ctrl-test", keepalive=keepalive, username="admin", password="admin"
+)
 connack_packet = mosq_test.gen_connack(rc=0)
 
 mid = 2
@@ -144,7 +159,7 @@ finally:
     broker.wait()
     (stdo, stde) = broker.communicate()
     if rc:
-        print(stde.decode('utf-8'))
+        print(stde.decode("utf-8"))
 
 
 exit(rc)

@@ -5,8 +5,9 @@
 
 from mosq_test_helper import *
 
+
 def write_config(filename, port):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("listener %d\n" % (port))
         f.write("allow_anonymous true\n")
         f.write("retain_available false\n")
@@ -14,7 +15,7 @@ def write_config(filename, port):
 
 def do_test(proto_ver):
     port = mosq_test.get_port()
-    conf_file = os.path.basename(__file__).replace('.py', '.conf')
+    conf_file = os.path.basename(__file__).replace(".py", ".conf")
     write_config(conf_file, port)
 
     rc = 1
@@ -25,7 +26,9 @@ def do_test(proto_ver):
     props = mqtt5_props.gen_byte_prop(mqtt5_props.PROP_RETAIN_AVAILABLE, 0)
     connack_packet = mosq_test.gen_connack(rc=0, proto_ver=5, properties=props)
 
-    publish_packet = mosq_test.gen_publish("pub/qos1/test", qos=1, mid=mid, payload="message", retain=True, proto_ver=5)
+    publish_packet = mosq_test.gen_publish(
+        "pub/qos1/test", qos=1, mid=mid, payload="message", retain=True, proto_ver=5
+    )
     puback_packet = mosq_test.gen_puback(mid, proto_ver=5)
 
     disconnect_packet = mosq_test.gen_disconnect(reason_code=154, proto_ver=5)
@@ -47,7 +50,7 @@ def do_test(proto_ver):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             print("proto_ver=%d" % (proto_ver))
             exit(rc)
 
@@ -55,4 +58,3 @@ def do_test(proto_ver):
 do_test(proto_ver=4)
 do_test(proto_ver=5)
 exit(0)
-

@@ -6,14 +6,17 @@
 from mosq_test_helper import *
 
 
-
-
 def do_test(clean_start):
     rc = 1
     keepalive = 10
-    connect_packet = mosq_test.gen_connect(None, proto_ver=5, keepalive=keepalive, clean_session=clean_start)
+    connect_packet = mosq_test.gen_connect(
+        None, proto_ver=5, keepalive=keepalive, clean_session=clean_start
+    )
 
-    props = mqtt5_props.gen_string_prop(mqtt5_props.PROP_ASSIGNED_CLIENT_IDENTIFIER, "auto-00000000-0000-0000-0000-000000000000")
+    props = mqtt5_props.gen_string_prop(
+        mqtt5_props.PROP_ASSIGNED_CLIENT_IDENTIFIER,
+        "auto-00000000-0000-0000-0000-000000000000",
+    )
     connack_packet = mosq_test.gen_connack(rc=0, proto_ver=5, properties=props)
 
     props = mqtt5_props.gen_uint32_prop(mqtt5_props.PROP_SESSION_EXPIRY_INTERVAL, 1)
@@ -44,11 +47,10 @@ def do_test(clean_start):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             exit(rc)
 
 
 do_test(True)
 do_test(False)
 exit(0)
-

@@ -18,24 +18,28 @@ subscribe_packet = mosq_test.gen_subscribe(mid, "unsubscribe/test", 2, proto_ver
 suback_packet = mosq_test.gen_suback(mid, 2, proto_ver=5)
 
 mid = 2
-unsubscribe_packet = mosq_test.gen_unsubscribe_multiple(mid, ["unsubscribe/test", "no-sub"], proto_ver=5)
+unsubscribe_packet = mosq_test.gen_unsubscribe_multiple(
+    mid, ["unsubscribe/test", "no-sub"], proto_ver=5
+)
 unsuback_packet = mosq_test.gen_unsuback(mid, reason_code=[0, 17], proto_ver=5)
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock.settimeout(10)
-sock.bind(('', port))
+sock.bind(("", port))
 sock.listen(5)
 
 client_args = sys.argv[1:]
 env = dict(os.environ)
-env['LD_LIBRARY_PATH'] = '../../lib:../../lib/cpp'
+env["LD_LIBRARY_PATH"] = "../../lib:../../lib/cpp"
 try:
-    pp = env['PYTHONPATH']
+    pp = env["PYTHONPATH"]
 except KeyError:
-    pp = ''
-env['PYTHONPATH'] = '../../lib/python:'+pp
-client = mosq_test.start_client(filename=sys.argv[1].replace('/', '-'), cmd=client_args, env=env, port=port)
+    pp = ""
+env["PYTHONPATH"] = "../../lib/python:" + pp
+client = mosq_test.start_client(
+    filename=sys.argv[1].replace("/", "-"), cmd=client_args, env=env, port=port
+)
 
 rc = 1
 try:

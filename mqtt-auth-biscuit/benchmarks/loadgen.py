@@ -1,10 +1,13 @@
+import contextlib
 import json
 import os
 import queue
 import subprocess
 import threading
 import time
+import uuid
 from dataclasses import dataclass
+from typing import Any, cast
 
 import httpx
 import numpy as np
@@ -17,11 +20,14 @@ except ModuleNotFoundError as exc:
         "Missing dependency 'paho-mqtt'. Install it with: pip install paho-mqtt"
     ) from exc
 
-from logging_utils import get_logger, setup_logging
-
+from benchmarks.logging_utils import get_logger, setup_logging
 
 logger = get_logger(__name__)
 app = typer.Typer(add_completion=False)
+BISCUIT_ATTENUATE_DENY_OPTION = typer.Option(None, "--biscuit-attenuate-deny")
+BISCUIT_ATTENUATE_CHECK_OPTION = typer.Option(None, "--biscuit-attenuate-check")
+BISCUIT_DELEGATE_DENY_OPTION = typer.Option(None, "--biscuit-delegate-deny")
+BISCUIT_DELEGATE_CHECK_OPTION = typer.Option(None, "--biscuit-delegate-check")
 
 
 def _percentile(values, p):
@@ -224,7 +230,8 @@ def _resolve_attenuate_cmd(custom_bin: str | None) -> list[str]:
         if os.path.exists(candidate):
             return [candidate]
     raise FileNotFoundError(
-        "biscuit-attenuate binary not found; build it first (cargo build -p gen-tokens --bin biscuit-attenuate)"
+        "biscuit-attenuate binary not found; build it first "
+        "(cargo build -p gen-tokens --bin biscuit-attenuate)"
     )
 
 
@@ -345,7 +352,7 @@ def _publish_delegated_tokens(
     client = mqtt.Client(
         mqtt.CallbackAPIVersion.VERSION2,
         client_id="delegation_master",
-        protocol=protocol,
+        protocol=cast(Any, protocol),
     )
     client.username_pw_set(username, password)
     if tls_enabled:
@@ -365,9 +372,9 @@ def _publish_delegated_tokens(
     time.sleep(0.2)
 
     for client_id, token in tokens_by_client.items():
-        payload = json.dumps(
-            {"client_id": client_id, "token": token, "nonce": nonce}
-        ).encode("utf-8")
+        payload = json.dumps({"client_id": client_id, "token": token, "nonce": nonce}).encode(
+            "utf-8"
+        )
         try:
             info = client.publish(topic, payload, qos=qos, retain=retain)
             info.wait_for_publish(timeout=10)
@@ -376,14 +383,10 @@ def _publish_delegated_tokens(
         except Exception as e:
             errors.append(f"delegation_master_publish_failed:{e}")
 
-    try:
+    with contextlib.suppress(Exception):
         client.disconnect()
-    except Exception:
-        pass
-    try:
+    with contextlib.suppress(Exception):
         client.loop_stop()
-    except Exception:
-        pass
     return errors
 
 
@@ -402,9 +405,11 @@ def _receive_delegated_token(
             return
         if payload.get("client_id") != cfg.client_id:
             return
-        if cfg.biscuit_delegate_handoff_nonce:
-            if payload.get("nonce") != cfg.biscuit_delegate_handoff_nonce:
-                return
+        if (
+            cfg.biscuit_delegate_handoff_nonce
+            and payload.get("nonce") != cfg.biscuit_delegate_handoff_nonce
+        ):
+            return
         token = payload.get("token")
         if token:
             token_holder["token"] = token
@@ -413,8 +418,9 @@ def _receive_delegated_token(
     client = mqtt.Client(
         mqtt.CallbackAPIVersion.VERSION2,
         client_id=f"handoff_{cfg.client_id}",
-        protocol=cfg.protocol,
+        protocol=cast(Any, cfg.protocol),
     )
+    client.user_data_set(token_holder)
     client.username_pw_set(cfg.username, cfg.biscuit_delegate_handoff_token)
     if cfg.tls_enabled:
         if cfg.tls_ca_file:
@@ -428,28 +434,24 @@ def _receive_delegated_token(
     try:
         client.connect(cfg.host, cfg.port, 30)
     except Exception as e:
-        raise ValueError(f"delegation_handoff_connect_failed:{e}")
+        raise ValueError(f"delegation_handoff_connect_failed:{e}") from e
 
     client.loop_start()
     try:
-        res, _ = client.subscribe(
-            cfg.biscuit_delegate_handoff_topic,
-            qos=cfg.biscuit_delegate_handoff_qos,
-        )
+        topic = cfg.biscuit_delegate_handoff_topic
+        if topic is None:
+            raise ValueError("biscuit_delegate_handoff_topic is required")
+        res, _ = client.subscribe(topic, qos=cfg.biscuit_delegate_handoff_qos)
         if res != mqtt.MQTT_ERR_SUCCESS:
             errors.append(f"delegation_handoff_subscribe_rc:{res}")
     except Exception as e:
         errors.append(f"delegation_handoff_subscribe_failed:{e}")
 
     event.wait(timeout_s)
-    try:
+    with contextlib.suppress(Exception):
         client.disconnect()
-    except Exception:
-        pass
-    try:
+    with contextlib.suppress(Exception):
         client.loop_stop()
-    except Exception:
-        pass
 
     if errors:
         raise ValueError(",".join(errors))
@@ -504,7 +506,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
         client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id=cfg.client_id,
-            protocol=cfg.protocol,
+            protocol=cast(Any, cfg.protocol),
         )
         client.user_data_set(userdata)
         client.username_pw_set(cfg.username, password)
@@ -540,14 +542,10 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
 
         if not userdata["connected"]:
             reason = userdata["connect_reason"]
-            try:
+            with contextlib.suppress(Exception):
                 client.loop_stop()
-            except Exception:
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 client.disconnect()
-            except Exception:
-                pass
             if reason is None:
                 return None, "connect_timeout", reason, userdata
             return None, f"connect_denied:{reason}", reason, userdata
@@ -561,9 +559,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
 
     if cfg.biscuit_attenuate:
         try:
-            password, attenuation_ms, attenuation_len = _attenuate_biscuit_token(
-                password, cfg
-            )
+            password, attenuation_ms, attenuation_len = _attenuate_biscuit_token(password, cfg)
         except Exception as e:
             errors.append(f"attenuation_failed:{e}")
             logger.exception("Biscuit attenuation failed", exc_info=e)
@@ -632,11 +628,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
             )
             return
 
-        if (
-            cfg.token_issuer_url
-            and cfg.token_issuer_kind
-            and reason in cfg.token_refresh_codes
-        ):
+        if cfg.token_issuer_url and cfg.token_issuer_kind and reason in cfg.token_refresh_codes:
             try:
                 t_refresh_start = time.perf_counter()
                 password = _fetch_token(
@@ -692,7 +684,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
         )
         return
 
-    if userdata is None:
+    if userdata is None or client is None:
         errors.append("connect_failed")
         out_q.put(
             WorkerResult(
@@ -721,9 +713,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
             errors.append("fanout_missing_topic")
         else:
             try:
-                subscribe_qos = _effective_subscribe_qos(
-                    cfg.qos, cfg.qos_distribution
-                )
+                subscribe_qos = _effective_subscribe_qos(cfg.qos, cfg.qos_distribution)
                 res, _ = client.subscribe(cfg.subscribe_topic, qos=subscribe_qos)
                 if res != mqtt.MQTT_ERR_SUCCESS:
                     errors.append(f"subscribe_rc:{res}")
@@ -750,19 +740,15 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                 errors.append(f"publish_failed:{e}")
                 break
 
-    try:
+    with contextlib.suppress(Exception):
         client.disconnect()
-    except Exception:
-        pass
 
     t_deadline = time.time() + 5
     while not userdata["disconnected"] and time.time() < t_deadline:
         time.sleep(0.01)
 
-    try:
+    with contextlib.suppress(Exception):
         client.loop_stop()
-    except Exception:
-        pass
 
     out_q.put(
         WorkerResult(
@@ -804,7 +790,7 @@ def _run_fanout_publisher(
     client = mqtt.Client(
         mqtt.CallbackAPIVersion.VERSION2,
         client_id=client_id,
-        protocol=protocol,
+        protocol=cast(Any, protocol),
     )
     client.username_pw_set(username, password)
     if tls_enabled:
@@ -826,7 +812,7 @@ def _run_fanout_publisher(
     for _ in range(message_count):
         try:
             sent_ts = time.perf_counter()
-            payload = f"{sent_ts:.9f}|".encode("utf-8")
+            payload = f"{sent_ts:.9f}|".encode()
             if message_size > len(payload):
                 payload += b"A" * (message_size - len(payload))
             t0 = time.perf_counter()
@@ -841,14 +827,10 @@ def _run_fanout_publisher(
             errors.append(f"fanout_publish_failed:{e}")
             break
 
-    try:
+    with contextlib.suppress(Exception):
         client.disconnect()
-    except Exception:
-        pass
-    try:
+    with contextlib.suppress(Exception):
         client.loop_stop()
-    except Exception:
-        pass
 
     return publish_ms, errors
 
@@ -903,7 +885,7 @@ def run_load(
     biscuit_delegate_handoff_topic: str | None = None,
     biscuit_delegate_handoff_token: str | None = None,
     biscuit_delegate_handoff_qos: int | None = 1,
-    biscuit_delegate_handoff_retain: bool = True,
+    biscuit_delegate_handoff_no_retain: bool = False,
 ):
     start_evt = threading.Event()
     out_q: queue.Queue = queue.Queue()
@@ -916,15 +898,15 @@ def run_load(
     delegate_denies = biscuit_delegate_denies or []
     delegate_checks = biscuit_delegate_checks or []
     handoff_topic = (
-        biscuit_delegate_handoff_topic or "delegation/handoff"
-        if biscuit_delegate_handoff
-        else None
+        biscuit_delegate_handoff_topic or "delegation/handoff" if biscuit_delegate_handoff else None
     )
     handoff_qos = biscuit_delegate_handoff_qos or 1
-    handoff_retain = True if biscuit_delegate_handoff_retain is None else biscuit_delegate_handoff_retain
+    handoff_retain = not biscuit_delegate_handoff_no_retain
     handoff_nonce = uuid.uuid4().hex if biscuit_delegate_handoff else None
     if biscuit_delegate_handoff and not biscuit_delegate_handoff_token:
         raise ValueError("biscuit_delegate_handoff_token is required")
+    if biscuit_delegate_handoff_topic is None:
+        raise ValueError("biscuit_delegate_handoff_topic is required")
 
     delegated_tokens_by_client: dict[str, str] = {}
     for i in range(clients):
@@ -932,21 +914,13 @@ def run_load(
         topic = topic_template.format(client_id=client_id)
         formatted_denies = [spec.format(client_id=client_id) for spec in attenuate_denies]
         formatted_checks = [spec.format(client_id=client_id) for spec in attenuate_checks]
-        formatted_delegate_denies = [
-            spec.format(client_id=client_id) for spec in delegate_denies
-        ]
-        formatted_delegate_checks = [
-            spec.format(client_id=client_id) for spec in delegate_checks
-        ]
+        formatted_delegate_denies = [spec.format(client_id=client_id) for spec in delegate_denies]
+        formatted_delegate_checks = [spec.format(client_id=client_id) for spec in delegate_checks]
         formatted_topic = (
-            biscuit_attenuate_topic.format(client_id=client_id)
-            if biscuit_attenuate_topic
-            else None
+            biscuit_attenuate_topic.format(client_id=client_id) if biscuit_attenuate_topic else None
         )
         formatted_delegate_topic = (
-            biscuit_delegate_topic.format(client_id=client_id)
-            if biscuit_delegate_topic
-            else None
+            biscuit_delegate_topic.format(client_id=client_id) if biscuit_delegate_topic else None
         )
         delegation_ms = None
         delegation_len = None
@@ -1039,9 +1013,7 @@ def run_load(
             delegation_ms=delegation_ms,
             delegation_len=delegation_len,
         )
-        t = threading.Thread(
-            target=_run_worker, args=(cfg, start_evt, out_q), daemon=True
-        )
+        t = threading.Thread(target=_run_worker, args=(cfg, start_evt, out_q), daemon=True)
         threads.append(t)
 
     for t in threads:
@@ -1103,20 +1075,12 @@ def run_load(
     connect_lat = [r.connect_ms for r in results if r.connect_ms is not None]
     publish_lat = [x for r in results for x in r.publish_ms]
     receive_lat = [x for r in results for x in r.receive_ms]
-    refresh_lat = [
-        r.token_refresh_ms for r in results if r.token_refresh_ms is not None
-    ]
-    refresh_len = [
-        r.token_refresh_len for r in results if r.token_refresh_len is not None
-    ]
+    refresh_lat = [r.token_refresh_ms for r in results if r.token_refresh_ms is not None]
+    refresh_lens = [r.token_refresh_len for r in results if r.token_refresh_len is not None]
     delegation_lat = [r.delegation_ms for r in results if r.delegation_ms is not None]
-    delegation_len = [r.delegation_len for r in results if r.delegation_len is not None]
-    attenuation_lat = [
-        r.attenuation_ms for r in results if r.attenuation_ms is not None
-    ]
-    attenuation_len = [
-        r.attenuation_len for r in results if r.attenuation_len is not None
-    ]
+    delegation_lens = [r.delegation_len for r in results if r.delegation_len is not None]
+    attenuation_lat = [r.attenuation_ms for r in results if r.attenuation_ms is not None]
+    attenuation_lens = [r.attenuation_len for r in results if r.attenuation_len is not None]
 
     errors = [e for r in results for e in r.errors]
     errors.extend(fanout_errors)
@@ -1177,11 +1141,11 @@ def run_load(
         },
         "connect": _summarize_ms(connect_lat),
         "token_refresh": _summarize_ms(refresh_lat),
-        "token_refresh_len": _summarize_ms(refresh_len),
+        "token_refresh_len": _summarize_ms(refresh_lens),
         "delegation": _summarize_ms(delegation_lat),
-        "delegation_len": _summarize_ms(delegation_len),
+        "delegation_len": _summarize_ms(delegation_lens),
         "attenuation": _summarize_ms(attenuation_lat),
-        "attenuation_len": _summarize_ms(attenuation_len),
+        "attenuation_len": _summarize_ms(attenuation_lens),
         "publish": _summarize_ms(publish_lat),
         "receive": _summarize_ms(receive_lat),
         "throughput_mps": throughput_mps,
@@ -1221,18 +1185,17 @@ def main(
     token_refresh_codes: str = typer.Option(
         "5,135",
         envvar="TOKEN_REFRESH_CODES",
-        help="Comma-separated MQTT v5 reason codes that should trigger token refresh (e.g., 5/0x87 = Not authorized)",
+        help=(
+            "Comma-separated MQTT v5 reason codes that should trigger token refresh "
+            "(e.g., 5/0x87 = Not authorized)"
+        ),
     ),
     tls: bool = False,
     tls_ca_file: str | None = None,
     tls_insecure: bool = False,
     biscuit_attenuate: bool = False,
-    biscuit_attenuate_deny: list[str] = typer.Option(
-        None, "--biscuit-attenuate-deny"
-    ),
-    biscuit_attenuate_check: list[str] = typer.Option(
-        None, "--biscuit-attenuate-check"
-    ),
+    biscuit_attenuate_deny: list[str] = BISCUIT_ATTENUATE_DENY_OPTION,
+    biscuit_attenuate_check: list[str] = BISCUIT_ATTENUATE_CHECK_OPTION,
     biscuit_attenuate_topic: str | None = None,
     biscuit_attenuate_op: str | None = None,
     biscuit_attenuate_ttl: int | None = None,
@@ -1241,12 +1204,8 @@ def main(
     biscuit_base64url: bool = False,
     biscuit_attenuate_bin: str | None = None,
     biscuit_delegate: bool = False,
-    biscuit_delegate_deny: list[str] = typer.Option(
-        None, "--biscuit-delegate-deny"
-    ),
-    biscuit_delegate_check: list[str] = typer.Option(
-        None, "--biscuit-delegate-check"
-    ),
+    biscuit_delegate_deny: list[str] = BISCUIT_DELEGATE_DENY_OPTION,
+    biscuit_delegate_check: list[str] = BISCUIT_DELEGATE_CHECK_OPTION,
     biscuit_delegate_topic: str | None = None,
     biscuit_delegate_op: str | None = None,
     biscuit_delegate_ttl: int | None = None,
@@ -1281,8 +1240,8 @@ def main(
             continue
         try:
             parsed_refresh_codes.add(int(part, 0))
-        except ValueError:
-            raise typer.BadParameter(f"invalid token refresh code: {part}")
+        except ValueError as exc:
+            raise typer.BadParameter(f"invalid token refresh code: {part}") from exc
 
     parsed_qos_distribution = None
     if qos_distribution:
@@ -1341,7 +1300,7 @@ def main(
         biscuit_delegate_handoff_topic=biscuit_delegate_handoff_topic,
         biscuit_delegate_handoff_token=biscuit_delegate_handoff_token,
         biscuit_delegate_handoff_qos=biscuit_delegate_handoff_qos,
-        biscuit_delegate_handoff_retain=not biscuit_delegate_handoff_no_retain,
+        biscuit_delegate_handoff_no_retain=biscuit_delegate_handoff_no_retain,
     )
 
     if json_output:

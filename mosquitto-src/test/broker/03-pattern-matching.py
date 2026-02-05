@@ -2,13 +2,16 @@
 
 from mosq_test_helper import *
 
+
 def helper(port, pub_topic):
     connect_packet = mosq_test.gen_connect("test-helper", keepalive=60)
     connack_packet = mosq_test.gen_connack(rc=0)
 
     publish_packet = mosq_test.gen_publish(pub_topic, qos=0, retain=True, payload="message")
 
-    sock = mosq_test.do_client_connect(connect_packet, connack_packet, connack_error="helper connack", port=port)
+    sock = mosq_test.do_client_connect(
+        connect_packet, connack_packet, connack_error="helper connack", port=port
+    )
     sock.send(publish_packet)
     sock.close()
 
@@ -20,13 +23,15 @@ def pattern_test(sub_topic, pub_topic):
     connack_packet = mosq_test.gen_connack(rc=0)
 
     publish_packet = mosq_test.gen_publish(pub_topic, qos=0, payload="message")
-    publish_retained_packet = mosq_test.gen_publish(pub_topic, qos=0, retain=True, payload="message")
+    publish_retained_packet = mosq_test.gen_publish(
+        pub_topic, qos=0, retain=True, payload="message"
+    )
 
     mid = 312
     subscribe_packet = mosq_test.gen_subscribe(mid, sub_topic, 0)
     suback_packet = mosq_test.gen_suback(mid, 0)
 
-    mid = 234;
+    mid = 234
     unsubscribe_packet = mosq_test.gen_unsubscribe(mid, sub_topic)
     unsuback_packet = mosq_test.gen_unsuback(mid)
 
@@ -53,11 +58,12 @@ def pattern_test(sub_topic, pub_topic):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
-            print(stdo.decode('utf-8'))
+            print(stde.decode("utf-8"))
+            print(stdo.decode("utf-8"))
             sys.exit(rc)
 
     return rc
+
 
 pattern_test("#", "test/topic")
 pattern_test("#", "/test/topic")
@@ -85,4 +91,3 @@ pattern_test("foo/foo/baz/#", "foo/foo/baz/bar")
 pattern_test("/#", "////foo///bar")
 
 exit(0)
-

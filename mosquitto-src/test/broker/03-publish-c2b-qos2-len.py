@@ -5,15 +5,20 @@
 
 from mosq_test_helper import *
 
+
 def len_test(test, pubrel_packet):
     rc = 1
     mid = 3265
     keepalive = 60
-    connect_packet = mosq_test.gen_connect("pub-test", keepalive=keepalive, clean_session=False, proto_ver=5)
+    connect_packet = mosq_test.gen_connect(
+        "pub-test", keepalive=keepalive, clean_session=False, proto_ver=5
+    )
     connack_packet = mosq_test.gen_connack(flags=0, rc=0, proto_ver=5)
 
     mid = 1
-    publish_packet = mosq_test.gen_publish("qos2/len/test", qos=2, mid=mid, payload="len-message", proto_ver=5)
+    publish_packet = mosq_test.gen_publish(
+        "qos2/len/test", qos=2, mid=mid, payload="len-message", proto_ver=5
+    )
     pubrec_packet = mosq_test.gen_pubrec(mid)
     pubcomp_packet = mosq_test.gen_pubcomp(mid)
 
@@ -37,7 +42,7 @@ def len_test(test, pubrel_packet):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
 
     if rc != 0:
         print(test)

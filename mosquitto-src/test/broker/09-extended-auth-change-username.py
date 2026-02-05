@@ -4,22 +4,26 @@
 
 from mosq_test_helper import *
 
+
 def write_config(filename, acl_file, port, per_listener):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("per_listener_settings %s\n" % (per_listener))
         f.write("port %d\n" % (port))
         f.write("allow_anonymous true\n")
         f.write("acl_file %s\n" % (acl_file))
         f.write("auth_plugin c/auth_plugin_extended_single.so\n")
 
+
 def write_acl(filename):
-    with open(filename, 'w') as f:
-        f.write('user new_username\n')
-        f.write('topic readwrite topic/one\n')
+    with open(filename, "w") as f:
+        f.write("user new_username\n")
+        f.write("topic readwrite topic/one\n")
+
 
 port = mosq_test.get_port()
-conf_file = os.path.basename(__file__).replace('.py', '.conf')
-acl_file = os.path.basename(__file__).replace('.py', '.acl')
+conf_file = os.path.basename(__file__).replace(".py", ".conf")
+acl_file = os.path.basename(__file__).replace(".py", ".acl")
+
 
 def do_test(per_listener):
     write_config(conf_file, acl_file, port, per_listener)
@@ -35,21 +39,31 @@ def do_test(per_listener):
     suback_packet = mosq_test.gen_suback(mid, 1, proto_ver=5)
 
     mid = 2
-    publish1_packet = mosq_test.gen_publish("topic/one", qos=1, mid=mid, payload="message", proto_ver=5)
-    puback1_packet = mosq_test.gen_puback(mid, proto_ver=5, reason_code=mqtt5_rc.MQTT_RC_NOT_AUTHORIZED)
+    publish1_packet = mosq_test.gen_publish(
+        "topic/one", qos=1, mid=mid, payload="message", proto_ver=5
+    )
+    puback1_packet = mosq_test.gen_puback(
+        mid, proto_ver=5, reason_code=mqtt5_rc.MQTT_RC_NOT_AUTHORIZED
+    )
 
     # Connect without a username, but have the plugin change it
     props = mqtt5_props.gen_string_prop(mqtt5_props.PROP_AUTHENTICATION_METHOD, "change")
-    connect2_packet = mosq_test.gen_connect("client-params-test2", keepalive=42, proto_ver=5, properties=props)
+    connect2_packet = mosq_test.gen_connect(
+        "client-params-test2", keepalive=42, proto_ver=5, properties=props
+    )
     props = mqtt5_props.gen_string_prop(mqtt5_props.PROP_AUTHENTICATION_METHOD, "change")
     connack2_packet = mosq_test.gen_connack(rc=0, proto_ver=5, properties=props)
 
     mid = 2
-    publish2s_packet = mosq_test.gen_publish("topic/one", qos=1, mid=mid, payload="message", proto_ver=5)
+    publish2s_packet = mosq_test.gen_publish(
+        "topic/one", qos=1, mid=mid, payload="message", proto_ver=5
+    )
     puback2s_packet = mosq_test.gen_puback(mid, proto_ver=5)
 
     mid = 1
-    publish2r_packet = mosq_test.gen_publish("topic/one", qos=1, mid=mid, payload="message", proto_ver=5)
+    publish2r_packet = mosq_test.gen_publish(
+        "topic/one", qos=1, mid=mid, payload="message", proto_ver=5
+    )
 
     broker = mosq_test.start_broker(filename=os.path.basename(__file__), use_conf=True, port=port)
 
@@ -78,7 +92,7 @@ def do_test(per_listener):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             exit(rc)
 
 

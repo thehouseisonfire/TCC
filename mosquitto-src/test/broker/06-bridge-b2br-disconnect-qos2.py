@@ -4,8 +4,9 @@
 
 from mosq_test_helper import *
 
+
 def write_config(filename, port1, port2, protocol_version):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("port %d\n" % (port2))
         f.write("\n")
         f.write("connection bridge_sample\n")
@@ -15,22 +16,25 @@ def write_config(filename, port1, port2, protocol_version):
         f.write("restart_timeout 5\n")
         f.write("bridge_protocol_version %s\n" % (protocol_version))
 
+
 def do_test(proto_ver):
     if proto_ver == 4:
         bridge_protocol = "mqttv311"
-        proto_ver_connect = 128+4
+        proto_ver_connect = 128 + 4
     else:
         bridge_protocol = "mqttv50"
         proto_ver_connect = 5
 
     (port1, port2) = mosq_test.get_port(2)
-    conf_file = os.path.basename(__file__).replace('.py', '.conf')
+    conf_file = os.path.basename(__file__).replace(".py", ".conf")
     write_config(conf_file, port1, port2, bridge_protocol)
 
     rc = 1
     keepalive = 60
-    client_id = socket.gethostname()+".bridge_sample"
-    connect_packet = mosq_test.gen_connect(client_id, keepalive=keepalive, clean_session=False, proto_ver=proto_ver_connect)
+    client_id = socket.gethostname() + ".bridge_sample"
+    connect_packet = mosq_test.gen_connect(
+        client_id, keepalive=keepalive, clean_session=False, proto_ver=proto_ver_connect
+    )
     connack_packet = mosq_test.gen_connack(rc=0, proto_ver=proto_ver)
 
     if proto_ver == 5:
@@ -51,8 +55,21 @@ def do_test(proto_ver):
     suback3_packet = mosq_test.gen_suback(mid, 2, proto_ver=proto_ver)
 
     mid = 5
-    publish_packet = mosq_test.gen_publish("bridge/disconnect/test", qos=2, mid=mid, payload="disconnect-message", proto_ver=proto_ver)
-    publish_dup_packet = mosq_test.gen_publish("bridge/disconnect/test", qos=2, mid=mid, payload="disconnect-message", dup=True, proto_ver=proto_ver)
+    publish_packet = mosq_test.gen_publish(
+        "bridge/disconnect/test",
+        qos=2,
+        mid=mid,
+        payload="disconnect-message",
+        proto_ver=proto_ver,
+    )
+    publish_dup_packet = mosq_test.gen_publish(
+        "bridge/disconnect/test",
+        qos=2,
+        mid=mid,
+        payload="disconnect-message",
+        dup=True,
+        proto_ver=proto_ver,
+    )
     pubrec_packet = mosq_test.gen_pubrec(mid, proto_ver=proto_ver)
     pubrel_packet = mosq_test.gen_pubrel(mid, proto_ver=proto_ver)
     pubcomp_packet = mosq_test.gen_pubcomp(mid, proto_ver=proto_ver)
@@ -60,11 +77,13 @@ def do_test(proto_ver):
     ssock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     ssock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     ssock.settimeout(40)
-    ssock.bind(('', port1))
+    ssock.bind(("", port1))
     ssock.listen(5)
 
     try:
-        broker = mosq_test.start_broker(filename=os.path.basename(__file__), port=port2, use_conf=True)
+        broker = mosq_test.start_broker(
+            filename=os.path.basename(__file__), port=port2, use_conf=True
+        )
         (bridge, address) = ssock.accept()
         bridge.settimeout(20)
 
@@ -123,7 +142,7 @@ def do_test(proto_ver):
         (stdo, stde) = broker.communicate()
         ssock.close()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             exit(rc)
 
 
@@ -131,4 +150,3 @@ do_test(proto_ver=4)
 do_test(proto_ver=5)
 
 exit(0)
-

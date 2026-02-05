@@ -1,0 +1,39 @@
+[project]
+name = "token-benchmark"
+version = "0.1.0"
+requires-python = ">=3.14,<3.15"
+
+[tool.black]
+line-length = 100
+target-version = ["py314"]
+exclude = '''
+/(
+    \.venv
+  | mosquitto-src
+)/
+'''
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+fix = true
+exclude = [
+  "mosquitto-src",
+  ".venv",
+]
+
+[tool.ruff.lint]
+select = [
+  "E", "F",      # correctness
+  "I",           # imports (replaces isort)
+  "B",           # bugbear
+  "UP",          # pyupgrade
+  "SIM",         # simplify
+]
+
+[tool.mypy]
+python_version = "3.14"
+check_untyped_defs = true
+no_implicit_optional = true
+exclude = '(\.venv|mosquitto-src)/'
+

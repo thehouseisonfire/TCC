@@ -10,12 +10,16 @@ def helper(port):
     connack_packet = mosq_test.gen_connack(rc=0)
 
     mid = 312
-    publish_packet = mosq_test.gen_publish("qos2/disconnect/test", qos=2, mid=mid, payload="disconnect-message")
+    publish_packet = mosq_test.gen_publish(
+        "qos2/disconnect/test", qos=2, mid=mid, payload="disconnect-message"
+    )
     pubrec_packet = mosq_test.gen_pubrec(mid)
     pubrel_packet = mosq_test.gen_pubrel(mid)
     pubcomp_packet = mosq_test.gen_pubcomp(mid)
 
-    sock = mosq_test.do_client_connect(connect_packet, connack_packet, connack_error="helper connack", port=port)
+    sock = mosq_test.do_client_connect(
+        connect_packet, connack_packet, connack_error="helper connack", port=port
+    )
 
     mosq_test.do_send_receive(sock, publish_packet, pubrec_packet, "helper pubrec")
     mosq_test.do_send_receive(sock, pubrel_packet, pubcomp_packet, "helper pubcomp")
@@ -27,7 +31,13 @@ def do_test(proto_ver):
     rc = 1
     mid = 3265
     keepalive = 60
-    connect_packet = mosq_test.gen_connect("pub-qos2-disco-test", keepalive=keepalive, clean_session=False, proto_ver=proto_ver, session_expiry=60)
+    connect_packet = mosq_test.gen_connect(
+        "pub-qos2-disco-test",
+        keepalive=keepalive,
+        clean_session=False,
+        proto_ver=proto_ver,
+        session_expiry=60,
+    )
     connack1_packet = mosq_test.gen_connack(flags=0, rc=0, proto_ver=proto_ver)
     connack2_packet = mosq_test.gen_connack(flags=1, rc=0, proto_ver=proto_ver)
 
@@ -35,14 +45,29 @@ def do_test(proto_ver):
     suback_packet = mosq_test.gen_suback(mid, 2, proto_ver=proto_ver)
 
     mid = 1
-    publish_packet = mosq_test.gen_publish("qos2/disconnect/test", qos=2, mid=mid, payload="disconnect-message", proto_ver=proto_ver)
-    publish_dup_packet = mosq_test.gen_publish("qos2/disconnect/test", qos=2, mid=mid, payload="disconnect-message", dup=True, proto_ver=proto_ver)
+    publish_packet = mosq_test.gen_publish(
+        "qos2/disconnect/test",
+        qos=2,
+        mid=mid,
+        payload="disconnect-message",
+        proto_ver=proto_ver,
+    )
+    publish_dup_packet = mosq_test.gen_publish(
+        "qos2/disconnect/test",
+        qos=2,
+        mid=mid,
+        payload="disconnect-message",
+        dup=True,
+        proto_ver=proto_ver,
+    )
     pubrec_packet = mosq_test.gen_pubrec(mid, proto_ver=proto_ver)
     pubrel_packet = mosq_test.gen_pubrel(mid, proto_ver=proto_ver)
     pubcomp_packet = mosq_test.gen_pubcomp(mid, proto_ver=proto_ver)
 
     mid = 3266
-    publish2_packet = mosq_test.gen_publish("qos1/outgoing", qos=1, mid=mid, payload="outgoing-message", proto_ver=proto_ver)
+    publish2_packet = mosq_test.gen_publish(
+        "qos1/outgoing", qos=1, mid=mid, payload="outgoing-message", proto_ver=proto_ver
+    )
     puback2_packet = mosq_test.gen_puback(mid, proto_ver=proto_ver)
 
     port = mosq_test.get_port()
@@ -81,7 +106,7 @@ def do_test(proto_ver):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             print("proto_ver=%d" % (proto_ver))
             exit(rc)
 
@@ -89,4 +114,3 @@ def do_test(proto_ver):
 do_test(proto_ver=4)
 do_test(proto_ver=5)
 exit(0)
-

@@ -33,7 +33,9 @@ disconnect_packet = mosq_test.gen_disconnect()
 
 mid = 1
 publish_packet = mosq_test.gen_publish("pub/qos2/test", qos=2, mid=mid, payload="message")
-publish_dup_packet = mosq_test.gen_publish("pub/qos2/test", qos=2, mid=mid, payload="message", dup=True)
+publish_dup_packet = mosq_test.gen_publish(
+    "pub/qos2/test", qos=2, mid=mid, payload="message", dup=True
+)
 pubrec_packet = mosq_test.gen_pubrec(mid)
 pubrel_packet = mosq_test.gen_pubrel(mid)
 pubcomp_packet = mosq_test.gen_pubcomp(mid)
@@ -41,18 +43,20 @@ pubcomp_packet = mosq_test.gen_pubcomp(mid)
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock.settimeout(10)
-sock.bind(('', port))
+sock.bind(("", port))
 sock.listen(5)
 
 client_args = sys.argv[1:]
 env = dict(os.environ)
-env['LD_LIBRARY_PATH'] = '../../lib:../../lib/cpp'
+env["LD_LIBRARY_PATH"] = "../../lib:../../lib/cpp"
 try:
-    pp = env['PYTHONPATH']
+    pp = env["PYTHONPATH"]
 except KeyError:
-    pp = ''
-env['PYTHONPATH'] = '../../lib/python:'+pp
-client = mosq_test.start_client(filename=sys.argv[1].replace('/', '-'), cmd=client_args, env=env, port=port)
+    pp = ""
+env["PYTHONPATH"] = "../../lib/python:" + pp
+client = mosq_test.start_client(
+    filename=sys.argv[1].replace("/", "-"), cmd=client_args, env=env, port=port
+)
 
 try:
     (conn, address) = sock.accept()

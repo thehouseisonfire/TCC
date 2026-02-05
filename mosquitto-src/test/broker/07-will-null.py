@@ -4,17 +4,23 @@
 
 from mosq_test_helper import *
 
+
 def helper(port, proto_ver):
-    connect_packet = mosq_test.gen_connect("test-helper", keepalive=60, will_topic="will/null/test", proto_ver=proto_ver)
+    connect_packet = mosq_test.gen_connect(
+        "test-helper", keepalive=60, will_topic="will/null/test", proto_ver=proto_ver
+    )
     connack_packet = mosq_test.gen_connack(rc=0, proto_ver=proto_ver)
     sock = mosq_test.do_client_connect(connect_packet, connack_packet, port=port)
     sock.close()
+
 
 def do_test(proto_ver):
     rc = 1
     mid = 53
     keepalive = 60
-    connect_packet = mosq_test.gen_connect("will-qos0-test", keepalive=keepalive, proto_ver=proto_ver)
+    connect_packet = mosq_test.gen_connect(
+        "will-qos0-test", keepalive=keepalive, proto_ver=proto_ver
+    )
     connack_packet = mosq_test.gen_connack(rc=0, proto_ver=proto_ver)
 
     subscribe_packet = mosq_test.gen_subscribe(mid, "will/null/test", 0, proto_ver=proto_ver)
@@ -42,7 +48,7 @@ def do_test(proto_ver):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             print("proto_ver=%d" % (proto_ver))
             exit(rc)
 
@@ -50,4 +56,3 @@ def do_test(proto_ver):
 do_test(proto_ver=4)
 do_test(proto_ver=5)
 exit(0)
-

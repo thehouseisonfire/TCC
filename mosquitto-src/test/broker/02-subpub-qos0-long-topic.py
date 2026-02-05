@@ -4,6 +4,7 @@
 
 from mosq_test_helper import *
 
+
 def do_test(topic, succeeds):
     rc = 1
     mid = 53
@@ -38,15 +39,17 @@ def do_test(topic, succeeds):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             exit(rc)
 
-do_test("/"*200, True) # 200 max hierarchy limit
-do_test("abc/"*199+"d", True) # 200 max hierarchy limit, longer overall string than 200
 
-do_test("/"*201, False) # Exceeds 200 max hierarchy limit
-do_test("abc/"*201+"d", False) # Exceeds 200 max hierarchy limit, longer overall string than 200
+do_test("/" * 200, True)  # 200 max hierarchy limit
+do_test("abc/" * 199 + "d", True)  # 200 max hierarchy limit, longer overall string than 200
+
+do_test("/" * 201, False)  # Exceeds 200 max hierarchy limit
+do_test(
+    "abc/" * 201 + "d", False
+)  # Exceeds 200 max hierarchy limit, longer overall string than 200
 
 
 exit(0)
-

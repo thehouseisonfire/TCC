@@ -6,6 +6,7 @@
 
 from mosq_test_helper import *
 
+
 def do_test():
     rc = 1
     keepalive = 60
@@ -13,7 +14,9 @@ def do_test():
     connack_packet = mosq_test.gen_connack(rc=0, proto_ver=5)
 
     mid = 530
-    subscribe_packet = mosq_test.gen_subscribe(mid, "subpub/qos1", 1 | mqtt5_opts.MQTT_SUB_OPT_NO_LOCAL, proto_ver=5)
+    subscribe_packet = mosq_test.gen_subscribe(
+        mid, "subpub/qos1", 1 | mqtt5_opts.MQTT_SUB_OPT_NO_LOCAL, proto_ver=5
+    )
     suback_packet = mosq_test.gen_suback(mid, 1, proto_ver=5)
 
     mid = 531
@@ -21,16 +24,21 @@ def do_test():
     suback2_packet = mosq_test.gen_suback(mid, 1, proto_ver=5)
 
     mid = 300
-    publish_packet = mosq_test.gen_publish("subpub/qos1", qos=1, mid=mid, payload="message", proto_ver=5)
+    publish_packet = mosq_test.gen_publish(
+        "subpub/qos1", qos=1, mid=mid, payload="message", proto_ver=5
+    )
     puback_packet = mosq_test.gen_puback(mid, proto_ver=5)
 
     mid = 301
-    publish2_packet = mosq_test.gen_publish("subpub/receive", qos=1, mid=mid, payload="success", proto_ver=5)
+    publish2_packet = mosq_test.gen_publish(
+        "subpub/receive", qos=1, mid=mid, payload="success", proto_ver=5
+    )
     puback2_packet = mosq_test.gen_puback(mid, proto_ver=5)
 
     mid = 1
-    publish3_packet = mosq_test.gen_publish("subpub/receive", qos=1, mid=mid, payload="success", proto_ver=5)
-
+    publish3_packet = mosq_test.gen_publish(
+        "subpub/receive", qos=1, mid=mid, payload="success", proto_ver=5
+    )
 
     port = mosq_test.get_port()
     broker = mosq_test.start_broker(filename=os.path.basename(__file__), port=port)
@@ -55,7 +63,7 @@ def do_test():
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             exit(rc)
 
 

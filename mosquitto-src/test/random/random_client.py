@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 
-import paho.mqtt.client as paho
 import random
 import sys
 import time
+
+import paho.mqtt.client as paho
 
 # This is a client that carries out randomised behaviour. It is intended for
 # use with the local config file. This file has multiple listeners configured:
@@ -42,26 +43,23 @@ import time
 #   * Interval until next outgoing message
 
 ports = [
-        {"port":1883, "tls":False, "transport":"tcp", "auth":False},
-        {"port":1884, "tls":False, "transport":"tcp", "auth":True},
-        {"port":1885, "tls":False, "transport":"tcp", "auth":True},
-        {"port":1886, "tls":False, "transport":"tcp", "auth":True},
-
-        {"port":8883, "tls":True, "transport":"tcp", "auth":False},
-        {"port":8884, "tls":True, "transport":"tcp", "auth":True},
-        {"port":8885, "tls":True, "transport":"tcp", "auth":True},
-        {"port":8886, "tls":True, "transport":"tcp", "auth":True},
-
-        {"port":8000, "tls":False, "transport":"websockets", "auth":False},
-        {"port":8001, "tls":False, "transport":"websockets", "auth":True},
-        {"port":8002, "tls":False, "transport":"websockets", "auth":True},
-        {"port":8003, "tls":False, "transport":"websockets", "auth":True},
-
-        {"port":4430, "tls":True, "transport":"websockets", "auth":False},
-        {"port":4431, "tls":True, "transport":"websockets", "auth":True},
-        {"port":4432, "tls":True, "transport":"websockets", "auth":True},
-        {"port":4433, "tls":True, "transport":"websockets", "auth":True},
-        ]
+    {"port": 1883, "tls": False, "transport": "tcp", "auth": False},
+    {"port": 1884, "tls": False, "transport": "tcp", "auth": True},
+    {"port": 1885, "tls": False, "transport": "tcp", "auth": True},
+    {"port": 1886, "tls": False, "transport": "tcp", "auth": True},
+    {"port": 8883, "tls": True, "transport": "tcp", "auth": False},
+    {"port": 8884, "tls": True, "transport": "tcp", "auth": True},
+    {"port": 8885, "tls": True, "transport": "tcp", "auth": True},
+    {"port": 8886, "tls": True, "transport": "tcp", "auth": True},
+    {"port": 8000, "tls": False, "transport": "websockets", "auth": False},
+    {"port": 8001, "tls": False, "transport": "websockets", "auth": True},
+    {"port": 8002, "tls": False, "transport": "websockets", "auth": True},
+    {"port": 8003, "tls": False, "transport": "websockets", "auth": True},
+    {"port": 4430, "tls": True, "transport": "websockets", "auth": False},
+    {"port": 4431, "tls": True, "transport": "websockets", "auth": True},
+    {"port": 4432, "tls": True, "transport": "websockets", "auth": True},
+    {"port": 4433, "tls": True, "transport": "websockets", "auth": True},
+]
 
 booleans = [True, False]
 qos_values = [0, 1, 2]
@@ -103,7 +101,9 @@ def main():
     global running
     global lifetime
 
-    mqttc = paho.Client(client_id, clean_session=clean_start, protocol=protocol, transport=transport)
+    mqttc = paho.Client(
+        client_id, clean_session=clean_start, protocol=protocol, transport=transport
+    )
     mqttc.on_message = on_message
     mqttc.on_publish = on_publish
     mqttc.on_connect = on_connect
@@ -139,7 +139,7 @@ use_tls = p["tls"]
 transport = p["transport"]
 auth = p["auth"]
 
-client_id = "cid"+sys.argv[1]
+client_id = "cid" + sys.argv[1]
 clean_start = random.choice(booleans)
 subscribe_qos = random.choice(qos_values)
 protocol = paho.MQTTv311

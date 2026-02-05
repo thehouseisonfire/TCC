@@ -6,18 +6,16 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import List
 
 import typer
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKDIR = os.path.join(SCRIPT_DIR, "mqtt-auth-biscuit")
 BENCHMARKS_DIR = os.path.join(WORKDIR, "benchmarks")
-if BENCHMARKS_DIR not in sys.path:
-    sys.path.append(BENCHMARKS_DIR)
+if WORKDIR not in sys.path:
+    sys.path.append(WORKDIR)
 
-from logging_utils import get_logger, setup_logging
-
+from benchmarks.logging_utils import get_logger, setup_logging  # noqa: E402
 
 logger = get_logger(__name__)
 app = typer.Typer(add_completion=False)
@@ -37,7 +35,7 @@ def check_paho() -> None:
         ) from exc
 
 
-def detect_compose_bin(override: str | None) -> List[str]:
+def detect_compose_bin(override: str | None) -> list[str]:
     if override:
         return shlex.split(override)
     if (
@@ -53,19 +51,17 @@ def detect_compose_bin(override: str | None) -> List[str]:
         return ["docker", "compose"]
     if shutil.which("docker-compose"):
         return ["docker-compose"]
-    raise SystemExit(
-        "Docker Compose not found. Install docker compose or docker-compose."
-    )
+    raise SystemExit("Docker Compose not found. Install docker compose or docker-compose.")
 
 
-def compose_args(compose_files: List[str]) -> List[str]:
-    args: List[str] = []
+def compose_args(compose_files: list[str]) -> list[str]:
+    args: list[str] = []
     for file in compose_files:
         args.extend(["-f", file])
     return args
 
 
-def run(cmd: List[str], cwd: str | None = None, env: dict | None = None) -> None:
+def run(cmd: list[str], cwd: str | None = None, env: dict | None = None) -> None:
     subprocess.run(cmd, cwd=cwd, env=env, check=True)
 
 
@@ -105,9 +101,7 @@ def main(
             return
         logger.info("Cleaning up Docker services...")
         cmd = compose_bin + compose_args(compose_files) + ["down"]
-        subprocess.run(
-            cmd, cwd=WORKDIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+        subprocess.run(cmd, cwd=WORKDIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     atexit.register(cleanup)
 
@@ -115,9 +109,7 @@ def main(
 
     if not skip_build:
         logger.info("Building plugin...")
-        run(
-            ["cargo", "build", "--release", "-p", "mosquitto-auth-biscuit"], cwd=WORKDIR
-        )
+        run(["cargo", "build", "--release", "-p", "mosquitto-auth-biscuit"], cwd=WORKDIR)
     else:
         logger.info("Skipping build (per --skip-build)")
 
@@ -133,7 +125,7 @@ def main(
     else:
         logger.info("Skipping token generation (per --skip-tokens)")
 
-    run_args: List[str] = []
+    run_args: list[str] = []
     if scenarios:
         run_args += ["--scenarios-arg", scenarios]
     if clients:

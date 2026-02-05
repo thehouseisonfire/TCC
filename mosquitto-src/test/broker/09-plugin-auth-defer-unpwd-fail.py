@@ -4,20 +4,27 @@
 
 from mosq_test_helper import *
 
+
 def write_config(filename, port, plugin_ver):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("port %d\n" % (port))
         f.write("auth_plugin c/auth_plugin_v%d.so\n" % (plugin_ver))
         f.write("allow_anonymous false\n")
 
+
 def do_test(plugin_ver):
     port = mosq_test.get_port()
-    conf_file = os.path.basename(__file__).replace('.py', '.conf')
+    conf_file = os.path.basename(__file__).replace(".py", ".conf")
     write_config(conf_file, port, plugin_ver)
 
     rc = 1
     keepalive = 10
-    connect_packet = mosq_test.gen_connect("connect-uname-pwd-test", keepalive=keepalive, username="test-username@v2", password="doesNotMatter")
+    connect_packet = mosq_test.gen_connect(
+        "connect-uname-pwd-test",
+        keepalive=keepalive,
+        username="test-username@v2",
+        password="doesNotMatter",
+    )
     connack_packet = mosq_test.gen_connack(rc=5)
 
     broker = mosq_test.start_broker(filename=os.path.basename(__file__), use_conf=True, port=port)
@@ -34,8 +41,9 @@ def do_test(plugin_ver):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             exit(rc)
+
 
 do_test(4)
 do_test(5)

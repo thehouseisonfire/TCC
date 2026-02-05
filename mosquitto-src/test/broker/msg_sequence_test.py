@@ -2,13 +2,12 @@
 
 # Test whether a valid CONNECT results in the correct CONNACK packet.
 
-from mosq_test_helper import *
-import importlib
-from os import walk
-import socket
 import json
 from collections import deque
+from os import walk
+
 import mosq_test
+from mosq_test_helper import *
 
 send = 1
 recv = 2
@@ -17,15 +16,17 @@ connected_check = 4
 publish = 5
 
 
-class SingleMsg(object):
-    __slots__ = 'action', 'message', 'comment'
-    def __init__(self, action, message, comment=''):
+class SingleMsg:
+    __slots__ = "action", "message", "comment"
+
+    def __init__(self, action, message, comment=""):
         self.action = action
         self.message = message
         self.comment = comment
 
-class MsgSequence(object):
-    __slots__ = 'name', 'msgs', 'expect_disconnect'
+
+class MsgSequence:
+    __slots__ = "name", "msgs", "expect_disconnect"
 
     def __init__(self, name, default_connect=True, proto_ver=4, expect_disconnect=True):
         self.name = name
@@ -72,13 +73,13 @@ class MsgSequence(object):
         mosq_test.expect_packet(sock, "connack", mosq_test.gen_connack(rc=0))
 
         m = msg.message
-        if m['qos'] == 0:
-            sock.send(mosq_test.gen_publish(topic=m['topic'], payload=m['payload']))
-        elif m['qos'] == 1:
-            sock.send(mosq_test.gen_publish(mid=1, qos=1, topic=m['topic'], payload=m['payload']))
+        if m["qos"] == 0:
+            sock.send(mosq_test.gen_publish(topic=m["topic"], payload=m["payload"]))
+        elif m["qos"] == 1:
+            sock.send(mosq_test.gen_publish(mid=1, qos=1, topic=m["topic"], payload=m["payload"]))
             mosq_test.expect_packet(sock, "helper puback", mosq_test.gen_puback(mid=1))
-        elif m['qos'] == 2:
-            sock.send(mosq_test.gen_publish(mid=1, qos=2, topic=m['topic'], payload=m['payload']))
+        elif m["qos"] == 2:
+            sock.send(mosq_test.gen_publish(mid=1, qos=2, topic=m["topic"], payload=m["payload"]))
             mosq_test.expect_packet(sock, "helper pubrec", mosq_test.gen_pubrec(mid=1))
             sock.send(mosq_test.gen_pubrel(mid=1))
             mosq_test.expect_packet(sock, "helper pubcomp", mosq_test.gen_pubcomp(mid=1))
@@ -88,7 +89,6 @@ class MsgSequence(object):
         data = sock.recv(len(msg.message))
         if data != msg.message:
             raise ValueError("Receive message %s | %s | %s" % (msg.comment, data, msg.message))
-
 
     def _disconnected_check(self, sock):
         try:
@@ -129,7 +129,7 @@ class MsgSequence(object):
 def do_test(hostname, port):
     rc = 0
     sequences = []
-    for (_, _, filenames) in walk("data"):
+    for _, _, filenames in walk("data"):
         sequences.extend(filenames)
         break
 
@@ -140,7 +140,7 @@ def do_test(hostname, port):
         if seq[-5:] != ".json":
             continue
 
-        with open("data/"+seq, "r") as f:
+        with open("data/" + seq) as f:
             test_file = json.load(f)
 
         for g in test_file:
@@ -168,10 +168,12 @@ def do_test(hostname, port):
                 except KeyError:
                     expect_disconnect = True
 
-                this_test = MsgSequence(tname,
-                        proto_ver=proto_ver,
-                        expect_disconnect=expect_disconnect,
-                        default_connect=connect)
+                this_test = MsgSequence(
+                    tname,
+                    proto_ver=proto_ver,
+                    expect_disconnect=expect_disconnect,
+                    default_connect=connect,
+                )
 
                 for m in t["msgs"]:
                     try:
@@ -197,7 +199,7 @@ def do_test(hostname, port):
                 except ConnectionResetError as e:
                     print("\033[31m" + tname + " failed: " + str(e) + "\033[0m")
                     rc = 1
-                except socket.timeout as e:
+                except TimeoutError as e:
                     print("\033[31m" + tname + " failed: " + str(e) + "\033[0m")
                     rc = 1
                 except mosq_test.TestError as e:
@@ -206,6 +208,7 @@ def do_test(hostname, port):
 
     print("%d tests total\n%d tests succeeded" % (total, succeeded))
     return rc
+
 
 hostname = "localhost"
 port = mosq_test.get_port()
@@ -220,8 +223,12 @@ finally:
     (stdo, stde) = broker.communicate()
     if broker.returncode != 0:
         rc = broker.returncode
-        print(f"Broker exited with code {rc}. If there are no obvious errors this may be due to an ASAN build having leaks, which must be fixed.")
-        print("The easiest way to reproduce this is to run the broker with `mosquitto -p 1888`, rerun the test, then quit the broker.")
+        print(
+            f"Broker exited with code {rc}. If there are no obvious errors this may be due to an ASAN build having leaks, which must be fixed."
+        )
+        print(
+            "The easiest way to reproduce this is to run the broker with `mosquitto -p 1888`, rerun the test, then quit the broker."
+        )
 if rc:
-    #print(stde.decode('utf-8'))
+    # print(stde.decode('utf-8'))
     exit(rc)

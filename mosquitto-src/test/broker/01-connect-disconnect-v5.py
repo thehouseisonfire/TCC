@@ -4,12 +4,12 @@
 
 from mosq_test_helper import *
 
+
 def disco_test(test, disconnect_packet):
     global rc
 
     sock1 = mosq_test.do_client_connect(connect1_packet, connack1_packet, port=port)
     mosq_test.do_send_receive(sock1, subscribe1_packet, suback1_packet, "suback1")
-
 
     sock2 = mosq_test.do_client_connect(connect2_packet, connack2_packet, port=port)
     sock2.send(disconnect_packet)
@@ -31,7 +31,13 @@ mid = 1
 subscribe1_packet = mosq_test.gen_subscribe(mid, "#", 0, proto_ver=5)
 suback1_packet = mosq_test.gen_suback(mid, 0, proto_ver=5)
 
-connect2_packet = mosq_test.gen_connect("connect-disconnect-test", proto_ver=5, keepalive=keepalive, will_topic="failure", will_payload=b"failure")
+connect2_packet = mosq_test.gen_connect(
+    "connect-disconnect-test",
+    proto_ver=5,
+    keepalive=keepalive,
+    will_topic="failure",
+    will_payload=b"failure",
+)
 connack2_packet = mosq_test.gen_connack(rc=0, proto_ver=5)
 
 port = mosq_test.get_port()
@@ -62,7 +68,7 @@ finally:
     broker.wait()
     (stdo, stde) = broker.communicate()
     if rc:
-        print(stde.decode('utf-8'))
+        print(stde.decode("utf-8"))
 
 if rc != 0:
     exit(rc)

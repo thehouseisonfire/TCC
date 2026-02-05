@@ -4,16 +4,25 @@
 
 from mosq_test_helper import *
 
+
 def do_test(proto_ver):
     rc = 1
     mid = 19
     keepalive = 60
-    connect_packet = mosq_test.gen_connect("pub-qos1-test", keepalive=keepalive, proto_ver=proto_ver)
+    connect_packet = mosq_test.gen_connect(
+        "pub-qos1-test", keepalive=keepalive, proto_ver=proto_ver
+    )
     connack_packet = mosq_test.gen_connack(rc=0, proto_ver=proto_ver)
 
-    publish_packet = mosq_test.gen_publish("pub/qos1/test", qos=1, mid=mid, payload="message", proto_ver=proto_ver)
+    publish_packet = mosq_test.gen_publish(
+        "pub/qos1/test", qos=1, mid=mid, payload="message", proto_ver=proto_ver
+    )
     if proto_ver == 5:
-        puback_packet = mosq_test.gen_puback(mid, proto_ver=proto_ver, reason_code=mqtt5_rc.MQTT_RC_NO_MATCHING_SUBSCRIBERS)
+        puback_packet = mosq_test.gen_puback(
+            mid,
+            proto_ver=proto_ver,
+            reason_code=mqtt5_rc.MQTT_RC_NO_MATCHING_SUBSCRIBERS,
+        )
     else:
         puback_packet = mosq_test.gen_puback(mid, proto_ver=proto_ver)
 
@@ -35,7 +44,7 @@ def do_test(proto_ver):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             print("proto_ver=%d" % (proto_ver))
             exit(rc)
 
@@ -43,4 +52,3 @@ def do_test(proto_ver):
 do_test(proto_ver=4)
 do_test(proto_ver=5)
 exit(0)
-

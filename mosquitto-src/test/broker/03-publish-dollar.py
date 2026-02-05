@@ -30,7 +30,6 @@ finally:
     broker.wait()
     (stdo, stde) = broker.communicate()
     if rc:
-        print(stde.decode('utf-8'))
+        print(stde.decode("utf-8"))
 
 exit(rc)
-

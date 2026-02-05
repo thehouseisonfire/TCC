@@ -5,6 +5,7 @@
 
 from mosq_test_helper import *
 
+
 def do_test():
     rc = 1
     keepalive = 60
@@ -16,18 +17,29 @@ def do_test():
     suback1_packet = mosq_test.gen_suback(mid, 0, proto_ver=5)
 
     mid = 531
-    subscribe2_packet = mosq_test.gen_subscribe(mid, "subpub/rap", 0 | mqtt5_opts.MQTT_SUB_OPT_RETAIN_AS_PUBLISHED, proto_ver=5)
+    subscribe2_packet = mosq_test.gen_subscribe(
+        mid, "subpub/rap", 0 | mqtt5_opts.MQTT_SUB_OPT_RETAIN_AS_PUBLISHED, proto_ver=5
+    )
     suback2_packet = mosq_test.gen_suback(mid, 0, proto_ver=5)
 
-    publish1_packet = mosq_test.gen_publish("subpub/normal", qos=0, retain=True, payload="message", proto_ver=5)
-    publish2_packet = mosq_test.gen_publish("subpub/rap", qos=0, retain=True, payload="message", proto_ver=5)
+    publish1_packet = mosq_test.gen_publish(
+        "subpub/normal", qos=0, retain=True, payload="message", proto_ver=5
+    )
+    publish2_packet = mosq_test.gen_publish(
+        "subpub/rap", qos=0, retain=True, payload="message", proto_ver=5
+    )
 
-    publish1r_packet = mosq_test.gen_publish("subpub/normal", qos=0, retain=False, payload="message", proto_ver=5)
-    publish2r_packet = mosq_test.gen_publish("subpub/rap", qos=0, retain=True, payload="message", proto_ver=5)
+    publish1r_packet = mosq_test.gen_publish(
+        "subpub/normal", qos=0, retain=False, payload="message", proto_ver=5
+    )
+    publish2r_packet = mosq_test.gen_publish(
+        "subpub/rap", qos=0, retain=True, payload="message", proto_ver=5
+    )
 
     mid = 1
-    publish3_packet = mosq_test.gen_publish("subpub/receive", qos=1, mid=mid, payload="success", proto_ver=5)
-
+    publish3_packet = mosq_test.gen_publish(
+        "subpub/receive", qos=1, mid=mid, payload="success", proto_ver=5
+    )
 
     port = mosq_test.get_port()
     broker = mosq_test.start_broker(filename=os.path.basename(__file__), port=port)
@@ -50,7 +62,7 @@ def do_test():
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             exit(rc)
 
 

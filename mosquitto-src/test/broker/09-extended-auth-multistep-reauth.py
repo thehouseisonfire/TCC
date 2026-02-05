@@ -2,14 +2,16 @@
 
 from mosq_test_helper import *
 
+
 def write_config(filename, port):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("port %d\n" % (port))
         f.write("allow_anonymous true\n")
         f.write("auth_plugin c/auth_plugin_extended_multiple.so\n")
 
+
 port = mosq_test.get_port()
-conf_file = os.path.basename(__file__).replace('.py', '.conf')
+conf_file = os.path.basename(__file__).replace(".py", ".conf")
 write_config(conf_file, port)
 
 rc = 1
@@ -18,17 +20,25 @@ rc = 1
 # ==========
 props = mqtt5_props.gen_string_prop(mqtt5_props.PROP_AUTHENTICATION_METHOD, "mirror")
 props += mqtt5_props.gen_string_prop(mqtt5_props.PROP_AUTHENTICATION_DATA, "step1")
-connect1_packet = mosq_test.gen_connect("client-params-test", keepalive=42, proto_ver=5, properties=props)
+connect1_packet = mosq_test.gen_connect(
+    "client-params-test", keepalive=42, proto_ver=5, properties=props
+)
 
 # Server to client
 props = mqtt5_props.gen_string_prop(mqtt5_props.PROP_AUTHENTICATION_METHOD, "mirror")
 props += mqtt5_props.gen_string_prop(mqtt5_props.PROP_AUTHENTICATION_DATA, "1pets")
-auth1_1_packet = mosq_test.gen_auth(reason_code=mqtt5_rc.MQTT_RC_CONTINUE_AUTHENTICATION, properties=props)
+auth1_1_packet = mosq_test.gen_auth(
+    reason_code=mqtt5_rc.MQTT_RC_CONTINUE_AUTHENTICATION, properties=props
+)
 
 # Client to server
 props = mqtt5_props.gen_string_prop(mqtt5_props.PROP_AUTHENTICATION_METHOD, "mirror")
-props += mqtt5_props.gen_string_prop(mqtt5_props.PROP_AUTHENTICATION_DATA, "supercalifragilisticexpialidocious")
-auth1_2_packet = mosq_test.gen_auth(reason_code=mqtt5_rc.MQTT_RC_CONTINUE_AUTHENTICATION, properties=props)
+props += mqtt5_props.gen_string_prop(
+    mqtt5_props.PROP_AUTHENTICATION_DATA, "supercalifragilisticexpialidocious"
+)
+auth1_2_packet = mosq_test.gen_auth(
+    reason_code=mqtt5_rc.MQTT_RC_CONTINUE_AUTHENTICATION, properties=props
+)
 
 props = mqtt5_props.gen_string_prop(mqtt5_props.PROP_AUTHENTICATION_METHOD, "mirror")
 connack1_packet = mosq_test.gen_connack(rc=0, proto_ver=5, properties=props)
@@ -42,12 +52,18 @@ reauth2_packet = mosq_test.gen_auth(reason_code=mqtt5_rc.MQTT_RC_REAUTHENTICATE,
 # Server to client
 props = mqtt5_props.gen_string_prop(mqtt5_props.PROP_AUTHENTICATION_METHOD, "mirror")
 props += mqtt5_props.gen_string_prop(mqtt5_props.PROP_AUTHENTICATION_DATA, "1pets")
-auth2_1_packet = mosq_test.gen_auth(reason_code=mqtt5_rc.MQTT_RC_CONTINUE_AUTHENTICATION, properties=props)
+auth2_1_packet = mosq_test.gen_auth(
+    reason_code=mqtt5_rc.MQTT_RC_CONTINUE_AUTHENTICATION, properties=props
+)
 
 # Client to server
 props = mqtt5_props.gen_string_prop(mqtt5_props.PROP_AUTHENTICATION_METHOD, "mirror")
-props += mqtt5_props.gen_string_prop(mqtt5_props.PROP_AUTHENTICATION_DATA, "supercalifragilisticexpialidocious")
-auth2_2_packet = mosq_test.gen_auth(reason_code=mqtt5_rc.MQTT_RC_CONTINUE_AUTHENTICATION, properties=props)
+props += mqtt5_props.gen_string_prop(
+    mqtt5_props.PROP_AUTHENTICATION_DATA, "supercalifragilisticexpialidocious"
+)
+auth2_2_packet = mosq_test.gen_auth(
+    reason_code=mqtt5_rc.MQTT_RC_CONTINUE_AUTHENTICATION, properties=props
+)
 
 props = mqtt5_props.gen_string_prop(mqtt5_props.PROP_AUTHENTICATION_METHOD, "mirror")
 auth2_3_packet = mosq_test.gen_auth(reason_code=0, properties=props)
@@ -60,13 +76,17 @@ props += mqtt5_props.gen_string_prop(mqtt5_props.PROP_AUTHENTICATION_DATA, "step
 reauth3_packet = mosq_test.gen_auth(reason_code=mqtt5_rc.MQTT_RC_REAUTHENTICATE, properties=props)
 
 # Server to client
-disconnect3_packet = mosq_test.gen_disconnect(reason_code=mqtt5_rc.MQTT_RC_PROTOCOL_ERROR, proto_ver=5)
+disconnect3_packet = mosq_test.gen_disconnect(
+    reason_code=mqtt5_rc.MQTT_RC_PROTOCOL_ERROR, proto_ver=5
+)
 
 
 broker = mosq_test.start_broker(filename=os.path.basename(__file__), use_conf=True, port=port)
 
 try:
-    sock = mosq_test.do_client_connect(connect1_packet, auth1_1_packet, timeout=20, port=port, connack_error="auth1")
+    sock = mosq_test.do_client_connect(
+        connect1_packet, auth1_1_packet, timeout=20, port=port, connack_error="auth1"
+    )
     mosq_test.do_send_receive(sock, auth1_2_packet, connack1_packet, "connack1")
     mosq_test.do_ping(sock, "pingresp1")
 
@@ -87,8 +107,7 @@ finally:
     broker.wait()
     (stdo, stde) = broker.communicate()
     if rc:
-        print(stde.decode('utf-8'))
+        print(stde.decode("utf-8"))
 
 
 exit(rc)
-

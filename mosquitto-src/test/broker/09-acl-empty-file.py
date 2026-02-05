@@ -3,26 +3,27 @@
 # Test for CVE-2018-xxxxx
 
 from mosq_test_helper import *
-import signal
+
 
 def write_config(filename, port, per_listener):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("per_listener_settings %s\n" % (per_listener))
         f.write("port %d\n" % (port))
         f.write("allow_anonymous true\n")
-        f.write("acl_file %s\n" % (filename.replace('.conf', '.acl')))
+        f.write("acl_file %s\n" % (filename.replace(".conf", ".acl")))
+
 
 def write_acl(filename):
-    with open(filename, 'w') as f:
-        f.write('#comment\n')
-        f.write('\n')
+    with open(filename, "w") as f:
+        f.write("#comment\n")
+        f.write("\n")
 
 
 def do_test(port, per_listener):
-    conf_file = os.path.basename(__file__).replace('.py', '.conf')
+    conf_file = os.path.basename(__file__).replace(".py", ".conf")
     write_config(conf_file, port, per_listener)
 
-    acl_file = os.path.basename(__file__).replace('.py', '.acl')
+    acl_file = os.path.basename(__file__).replace(".py", ".acl")
     write_acl(acl_file)
 
     rc = 1
@@ -57,8 +58,9 @@ def do_test(port, per_listener):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             exit(rc)
+
 
 port = mosq_test.get_port()
 do_test(port, "false")

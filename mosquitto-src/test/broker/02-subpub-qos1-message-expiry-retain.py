@@ -13,6 +13,7 @@
 
 from mosq_test_helper import *
 
+
 def do_test(proto_ver):
     rc = 1
     keepalive = 60
@@ -30,19 +31,46 @@ def do_test(proto_ver):
     helper_connect = mosq_test.gen_connect("helper", proto_ver=proto_ver)
     helper_connack = mosq_test.gen_connack(rc=0, proto_ver=proto_ver)
 
-    mid=1
+    mid = 1
     props = mqtt5_props.gen_uint32_prop(mqtt5_props.PROP_MESSAGE_EXPIRY_INTERVAL, 4)
-    publish1_packet = mosq_test.gen_publish("subpub/expired", mid=mid, qos=1, retain=True, payload="message1", proto_ver=proto_ver, properties=props)
-    puback1_packet = mosq_test.gen_puback(mid, proto_ver=proto_ver, reason_code=mqtt5_rc.MQTT_RC_NO_MATCHING_SUBSCRIBERS)
+    publish1_packet = mosq_test.gen_publish(
+        "subpub/expired",
+        mid=mid,
+        qos=1,
+        retain=True,
+        payload="message1",
+        proto_ver=proto_ver,
+        properties=props,
+    )
+    puback1_packet = mosq_test.gen_puback(
+        mid, proto_ver=proto_ver, reason_code=mqtt5_rc.MQTT_RC_NO_MATCHING_SUBSCRIBERS
+    )
 
-    mid=2
-    publish2s_packet = mosq_test.gen_publish("subpub/kept", mid=mid, qos=1, retain=True, payload="message2", proto_ver=proto_ver)
-    puback2s_packet = mosq_test.gen_puback(mid, proto_ver=proto_ver, reason_code=mqtt5_rc.MQTT_RC_NO_MATCHING_SUBSCRIBERS)
+    mid = 2
+    publish2s_packet = mosq_test.gen_publish(
+        "subpub/kept",
+        mid=mid,
+        qos=1,
+        retain=True,
+        payload="message2",
+        proto_ver=proto_ver,
+    )
+    puback2s_packet = mosq_test.gen_puback(
+        mid, proto_ver=proto_ver, reason_code=mqtt5_rc.MQTT_RC_NO_MATCHING_SUBSCRIBERS
+    )
 
-    mid=1
-    publish2r_packet = mosq_test.gen_publish("subpub/kept", mid=mid, qos=1, retain=True, payload="message2", proto_ver=proto_ver)
-    puback2r_packet = mosq_test.gen_puback(mid, proto_ver=proto_ver, reason_code=mqtt5_rc.MQTT_RC_NO_MATCHING_SUBSCRIBERS)
-
+    mid = 1
+    publish2r_packet = mosq_test.gen_publish(
+        "subpub/kept",
+        mid=mid,
+        qos=1,
+        retain=True,
+        payload="message2",
+        proto_ver=proto_ver,
+    )
+    puback2r_packet = mosq_test.gen_puback(
+        mid, proto_ver=proto_ver, reason_code=mqtt5_rc.MQTT_RC_NO_MATCHING_SUBSCRIBERS
+    )
 
     port = mosq_test.get_port()
     broker = mosq_test.start_broker(filename=os.path.basename(__file__), port=port)
@@ -82,7 +110,7 @@ def do_test(proto_ver):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             print("proto_ver=%d" % (proto_ver))
             exit(rc)
 

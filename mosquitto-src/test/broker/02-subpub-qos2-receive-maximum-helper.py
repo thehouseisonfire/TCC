@@ -5,33 +5,41 @@
 
 from mosq_test_helper import *
 
+
 def do_test(proto_ver):
     if proto_ver == 4:
         exit(0)
 
     rc = 1
     keepalive = 60
-    connect_packet = mosq_test.gen_connect("subpub-qos2-test-helper", keepalive=keepalive, proto_ver=5)
+    connect_packet = mosq_test.gen_connect(
+        "subpub-qos2-test-helper", keepalive=keepalive, proto_ver=5
+    )
     connack_packet = mosq_test.gen_connack(rc=0, proto_ver=5)
 
     mid = 1
-    publish_packet = mosq_test.gen_publish("subpub/qos2", qos=2, mid=mid, payload="message1", proto_ver=5)
+    publish_packet = mosq_test.gen_publish(
+        "subpub/qos2", qos=2, mid=mid, payload="message1", proto_ver=5
+    )
     pubrec_packet = mosq_test.gen_pubrec(mid, proto_ver=5)
     pubrel_packet = mosq_test.gen_pubrel(mid, proto_ver=5)
     pubcomp_packet = mosq_test.gen_pubcomp(mid, proto_ver=5)
 
     mid = 2
-    publish_packet2 = mosq_test.gen_publish("subpub/qos2", qos=2, mid=mid, payload="message2", proto_ver=5)
+    publish_packet2 = mosq_test.gen_publish(
+        "subpub/qos2", qos=2, mid=mid, payload="message2", proto_ver=5
+    )
     pubrec_packet2 = mosq_test.gen_pubrec(mid, proto_ver=5)
     pubrel_packet2 = mosq_test.gen_pubrel(mid, proto_ver=5)
     pubcomp_packet2 = mosq_test.gen_pubcomp(mid, proto_ver=5)
 
     mid = 3
-    publish_packet3 = mosq_test.gen_publish("subpub/qos2", qos=2, mid=mid, payload="message3", proto_ver=5)
+    publish_packet3 = mosq_test.gen_publish(
+        "subpub/qos2", qos=2, mid=mid, payload="message3", proto_ver=5
+    )
     pubrec_packet3 = mosq_test.gen_pubrec(mid, proto_ver=5)
     pubrel_packet3 = mosq_test.gen_pubrel(mid, proto_ver=5)
     pubcomp_packet3 = mosq_test.gen_pubcomp(mid, proto_ver=5)
-
 
     port = mosq_test.get_port()
 
@@ -53,7 +61,7 @@ def do_test(proto_ver):
         pass
     finally:
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             print("proto_ver=%d" % (proto_ver))
             exit(rc)
 

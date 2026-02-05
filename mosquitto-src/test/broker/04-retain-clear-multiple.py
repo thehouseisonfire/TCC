@@ -4,6 +4,7 @@
 
 from mosq_test_helper import *
 
+
 def send_retain(port, topic, payload):
     connect_packet = mosq_test.gen_connect("retain-clear-test")
     connack_packet = mosq_test.gen_connack(rc=0)
@@ -15,6 +16,7 @@ def send_retain(port, topic, payload):
     mosq_test.do_send_receive(sock, publish_packet, puback_packet, f"set retain {topic}")
     sock.close()
 
+
 def do_test():
     rc = 1
     connect_packet = mosq_test.gen_connect("retain-clear-test")
@@ -23,8 +25,12 @@ def do_test():
     subscribe_packet = mosq_test.gen_subscribe(1, "#", 0)
     suback_packet = mosq_test.gen_suback(1, 0)
 
-    retain1_packet = mosq_test.gen_publish("1/2/3/4/5/6/7", qos=0, payload="retained message", retain=True)
-    retain2_packet = mosq_test.gen_publish("1/2/3/4", qos=0, payload="retained message", retain=True)
+    retain1_packet = mosq_test.gen_publish(
+        "1/2/3/4/5/6/7", qos=0, payload="retained message", retain=True
+    )
+    retain2_packet = mosq_test.gen_publish(
+        "1/2/3/4", qos=0, payload="retained message", retain=True
+    )
     retain3_packet = mosq_test.gen_publish("1", qos=0, payload="retained message", retain=True)
 
     port = mosq_test.get_port()
@@ -72,9 +78,9 @@ def do_test():
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             exit(rc)
+
 
 do_test()
 exit(0)
-

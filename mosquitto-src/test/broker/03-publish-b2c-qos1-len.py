@@ -5,13 +5,16 @@
 
 from mosq_test_helper import *
 
+
 def helper(port):
     connect_packet = mosq_test.gen_connect("test-helper", keepalive=60)
     connack_packet = mosq_test.gen_connack(rc=0)
     mid = 1
     publish_packet = mosq_test.gen_publish("qos1/len/test", qos=1, mid=mid, payload="len-message")
     puback_packet = mosq_test.gen_puback(mid)
-    sock = mosq_test.do_client_connect(connect_packet, connack_packet, connack_error="helper connack", port=port)
+    sock = mosq_test.do_client_connect(
+        connect_packet, connack_packet, connack_error="helper connack", port=port
+    )
     mosq_test.do_send_receive(sock, publish_packet, puback_packet, "helper puback")
     sock.close()
 
@@ -20,14 +23,18 @@ def len_test(test, puback_packet):
     rc = 1
     mid = 3265
     keepalive = 60
-    connect_packet = mosq_test.gen_connect("pub-qos1-test", keepalive=keepalive, clean_session=False, proto_ver=5)
+    connect_packet = mosq_test.gen_connect(
+        "pub-qos1-test", keepalive=keepalive, clean_session=False, proto_ver=5
+    )
     connack_packet = mosq_test.gen_connack(flags=0, rc=0, proto_ver=5)
 
     subscribe_packet = mosq_test.gen_subscribe(mid, "qos1/len/test", 1, proto_ver=5)
     suback_packet = mosq_test.gen_suback(mid, 1, proto_ver=5)
 
     mid = 1
-    publish_packet = mosq_test.gen_publish("qos1/len/test", qos=1, mid=mid, payload="len-message", proto_ver=5)
+    publish_packet = mosq_test.gen_publish(
+        "qos1/len/test", qos=1, mid=mid, payload="len-message", proto_ver=5
+    )
 
     port = mosq_test.get_port()
     broker = mosq_test.start_broker(filename=os.path.basename(__file__), port=port)
@@ -54,7 +61,7 @@ def len_test(test, puback_packet):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
 
     if rc != 0:
         print(test)

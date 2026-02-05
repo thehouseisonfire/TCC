@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 
-from mosq_test_helper import *
 import json
 import shutil
 
+from mosq_test_helper import *
+
+
 def write_config(filename, port):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("listener %d\n" % (port))
         f.write("allow_anonymous true\n")
         f.write("plugin ../../plugins/dynamic-security/mosquitto_dynamic_security.so\n")
         f.write("plugin_opt_config_file %d/dynamic-security.json\n" % (port))
 
+
 def command_check(sock, command_payload, expected_response, msg=""):
-    command_packet = mosq_test.gen_publish(topic="$CONTROL/dynamic-security/v1", qos=0, payload=json.dumps(command_payload))
+    command_packet = mosq_test.gen_publish(
+        topic="$CONTROL/dynamic-security/v1", qos=0, payload=json.dumps(command_payload)
+    )
     sock.send(command_packet)
     response = json.loads(mosq_test.read_publish(sock))
     if response != expected_response:
@@ -22,125 +27,196 @@ def command_check(sock, command_payload, expected_response, msg=""):
         raise ValueError(response)
 
 
-
 port = mosq_test.get_port()
-conf_file = os.path.basename(__file__).replace('.py', '.conf')
+conf_file = os.path.basename(__file__).replace(".py", ".conf")
 write_config(conf_file, port)
 
-create_client_command = { "commands": [{
-            "command": "createClient", "username": "user_one",
-            "password": "password", "clientid": "cid",
-            "textname": "Name", "textdescription": "Description",
-            "correlationData": "2" }]
-}
-create_client_response = {'responses': [{'command': 'createClient', 'correlationData': '2'}]}
-
-create_groups_command = { "commands": [
-    {
-        "command": "createGroup", "groupname": "group_one",
-        "textname": "Name", "textdescription": "Description",
-        "correlationData": "12"
-    },
-    {
-        "command": "createGroup", "groupname": "group_two",
-        "textname": "Name", "textdescription": "Description",
-        "correlationData": "13"
-    }
+create_client_command = {
+    "commands": [
+        {
+            "command": "createClient",
+            "username": "user_one",
+            "password": "password",
+            "clientid": "cid",
+            "textname": "Name",
+            "textdescription": "Description",
+            "correlationData": "2",
+        }
     ]
 }
-create_groups_response = {'responses': [
-    {'command': 'createGroup', 'correlationData': '12'},
-    {'command': 'createGroup', 'correlationData': '13'}
-    ]}
+create_client_response = {"responses": [{"command": "createClient", "correlationData": "2"}]}
 
-create_roles_command = { "commands": [
-    {
-        "command": "createRole", "rolename": "role_one",
-        "textname": "Name", "textdescription": "Description",
-        "acls":[], "correlationData": "21"
-    },
-    {
-        "command": "createRole", "rolename": "role_two",
-        "textname": "Name", "textdescription": "Description",
-        "acls":[], "correlationData": "22"
-    },
-    {
-        "command": "createRole", "rolename": "role_three",
-        "textname": "Name", "textdescription": "Description",
-        "acls":[], "correlationData": "23"
-    }
+create_groups_command = {
+    "commands": [
+        {
+            "command": "createGroup",
+            "groupname": "group_one",
+            "textname": "Name",
+            "textdescription": "Description",
+            "correlationData": "12",
+        },
+        {
+            "command": "createGroup",
+            "groupname": "group_two",
+            "textname": "Name",
+            "textdescription": "Description",
+            "correlationData": "13",
+        },
     ]
 }
-create_roles_response = {'responses': [
-    {'command': 'createRole', 'correlationData': '21'},
-    {'command': 'createRole', 'correlationData': '22'},
-    {'command': 'createRole', 'correlationData': '23'}
-    ]}
-
-modify_client_command1 = { "commands": [{
-    "command": "modifyClient", "username": "user_one",
-    "textname": "Modified name", "textdescription": "Modified description",
-    "clientid": "",
-    "roles":[
-        {'rolename':'role_one', 'priority':2},
-        {'rolename':'role_two'},
-        {'rolename':'role_three', 'priority':10}
-    ],
-    "groups":[
-        {'groupname':'group_one', 'priority':3},
-        {'groupname':'group_two', 'priority':8}
-    ],
-    "correlationData": "3" }]
+create_groups_response = {
+    "responses": [
+        {"command": "createGroup", "correlationData": "12"},
+        {"command": "createGroup", "correlationData": "13"},
+    ]
 }
-modify_client_response1 = {'responses': [{'command': 'modifyClient', 'correlationData': '3'}]}
 
-modify_client_command2 = { "commands": [{
-    "command": "modifyClient", "username": "user_one",
-    "textname": "Modified name", "textdescription": "Modified description",
-    "groups":[],
-    "correlationData": "4" }]
+create_roles_command = {
+    "commands": [
+        {
+            "command": "createRole",
+            "rolename": "role_one",
+            "textname": "Name",
+            "textdescription": "Description",
+            "acls": [],
+            "correlationData": "21",
+        },
+        {
+            "command": "createRole",
+            "rolename": "role_two",
+            "textname": "Name",
+            "textdescription": "Description",
+            "acls": [],
+            "correlationData": "22",
+        },
+        {
+            "command": "createRole",
+            "rolename": "role_three",
+            "textname": "Name",
+            "textdescription": "Description",
+            "acls": [],
+            "correlationData": "23",
+        },
+    ]
 }
-modify_client_response2 = {'responses': [{'command': 'modifyClient', 'correlationData': '4'}]}
+create_roles_response = {
+    "responses": [
+        {"command": "createRole", "correlationData": "21"},
+        {"command": "createRole", "correlationData": "22"},
+        {"command": "createRole", "correlationData": "23"},
+    ]
+}
+
+modify_client_command1 = {
+    "commands": [
+        {
+            "command": "modifyClient",
+            "username": "user_one",
+            "textname": "Modified name",
+            "textdescription": "Modified description",
+            "clientid": "",
+            "roles": [
+                {"rolename": "role_one", "priority": 2},
+                {"rolename": "role_two"},
+                {"rolename": "role_three", "priority": 10},
+            ],
+            "groups": [
+                {"groupname": "group_one", "priority": 3},
+                {"groupname": "group_two", "priority": 8},
+            ],
+            "correlationData": "3",
+        }
+    ]
+}
+modify_client_response1 = {"responses": [{"command": "modifyClient", "correlationData": "3"}]}
+
+modify_client_command2 = {
+    "commands": [
+        {
+            "command": "modifyClient",
+            "username": "user_one",
+            "textname": "Modified name",
+            "textdescription": "Modified description",
+            "groups": [],
+            "correlationData": "4",
+        }
+    ]
+}
+modify_client_response2 = {"responses": [{"command": "modifyClient", "correlationData": "4"}]}
 
 
-get_client_command1 = { "commands": [{
-    "command": "getClient", "username": "user_one"}]}
-get_client_response1 = {'responses':[{'command': 'getClient', 'data': {'client': {'username': 'user_one', 'clientid': 'cid',
-    'textname': 'Name', 'textdescription': 'Description',
-    'roles': [],
-    'groups': [],
-    }}}]}
+get_client_command1 = {"commands": [{"command": "getClient", "username": "user_one"}]}
+get_client_response1 = {
+    "responses": [
+        {
+            "command": "getClient",
+            "data": {
+                "client": {
+                    "username": "user_one",
+                    "clientid": "cid",
+                    "textname": "Name",
+                    "textdescription": "Description",
+                    "roles": [],
+                    "groups": [],
+                }
+            },
+        }
+    ]
+}
 
-get_client_command2 = { "commands": [{
-    "command": "getClient", "username": "user_one"}]}
-get_client_response2 = {'responses':[{'command': 'getClient', 'data': {'client': {'username': 'user_one',
-    'textname': 'Modified name', 'textdescription': 'Modified description',
-    'roles': [
-        {'rolename':'role_three', 'priority':10},
-        {'rolename':'role_one', 'priority':2},
-        {'rolename':'role_two'}
-    ],
-    'groups': [
-        {'groupname':'group_two', 'priority':8},
-        {'groupname':'group_one', 'priority':3}
-    ]}}}]}
+get_client_command2 = {"commands": [{"command": "getClient", "username": "user_one"}]}
+get_client_response2 = {
+    "responses": [
+        {
+            "command": "getClient",
+            "data": {
+                "client": {
+                    "username": "user_one",
+                    "textname": "Modified name",
+                    "textdescription": "Modified description",
+                    "roles": [
+                        {"rolename": "role_three", "priority": 10},
+                        {"rolename": "role_one", "priority": 2},
+                        {"rolename": "role_two"},
+                    ],
+                    "groups": [
+                        {"groupname": "group_two", "priority": 8},
+                        {"groupname": "group_one", "priority": 3},
+                    ],
+                }
+            },
+        }
+    ]
+}
 
-get_client_command3 = { "commands": [{
-            "command": "getClient", "username": "user_one"}]}
-get_client_response3 = {'responses':[{'command': 'getClient', 'data': {'client': {'username': 'user_one',
-    'textname': 'Modified name', 'textdescription': 'Modified description',
-    'groups': [],
-    'roles': [
-        {'rolename':'role_three', 'priority':10},
-        {'rolename':'role_one', 'priority':2},
-        {'rolename':'role_two'}
-    ]}}}]}
-
+get_client_command3 = {"commands": [{"command": "getClient", "username": "user_one"}]}
+get_client_response3 = {
+    "responses": [
+        {
+            "command": "getClient",
+            "data": {
+                "client": {
+                    "username": "user_one",
+                    "textname": "Modified name",
+                    "textdescription": "Modified description",
+                    "groups": [],
+                    "roles": [
+                        {"rolename": "role_three", "priority": 10},
+                        {"rolename": "role_one", "priority": 2},
+                        {"rolename": "role_two"},
+                    ],
+                }
+            },
+        }
+    ]
+}
 
 
 rc = 1
 keepalive = 10
-connect_packet = mosq_test.gen_connect("ctrl-test", keepalive=keepalive, username="admin", password="admin")
+connect_packet = mosq_test.gen_connect(
+    "ctrl-test", keepalive=keepalive, username="admin", password="admin"
+)
 connack_packet = mosq_test.gen_connack(rc=0)
 
 mid = 2
@@ -211,7 +287,7 @@ finally:
     broker.wait()
     (stdo, stde) = broker.communicate()
     if rc:
-        print(stde.decode('utf-8'))
+        print(stde.decode("utf-8"))
 
 
 exit(rc)

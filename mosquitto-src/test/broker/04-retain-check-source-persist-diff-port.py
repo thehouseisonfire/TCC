@@ -2,52 +2,56 @@
 
 # Test for CVE-2018-12546, with the broker being stopped to write the persistence file, plus subscriber on different port.
 
-from mosq_test_helper import *
 import os.path
-import signal
+
+from mosq_test_helper import *
+
 
 def write_config(filename, port1, port2, per_listener):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("per_listener_settings %s\n" % (per_listener))
         f.write("check_retain_source true\n")
         f.write("port %d\n" % (port1))
         f.write("allow_anonymous true\n")
-        f.write("acl_file %s\n" % (filename.replace('.conf', '.acl')))
+        f.write("acl_file %s\n" % (filename.replace(".conf", ".acl")))
         f.write("persistence true\n")
-        f.write("persistence_file %s\n" % (filename.replace('.conf', '.db')))
+        f.write("persistence_file %s\n" % (filename.replace(".conf", ".db")))
         f.write("listener %d\n" % (port2))
         f.write("allow_anonymous true\n")
 
+
 def write_acl_1(filename, username):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         if username is not None:
-            f.write('user %s\n' % (username))
-        f.write('topic readwrite test/topic\n')
+            f.write("user %s\n" % (username))
+        f.write("topic readwrite test/topic\n")
+
 
 def write_acl_2(filename, username):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         if username is not None:
-            f.write('user %s\n' % (username))
-        f.write('topic read test/topic\n')
+            f.write("user %s\n" % (username))
+        f.write("topic read test/topic\n")
 
 
 def do_test(proto_ver, per_listener, username):
-    conf_file = os.path.basename(__file__).replace('.py', '.conf')
+    conf_file = os.path.basename(__file__).replace(".py", ".conf")
     write_config(conf_file, port1, port2, per_listener)
 
-    persistence_file = os.path.basename(__file__).replace('.py', '.db')
+    persistence_file = os.path.basename(__file__).replace(".py", ".db")
     try:
         os.remove(persistence_file)
     except OSError:
         pass
 
-    acl_file = os.path.basename(__file__).replace('.py', '.acl')
+    acl_file = os.path.basename(__file__).replace(".py", ".acl")
     write_acl_1(acl_file, username)
-
 
     rc = 1
     keepalive = 60
-    connect_packet = mosq_test.gen_connect("retain-check", keepalive=keepalive, username=username, proto_ver=proto_ver)
+    connect_packet = mosq_test.gen_connect(
+        "retain-check", keepalive=keepalive, username=username, proto_ver=proto_ver
+    )
     connack_packet = mosq_test.gen_connack(rc=0, proto_ver=proto_ver)
 
     if per_listener == "true":
@@ -57,11 +61,19 @@ def do_test(proto_ver, per_listener, username):
         # unless we provide a username
         u = username
 
-    connect2_packet = mosq_test.gen_connect("retain-recv", keepalive=keepalive, username=u, proto_ver=proto_ver)
+    connect2_packet = mosq_test.gen_connect(
+        "retain-recv", keepalive=keepalive, username=u, proto_ver=proto_ver
+    )
     connack2_packet = mosq_test.gen_connack(rc=0, proto_ver=proto_ver)
 
     mid = 1
-    publish_packet = mosq_test.gen_publish("test/topic", qos=0, payload="retained message", retain=True, proto_ver=proto_ver)
+    publish_packet = mosq_test.gen_publish(
+        "test/topic",
+        qos=0,
+        payload="retained message",
+        retain=True,
+        proto_ver=proto_ver,
+    )
     subscribe_packet = mosq_test.gen_subscribe(mid, "test/topic", 0, proto_ver=proto_ver)
     suback_packet = mosq_test.gen_suback(mid, 0, proto_ver=proto_ver)
 
@@ -85,7 +97,9 @@ def do_test(proto_ver, per_listener, username):
         if os.path.isfile(persistence_file) == False:
             raise FileNotFoundError("Persistence file not written")
 
-        broker = mosq_test.start_broker(filename=os.path.basename(__file__), use_conf=True, port=port1)
+        broker = mosq_test.start_broker(
+            filename=os.path.basename(__file__), use_conf=True, port=port1
+        )
 
         sock = mosq_test.do_client_connect(connect2_packet, connack2_packet, port=port2)
         mosq_test.do_send_receive(sock, subscribe_packet, suback_packet, "suback 2")
@@ -107,7 +121,7 @@ def do_test(proto_ver, per_listener, username):
             pass
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             exit(rc)
 
 

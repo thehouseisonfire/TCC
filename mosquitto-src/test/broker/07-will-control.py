@@ -8,7 +8,12 @@ from mosq_test_helper import *
 def do_test(start_broker, proto_ver):
     rc = 1
     mid = 1
-    connect_packet = mosq_test.gen_connect("will", will_topic="$CONTROL/dynamic-security/v1", will_payload=b"will-message", proto_ver=proto_ver)
+    connect_packet = mosq_test.gen_connect(
+        "will",
+        will_topic="$CONTROL/dynamic-security/v1",
+        will_payload=b"will-message",
+        proto_ver=proto_ver,
+    )
 
     port = mosq_test.get_port()
     if start_broker:
@@ -32,7 +37,7 @@ def do_test(start_broker, proto_ver):
             broker.wait()
             (stdo, stde) = broker.communicate()
             if rc:
-                print(stde.decode('utf-8'))
+                print(stde.decode("utf-8"))
                 exit(rc)
         else:
             return rc
@@ -41,11 +46,12 @@ def do_test(start_broker, proto_ver):
 def all_tests(start_broker=False):
     rc = do_test(start_broker, proto_ver=4)
     if rc:
-        return rc;
+        return rc
     rc = do_test(start_broker, proto_ver=5)
     if rc:
-        return rc;
+        return rc
     return 0
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     all_tests(True)

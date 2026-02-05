@@ -3,7 +3,7 @@
 import mosquitto
 import serial
 
-usb = serial.Serial(port='/dev/ttyUSB0', baudrate=57600)
+usb = serial.Serial(port="/dev/ttyUSB0", baudrate=57600)
 
 mosq = mosquitto.Mosquitto()
 mosq.connect("localhost")
@@ -19,4 +19,3 @@ except usb.SerialException, e:
 
 mosq.disconnect()
 mosq.loop_stop()
-

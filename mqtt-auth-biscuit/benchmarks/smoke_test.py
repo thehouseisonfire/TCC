@@ -6,7 +6,7 @@ import time
 import httpx
 import typer
 
-from logging_utils import get_logger, setup_logging
+from benchmarks.logging_utils import get_logger, setup_logging
 
 
 def _compose_bin():
@@ -51,8 +51,8 @@ def _health_check(name: str, base_url: str, ca_file: str | None, insecure: bool)
         payload = json.loads(body)
         if not payload.get("ok"):
             raise SystemExit(f"{name} health check failed: {payload}")
-    except json.JSONDecodeError:
-        raise SystemExit(f"{name} health check returned non-JSON body")
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"{name} health check returned non-JSON body") from exc
 
 
 def _run_loadgen(
@@ -178,13 +178,11 @@ def main(
         time.sleep(1)
 
     tokens_path = os.path.join(repo_root, tokens)
-    with open(tokens_path, "r", encoding="utf-8") as f:
-        tokens = json.load(f)
+    with open(tokens_path, encoding="utf-8") as f:
+        tokens_data: dict[str, object] = json.load(f)
 
     authz_base = authz_base or ("https://localhost:8443" if tls else "http://localhost:8081")
-    issuer_base = issuer_base or (
-        "https://localhost:8444" if tls else "http://localhost:8082"
-    )
+    issuer_base = issuer_base or ("https://localhost:8444" if tls else "http://localhost:8082")
     mqtt_host = mqtt_host or "localhost"
     mqtt_port = 8883 if tls else 1883
 
@@ -202,7 +200,7 @@ def main(
 
     results["loadgen"]["jwt"] = _run_loadgen(
         "jwt",
-        tokens["jwt"],
+        str(tokens_data["jwt"]),
         mqtt_host,
         mqtt_port,
         clients,
@@ -213,7 +211,7 @@ def main(
     )
     results["loadgen"]["biscuit"] = _run_loadgen(
         "biscuit",
-        tokens["biscuit"],
+        str(tokens_data["biscuit"]),
         mqtt_host,
         mqtt_port,
         clients,
@@ -227,8 +225,8 @@ def main(
         results["mqtt5_auth"] = _run_mqtt5_auth(
             mqtt_host,
             mqtt_port,
-            tokens.get("jwt_short", tokens["jwt"]),
-            tokens["jwt"],
+            str(tokens_data.get("jwt_short", tokens_data["jwt"])),
+            str(tokens_data["jwt"]),
             tls,
             tls_ca,
             tls_insecure,

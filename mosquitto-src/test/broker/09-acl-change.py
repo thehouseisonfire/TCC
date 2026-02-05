@@ -2,27 +2,33 @@
 
 # Check whether messages deliver or not after some access is revoked.
 
-from mosq_test_helper import *
 import signal
 
+from mosq_test_helper import *
+
+
 def write_config(filename, port, per_listener):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("per_listener_settings %s\n" % (per_listener))
         f.write("port %d\n" % (port))
         f.write("allow_anonymous true\n")
-        f.write("acl_file %s\n" % (filename.replace('.conf', '.acl')))
+        f.write("acl_file %s\n" % (filename.replace(".conf", ".acl")))
+
 
 def write_acl(filename, en):
-    with open(filename, 'w') as f:
-        f.write('user username\n')
-        f.write('topic readwrite topic/one\n')
+    with open(filename, "w") as f:
+        f.write("user username\n")
+        f.write("topic readwrite topic/one\n")
         if en:
-            f.write('topic readwrite topic/two\n')
+            f.write("topic readwrite topic/two\n")
+
 
 keepalive = 60
 username = "username"
 
-connect1_packet = mosq_test.gen_connect("acl-check", keepalive=keepalive, username=username, clean_session=False)
+connect1_packet = mosq_test.gen_connect(
+    "acl-check", keepalive=keepalive, username=username, clean_session=False
+)
 connack1a_packet = mosq_test.gen_connack(rc=0)
 connack1b_packet = mosq_test.gen_connack(rc=0, flags=1)
 
@@ -67,10 +73,10 @@ rc = 1
 
 port = mosq_test.get_port()
 
-conf_file = os.path.basename(__file__).replace('.py', '.conf')
+conf_file = os.path.basename(__file__).replace(".py", ".conf")
 write_config(conf_file, port, "false")
 
-acl_file = os.path.basename(__file__).replace('.py', '.acl')
+acl_file = os.path.basename(__file__).replace(".py", ".acl")
 write_acl(acl_file, True)
 
 broker = mosq_test.start_broker(filename=os.path.basename(__file__), use_conf=True, port=port)
@@ -120,8 +126,7 @@ finally:
     broker.wait()
     (stdo, stde) = broker.communicate()
     if rc:
-        print(stde.decode('utf-8'))
+        print(stde.decode("utf-8"))
         exit(rc)
 
 port = mosq_test.get_port()
-

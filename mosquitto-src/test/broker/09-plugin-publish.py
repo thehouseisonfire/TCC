@@ -2,46 +2,76 @@
 
 from mosq_test_helper import *
 
+
 def write_config(filename, port):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("port %d\n" % (port))
         f.write("auth_plugin c/auth_plugin_publish.so\n")
         f.write("allow_anonymous true\n")
 
+
 proto_ver = 5
 port = mosq_test.get_port()
-conf_file = os.path.basename(__file__).replace('.py', '.conf')
+conf_file = os.path.basename(__file__).replace(".py", ".conf")
 write_config(conf_file, port)
 
 rc = 1
 keepalive = 10
-connect1_packet = mosq_test.gen_connect("test-client", keepalive=keepalive, username="readwrite", clean_session=False, proto_ver=proto_ver)
+connect1_packet = mosq_test.gen_connect(
+    "test-client",
+    keepalive=keepalive,
+    username="readwrite",
+    clean_session=False,
+    proto_ver=proto_ver,
+)
 connack1_packet = mosq_test.gen_connack(rc=0, proto_ver=proto_ver)
 
 publish_packet = mosq_test.gen_publish("init", qos=0, proto_ver=proto_ver)
 
-publish0_packet = mosq_test.gen_publish("topic/0", qos=0, payload="test-message-0", proto_ver=proto_ver)
+publish0_packet = mosq_test.gen_publish(
+    "topic/0", qos=0, payload="test-message-0", proto_ver=proto_ver
+)
 
 mid = 1
-publish1_packet = mosq_test.gen_publish("topic/1", qos=1, mid=mid, payload="test-message-1", proto_ver=proto_ver)
+publish1_packet = mosq_test.gen_publish(
+    "topic/1", qos=1, mid=mid, payload="test-message-1", proto_ver=proto_ver
+)
 puback1_packet = mosq_test.gen_puback(mid, proto_ver=proto_ver)
 
 mid = 2
-publish2_packet = mosq_test.gen_publish("topic/2", qos=2, mid=mid, payload="test-message-2", proto_ver=proto_ver)
+publish2_packet = mosq_test.gen_publish(
+    "topic/2", qos=2, mid=mid, payload="test-message-2", proto_ver=proto_ver
+)
 pubrec2_packet = mosq_test.gen_pubrec(mid, proto_ver=proto_ver)
 pubrel2_packet = mosq_test.gen_pubrel(mid, proto_ver=proto_ver)
 pubcomp2_packet = mosq_test.gen_pubcomp(mid, proto_ver=proto_ver)
 
 
 props = mqtt5_props.gen_byte_prop(mqtt5_props.PROP_PAYLOAD_FORMAT_INDICATOR, 1)
-publish0p_packet = mosq_test.gen_publish("topic/0", qos=0, payload="test-message-0", proto_ver=proto_ver, properties=props)
+publish0p_packet = mosq_test.gen_publish(
+    "topic/0", qos=0, payload="test-message-0", proto_ver=proto_ver, properties=props
+)
 
 mid = 3
-publish1p_packet = mosq_test.gen_publish("topic/1", qos=1, mid=mid, payload="test-message-1", proto_ver=proto_ver, properties=props)
+publish1p_packet = mosq_test.gen_publish(
+    "topic/1",
+    qos=1,
+    mid=mid,
+    payload="test-message-1",
+    proto_ver=proto_ver,
+    properties=props,
+)
 puback1p_packet = mosq_test.gen_puback(mid, proto_ver=proto_ver)
 
 mid = 4
-publish2p_packet = mosq_test.gen_publish("topic/2", qos=2, mid=mid, payload="test-message-2", proto_ver=proto_ver, properties=props)
+publish2p_packet = mosq_test.gen_publish(
+    "topic/2",
+    qos=2,
+    mid=mid,
+    payload="test-message-2",
+    proto_ver=proto_ver,
+    properties=props,
+)
 pubrec2p_packet = mosq_test.gen_pubrec(mid, proto_ver=proto_ver)
 pubrel2p_packet = mosq_test.gen_pubrel(mid, proto_ver=proto_ver)
 pubcomp2p_packet = mosq_test.gen_pubcomp(mid, proto_ver=proto_ver)
@@ -84,7 +114,7 @@ finally:
     broker.wait()
     (stdo, stde) = broker.communicate()
     if rc:
-        print(stde.decode('utf-8'))
+        print(stde.decode("utf-8"))
 
 
 exit(rc)

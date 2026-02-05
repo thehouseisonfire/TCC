@@ -2,12 +2,13 @@
 
 from mosq_test_helper import *
 
-if sys.version < '2.7':
+if sys.version < "2.7":
     print("WARNING: SSL not supported on Python 2.6")
     exit(0)
 
+
 def write_config(filename, port1, port2):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("port %d\n" % (port2))
         f.write("allow_anonymous true\n")
         f.write("listener %d\n" % (port1))
@@ -18,8 +19,9 @@ def write_config(filename, port1, port2):
         f.write("require_certificate true\n")
         f.write("crlfile ../ssl/crl.pem\n")
 
+
 (port1, port2) = mosq_test.get_port(2)
-conf_file = os.path.basename(__file__).replace('.py', '.conf')
+conf_file = os.path.basename(__file__).replace(".py", ".conf")
 write_config(conf_file, port1, port2)
 
 rc = 1
@@ -29,7 +31,9 @@ ssl_eof = False
 try:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile="../ssl/test-root-ca.crt")
-    context.load_cert_chain(certfile="../ssl/client-revoked.crt", keyfile="../ssl/client-revoked.key")
+    context.load_cert_chain(
+        certfile="../ssl/client-revoked.crt", keyfile="../ssl/client-revoked.key"
+    )
     ssock = context.wrap_socket(sock, server_hostname="localhost")
     ssock.settimeout(20)
     try:
@@ -42,9 +46,11 @@ try:
             # payload and so we get an EOF.
             ssl_eof = True
         except ssl.SSLError as err:
-            if err.reason == "SSLV3_ALERT_CERTIFICATE_REVOKED":
-                rc = 0
-            elif err.errno == 8 and "EOF occurred" in err.strerror:
+            if (
+                err.reason == "SSLV3_ALERT_CERTIFICATE_REVOKED"
+                or err.errno == 8
+                and "EOF occurred" in err.strerror
+            ):
                 rc = 0
             else:
                 broker.terminate()
@@ -67,10 +73,9 @@ finally:
     broker.wait()
     (stdo, stde) = broker.communicate()
     if ssl_eof:
-        if "certificate verify failed" in stde.decode('utf-8'):
+        if "certificate verify failed" in stde.decode("utf-8"):
             rc = 0
     if rc:
-        print(stde.decode('utf-8'))
+        print(stde.decode("utf-8"))
 
 exit(rc)
-

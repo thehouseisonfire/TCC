@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-
 # Copyright © 2012-2014 Roberto Alsina and others.
 
 # Permission is hereby granted, free of charge, to any
@@ -52,18 +50,18 @@ class CompileDocbookManpage(PageCompiler):
     def compile(self, source, dest, is_two_file=True, post=None, lang=None):
         """Compile the source file into HTML and save as dest."""
         makedirs(os.path.dirname(dest))
-        binary = self.site.config.get('XSLTPROC_BINARY', 'xsltproc')
-        xslpath = os.path.join(os.path.split(__file__)[0], 'html.xsl')
+        binary = self.site.config.get("XSLTPROC_BINARY", "xsltproc")
+        xslpath = os.path.join(os.path.split(__file__)[0], "html.xsl")
         try:
-            subprocess.check_call((binary, '-o', dest, xslpath, source))
+            subprocess.check_call((binary, "-o", dest, xslpath, source))
             if post is None:
                 if shortcode_deps:
                     self.logger.error(
-                        "Cannot save dependencies for post {0} (post unknown)",
-                        source)
+                        "Cannot save dependencies for post {0} (post unknown)", source
+                    )
         except OSError as e:
             print(e)
-            req_missing(['xsltproc'], 'build this site (compile with xsltproc)', python=False)
+            req_missing(["xsltproc"], "build this site (compile with xsltproc)", python=False)
 
     def create_post(self, path, content=None, onefile=False, is_page=False, **kw):
         """Create post file with optional metadata."""
@@ -71,8 +69,8 @@ class CompileDocbookManpage(PageCompiler):
         metadata.update(self.default_metadata)
         metadata.update(kw)
         makedirs(os.path.dirname(path))
-        if not content.endswith('\n'):
-            content += '\n'
+        if not content.endswith("\n"):
+            content += "\n"
         with codecs.open(path, "wb+", "utf8") as fd:
             if onefile:
                 fd.write("////\n")

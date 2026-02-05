@@ -6,6 +6,7 @@
 
 from mosq_test_helper import *
 
+
 def prop_subpub_helper(props_out, props_in, expect_proto_error=False):
     rc = 1
     mid = 53
@@ -16,11 +17,17 @@ def prop_subpub_helper(props_out, props_in, expect_proto_error=False):
     subscribe_packet = mosq_test.gen_subscribe(mid, "subpub/qos0", 0, proto_ver=5)
     suback_packet = mosq_test.gen_suback(mid, 0, proto_ver=5)
 
-    publish_packet_out = mosq_test.gen_publish("subpub/qos0", qos=0, payload="message", proto_ver=5, properties=props_out)
+    publish_packet_out = mosq_test.gen_publish(
+        "subpub/qos0", qos=0, payload="message", proto_ver=5, properties=props_out
+    )
 
-    publish_packet_expected = mosq_test.gen_publish("subpub/qos0", qos=0, payload="message", proto_ver=5, properties=props_in)
+    publish_packet_expected = mosq_test.gen_publish(
+        "subpub/qos0", qos=0, payload="message", proto_ver=5, properties=props_in
+    )
 
-    disconnect_packet = mosq_test.gen_disconnect(reason_code=mqtt5_rc.MQTT_RC_PROTOCOL_ERROR, proto_ver=5)
+    disconnect_packet = mosq_test.gen_disconnect(
+        reason_code=mqtt5_rc.MQTT_RC_PROTOCOL_ERROR, proto_ver=5
+    )
 
     port = mosq_test.get_port()
     broker = mosq_test.start_broker(filename=os.path.basename(__file__), port=port)
@@ -44,7 +51,6 @@ def prop_subpub_helper(props_out, props_in, expect_proto_error=False):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
 
     exit(rc)
-

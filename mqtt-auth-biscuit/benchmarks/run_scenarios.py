@@ -3,21 +3,107 @@ import os
 import shutil
 import subprocess
 import time
+from typing import Any, Literal, TypedDict, cast
 
 import httpx
 import typer
 from pydantic import BaseModel, ConfigDict
 
-from logging_utils import get_logger, setup_logging
+from benchmarks.logging_utils import get_logger, setup_logging
 
 
-def _read_tokens(path: str):
-    with open(path, "r", encoding="utf-8") as f:
+def _read_tokens(path: str) -> dict[str, Any]:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
 logger = get_logger(__name__)
 app = typer.Typer(add_completion=False)
+
+
+class NetemConfig(TypedDict, total=False):
+    clear: bool
+    mtu: int
+    delay_ms: int
+    loss_pct: float
+    rate_kbit: int
+
+
+class AuthzConfig(TypedDict, total=False):
+    delay_ms: int
+    fail_mode: str
+    fail_rate: float
+
+
+class BiscuitAttenuateConfig(TypedDict, total=False):
+    denies: list[str]
+    checks: list[str]
+    ttl_seconds: int
+    topic: str
+    op: str
+
+
+class BiscuitDelegateHandoffConfig(TypedDict, total=False):
+    topic: str
+    token: str
+    qos: int
+    retain: bool
+
+
+class BiscuitDelegateConfig(TypedDict, total=False):
+    denies: list[str]
+    checks: list[str]
+    ttl_seconds: int
+    topic: str
+    op: str
+    handoff: BiscuitDelegateHandoffConfig
+
+
+class TokenRefreshConfig(TypedDict):
+    kind: Literal["jwt", "biscuit"]
+    ttl_seconds: int
+
+
+class Mqtt5AuthConfig(TypedDict):
+    token1: str
+    token2: str
+
+
+class ScenarioConfig(TypedDict, total=False):
+    id: str
+    mosquitto_conf: str
+    username: str
+    password: str
+    topic: str
+    authz: AuthzConfig | None
+    netem: NetemConfig | None
+    message_size: int
+    qos: int
+    qos_distribution: str
+    fanout_publisher_username: str
+    fanout_publisher_password: str
+    mode: str
+    fanout_topic: str
+    biscuit_attenuate: BiscuitAttenuateConfig
+    biscuit_public_key_hex: str | None
+    biscuit_public_key_file: str | None
+    biscuit_attenuate_bin: str | None
+    biscuit_delegate: BiscuitDelegateConfig
+    biscuit_delegate_public_key_hex: str | None
+    biscuit_delegate_public_key_file: str | None
+    biscuit_delegate_bin: str | None
+    policy_complexity_kind: Literal["block_chain", "datalog"]
+    mqtt5_auth: Mqtt5AuthConfig
+    restart_mosquitto: bool
+    sync_connect: bool
+    repeat: int
+    sleep_between: int
+    token_refresh: TokenRefreshConfig
+    dynsec_config: str
+    dynsec_churn: list[str]
+    token_issuer_no_default_roles: bool
+    token_issuer_no_default_grants: bool
+    tls: bool
 
 
 def _compose_bin():
@@ -59,7 +145,7 @@ def _authz_config(
     ca_file: str | None = None,
     insecure: bool = False,
 ):
-    body = {}
+    body: dict[str, object] = {}
     if delay_ms is not None:
         body["delay_ms"] = delay_ms
     if fail_mode is not None:
@@ -78,8 +164,16 @@ def _authz_config(
 
 
 # Prometheus query templates
-CURRENT_DOCKER_COMPOSE_CPU_QUERY = 'sum(rate(container_cpu_usage_seconds_total{container_label_com_docker_compose_service="mosquitto"}[30s]))'
-CURRENT_DOCKER_COMPOSE_MEM_QUERY = 'max(container_memory_working_set_bytes{container_label_com_docker_compose_service="mosquitto"})'
+CURRENT_DOCKER_COMPOSE_CPU_QUERY = (
+    "sum(rate(container_cpu_usage_seconds_total{"
+    'container_label_com_docker_compose_service="mosquitto"'
+    "}[30s]))"
+)
+CURRENT_DOCKER_COMPOSE_MEM_QUERY = (
+    "max(container_memory_working_set_bytes{"
+    'container_label_com_docker_compose_service="mosquitto"'
+    "})"
+)
 
 
 def _prom_query(base_url: str, query: str, ca_file: str | None, insecure: bool):
@@ -308,8 +402,10 @@ def _apply_dynsec_config(source_path: str):
         shutil.copyfile(src, tls_dest)
 
 
-def _expand_tls_matrix(scenarios: dict[str, dict]) -> dict[str, dict]:
-    expanded: dict[str, dict] = {}
+def _expand_tls_matrix(
+    scenarios: dict[str, ScenarioConfig],
+) -> dict[str, ScenarioConfig]:
+    expanded: dict[str, ScenarioConfig] = {}
     for scenario_id, scenario in scenarios.items():
         expanded[scenario_id] = scenario
         if scenario_id.endswith("-TLS"):
@@ -381,7 +477,7 @@ class ScenarioModel(BaseModel):
 
 @app.command()
 def main(
-    tokens: str = "benchmarks/tokens.json",
+    tokens_path: str = "benchmarks/tokens.json",
     out: str = "benchmarks/results",
     clients: int = 50,
     messages: int = 20,
@@ -391,9 +487,7 @@ def main(
     token_issuer_no_default_roles: bool = False,
     token_issuer_no_default_grants: bool = False,
     biscuit_base64url: bool = False,
-    token_refresh_codes: str | None = typer.Option(
-        None, envvar="TOKEN_REFRESH_CODES"
-    ),
+    token_refresh_codes: str | None = typer.Option(None, envvar="TOKEN_REFRESH_CODES"),
     tls: bool = False,
     tls_insecure: bool = False,
     tls_ca_file: str | None = None,
@@ -404,19 +498,17 @@ def main(
 ):
     setup_logging(log_level)
 
-    tokens = _read_tokens(
-        os.path.join(os.path.dirname(os.path.dirname(__file__)), tokens)
+    tokens: dict[str, Any] = _read_tokens(
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), tokens_path)
     )
 
-    scenarios = []
+    scenarios: list[ScenarioConfig] = []
     tls_enabled = tls
     tls_ca = tls_ca_file or ("docker/tls/ca.pem" if tls_enabled else None)
     if (
         tls_enabled
         and tls_ca
-        and not os.path.exists(
-            os.path.join(os.path.dirname(os.path.dirname(__file__)), tls_ca)
-        )
+        and not os.path.exists(os.path.join(os.path.dirname(os.path.dirname(__file__)), tls_ca))
     ):
         raise SystemExit(
             f"TLS enabled but CA file not found at {tls_ca}. Run docker/tls/generate_certs.sh"
@@ -424,7 +516,7 @@ def main(
     if scenarios_arg:
         scenario_ids = [s.strip() for s in scenarios_arg.split(",")]
         # Define available scenarios mapping
-        available_scenarios = {
+        available_scenarios: dict[str, ScenarioConfig] = {
             "BASE-01": {
                 "mosquitto_conf": "./mosquitto_base.conf",
                 "username": "",
@@ -558,7 +650,7 @@ def main(
                 "message_size": 0,
                 "biscuit_attenuate": {
                     "denies": ["subscribe:sensors/{client_id}/temp"],
-                    "checks": ["resource(\"sensors/{client_id}/temp\")"],
+                    "checks": ['resource("sensors/{client_id}/temp")'],
                 },
             },
             "BIS-ATTENUATE-OP-ONLY": {
@@ -913,12 +1005,8 @@ def main(
             }
 
         for scenario in available_scenarios.values():
-            scenario.setdefault(
-                "token_issuer_no_default_roles", token_issuer_no_default_roles
-            )
-            scenario.setdefault(
-                "token_issuer_no_default_grants", token_issuer_no_default_grants
-            )
+            scenario.setdefault("token_issuer_no_default_roles", token_issuer_no_default_roles)
+            scenario.setdefault("token_issuer_no_default_grants", token_issuer_no_default_grants)
 
         available_scenarios = _expand_tls_matrix(available_scenarios)
 
@@ -927,29 +1015,43 @@ def main(
             if scenario_id in available_scenarios:
                 scenario = available_scenarios[scenario_id].copy()
                 scenario["id"] = scenario_id
-                scenarios.append(ScenarioModel.model_validate(scenario).model_dump())
+                scenarios.append(
+                    cast(
+                        ScenarioConfig,
+                        ScenarioModel.model_validate(scenario).model_dump(),
+                    )
+                )
             else:
                 logger.warning("Unknown scenario '%s', skipping", scenario_id)
     else:
-        logger.info(
-            "No scenarios specified. Use --scenarios to specify which scenarios to run."
-        )
+        logger.info("No scenarios specified. Use --scenarios to specify which scenarios to run.")
         logger.info("Available scenarios:")
         logger.info(
-            "BASE-01, QOS0-BASE-01, JWT-01, BIS-01, QOS2-JWT, QOS2-BISCUIT, QOS-MIXED-JWT, QOS-MIXED-BISCUIT, BIS-ATTENUATE-CLIENT, BIS-ATTENUATE-TTL, BIS-ATTENUATE-DENY, BIS-ATTENUATE-OP-ONLY, POLICY-COMPLEX-1, POLICY-COMPLEX-5, POLICY-COMPLEX-25, POLICY-COMPLEX-LOW, POLICY-COMPLEX-MED, POLICY-COMPLEX-HIGH"
+            "BASE-01, QOS0-BASE-01, JWT-01, BIS-01, QOS2-JWT, QOS2-BISCUIT, "
+            "QOS-MIXED-JWT, QOS-MIXED-BISCUIT, BIS-ATTENUATE-CLIENT, "
+            "BIS-ATTENUATE-TTL, BIS-ATTENUATE-DENY, BIS-ATTENUATE-OP-ONLY, "
+            "POLICY-COMPLEX-1, POLICY-COMPLEX-5, POLICY-COMPLEX-25, "
+            "POLICY-COMPLEX-LOW, POLICY-COMPLEX-MED, POLICY-COMPLEX-HIGH",
         )
-        logger.info("JWT-HTTP-200MS, JWT-HTTP-1000MS, HYBRID-AUTHZ-DOWN, MTU-200-JWT")
-        logger.info("BIS-HTTP-200MS, JWT-HTTP-200MS-LOSS1, JWT-HTTP-200MS-LOSS5")
         logger.info(
-            "MQTT5-REAUTH-JWT, MQTT5-REAUTH-BISCUIT, THUNDERING-HERD, DELEGATION-TEMP-ONLY, DELEGATION-HANDOFF, DELEGATION-SIMULATED"
+            "JWT-HTTP-200MS, JWT-HTTP-1000MS, HYBRID-AUTHZ-DOWN, MTU-200-JWT",
         )
-        logger.info("LIFECYCLE-JWT-SHORT-RECONNECT, LIFECYCLE-BIS-SHORT-RECONNECT")
+        logger.info(
+            "BIS-HTTP-200MS, JWT-HTTP-200MS-LOSS1, JWT-HTTP-200MS-LOSS5",
+        )
+        logger.info(
+            "MQTT5-REAUTH-JWT, MQTT5-REAUTH-BISCUIT, THUNDERING-HERD, "
+            "DELEGATION-TEMP-ONLY, DELEGATION-HANDOFF, DELEGATION-SIMULATED",
+        )
+        logger.info(
+            "LIFECYCLE-JWT-SHORT-RECONNECT, LIFECYCLE-BIS-SHORT-RECONNECT",
+        )
         logger.info("MTU-500-BIS-25, MTU-1500-BIS-25, MTU-9000-BIS-25")
         logger.info("MTU-500-JWT, MTU-1500-JWT, MTU-9000-JWT")
         logger.info("DYNSEC-BASE, DYNSEC-CHURN, DYNSEC-READ-FANOUT")
         logger.info("DYNSEC-READ-FANOUT-CHURN")
         logger.info(
-            "STATIC-ACL-JWT, STATIC-ACL-BIS, STATIC-ACL-FANOUT, STATIC-ACL-FANOUT-BIS"
+            "STATIC-ACL-JWT, STATIC-ACL-BIS, STATIC-ACL-FANOUT, " "STATIC-ACL-FANOUT-BIS",
         )
         logger.info("Append -TLS to any scenario id for TLS variants.")
         return
@@ -963,15 +1065,9 @@ def main(
         if scenario_tls:
             mosq_conf = mosq_conf.replace("./", "./tls/")
         extra_env = {"MOSQUITTO_CONF": mosq_conf}
-        authz_base = (
-            "https://localhost:8443" if scenario_tls else "http://localhost:8081"
-        )
-        prom_base = (
-            "https://localhost:9443" if scenario_tls else "http://localhost:9090"
-        )
-        token_issuer_base = (
-            "https://localhost:8444" if scenario_tls else "http://localhost:8082"
-        )
+        authz_base = "https://localhost:8443" if scenario_tls else "http://localhost:8081"
+        prom_base = "https://localhost:9443" if scenario_tls else "http://localhost:9090"
+        token_issuer_base = "https://localhost:8444" if scenario_tls else "http://localhost:8082"
         mqtt_host = "localhost"
         mqtt_port = 8883 if scenario_tls else 1883
         compose_files = ["docker/docker-compose.yml"]
@@ -993,13 +1089,9 @@ def main(
             if "mtu" in netem:
                 extra_env.update({"NETEM_CLEAR": "1", "NETEM_MTU": str(netem["mtu"])})
             if "delay_ms" in netem:
-                extra_env.update(
-                    {"NETEM_CLEAR": "1", "NETEM_DELAY_MS": str(netem["delay_ms"])}
-                )
+                extra_env.update({"NETEM_CLEAR": "1", "NETEM_DELAY_MS": str(netem["delay_ms"])})
             if "loss_pct" in netem:
-                extra_env.update(
-                    {"NETEM_CLEAR": "1", "NETEM_LOSS_PCT": str(netem["loss_pct"])}
-                )
+                extra_env.update({"NETEM_CLEAR": "1", "NETEM_LOSS_PCT": str(netem["loss_pct"])})
 
         token_issuer_no_default_grants = s.get(
             "token_issuer_no_default_grants", token_issuer_no_default_grants
@@ -1013,9 +1105,7 @@ def main(
                     "TOKEN_ISSUER_ALLOW_DEFAULT_KEYS", "1"
                 ),
                 "JWT_NO_DEFAULT_ROLES": "1" if token_issuer_no_default_roles else "0",
-                "JWT_NO_DEFAULT_GRANTS": "1"
-                if token_issuer_no_default_grants
-                else "0",
+                "JWT_NO_DEFAULT_GRANTS": "1" if token_issuer_no_default_grants else "0",
                 "BISCUIT_BASE64URL": "1" if biscuit_base64url else "0",
             }
         )
@@ -1037,8 +1127,8 @@ def main(
         )
         time.sleep(1)
 
-        if s.get("authz") is not None:
-            cfg = s["authz"]
+        cfg = s.get("authz")
+        if cfg is not None:
             _authz_config(
                 authz_base,
                 delay_ms=cfg.get("delay_ms"),
@@ -1068,7 +1158,7 @@ def main(
 
         biscuit_only = bool(s.get("biscuit_attenuate") or s.get("biscuit_delegate"))
         policy_complexity_kind = s.get("policy_complexity_kind")
-        out_payload = {
+        out_payload: dict[str, Any] = {
             "scenario": s["id"],
             "token_len": token_len,
             "token_schema": token_schema,
@@ -1117,19 +1207,19 @@ def main(
             elif s.get("dynsec_churn"):
                 churn_list = s["dynsec_churn"]
                 _apply_dynsec_config(churn_list[idx % len(churn_list)])
-            if s.get("mqtt5_auth") is not None:
-                cfg = s["mqtt5_auth"]
+            mqtt5_cfg = s.get("mqtt5_auth")
+            if mqtt5_cfg is not None:
                 res = _run_mqtt5_auth(
                     mqtt_host,
                     mqtt_port,
-                    cfg["token1"],
-                    cfg["token2"],
+                    mqtt5_cfg["token1"],
+                    mqtt5_cfg["token2"],
                     scenario_tls,
                     tls_ca,
                     tls_insecure,
                 )
             else:
-                token_refresh = s.get("token_refresh") or {}
+                token_refresh = s.get("token_refresh")
                 scenario_qos = int(s.get("qos", qos))
                 scenario_qos_distribution = s.get("qos_distribution", qos_distribution)
                 res = _run_loadgen(
@@ -1150,8 +1240,8 @@ def main(
                     message_size=int(s.get("message_size", 0)),
                     sync_connect=bool(s.get("sync_connect", False)),
                     token_issuer_url=token_issuer_base if token_refresh else None,
-                    token_issuer_kind=token_refresh.get("kind"),
-                    token_issuer_ttl=token_refresh.get("ttl_seconds"),
+                    token_issuer_kind=(token_refresh.get("kind") if token_refresh else None),
+                    token_issuer_ttl=(token_refresh.get("ttl_seconds") if token_refresh else None),
                     token_issuer_no_default_roles=token_issuer_no_default_roles,
                     token_issuer_no_default_grants=token_issuer_no_default_grants,
                     token_refresh_codes=token_refresh_codes,
@@ -1216,9 +1306,9 @@ def main(
                         if s.get("biscuit_delegate")
                         else None
                     ),
-                    biscuit_delegate_public_key_hex=s.get("biscuit_public_key_hex"),
+                    biscuit_delegate_public_key_hex=s.get("biscuit_delegate_public_key_hex"),
                     biscuit_delegate_public_key_file=s.get(
-                        "biscuit_public_key_file", "docker/biscuit_public.key"
+                        "biscuit_delegate_public_key_file", "docker/biscuit_public.key"
                     ),
                     biscuit_delegate_base64url=biscuit_base64url,
                     biscuit_delegate_bin=s.get("biscuit_delegate_bin"),

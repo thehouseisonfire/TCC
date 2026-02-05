@@ -2,12 +2,13 @@
 
 from mosq_test_helper import *
 
-if sys.version < '2.7':
+if sys.version < "2.7":
     print("WARNING: SSL not supported on Python 2.6")
     exit(0)
 
+
 def write_config(filename, port1, port2):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("port %d\n" % (port2))
         f.write("allow_anonymous true\n")
         f.write("listener %d\n" % (port1))
@@ -18,8 +19,9 @@ def write_config(filename, port1, port2):
         f.write("require_certificate true\n")
         f.write("crlfile ../ssl/crl.pem\n")
 
+
 (port1, port2) = mosq_test.get_port(2)
-conf_file = os.path.basename(__file__).replace('.py', '.conf')
+conf_file = os.path.basename(__file__).replace(".py", ".conf")
 write_config(conf_file, port1, port2)
 
 rc = 1
@@ -50,7 +52,6 @@ finally:
     broker.wait()
     (stdo, stde) = broker.communicate()
     if rc:
-        print(stde.decode('utf-8'))
+        print(stde.decode("utf-8"))
 
 exit(rc)
-

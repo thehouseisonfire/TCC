@@ -27,6 +27,7 @@ disconnect_packet = mosq_test.gen_disconnect()
 port = mosq_test.get_port()
 broker = mosq_test.start_broker(filename=os.path.basename(__file__), port=port)
 
+
 def test():
     sock = mosq_test.do_client_connect(connect_packet, connack_packet, port=port)
     mosq_test.do_send_receive(sock, subscribe1_packet, suback1_packet, "suback 1")
@@ -53,7 +54,6 @@ finally:
     broker.wait()
     (stdo, stde) = broker.communicate()
     if rc:
-        print(stde.decode('utf-8'))
+        print(stde.decode("utf-8"))
 
 exit(rc)
-

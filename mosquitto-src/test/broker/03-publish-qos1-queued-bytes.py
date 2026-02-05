@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 
 # Test whether a PUBLISH to a topic with an offline subscriber results in a queued message
-import Queue
 import random
 import string
-import subprocess
-import socket
 import threading
 import time
+
+import Queue
 
 try:
     import paho.mqtt.client
@@ -23,6 +22,7 @@ rc = 1
 
 port = mosq_test.get_port()
 
+
 def registerOfflineSubscriber():
     """Just a durable client to trigger queuing"""
     client = paho.mqtt.client.Client("sub-qos1-offline", clean_session=False)
@@ -33,6 +33,7 @@ def registerOfflineSubscriber():
 
 
 broker = mosq_test.start_broker(filename=os.path.basename(__file__), port=port)
+
 
 class BrokerMonitor(threading.Thread):
     def __init__(self, group=None, target=None, name=None, args=(), kwargs=None, verbose=None):
@@ -82,11 +83,13 @@ class BrokerMonitor(threading.Thread):
 
         client.disconnect()
 
+
 rq = Queue.Queue()
 cq = Queue.Queue()
-brokerMonitor = BrokerMonitor(args=(rq,cq))
+brokerMonitor = BrokerMonitor(args=(rq, cq))
 
-class StoreCounts():
+
+class StoreCounts:
     def __init__(self):
         self.stored = 0
         self.bstored = 0
@@ -104,7 +107,15 @@ class StoreCounts():
         self.drops = tup[2]
 
     def __repr__(self):
-        return "s: %d (%d) b: %d (%d) d: %d (%d)" % (self.stored, self.diff_stored, self.bstored, self.diff_bstored, self.drops, self.diff_drops)
+        return "s: %d (%d) b: %d (%d) d: %d (%d)" % (
+            self.stored,
+            self.diff_stored,
+            self.bstored,
+            self.diff_bstored,
+            self.drops,
+            self.diff_drops,
+        )
+
 
 try:
     registerOfflineSubscriber()
@@ -119,9 +130,15 @@ try:
     # publish 10 short messages, should be no drops
     print("publishing 10 short")
     cq.put(False)  # expect no updated drop count
-    msgs_short10 = [("test/publish/queueing/%d" % x,
-             ''.join(random.choice(string.hexdigits) for _ in range(10)),
-             1, False) for x in range(1, 10 + 1)]
+    msgs_short10 = [
+        (
+            "test/publish/queueing/%d" % x,
+            "".join(random.choice(string.hexdigits) for _ in range(10)),
+            1,
+            False,
+        )
+        for x in range(1, 10 + 1)
+    ]
     paho.mqtt.publish.multiple(msgs_short10, port=port)
     counts.update(rq.get())  # Initial start
     print("rq.get (short) gave us: ", counts)
@@ -134,9 +151,15 @@ try:
     # publish 10 mediums (40bytes). should fail after 8, when it finally crosses 400
     print("publishing 10 medium")
     cq.put(True)  # expect a drop count
-    msgs_medium10 = [("test/publish/queueing/%d" % x,
-             ''.join(random.choice(string.hexdigits) for _ in range(40)),
-             1, False) for x in range(1, 10 + 1)]
+    msgs_medium10 = [
+        (
+            "test/publish/queueing/%d" % x,
+            "".join(random.choice(string.hexdigits) for _ in range(40)),
+            1,
+            False,
+        )
+        for x in range(1, 10 + 1)
+    ]
     paho.mqtt.publish.multiple(msgs_medium10, port=port)
     counts.update(rq.get())  # Initial start
     print("rq.get (medium) gave us: ", counts)
@@ -157,7 +180,6 @@ finally:
     broker.terminate()
     (stdo, stde) = broker.communicate()
     if rc:
-        print(stde.decode('utf-8'))
+        print(stde.decode("utf-8"))
 
 exit(rc)
-

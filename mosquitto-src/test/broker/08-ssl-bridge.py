@@ -2,8 +2,9 @@
 
 from mosq_test_helper import *
 
+
 def write_config(filename, port1, port2):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("port %d\n" % (port2))
         f.write("allow_anonymous true\n")
         f.write("\n")
@@ -16,14 +17,17 @@ def write_config(filename, port1, port2):
         f.write("bridge_cafile ../ssl/all-ca.crt\n")
         f.write("bridge_insecure true\n")
 
+
 (port1, port2) = mosq_test.get_port(2)
-conf_file = os.path.basename(__file__).replace('.py', '.conf')
+conf_file = os.path.basename(__file__).replace(".py", ".conf")
 write_config(conf_file, port1, port2)
 
 rc = 1
 keepalive = 60
-client_id = socket.gethostname()+".bridge_test"
-connect_packet = mosq_test.gen_connect(client_id, keepalive=keepalive, clean_session=False, proto_ver=128+4)
+client_id = socket.gethostname() + ".bridge_test"
+connect_packet = mosq_test.gen_connect(
+    client_id, keepalive=keepalive, clean_session=False, proto_ver=128 + 4
+)
 connack_packet = mosq_test.gen_connack(rc=0)
 
 mid = 1
@@ -38,7 +42,7 @@ context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH, cafile="../ssl/all
 context.load_cert_chain(certfile="../ssl/server.crt", keyfile="../ssl/server.key")
 ssock = context.wrap_socket(sock, server_side=True)
 ssock.settimeout(20)
-ssock.bind(('', port1))
+ssock.bind(("", port1))
 ssock.listen(5)
 
 broker = mosq_test.start_broker(filename=os.path.basename(__file__), port=port2, use_conf=True)
@@ -53,7 +57,11 @@ try:
     mosq_test.expect_packet(bridge, "subscribe", subscribe_packet)
     bridge.send(suback_packet)
 
-    pub = subprocess.Popen(['./08-ssl-bridge-helper.py', str(port2)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    pub = subprocess.Popen(
+        ["./08-ssl-bridge-helper.py", str(port2)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
     pub.wait()
     (stdo, stde) = pub.communicate()
 
@@ -74,8 +82,7 @@ finally:
     broker.wait()
     (stdo, stde) = broker.communicate()
     if rc:
-        print(stde.decode('utf-8'))
+        print(stde.decode("utf-8"))
     ssock.close()
 
 exit(rc)
-

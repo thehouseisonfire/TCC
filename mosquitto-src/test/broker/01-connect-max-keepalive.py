@@ -4,11 +4,13 @@
 
 from mosq_test_helper import *
 
+
 def write_config(filename, port):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("listener %d\n" % (port))
         f.write("allow_anonymous true\n")
         f.write("max_keepalive 100\n")
+
 
 def do_test(proto_ver):
     rc = 1
@@ -17,7 +19,7 @@ def do_test(proto_ver):
     connack_packet = mosq_test.gen_connack(rc=2, proto_ver=proto_ver)
 
     port = mosq_test.get_port()
-    conf_file = os.path.basename(__file__).replace('.py', '.conf')
+    conf_file = os.path.basename(__file__).replace(".py", ".conf")
     write_config(conf_file, port)
     broker = mosq_test.start_broker(filename=os.path.basename(__file__), use_conf=True, port=port)
 
@@ -36,8 +38,9 @@ def do_test(proto_ver):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             exit(rc)
+
 
 do_test(3)
 do_test(4)

@@ -4,15 +4,17 @@
 
 from mosq_test_helper import *
 
+
 def write_config(filename, port):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("port %d\n" % (port))
         f.write("allow_anonymous true\n")
         f.write("persistence true\n")
         f.write("persistence_file mosquitto-%d.db\n" % (port))
 
+
 port = mosq_test.get_port()
-conf_file = os.path.basename(__file__).replace('.py', '.conf')
+conf_file = os.path.basename(__file__).replace(".py", ".conf")
 write_config(conf_file, port)
 
 rc = 1
@@ -28,17 +30,29 @@ props += mqtt5_props.gen_string_prop(mqtt5_props.PROP_CONTENT_TYPE, "plain/text"
 props += mqtt5_props.gen_string_prop(mqtt5_props.PROP_RESPONSE_TOPIC, "/dev/null")
 props += mqtt5_props.gen_string_prop(mqtt5_props.PROP_CORRELATION_DATA, "2357289375902345")
 props += mqtt5_props.gen_string_pair_prop(mqtt5_props.PROP_USER_PROPERTY, "name", "value")
-publish_packet = mosq_test.gen_publish("subpub/qos1", qos=1, mid=mid, payload="message", proto_ver=5, properties=props, retain=True)
-puback_packet = mosq_test.gen_puback(mid, reason_code=mqtt5_rc.MQTT_RC_NO_MATCHING_SUBSCRIBERS, proto_ver=5)
+publish_packet = mosq_test.gen_publish(
+    "subpub/qos1",
+    qos=1,
+    mid=mid,
+    payload="message",
+    proto_ver=5,
+    properties=props,
+    retain=True,
+)
+puback_packet = mosq_test.gen_puback(
+    mid, reason_code=mqtt5_rc.MQTT_RC_NO_MATCHING_SUBSCRIBERS, proto_ver=5
+)
 
-publish2_packet = mosq_test.gen_publish("subpub/qos1", qos=0, payload="message", proto_ver=5, properties=props, retain=True)
+publish2_packet = mosq_test.gen_publish(
+    "subpub/qos1", qos=0, payload="message", proto_ver=5, properties=props, retain=True
+)
 
 mid = 1
 subscribe_packet = mosq_test.gen_subscribe(mid, "subpub/qos1", 0, proto_ver=5)
 suback_packet = mosq_test.gen_suback(mid, 0, proto_ver=5)
 
-if os.path.exists('mosquitto-%d.db' % (port)):
-    os.unlink('mosquitto-%d.db' % (port))
+if os.path.exists("mosquitto-%d.db" % (port)):
+    os.unlink("mosquitto-%d.db" % (port))
 
 broker = mosq_test.start_broker(filename=os.path.basename(__file__), use_conf=True, port=port)
 
@@ -71,10 +85,9 @@ finally:
     broker.wait()
     (stdo, stde) = broker.communicate()
     if rc:
-        print(stde.decode('utf-8'))
-    if os.path.exists('mosquitto-%d.db' % (port)):
-        os.unlink('mosquitto-%d.db' % (port))
+        print(stde.decode("utf-8"))
+    if os.path.exists("mosquitto-%d.db" % (port)):
+        os.unlink("mosquitto-%d.db" % (port))
 
 
 exit(rc)
-

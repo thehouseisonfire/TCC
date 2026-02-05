@@ -2,7 +2,7 @@
 
 import subprocess
 import time
-import sys
+
 
 def next_client(clients):
     if len(clients) == 0:
@@ -42,5 +42,5 @@ def run_clients(max_clients):
 env = {}
 env["LD_LIBRARY_PATH"] = "../../lib"
 
-#broker = subprocess.Popen(["../../src/mosquitto", "-c", "random.conf"], env=env)
+# broker = subprocess.Popen(["../../src/mosquitto", "-c", "random.conf"], env=env)
 run_clients(1000)

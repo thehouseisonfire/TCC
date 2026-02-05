@@ -4,8 +4,9 @@
 
 from mosq_test_helper import *
 
+
 def write_config(filename, port1, port2, protocol_version):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("port %d\n" % (port2))
         f.write("\n")
         f.write("connection bridge-u-test\n")
@@ -29,43 +30,48 @@ def do_test(proto_ver):
         proto_ver_connect = 5
 
     (port1, port2) = mosq_test.get_port(2)
-    conf_file = os.path.basename(__file__).replace('.py', '.conf')
+    conf_file = os.path.basename(__file__).replace(".py", ".conf")
     write_config(conf_file, port1, port2, bridge_protocol)
 
     rc = 1
     keepalive = 60
-    connect_packet = mosq_test.gen_connect("bridge-u-test", keepalive=keepalive, proto_ver=proto_ver_connect)
+    connect_packet = mosq_test.gen_connect(
+        "bridge-u-test", keepalive=keepalive, proto_ver=proto_ver_connect
+    )
     connack_packet = mosq_test.gen_connack(rc=0, proto_ver=proto_ver)
 
     mid = 180
     mid_unknown = 2000
 
-    publish_packet = mosq_test.gen_publish("bridge/unknown/qos2", qos=1, payload="bridge-message", mid=mid, proto_ver=proto_ver)
+    publish_packet = mosq_test.gen_publish(
+        "bridge/unknown/qos2",
+        qos=1,
+        payload="bridge-message",
+        mid=mid,
+        proto_ver=proto_ver,
+    )
     puback_packet = mosq_test.gen_puback(mid, proto_ver=proto_ver)
 
-    pubrec_packet_unknown1 = mosq_test.gen_pubrec(mid_unknown+1, proto_ver=proto_ver)
-    pubrel_packet_unknown1 = mosq_test.gen_pubrel(mid_unknown+1, proto_ver=proto_ver)
+    pubrec_packet_unknown1 = mosq_test.gen_pubrec(mid_unknown + 1, proto_ver=proto_ver)
+    pubrel_packet_unknown1 = mosq_test.gen_pubrel(mid_unknown + 1, proto_ver=proto_ver)
 
-    pubrel_packet_unknown2 = mosq_test.gen_pubrel(mid_unknown+2, proto_ver=proto_ver)
-    pubcomp_packet_unknown2 = mosq_test.gen_pubcomp(mid_unknown+2, proto_ver=proto_ver)
+    pubrel_packet_unknown2 = mosq_test.gen_pubrel(mid_unknown + 2, proto_ver=proto_ver)
+    pubcomp_packet_unknown2 = mosq_test.gen_pubcomp(mid_unknown + 2, proto_ver=proto_ver)
 
-    pubcomp_packet_unknown3 = mosq_test.gen_pubcomp(mid_unknown+3, proto_ver=proto_ver)
-
+    pubcomp_packet_unknown3 = mosq_test.gen_pubcomp(mid_unknown + 3, proto_ver=proto_ver)
 
     unsubscribe_packet = mosq_test.gen_unsubscribe(1, "bridge/#", proto_ver=proto_ver)
     unsuback_packet = mosq_test.gen_unsuback(1, proto_ver=proto_ver)
 
-
-    if os.environ.get('MOSQ_USE_VALGRIND') is not None:
+    if os.environ.get("MOSQ_USE_VALGRIND") is not None:
         sleep_time = 5
     else:
         sleep_time = 0.5
 
-
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.settimeout(10)
-    sock.bind(('', port1))
+    sock.bind(("", port1))
     sock.listen(5)
 
     broker = mosq_test.start_broker(filename=os.path.basename(__file__), port=port2, use_conf=True)
@@ -105,7 +111,7 @@ def do_test(proto_ver):
         (stdo, stde) = broker.communicate()
         sock.close()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             exit(rc)
 
 
@@ -113,4 +119,3 @@ do_test(proto_ver=4)
 do_test(proto_ver=5)
 
 exit(0)
-

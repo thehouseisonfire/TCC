@@ -5,6 +5,7 @@
 
 from mosq_test_helper import *
 
+
 def do_test():
     rc = 1
     keepalive = 60
@@ -19,12 +20,15 @@ def do_test():
     suback_packet = mosq_test.gen_suback(mid, 0, proto_ver=5)
 
     props = mqtt5_props.gen_uint16_prop(mqtt5_props.PROP_TOPIC_ALIAS, 3)
-    publish1_packet = mosq_test.gen_publish("subpub/alias", qos=0, payload="message", proto_ver=5, properties=props)
+    publish1_packet = mosq_test.gen_publish(
+        "subpub/alias", qos=0, payload="message", proto_ver=5, properties=props
+    )
 
     props = mqtt5_props.gen_uint16_prop(mqtt5_props.PROP_TOPIC_ALIAS, 3)
-    publish2s_packet = mosq_test.gen_publish("", qos=0, payload="message", proto_ver=5, properties=props)
+    publish2s_packet = mosq_test.gen_publish(
+        "", qos=0, payload="message", proto_ver=5, properties=props
+    )
     publish2r_packet = mosq_test.gen_publish("subpub/alias", qos=0, payload="message", proto_ver=5)
-
 
     port = mosq_test.get_port()
     broker = mosq_test.start_broker(filename=os.path.basename(__file__), port=port)
@@ -51,7 +55,7 @@ def do_test():
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             exit(rc)
 
 

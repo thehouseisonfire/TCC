@@ -2,13 +2,16 @@
 
 from mosq_test_helper import *
 
+
 def do_test(proto_ver):
     rc = 1
     connect_packet = mosq_test.gen_connect("03-pub-qos2-dup-test", proto_ver=proto_ver)
     connack_packet = mosq_test.gen_connack(rc=0, proto_ver=proto_ver)
 
     mid = 1
-    publish_packet = mosq_test.gen_publish("topic", qos=2, mid=mid, payload="message", proto_ver=proto_ver, dup=1)
+    publish_packet = mosq_test.gen_publish(
+        "topic", qos=2, mid=mid, payload="message", proto_ver=proto_ver, dup=1
+    )
     pubrec_packet = mosq_test.gen_pubrec(mid, proto_ver=proto_ver)
 
     disconnect_packet = mosq_test.gen_disconnect(reason_code=130, proto_ver=proto_ver)
@@ -40,7 +43,7 @@ def do_test(proto_ver):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             print("proto_ver=%d" % (proto_ver))
             exit(rc)
 
@@ -48,11 +51,12 @@ def do_test(proto_ver):
 def all_tests():
     rc = do_test(proto_ver=4)
     if rc:
-        return rc;
+        return rc
     rc = do_test(proto_ver=5)
     if rc:
-        return rc;
+        return rc
     return 0
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     all_tests()

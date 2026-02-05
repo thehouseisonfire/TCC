@@ -4,10 +4,13 @@
 
 from mosq_test_helper import *
 
+
 def do_test(proto_ver):
     rc = 1
     keepalive = 60
-    connect_packet = mosq_test.gen_connect("subscribe-test", keepalive=keepalive, proto_ver=proto_ver)
+    connect_packet = mosq_test.gen_connect(
+        "subscribe-test", keepalive=keepalive, proto_ver=proto_ver
+    )
     connack_packet = mosq_test.gen_connack(rc=0, proto_ver=proto_ver)
 
     mid = 1
@@ -36,8 +39,9 @@ def do_test(proto_ver):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             exit(rc)
+
 
 do_test(4)
 do_test(5)

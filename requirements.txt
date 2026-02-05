@@ -1,6 +1,7 @@
 httpx[http2]
 numpy
 pandas
+pandas-stubs
 pydantic
 typer
 rich

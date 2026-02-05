@@ -1,6 +1,3 @@
-# -*- coding: utf-8 -*-
-
-from __future__ import unicode_literals
 import time
 
 # !! This is the configuration of Nikola. !! #
@@ -79,12 +76,12 @@ TRANSLATIONS_PATTERN = "{path}.{lang}.{ext}"
 NAVIGATION_LINKS = {
     DEFAULT_LANG: (
         ("/", "Home"),
-        #("/about/", "About"),
+        # ("/about/", "About"),
         ("/blog/", "Blog"),
         ("/download/", "Download"),
-        #("/development/", "Development"),
-        #("/community/", "Community"),
-        #("/sponsoring/", "Sponsoring"),
+        # ("/development/", "Development"),
+        # ("/community/", "Community"),
+        # ("/sponsoring/", "Sponsoring"),
         (
             (
                 ("/documentation/", "All"),
@@ -101,18 +98,19 @@ NAVIGATION_LINKS = {
                 ("/man/mosquitto_sub-1.html", "mosquitto_sub"),
                 ("/man/mosquitto-tls-7.html", "mosquitto-tls"),
                 ("/man/mqtt-7.html", "mqtt"),
-            ), "Documentation",
-        )
+            ),
+            "Documentation",
+        ),
     ),
 }
 
 # Name of the theme to use.
 THEME = "mosquitto"
-#THEME = "bootstrap3"
+# THEME = "bootstrap3"
 
 # Primary color of your theme. This will be used to customize your theme and
 # auto-generate related colors in POSTS_SECTION_COLORS. Must be a HEX value.
-THEME_COLOR = '#3c5280'
+THEME_COLOR = "#3c5280"
 
 # POSTS and PAGES contains (wildcard, destination, template) tuples.
 # (translatable)
@@ -232,22 +230,22 @@ TIMEZONE = "Europe/London"
 # 'markdown' is MarkDown
 # 'html' assumes the file is HTML and just copies it
 COMPILERS = {
-    "rest": ('.rst', '.txt'),
-    "markdown": ('.md', '.mdown', '.markdown'),
-    "textile": ('.textile',),
-    "txt2tags": ('.t2t',),
-    "bbcode": ('.bb',),
-    "wiki": ('.wiki',),
-    "ipynb": ('.ipynb',),
-    "html": ('.html', '.htm'),
+    "rest": (".rst", ".txt"),
+    "markdown": (".md", ".mdown", ".markdown"),
+    "textile": (".textile",),
+    "txt2tags": (".t2t",),
+    "bbcode": (".bb",),
+    "wiki": (".wiki",),
+    "ipynb": (".ipynb",),
+    "html": (".html", ".htm"),
     # PHP files are rendered the usual way (i.e. with the full templates).
     # The resulting files have .php extensions, making it possible to run
     # them without reconfiguring your server to recognize them.
-    "php": ('.php',),
+    "php": (".php",),
     # Pandoc detects the input from the source filename
     # but is disabled by default as it would conflict
     # with many of the others.
-    "docbookmanpage": ('.xml',),
+    "docbookmanpage": (".xml",),
 }
 
 # Create by default posts in one file format?
@@ -261,7 +259,7 @@ NEW_POST_DATE_PATH = True
 
 # What format to use when creating posts with date paths?
 # Default is '%Y/%m/%d', other possibilities include '%Y' or '%Y/%m'.
-NEW_POST_DATE_PATH_FORMAT = '%Y/%m'
+NEW_POST_DATE_PATH_FORMAT = "%Y/%m"
 
 # If this is set to True, the DEFAULT_LANG version will be displayed for
 # untranslated posts.
@@ -383,7 +381,7 @@ TAG_PATH = "blog/categories"
 # If you do not want to display a tag publicly, you can mark it as hidden.
 # The tag will not be displayed on the tag list page, the tag cloud and posts.
 # Tag pages will still be generated.
-HIDDEN_TAGS = ['mathjax']
+HIDDEN_TAGS = ["mathjax"]
 
 # Only include tags on the tag list/overview page if there are at least
 # TAGLIST_MINIMUM_POSTS number of posts or more with every tag. Every tag
@@ -473,7 +471,7 @@ AUTHOR_PATH = "blog/authors"
 # If you do not want to display an author publicly, you can mark it as hidden.
 # The author will not be displayed on the author list page and posts.
 # Tag pages will still be generated.
-HIDDEN_AUTHORS = ['Guest']
+HIDDEN_AUTHORS = ["Guest"]
 
 # Final location for the main blog page and sibling paginated pages is
 # output / TRANSLATION[lang] / INDEX_PATH / index-*.html
@@ -482,9 +480,7 @@ INDEX_PATH = "blog"
 
 # Optional HTML that displayed on “main” blog index.html files.
 # May be used for a greeting. (translatable)
-FRONT_INDEX_HEADER = {
-    DEFAULT_LANG: ''
-}
+FRONT_INDEX_HEADER = {DEFAULT_LANG: ""}
 
 # Create per-month archives instead of per-year
 # CREATE_MONTHLY_ARCHIVE = False
@@ -546,166 +542,442 @@ USE_BASE_TAG = False
 # relative URL.
 #
 # If you don't need any of these, just set to []
-REDIRECTIONS = [ \
-    ["2009/12/version-0-2-released/index.html", "/blog/2009/12/version-0-2-released"], \
-    ["2009/12/version-0-3-released/index.html", "/blog/2009/12/version-0-3-released"], \
-    ["2010/01/mailing-list-irc/index.html", "/blog/2010/01/mailing-list-irc"], \
-    ["2010/01/version-0-4-1-released/index.html", "/blog/2010/01/version-0-4-1-released"], \
-    ["2010/01/version-0-4-released/index.html", "/blog/2010/01/version-0-4-released"], \
-    ["2010/02/version-0-4-2-released/index.html", "/blog/2010/02/version-0-4-2-released"], \
-    ["2010/03/google-powermeter/index.html", "/blog/2010/03/google-powermeter"], \
-    ["2010/03/upgrading-to-0-5-1/index.html", "/blog/2010/03/upgrading-to-0-5-1"], \
-    ["2010/03/version-0-5-1-released/index.html", "/blog/2010/03/version-0-5-1-released"], \
-    ["2010/03/version-0-5-2-released/index.html", "/blog/2010/03/version-0-5-2-released"], \
-    ["2010/03/version-0-5-3-released/index.html", "/blog/2010/03/version-0-5-3-released"], \
-    ["2010/03/version-0-5-4-released/index.html", "/blog/2010/03/version-0-5-4-released"], \
-    ["2010/04/help-wanted-rpm-packaging/index.html", "/blog/2010/04/help-wanted-rpm-packaging"], \
-    ["2010/04/mind-control-mqtt/index.html", "/blog/2010/04/mind-control-mqtt"], \
-    ["2010/04/oggcamp/index.html", "/blog/2010/04/oggcamp"], \
-    ["2010/05/fedora-packages-available/index.html", "/blog/2010/05/fedora-packages-available"], \
-    ["2010/05/gentoo-ebuilds-available/index.html", "/blog/2010/05/gentoo-ebuilds-available"], \
-    ["2010/05/mosquitto-org/index.html", "/blog/2010/05/mosquitto-org"], \
-    ["2010/05/mqtt-push-on-android/index.html", "/blog/2010/05/mqtt-push-on-android"], \
-    ["2010/05/mqtt-wiki/index.html", "/blog/2010/05/mqtt-wiki"], \
-    ["2010/05/version-0-6-1-released/index.html", "/blog/2010/05/version-0-6-1-released"], \
-    ["2010/05/version-0-6-released/index.html", "/blog/2010/05/version-0-6-released"], \
-    ["2010/06/automation-has-the-oven-warmed-up-yet/index.html", "/blog/2010/06/automation-has-the-oven-warmed-up-yet"], \
-    ["2010/06/google-powermeter-step-by-step/index.html", "/blog/2010/06/google-powermeter-step-by-step"], \
-    ["2010/06/mosquitto-0-7rc1/index.html", "/blog/2010/06/mosquitto-0-7rc1"], \
-    ["2010/06/version-0-7-released/index.html", "/blog/2010/06/version-0-7-released"], \
-    ["2010/07/mosquitto-on-opensuse-11-3/index.html", "/blog/2010/07/mosquitto-on-opensuse-11-3"], \
-    ["2010/07/mqtt-client-library/index.html", "/blog/2010/07/mqtt-client-library"], \
-    ["2010/08/compiling-mosquitto-on-mac-os-x/index.html", "/blog/2010/08/compiling-mosquitto-on-mac-os-x"], \
-    ["2010/08/mosquitto-running-on-mac-os-x/index.html", "/blog/2010/08/mosquitto-running-on-mac-os-x"], \
-    ["2010/08/mqtt-v3-1/index.html", "/blog/2010/08/mqtt-v3-1"], \
-    ["2010/08/version-0-8-1-released/index.html", "/blog/2010/08/version-0-8-1-released"], \
-    ["2010/08/version-0-8-2/index.html", "/blog/2010/08/version-0-8-2"], \
-    ["2010/08/version-0-8-released/index.html", "/blog/2010/08/version-0-8-released"], \
-    ["2010/09/debian-packages/index.html", "/blog/2010/09/debian-packages"], \
-    ["2010/09/mqtt-with-php/index.html", "/blog/2010/09/mqtt-with-php"], \
-    ["2010/10/man-page-translations/index.html", "/blog/2010/10/man-page-translations"], \
-    ["2010/10/one-year-old/index.html", "/blog/2010/10/one-year-old"], \
-    ["2010/10/version-0-8-3-released/index.html", "/blog/2010/10/version-0-8-3-released"], \
-    ["2010/11/distro-packaging/index.html", "/blog/2010/11/distro-packaging"], \
-    ["2010/11/mosquitto-0-9test2/index.html", "/blog/2010/11/mosquitto-0-9test2"], \
-    ["2010/11/version-0-9-released/index.html", "/blog/2010/11/version-0-9-released"], \
-    ["2010/12/version-0-9-1-released/index.html", "/blog/2010/12/version-0-9-1-released"], \
-    ["2011/01/mosquitto-for-slackware/index.html", "/blog/2011/01/mosquitto-for-slackware"], \
-    ["2011/01/mqtt-news/index.html", "/blog/2011/01/mqtt-news"], \
-    ["2011/02/lightweight-messaging-and-linux/index.html", "/blog/2011/02/lightweight-messaging-and-linux"], \
-    ["2011/02/mosquitto-on-maemo/index.html", "/blog/2011/02/mosquitto-on-maemo"], \
-    ["2011/02/mqtt-on-android/index.html", "/blog/2011/02/mqtt-on-android"], \
-    ["2011/02/version-0-9-2-released/index.html", "/blog/2011/02/version-0-9-2-released"], \
-    ["2011/03/api-documentation/index.html", "/blog/2011/03/api-documentation"], \
-    ["2011/03/mosquitto-in-mac-homebrew/index.html", "/blog/2011/03/mosquitto-in-mac-homebrew"], \
-    ["2011/03/version-0-9-3-released/index.html", "/blog/2011/03/version-0-9-3-released"], \
-    ["2011/04/version-0-10-released/index.html", "/blog/2011/04/version-0-10-released"], \
-    ["2011/05/mqtt-ontology/index.html", "/blog/2011/05/mqtt-ontology"], \
-    ["2011/05/version-0-10-1-released/index.html", "/blog/2011/05/version-0-10-1-released"], \
-    ["2011/06/nanode-a-cheap-networked-arduino-clone/index.html", "/blog/2011/06/nanode-a-cheap-networked-arduino-clone"], \
-    ["2011/06/version-0-10-2-released/index.html", "/blog/2011/06/version-0-10-2-released"], \
-    ["2011/06/version-0-11-1-released/index.html", "/blog/2011/06/version-0-11-1-released"], \
-    ["2011/06/version-0-11-2-released/index.html", "/blog/2011/06/version-0-11-2-released"], \
-    ["2011/06/version-0-11-released/index.html", "/blog/2011/06/version-0-11-released"], \
-    ["2011/07/debian-and-ubuntu-packaging/index.html", "/blog/2011/07/debian-and-ubuntu-packaging"], \
-    ["2011/07/lua-mqtt-client/index.html", "/blog/2011/07/lua-mqtt-client"], \
-    ["2011/07/mosquitto-on-qnx/index.html", "/blog/2011/07/mosquitto-on-qnx"], \
-    ["2011/07/version-0-11-3-released/index.html", "/blog/2011/07/version-0-11-3-released"], \
-    ["2011/07/version-0-12-released/index.html", "/blog/2011/07/version-0-12-released"], \
-    ["2011/07/wireshark-mqtt-decoder/index.html", "/blog/2011/07/wireshark-mqtt-decoder"], \
-    ["2011/08/arch-linux-package/index.html", "/blog/2011/08/arch-linux-package"], \
-    ["2011/08/facebook-using-mqtt/index.html", "/blog/2011/08/facebook-using-mqtt"], \
-    ["2011/08/mosquitto-on-openwrt/index.html", "/blog/2011/08/mosquitto-on-openwrt"], \
-    ["2011/08/mqtt-standardisation/index.html", "/blog/2011/08/mqtt-standardisation"], \
-    ["2011/09/version-0-13-released/index.html", "/blog/2011/09/version-0-13-released"], \
-    ["2011/10/mqtt-power-usage-on-android/index.html", "/blog/2011/10/mqtt-power-usage-on-android"], \
-    ["2011/10/two/index.html", "/blog/2011/10/two"], \
-    ["2011/11/android-mqtt-example-project/index.html", "/blog/2011/11/android-mqtt-example-project"], \
-    ["2011/11/ibm-java-and-c-clients-to-be-open-source/index.html", "/blog/2011/11/ibm-java-and-c-clients-to-be-open-source"], \
-    ["2011/11/new-linux-repositories/index.html", "/blog/2011/11/new-linux-repositories"], \
-    ["2011/11/version-0-14-1-released/index.html", "/blog/2011/11/version-0-14-1-released"], \
-    ["2011/11/version-0-14-2-released/index.html", "/blog/2011/11/version-0-14-2-released"], \
-    ["2011/11/version-0-14-released/index.html", "/blog/2011/11/version-0-14-released"], \
-    ["2011/12/mqtt-on-nanode/index.html", "/blog/2011/12/mqtt-on-nanode"], \
-    ["2011/12/version-0-14-3-released/index.html", "/blog/2011/12/version-0-14-3-released"], \
-    ["2012/01/challenge-web-based-mqtt-graphing/index.html", "/blog/2012/01/challenge-web-based-mqtt-graphing"], \
-    ["2012/01/do-you-use-mqtt/index.html", "/blog/2012/01/do-you-use-mqtt"], \
-    ["2012/01/mosquitto-test-server/index.html", "/blog/2012/01/mosquitto-test-server"], \
-    ["2012/01/version-0-14-4-released/index.html", "/blog/2012/01/version-0-14-4-released"], \
-    ["2012/02/mqtt2pachube/index.html", "/blog/2012/02/mqtt2pachube"], \
-    ["2012/02/version-0-15-released/index.html", "/blog/2012/02/version-0-15-released"], \
-    ["2012/03/quick-start-guide-for-mqtt-with-pachube/index.html", "/blog/2012/03/quick-start-guide-for-mqtt-with-pachube"], \
-    ["2012/03/upcoming-incompatible-library-changes/index.html", "/blog/2012/03/upcoming-incompatible-library-changes"], \
-    ["2012/05/python-client-module-available-for-testing/index.html", "/blog/2012/05/python-client-module-available-for-testing"], \
-    ["2012/06/ipv6-on-test-server/index.html", "/blog/2012/06/ipv6-on-test-server"], \
-    ["2012/06/ssl-support-on-test-server/index.html", "/blog/2012/06/ssl-support-on-test-server"], \
-    ["2012/07/upcoming-release/index.html", "/blog/2012/07/upcoming-release"], \
-    ["2012/08/baby/index.html", "/blog/2012/08/baby"], \
-    ["2012/08/bugfix-coming-soon/index.html", "/blog/2012/08/bugfix-coming-soon"], \
-    ["2012/08/version-1-0-1-released/index.html", "/blog/2012/08/version-1-0-1-released"], \
-    ["2012/08/version-1-0-2-released/index.html", "/blog/2012/08/version-1-0-2-released"], \
-    ["2012/08/version-1-0-released/index.html", "/blog/2012/08/version-1-0-released"], \
-    ["2012/09/updating-password-files/index.html", "/blog/2012/09/updating-password-files"], \
-    ["2012/09/version-1-0-3-released/index.html", "/blog/2012/09/version-1-0-3-released"], \
-    ["2012/10/version-1-0-4-released/index.html", "/blog/2012/10/version-1-0-4-released"], \
-    ["2012/11/making-mosquitto-packages-for-debian-yourself/index.html", "/blog/2012/11/making-mosquitto-packages-for-debian-yourself"], \
-    ["2012/11/version-1-0-5-released/index.html", "/blog/2012/11/version-1-0-5-released"], \
-    ["2012/12/libmosquitto-go-bindings/index.html", "/blog/2012/12/libmosquitto-go-bindings"], \
-    ["2012/12/version-1-1-released/index.html", "/blog/2012/12/version-1-1-released"], \
-    ["2013/01/mosquitto-debian-repository/index.html", "/blog/2013/01/mosquitto-debian-repository"], \
-    ["2013/01/version-1-1-1-released/index.html", "/blog/2013/01/version-1-1-1-released"], \
-    ["2013/01/version-1-1-2-released/index.html", "/blog/2013/01/version-1-1-2-released"], \
-    ["2013/02/mqtt-standardisation-oasis-call-for-participation/index.html", "/blog/2013/02/mqtt-standardisation-oasis-call-for-participation"], \
-    ["2013/02/version-1-1-3-released/index.html", "/blog/2013/02/version-1-1-3-released"], \
-    ["2013/04/some-interesting-mqtt-things/index.html", "/blog/2013/04/some-interesting-mqtt-things"], \
-    ["2013/05/mosquitto-javascript-client-deprecated/index.html", "/blog/2013/05/mosquitto-javascript-client-deprecated"], \
-    ["2013/07/authentication-plugins/index.html", "/blog/2013/07/authentication-plugins"], \
-    ["2013/07/version-1-2-near-complete/index.html", "/blog/2013/07/version-1-2-near-complete"], \
-    ["2013/08/mosquitto-on-fedora/index.html", "/blog/2013/08/mosquitto-on-fedora"], \
-    ["2013/08/mqtt-watchdir/index.html", "/blog/2013/08/mqtt-watchdir"], \
-    ["2013/08/version-1-2-released/index.html", "/blog/2013/08/version-1-2-released"], \
-    ["2013/09/version-1-2-1-released/index.html", "/blog/2013/09/version-1-2-1-released"], \
-    ["2013/10/version-1-2-2-released/index.html", "/blog/2013/10/version-1-2-2-released"], \
-    ["2013/12/paho-mqtt-python-client/index.html", "/blog/2013/12/paho-mqtt-python-client"], \
-    ["2013/12/version-1-2-3-released/index.html", "/blog/2013/12/version-1-2-3-released"], \
-    ["2014/03/version-1-3-1-released/index.html", "/blog/2014/03/version-1-3-1-released"], \
-    ["2014/03/version-1-3-released/index.html", "/blog/2014/03/version-1-3-released"], \
-    ["2014/05/new-arrival/index.html", "/blog/2014/05/new-arrival"], \
-    ["2014/07/version-1-3-2-released/index.html", "/blog/2014/07/version-1-3-2-released"], \
-    ["2014/08/version-1-3-3-released/index.html", "/blog/2014/08/version-1-3-3-released"], \
-    ["2014/08/version-1-3-4-released/index.html", "/blog/2014/08/version-1-3-4-released"], \
-    ["2014/10/mosquitto-and-poodle/index.html", "/blog/2014/10/mosquitto-and-poodle"], \
-    ["2014/10/unintended-change-of-behaviour-in-1-3-4/index.html", "/blog/2014/10/unintended-change-of-behaviour-in-1-3-4"], \
-    ["2014/10/version-1-3-5-released/index.html", "/blog/2014/10/version-1-3-5-released"], \
-    ["2015/01/seeking-sponsorship/index.html", "/blog/2015/01/seeking-sponsorship"], \
-    ["2015/02/version-1-4-released/index.html", "/blog/2015/02/version-1-4-released"], \
-    ["2015/04/version-1-4-1-released/index.html", "/blog/2015/04/version-1-4-1-released"], \
-    ["2015/05/mosquitto-and-current-unreleased-libwebsockets-branch/index.html", "/blog/2015/05/mosquitto-and-current-unreleased-libwebsockets-branch"], \
-    ["2015/05/version-1-4-2-released/index.html", "/blog/2015/05/version-1-4-2-released"], \
-    ["2015/08/version-1-4-3-released/index.html", "/blog/2015/08/version-1-4-3-released"], \
-    ["2015/09/version-1-4-4-released/index.html", "/blog/2015/09/version-1-4-4-released"], \
-    ["2015/11/version-1-4-5-released/index.html", "/blog/2015/11/version-1-4-5-released"], \
-    ["2015/12/using-lets-encrypt-certificates-with-mosquitto/index.html", "/blog/2015/12/using-lets-encrypt-certificates-with-mosquitto"], \
-    ["2015/12/version-1-4-7-released/index.html", "/blog/2015/12/version-1-4-7-released"], \
-    ["2016/01/test6-mosquitto-org/index.html", "/blog/2016/01/test6-mosquitto-org"], \
-    ["2016/02/version-1-4-8-released/index.html", "/blog/2016/02/version-1-4-8-released"], \
-    ["2016/03/logo-contest-results-for-shortlisting/index.html", "/blog/2016/03/logo-contest-results-for-shortlisting"], \
-    ["2016/03/logo-contest/index.html", "/blog/2016/03/logo-contest"], \
-    ["2016/03/repository-moved-to-github/index.html", "/blog/2016/03/repository-moved-to-github"], \
-    ["2016/05/stickers/index.html", "/blog/2016/05/stickers"], \
-    ["2016/06/version-1-4-9-released/index.html", "/blog/2016/06/version-1-4-9-released"], \
-    ["2016/08/mqtt-v5-draft-features/index.html", "/blog/2016/08/mqtt-v5-draft-features"], \
-    ["2016/08/version-1-4-10-released/index.html", "/blog/2016/08/version-1-4-10-released"], \
-    ["2016/12/pre-christmas-update/index.html", "/blog/2016/12/pre-christmas-update"], \
-    ["2017/02/version-1-4-11-released/index.html", "/blog/2017/02/version-1-4-11-released"], \
-    ["2017/03/for-the-final-time/index.html", "/blog/2017/03/for-the-final-time"], \
-    ["2017/05/security-advisory-cve-2017-7650/index.html", "/blog/2017/05/security-advisory-cve-2017-7650"], \
-    ["2017/06/citing-eclipse-mosquitto/index.html", "/blog/2017/06/citing-eclipse-mosquitto"], \
-    ["2017/06/security-advisory-cve-2017-9868/index.html", "/blog/2017/06/security-advisory-cve-2017-9868"], \
-    ["2017/07/version-1-4-13-released/index.html", "/blog/2017/07/version-1-4-13-released"], \
-    ["2017/07/version-1-4-14-released/index.html", "/blog/2017/07/version-1-4-14-released"], \
-    ["2018/01/mosquitto-debian-repo-key-updated/index.html", "/blog/2018/01/mosquitto-debian-repo-key-updated"] \
-    ]
+REDIRECTIONS = [
+    ["2009/12/version-0-2-released/index.html", "/blog/2009/12/version-0-2-released"],
+    ["2009/12/version-0-3-released/index.html", "/blog/2009/12/version-0-3-released"],
+    ["2010/01/mailing-list-irc/index.html", "/blog/2010/01/mailing-list-irc"],
+    [
+        "2010/01/version-0-4-1-released/index.html",
+        "/blog/2010/01/version-0-4-1-released",
+    ],
+    ["2010/01/version-0-4-released/index.html", "/blog/2010/01/version-0-4-released"],
+    [
+        "2010/02/version-0-4-2-released/index.html",
+        "/blog/2010/02/version-0-4-2-released",
+    ],
+    ["2010/03/google-powermeter/index.html", "/blog/2010/03/google-powermeter"],
+    ["2010/03/upgrading-to-0-5-1/index.html", "/blog/2010/03/upgrading-to-0-5-1"],
+    [
+        "2010/03/version-0-5-1-released/index.html",
+        "/blog/2010/03/version-0-5-1-released",
+    ],
+    [
+        "2010/03/version-0-5-2-released/index.html",
+        "/blog/2010/03/version-0-5-2-released",
+    ],
+    [
+        "2010/03/version-0-5-3-released/index.html",
+        "/blog/2010/03/version-0-5-3-released",
+    ],
+    [
+        "2010/03/version-0-5-4-released/index.html",
+        "/blog/2010/03/version-0-5-4-released",
+    ],
+    [
+        "2010/04/help-wanted-rpm-packaging/index.html",
+        "/blog/2010/04/help-wanted-rpm-packaging",
+    ],
+    ["2010/04/mind-control-mqtt/index.html", "/blog/2010/04/mind-control-mqtt"],
+    ["2010/04/oggcamp/index.html", "/blog/2010/04/oggcamp"],
+    [
+        "2010/05/fedora-packages-available/index.html",
+        "/blog/2010/05/fedora-packages-available",
+    ],
+    [
+        "2010/05/gentoo-ebuilds-available/index.html",
+        "/blog/2010/05/gentoo-ebuilds-available",
+    ],
+    ["2010/05/mosquitto-org/index.html", "/blog/2010/05/mosquitto-org"],
+    ["2010/05/mqtt-push-on-android/index.html", "/blog/2010/05/mqtt-push-on-android"],
+    ["2010/05/mqtt-wiki/index.html", "/blog/2010/05/mqtt-wiki"],
+    [
+        "2010/05/version-0-6-1-released/index.html",
+        "/blog/2010/05/version-0-6-1-released",
+    ],
+    ["2010/05/version-0-6-released/index.html", "/blog/2010/05/version-0-6-released"],
+    [
+        "2010/06/automation-has-the-oven-warmed-up-yet/index.html",
+        "/blog/2010/06/automation-has-the-oven-warmed-up-yet",
+    ],
+    [
+        "2010/06/google-powermeter-step-by-step/index.html",
+        "/blog/2010/06/google-powermeter-step-by-step",
+    ],
+    ["2010/06/mosquitto-0-7rc1/index.html", "/blog/2010/06/mosquitto-0-7rc1"],
+    ["2010/06/version-0-7-released/index.html", "/blog/2010/06/version-0-7-released"],
+    [
+        "2010/07/mosquitto-on-opensuse-11-3/index.html",
+        "/blog/2010/07/mosquitto-on-opensuse-11-3",
+    ],
+    ["2010/07/mqtt-client-library/index.html", "/blog/2010/07/mqtt-client-library"],
+    [
+        "2010/08/compiling-mosquitto-on-mac-os-x/index.html",
+        "/blog/2010/08/compiling-mosquitto-on-mac-os-x",
+    ],
+    [
+        "2010/08/mosquitto-running-on-mac-os-x/index.html",
+        "/blog/2010/08/mosquitto-running-on-mac-os-x",
+    ],
+    ["2010/08/mqtt-v3-1/index.html", "/blog/2010/08/mqtt-v3-1"],
+    [
+        "2010/08/version-0-8-1-released/index.html",
+        "/blog/2010/08/version-0-8-1-released",
+    ],
+    ["2010/08/version-0-8-2/index.html", "/blog/2010/08/version-0-8-2"],
+    ["2010/08/version-0-8-released/index.html", "/blog/2010/08/version-0-8-released"],
+    ["2010/09/debian-packages/index.html", "/blog/2010/09/debian-packages"],
+    ["2010/09/mqtt-with-php/index.html", "/blog/2010/09/mqtt-with-php"],
+    ["2010/10/man-page-translations/index.html", "/blog/2010/10/man-page-translations"],
+    ["2010/10/one-year-old/index.html", "/blog/2010/10/one-year-old"],
+    [
+        "2010/10/version-0-8-3-released/index.html",
+        "/blog/2010/10/version-0-8-3-released",
+    ],
+    ["2010/11/distro-packaging/index.html", "/blog/2010/11/distro-packaging"],
+    ["2010/11/mosquitto-0-9test2/index.html", "/blog/2010/11/mosquitto-0-9test2"],
+    ["2010/11/version-0-9-released/index.html", "/blog/2010/11/version-0-9-released"],
+    [
+        "2010/12/version-0-9-1-released/index.html",
+        "/blog/2010/12/version-0-9-1-released",
+    ],
+    [
+        "2011/01/mosquitto-for-slackware/index.html",
+        "/blog/2011/01/mosquitto-for-slackware",
+    ],
+    ["2011/01/mqtt-news/index.html", "/blog/2011/01/mqtt-news"],
+    [
+        "2011/02/lightweight-messaging-and-linux/index.html",
+        "/blog/2011/02/lightweight-messaging-and-linux",
+    ],
+    ["2011/02/mosquitto-on-maemo/index.html", "/blog/2011/02/mosquitto-on-maemo"],
+    ["2011/02/mqtt-on-android/index.html", "/blog/2011/02/mqtt-on-android"],
+    [
+        "2011/02/version-0-9-2-released/index.html",
+        "/blog/2011/02/version-0-9-2-released",
+    ],
+    ["2011/03/api-documentation/index.html", "/blog/2011/03/api-documentation"],
+    [
+        "2011/03/mosquitto-in-mac-homebrew/index.html",
+        "/blog/2011/03/mosquitto-in-mac-homebrew",
+    ],
+    [
+        "2011/03/version-0-9-3-released/index.html",
+        "/blog/2011/03/version-0-9-3-released",
+    ],
+    ["2011/04/version-0-10-released/index.html", "/blog/2011/04/version-0-10-released"],
+    ["2011/05/mqtt-ontology/index.html", "/blog/2011/05/mqtt-ontology"],
+    [
+        "2011/05/version-0-10-1-released/index.html",
+        "/blog/2011/05/version-0-10-1-released",
+    ],
+    [
+        "2011/06/nanode-a-cheap-networked-arduino-clone/index.html",
+        "/blog/2011/06/nanode-a-cheap-networked-arduino-clone",
+    ],
+    [
+        "2011/06/version-0-10-2-released/index.html",
+        "/blog/2011/06/version-0-10-2-released",
+    ],
+    [
+        "2011/06/version-0-11-1-released/index.html",
+        "/blog/2011/06/version-0-11-1-released",
+    ],
+    [
+        "2011/06/version-0-11-2-released/index.html",
+        "/blog/2011/06/version-0-11-2-released",
+    ],
+    ["2011/06/version-0-11-released/index.html", "/blog/2011/06/version-0-11-released"],
+    [
+        "2011/07/debian-and-ubuntu-packaging/index.html",
+        "/blog/2011/07/debian-and-ubuntu-packaging",
+    ],
+    ["2011/07/lua-mqtt-client/index.html", "/blog/2011/07/lua-mqtt-client"],
+    ["2011/07/mosquitto-on-qnx/index.html", "/blog/2011/07/mosquitto-on-qnx"],
+    [
+        "2011/07/version-0-11-3-released/index.html",
+        "/blog/2011/07/version-0-11-3-released",
+    ],
+    ["2011/07/version-0-12-released/index.html", "/blog/2011/07/version-0-12-released"],
+    [
+        "2011/07/wireshark-mqtt-decoder/index.html",
+        "/blog/2011/07/wireshark-mqtt-decoder",
+    ],
+    ["2011/08/arch-linux-package/index.html", "/blog/2011/08/arch-linux-package"],
+    ["2011/08/facebook-using-mqtt/index.html", "/blog/2011/08/facebook-using-mqtt"],
+    ["2011/08/mosquitto-on-openwrt/index.html", "/blog/2011/08/mosquitto-on-openwrt"],
+    ["2011/08/mqtt-standardisation/index.html", "/blog/2011/08/mqtt-standardisation"],
+    ["2011/09/version-0-13-released/index.html", "/blog/2011/09/version-0-13-released"],
+    [
+        "2011/10/mqtt-power-usage-on-android/index.html",
+        "/blog/2011/10/mqtt-power-usage-on-android",
+    ],
+    ["2011/10/two/index.html", "/blog/2011/10/two"],
+    [
+        "2011/11/android-mqtt-example-project/index.html",
+        "/blog/2011/11/android-mqtt-example-project",
+    ],
+    [
+        "2011/11/ibm-java-and-c-clients-to-be-open-source/index.html",
+        "/blog/2011/11/ibm-java-and-c-clients-to-be-open-source",
+    ],
+    [
+        "2011/11/new-linux-repositories/index.html",
+        "/blog/2011/11/new-linux-repositories",
+    ],
+    [
+        "2011/11/version-0-14-1-released/index.html",
+        "/blog/2011/11/version-0-14-1-released",
+    ],
+    [
+        "2011/11/version-0-14-2-released/index.html",
+        "/blog/2011/11/version-0-14-2-released",
+    ],
+    ["2011/11/version-0-14-released/index.html", "/blog/2011/11/version-0-14-released"],
+    ["2011/12/mqtt-on-nanode/index.html", "/blog/2011/12/mqtt-on-nanode"],
+    [
+        "2011/12/version-0-14-3-released/index.html",
+        "/blog/2011/12/version-0-14-3-released",
+    ],
+    [
+        "2012/01/challenge-web-based-mqtt-graphing/index.html",
+        "/blog/2012/01/challenge-web-based-mqtt-graphing",
+    ],
+    ["2012/01/do-you-use-mqtt/index.html", "/blog/2012/01/do-you-use-mqtt"],
+    ["2012/01/mosquitto-test-server/index.html", "/blog/2012/01/mosquitto-test-server"],
+    [
+        "2012/01/version-0-14-4-released/index.html",
+        "/blog/2012/01/version-0-14-4-released",
+    ],
+    ["2012/02/mqtt2pachube/index.html", "/blog/2012/02/mqtt2pachube"],
+    ["2012/02/version-0-15-released/index.html", "/blog/2012/02/version-0-15-released"],
+    [
+        "2012/03/quick-start-guide-for-mqtt-with-pachube/index.html",
+        "/blog/2012/03/quick-start-guide-for-mqtt-with-pachube",
+    ],
+    [
+        "2012/03/upcoming-incompatible-library-changes/index.html",
+        "/blog/2012/03/upcoming-incompatible-library-changes",
+    ],
+    [
+        "2012/05/python-client-module-available-for-testing/index.html",
+        "/blog/2012/05/python-client-module-available-for-testing",
+    ],
+    ["2012/06/ipv6-on-test-server/index.html", "/blog/2012/06/ipv6-on-test-server"],
+    [
+        "2012/06/ssl-support-on-test-server/index.html",
+        "/blog/2012/06/ssl-support-on-test-server",
+    ],
+    ["2012/07/upcoming-release/index.html", "/blog/2012/07/upcoming-release"],
+    ["2012/08/baby/index.html", "/blog/2012/08/baby"],
+    ["2012/08/bugfix-coming-soon/index.html", "/blog/2012/08/bugfix-coming-soon"],
+    [
+        "2012/08/version-1-0-1-released/index.html",
+        "/blog/2012/08/version-1-0-1-released",
+    ],
+    [
+        "2012/08/version-1-0-2-released/index.html",
+        "/blog/2012/08/version-1-0-2-released",
+    ],
+    ["2012/08/version-1-0-released/index.html", "/blog/2012/08/version-1-0-released"],
+    [
+        "2012/09/updating-password-files/index.html",
+        "/blog/2012/09/updating-password-files",
+    ],
+    [
+        "2012/09/version-1-0-3-released/index.html",
+        "/blog/2012/09/version-1-0-3-released",
+    ],
+    [
+        "2012/10/version-1-0-4-released/index.html",
+        "/blog/2012/10/version-1-0-4-released",
+    ],
+    [
+        "2012/11/making-mosquitto-packages-for-debian-yourself/index.html",
+        "/blog/2012/11/making-mosquitto-packages-for-debian-yourself",
+    ],
+    [
+        "2012/11/version-1-0-5-released/index.html",
+        "/blog/2012/11/version-1-0-5-released",
+    ],
+    [
+        "2012/12/libmosquitto-go-bindings/index.html",
+        "/blog/2012/12/libmosquitto-go-bindings",
+    ],
+    ["2012/12/version-1-1-released/index.html", "/blog/2012/12/version-1-1-released"],
+    [
+        "2013/01/mosquitto-debian-repository/index.html",
+        "/blog/2013/01/mosquitto-debian-repository",
+    ],
+    [
+        "2013/01/version-1-1-1-released/index.html",
+        "/blog/2013/01/version-1-1-1-released",
+    ],
+    [
+        "2013/01/version-1-1-2-released/index.html",
+        "/blog/2013/01/version-1-1-2-released",
+    ],
+    [
+        "2013/02/mqtt-standardisation-oasis-call-for-participation/index.html",
+        "/blog/2013/02/mqtt-standardisation-oasis-call-for-participation",
+    ],
+    [
+        "2013/02/version-1-1-3-released/index.html",
+        "/blog/2013/02/version-1-1-3-released",
+    ],
+    [
+        "2013/04/some-interesting-mqtt-things/index.html",
+        "/blog/2013/04/some-interesting-mqtt-things",
+    ],
+    [
+        "2013/05/mosquitto-javascript-client-deprecated/index.html",
+        "/blog/2013/05/mosquitto-javascript-client-deprecated",
+    ],
+    [
+        "2013/07/authentication-plugins/index.html",
+        "/blog/2013/07/authentication-plugins",
+    ],
+    [
+        "2013/07/version-1-2-near-complete/index.html",
+        "/blog/2013/07/version-1-2-near-complete",
+    ],
+    ["2013/08/mosquitto-on-fedora/index.html", "/blog/2013/08/mosquitto-on-fedora"],
+    ["2013/08/mqtt-watchdir/index.html", "/blog/2013/08/mqtt-watchdir"],
+    ["2013/08/version-1-2-released/index.html", "/blog/2013/08/version-1-2-released"],
+    [
+        "2013/09/version-1-2-1-released/index.html",
+        "/blog/2013/09/version-1-2-1-released",
+    ],
+    [
+        "2013/10/version-1-2-2-released/index.html",
+        "/blog/2013/10/version-1-2-2-released",
+    ],
+    [
+        "2013/12/paho-mqtt-python-client/index.html",
+        "/blog/2013/12/paho-mqtt-python-client",
+    ],
+    [
+        "2013/12/version-1-2-3-released/index.html",
+        "/blog/2013/12/version-1-2-3-released",
+    ],
+    [
+        "2014/03/version-1-3-1-released/index.html",
+        "/blog/2014/03/version-1-3-1-released",
+    ],
+    ["2014/03/version-1-3-released/index.html", "/blog/2014/03/version-1-3-released"],
+    ["2014/05/new-arrival/index.html", "/blog/2014/05/new-arrival"],
+    [
+        "2014/07/version-1-3-2-released/index.html",
+        "/blog/2014/07/version-1-3-2-released",
+    ],
+    [
+        "2014/08/version-1-3-3-released/index.html",
+        "/blog/2014/08/version-1-3-3-released",
+    ],
+    [
+        "2014/08/version-1-3-4-released/index.html",
+        "/blog/2014/08/version-1-3-4-released",
+    ],
+    ["2014/10/mosquitto-and-poodle/index.html", "/blog/2014/10/mosquitto-and-poodle"],
+    [
+        "2014/10/unintended-change-of-behaviour-in-1-3-4/index.html",
+        "/blog/2014/10/unintended-change-of-behaviour-in-1-3-4",
+    ],
+    [
+        "2014/10/version-1-3-5-released/index.html",
+        "/blog/2014/10/version-1-3-5-released",
+    ],
+    ["2015/01/seeking-sponsorship/index.html", "/blog/2015/01/seeking-sponsorship"],
+    ["2015/02/version-1-4-released/index.html", "/blog/2015/02/version-1-4-released"],
+    [
+        "2015/04/version-1-4-1-released/index.html",
+        "/blog/2015/04/version-1-4-1-released",
+    ],
+    [
+        "2015/05/mosquitto-and-current-unreleased-libwebsockets-branch/index.html",
+        "/blog/2015/05/mosquitto-and-current-unreleased-libwebsockets-branch",
+    ],
+    [
+        "2015/05/version-1-4-2-released/index.html",
+        "/blog/2015/05/version-1-4-2-released",
+    ],
+    [
+        "2015/08/version-1-4-3-released/index.html",
+        "/blog/2015/08/version-1-4-3-released",
+    ],
+    [
+        "2015/09/version-1-4-4-released/index.html",
+        "/blog/2015/09/version-1-4-4-released",
+    ],
+    [
+        "2015/11/version-1-4-5-released/index.html",
+        "/blog/2015/11/version-1-4-5-released",
+    ],
+    [
+        "2015/12/using-lets-encrypt-certificates-with-mosquitto/index.html",
+        "/blog/2015/12/using-lets-encrypt-certificates-with-mosquitto",
+    ],
+    [
+        "2015/12/version-1-4-7-released/index.html",
+        "/blog/2015/12/version-1-4-7-released",
+    ],
+    ["2016/01/test6-mosquitto-org/index.html", "/blog/2016/01/test6-mosquitto-org"],
+    [
+        "2016/02/version-1-4-8-released/index.html",
+        "/blog/2016/02/version-1-4-8-released",
+    ],
+    [
+        "2016/03/logo-contest-results-for-shortlisting/index.html",
+        "/blog/2016/03/logo-contest-results-for-shortlisting",
+    ],
+    ["2016/03/logo-contest/index.html", "/blog/2016/03/logo-contest"],
+    [
+        "2016/03/repository-moved-to-github/index.html",
+        "/blog/2016/03/repository-moved-to-github",
+    ],
+    ["2016/05/stickers/index.html", "/blog/2016/05/stickers"],
+    [
+        "2016/06/version-1-4-9-released/index.html",
+        "/blog/2016/06/version-1-4-9-released",
+    ],
+    [
+        "2016/08/mqtt-v5-draft-features/index.html",
+        "/blog/2016/08/mqtt-v5-draft-features",
+    ],
+    [
+        "2016/08/version-1-4-10-released/index.html",
+        "/blog/2016/08/version-1-4-10-released",
+    ],
+    ["2016/12/pre-christmas-update/index.html", "/blog/2016/12/pre-christmas-update"],
+    [
+        "2017/02/version-1-4-11-released/index.html",
+        "/blog/2017/02/version-1-4-11-released",
+    ],
+    ["2017/03/for-the-final-time/index.html", "/blog/2017/03/for-the-final-time"],
+    [
+        "2017/05/security-advisory-cve-2017-7650/index.html",
+        "/blog/2017/05/security-advisory-cve-2017-7650",
+    ],
+    [
+        "2017/06/citing-eclipse-mosquitto/index.html",
+        "/blog/2017/06/citing-eclipse-mosquitto",
+    ],
+    [
+        "2017/06/security-advisory-cve-2017-9868/index.html",
+        "/blog/2017/06/security-advisory-cve-2017-9868",
+    ],
+    [
+        "2017/07/version-1-4-13-released/index.html",
+        "/blog/2017/07/version-1-4-13-released",
+    ],
+    [
+        "2017/07/version-1-4-14-released/index.html",
+        "/blog/2017/07/version-1-4-14-released",
+    ],
+    [
+        "2018/01/mosquitto-debian-repo-key-updated/index.html",
+        "/blog/2018/01/mosquitto-debian-repo-key-updated",
+    ],
+]
 
 
 ## Presets of commands to execute to deploy. Can be anything, for
@@ -728,11 +1000,11 @@ REDIRECTIONS = [ \
 # For more details, read the manual:
 # https://getnikola.com/handbook.html#deploying-to-github
 # You will need to configure the deployment branch on GitHub.
-GITHUB_SOURCE_BRANCH = 'src'
-GITHUB_DEPLOY_BRANCH = 'master'
+GITHUB_SOURCE_BRANCH = "src"
+GITHUB_DEPLOY_BRANCH = "master"
 
 # The name of the remote where you wish to push to, using github_deploy.
-GITHUB_REMOTE_NAME = 'origin'
+GITHUB_REMOTE_NAME = "origin"
 
 # Whether or not github_deploy should commit to the source branch automatically
 # before deploying.
@@ -741,7 +1013,7 @@ GITHUB_COMMIT_SOURCE = True
 # Where the output site should be located
 # If you don't use an absolute path, it will be considered as relative
 # to the location of conf.py
-OUTPUT_FOLDER = '/home/mosqorg/site/mosquitto.org'
+OUTPUT_FOLDER = "/home/mosqorg/site/mosquitto.org"
 
 # where the "cache" of partial generated content should be located
 # default: 'cache'
@@ -793,7 +1065,6 @@ OUTPUT_FOLDER = '/home/mosqorg/site/mosquitto.org'
 # "html_tidy_wrap", "html_tidy_wrap_attr" and "html_tidy_mini" filters
 # (defaults to 'tidy5').
 # HTML_TIDY_EXECUTABLE = 'tidy5'
-
 
 
 # Expert setting! Create a gzipped copy of each generated file. Cheap server-
@@ -897,7 +1168,7 @@ OUTPUT_FOLDER = '/home/mosqorg/site/mosquitto.org'
 # (the thumbnail has ``.thumbnail`` added before the file extension by default,
 # but a different naming template can be configured with IMAGE_THUMBNAIL_FORMAT).
 
-IMAGE_FOLDERS = {'images': 'images'}
+IMAGE_FOLDERS = {"images": "images"}
 # IMAGE_THUMBNAIL_SIZE = 400
 # IMAGE_THUMBNAIL_FORMAT = '{name}.thumbnail{ext}'
 
@@ -974,7 +1245,7 @@ IMAGE_FOLDERS = {'images': 'images'}
 FAVICONS = (
     ("icon", "/favicon-16x16.png", "16x16"),
     ("icon", "/favicon-32x32.png", "32x32"),
- )
+)
 
 # Show teasers (instead of full posts) in indexes? Defaults to False.
 # INDEX_TEASERS = False
@@ -1040,15 +1311,15 @@ CONTENT_FOOTER_FORMATS = {
             "email": BLOG_EMAIL,
             "author": BLOG_AUTHOR,
             "date": time.gmtime().tm_year,
-            "license": LICENSE
-        }
+            "license": LICENSE,
+        },
     )
 }
 
 # A simple copyright tag for inclusion in RSS feeds that works just
 # like CONTENT_FOOTER and CONTENT_FOOTER_FORMATS
 RSS_COPYRIGHT = 'Contents © {date} <a href="mailto:{email}">{author}</a> {license}'
-RSS_COPYRIGHT_PLAIN = 'Contents © {date} {author} {license}'
+RSS_COPYRIGHT_PLAIN = "Contents © {date} {author} {license}"
 RSS_COPYRIGHT_FORMATS = CONTENT_FOOTER_FORMATS
 
 # To use comments, you can choose between different third party comment
@@ -1060,7 +1331,7 @@ COMMENT_SYSTEM = ""
 # depends on what comment system you use. The default is
 # "nikolademo" which is a test account for Disqus. More information
 # is in the manual.
-#COMMENT_SYSTEM_ID = "mosquitto"
+# COMMENT_SYSTEM_ID = "mosquitto"
 
 # Enable annotations using annotateit.org?
 # If set to False, you can still enable them for individual posts and pages
@@ -1177,19 +1448,18 @@ PRETTY_URLS = True
 # Note: most Nikola-specific extensions are done via the Nikola plugin system,
 #       with the MarkdownExtension class and should not be added here.
 # The default is ['fenced_code', 'codehilite']
-#MARKDOWN_EXTENSIONS = ['fenced_code', 'codehilite', 'extra', 'toc']
+# MARKDOWN_EXTENSIONS = ['fenced_code', 'codehilite', 'extra', 'toc']
 
-MARKDOWN_EXTENSIONS = ['markdown.extensions.fenced_code', 'markdown.extensions.codehilite', 'markdown.extensions.extra', 'markdown.extensions.toc']
+MARKDOWN_EXTENSIONS = [
+    "markdown.extensions.fenced_code",
+    "markdown.extensions.codehilite",
+    "markdown.extensions.extra",
+    "markdown.extensions.toc",
+]
 
 # Options to be passed to markdown extensions (See https://python-markdown.github.io/reference/)
 # Default is {} (no config at all)
-MARKDOWN_EXTENSION_CONFIGS = {
-    DEFAULT_LANG: {
-        'markdown.extensions.toc':{
-            'toc_depth':2
-        }
-    }
-}
+MARKDOWN_EXTENSION_CONFIGS = {DEFAULT_LANG: {"markdown.extensions.toc": {"toc_depth": 2}}}
 
 
 # Extra options to pass to the pandoc command.

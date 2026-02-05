@@ -1,14 +1,13 @@
 import json
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import typer
 
-from logging_utils import get_logger, setup_logging
-
+from benchmarks.logging_utils import get_logger, setup_logging
 
 logger = get_logger(__name__)
 app = typer.Typer(add_completion=False)
@@ -66,7 +65,7 @@ def _aggregate_latency_values(values):
 
 
 def _aggregate_metric(runs, metric_name):
-    values_by_field = {field: [] for field in METRIC_FIELDS}
+    values_by_field: dict[str, list[float | None]] = {field: [] for field in METRIC_FIELDS}
     counts = []
     for run in runs:
         metric = run.get("loadgen", {}).get(metric_name)
@@ -157,7 +156,7 @@ def _aggregate_mqtt5(runs):
 
 
 def _load_scenario(path):
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         data = json.load(f)
     return data
 
@@ -204,7 +203,7 @@ def _build_summary(input_dir):
         scenario_summaries.append(summary)
 
     return {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "input_dir": input_dir,
         "scenario_count": len(scenario_summaries),
         "scenarios": scenario_summaries,
@@ -230,23 +229,13 @@ def _write_csv(summary, path):
                 "scenario": scenario.get("scenario"),
                 "runs": scenario.get("runs"),
                 "token_len": scenario.get("token_len"),
-                "jwt_grants_schema_version": token_metadata.get(
-                    "jwt_grants_schema_version"
-                ),
-                "jwt_default_grants_enabled": token_metadata.get(
-                    "jwt_default_grants_enabled"
-                ),
-                "jwt_denies_schema_version": token_metadata.get(
-                    "jwt_denies_schema_version"
-                ),
+                "jwt_grants_schema_version": token_metadata.get("jwt_grants_schema_version"),
+                "jwt_default_grants_enabled": token_metadata.get("jwt_default_grants_enabled"),
+                "jwt_denies_schema_version": token_metadata.get("jwt_denies_schema_version"),
                 "tls_enabled": (scenario.get("tls") or {}).get("enabled"),
                 "throughput_avg": (loadgen.get("throughput_mps") or {}).get("avg"),
-                "publish_throughput_avg": (
-                    loadgen.get("publish_throughput_mps") or {}
-                ).get("avg"),
-                "receive_throughput_avg": (
-                    loadgen.get("receive_throughput_mps") or {}
-                ).get("avg"),
+                "publish_throughput_avg": (loadgen.get("publish_throughput_mps") or {}).get("avg"),
+                "receive_throughput_avg": (loadgen.get("receive_throughput_mps") or {}).get("avg"),
                 "connect_p50_avg": (connect.get("p50_ms") or {}).get("avg"),
                 "connect_p95_avg": (connect.get("p95_ms") or {}).get("avg"),
                 "connect_p99_avg": (connect.get("p99_ms") or {}).get("avg"),
@@ -257,14 +246,10 @@ def _write_csv(summary, path):
                 "token_refresh_count_total": refresh.get("count_total"),
                 "delegation_p50_avg": (delegation.get("p50_ms") or {}).get("avg"),
                 "delegation_count_total": delegation.get("count_total"),
-                "delegation_len_p50_avg": (delegation_len.get("p50_ms") or {}).get(
-                    "avg"
-                ),
+                "delegation_len_p50_avg": (delegation_len.get("p50_ms") or {}).get("avg"),
                 "attenuation_p50_avg": (attenuation.get("p50_ms") or {}).get("avg"),
                 "attenuation_count_total": attenuation.get("count_total"),
-                "attenuation_len_p50_avg": (attenuation_len.get("p50_ms") or {}).get(
-                    "avg"
-                ),
+                "attenuation_len_p50_avg": (attenuation_len.get("p50_ms") or {}).get("avg"),
                 "errors_total": (scenario.get("errors") or {}).get("total"),
                 "cpu_avg": (resources.get("cpu") or {}).get("avg"),
                 "memory_avg": (resources.get("memory") or {}).get("avg"),

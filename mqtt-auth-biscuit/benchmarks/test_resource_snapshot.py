@@ -3,9 +3,9 @@
 Test the fixed resource snapshot function directly
 """
 
-import sys
-import os
 import json
+import os
+import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
@@ -19,7 +19,7 @@ def test_error_scenarios():
     # Test with invalid Prometheus URL
     print("1. Testing with invalid Prometheus URL...")
     try:
-        result = _resource_snapshot("http://localhost:9999", None, False)
+        _resource_snapshot("http://localhost:9999", None, False)
         print("   ❌ Should have failed with invalid URL")
     except Exception as e:
         print(f"   ✅ Correctly failed with: {type(e).__name__}: {e}")
@@ -27,7 +27,7 @@ def test_error_scenarios():
     # Test with unreachable Prometheus
     print("2. Testing with unreachable Prometheus...")
     try:
-        result = _resource_snapshot("http://nonexistent-host:9090", None, False)
+        _resource_snapshot("http://nonexistent-host:9090", None, False)
         print("   ❌ Should have failed with unreachable host")
     except Exception as e:
         print(f"   ✅ Correctly failed with: {type(e).__name__}: {e}")
@@ -35,7 +35,7 @@ def test_error_scenarios():
     # Test with TLS verification failure
     print("3. Testing with TLS verification (should fail for HTTP)...")
     try:
-        result = _resource_snapshot("https://localhost:9090", None, False)
+        _resource_snapshot("https://localhost:9090", None, False)
         # This might fail due to TLS or connection issues
         print("   ⚠️  TLS test completed (behavior depends on Prometheus TLS setup)")
     except Exception as e:
@@ -66,9 +66,7 @@ def test_resource_snapshot():
 
     # Test with rate query
     print("\nTesting with rate CPU query...")
-    result_rate = _resource_snapshot(
-        "http://localhost:9090", None, False, cpu_query_type="rate"
-    )
+    result_rate = _resource_snapshot("http://localhost:9090", None, False, cpu_query_type="rate")
 
     if result_rate.get("prometheus", {}).get("cpu", {}).get("data", {}).get("result"):
         print("✅ CPU rate data found")

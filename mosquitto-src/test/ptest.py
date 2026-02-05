@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 
 import subprocess
-import time
 import sys
+import time
+
 
 def next_test(tests, ports):
     if len(tests) == 0 or len(ports) == 0:
@@ -32,7 +33,7 @@ def next_test(tests, ports):
 
 
 def run_tests(tests, minport=1888, max_running=20):
-    ports = list(range(minport, minport+max_running+1))
+    ports = list(range(minport, minport + max_running + 1))
     start_time = time.time()
     passed = 0
     failed = 0
@@ -60,7 +61,7 @@ def run_tests(tests, minport=1888, max_running=20):
                 t.terminate()
                 t.wait()
                 runtime = time.time() - t.start_time
-                #(stdo, stde) = t.communicate()
+                # (stdo, stde) = t.communicate()
                 if t.returncode == 1:
                     print("%0.3fs : \033[31m%s\033[0m" % (runtime, t.args[0]))
                     failed = failed + 1
@@ -69,11 +70,13 @@ def run_tests(tests, minport=1888, max_running=20):
                     passed = passed + 1
                     print("%0.3fs : \033[32m%s\033[0m" % (runtime, t.args[0]))
 
-    print("Passed: %d\nFailed: %d\nTotal: %d\nTotal time: %0.2f" % (passed, failed, passed+failed, time.time()-start_time))
+    print(
+        "Passed: %d\nFailed: %d\nTotal: %d\nTotal time: %0.2f"
+        % (passed, failed, passed + failed, time.time() - start_time)
+    )
     if failed > 0:
         print("Failing tests:")
         failed_tests.sort()
         for f in failed_tests:
             print(f)
         sys.exit(1)
-

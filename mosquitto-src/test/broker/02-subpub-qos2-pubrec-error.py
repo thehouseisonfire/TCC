@@ -4,23 +4,30 @@
 
 from mosq_test_helper import *
 
+
 def helper(port):
     connect_packet = mosq_test.gen_connect("test-helper", keepalive=60)
     connack_packet = mosq_test.gen_connack(rc=0)
 
     mid = 1
-    publish_1_packet = mosq_test.gen_publish("qos2/pubrec/rejected", qos=2, mid=mid, payload="rejected-message")
+    publish_1_packet = mosq_test.gen_publish(
+        "qos2/pubrec/rejected", qos=2, mid=mid, payload="rejected-message"
+    )
     pubrec_1_packet = mosq_test.gen_pubrec(mid)
     pubrel_1_packet = mosq_test.gen_pubrel(mid)
     pubcomp_1_packet = mosq_test.gen_pubcomp(mid)
 
     mid = 2
-    publish_2_packet = mosq_test.gen_publish("qos2/pubrec/accepted", qos=2, mid=mid, payload="accepted-message")
+    publish_2_packet = mosq_test.gen_publish(
+        "qos2/pubrec/accepted", qos=2, mid=mid, payload="accepted-message"
+    )
     pubrec_2_packet = mosq_test.gen_pubrec(mid)
     pubrel_2_packet = mosq_test.gen_pubrel(mid)
     pubcomp_2_packet = mosq_test.gen_pubcomp(mid)
 
-    sock = mosq_test.do_client_connect(connect_packet, connack_packet, connack_error="helper connack", port=port)
+    sock = mosq_test.do_client_connect(
+        connect_packet, connack_packet, connack_error="helper connack", port=port
+    )
 
     mosq_test.do_send_receive(sock, publish_1_packet, pubrec_1_packet, "helper pubrec")
     mosq_test.do_send_receive(sock, pubrel_1_packet, pubcomp_1_packet, "helper pubcomp")
@@ -33,7 +40,9 @@ def helper(port):
 def do_test(proto_ver):
     rc = 1
     keepalive = 60
-    connect_packet = mosq_test.gen_connect("pub-qo2-timeout-test", keepalive=keepalive, proto_ver=proto_ver)
+    connect_packet = mosq_test.gen_connect(
+        "pub-qo2-timeout-test", keepalive=keepalive, proto_ver=proto_ver
+    )
     connack_packet = mosq_test.gen_connack(rc=0, proto_ver=proto_ver)
 
     mid = 1
@@ -41,11 +50,23 @@ def do_test(proto_ver):
     suback_packet = mosq_test.gen_suback(mid, 2, proto_ver=proto_ver)
 
     mid = 1
-    publish_1_packet = mosq_test.gen_publish("qos2/pubrec/rejected", qos=2, mid=mid, payload="rejected-message", proto_ver=proto_ver)
+    publish_1_packet = mosq_test.gen_publish(
+        "qos2/pubrec/rejected",
+        qos=2,
+        mid=mid,
+        payload="rejected-message",
+        proto_ver=proto_ver,
+    )
     pubrec_1_packet = mosq_test.gen_pubrec(mid, proto_ver=proto_ver, reason_code=0x80)
 
     mid = 2
-    publish_2_packet = mosq_test.gen_publish("qos2/pubrec/accepted", qos=2, mid=mid, payload="accepted-message", proto_ver=proto_ver)
+    publish_2_packet = mosq_test.gen_publish(
+        "qos2/pubrec/accepted",
+        qos=2,
+        mid=mid,
+        payload="accepted-message",
+        proto_ver=proto_ver,
+    )
     pubrec_2_packet = mosq_test.gen_pubrec(mid, proto_ver=proto_ver)
     pubrel_2_packet = mosq_test.gen_pubrel(mid, proto_ver=proto_ver)
     pubcomp_2_packet = mosq_test.gen_pubcomp(mid, proto_ver=proto_ver)
@@ -76,7 +97,7 @@ def do_test(proto_ver):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             print("proto_ver=%d" % (proto_ver))
             exit(rc)
 

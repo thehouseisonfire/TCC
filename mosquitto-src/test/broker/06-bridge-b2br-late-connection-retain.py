@@ -4,16 +4,18 @@
 
 from mosq_test_helper import *
 
+
 def write_config1(filename, persistence_file, port1, port2):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("port %d\n" % (port2))
         f.write("allow_anonymous true\n")
         f.write("\n")
         f.write("persistence true\n")
         f.write("persistence_file %s\n" % (persistence_file))
 
+
 def write_config2(filename, persistence_file, port1, port2, protocol_version):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("port %d\n" % (port2))
         f.write("allow_anonymous true\n")
         f.write("\n")
@@ -26,29 +28,39 @@ def write_config2(filename, persistence_file, port1, port2, protocol_version):
         f.write("persistence true\n")
         f.write("persistence_file %s\n" % (persistence_file))
 
+
 def do_test(proto_ver):
     if proto_ver == 4:
         bridge_protocol = "mqttv311"
-        proto_ver_connect = 128+4
+        proto_ver_connect = 128 + 4
     else:
         bridge_protocol = "mqttv50"
         proto_ver_connect = 5
 
     (port1, port2) = mosq_test.get_port(2)
-    conf_file = os.path.basename(__file__).replace('.py', '.conf')
-    persistence_file = os.path.basename(__file__).replace('.py', '.db')
+    conf_file = os.path.basename(__file__).replace(".py", ".conf")
+    persistence_file = os.path.basename(__file__).replace(".py", ".db")
 
     rc = 1
     keepalive = 60
-    client_id = socket.gethostname()+".bridge_sample"
-    connect_packet = mosq_test.gen_connect(client_id, keepalive=keepalive, clean_session=False, proto_ver=proto_ver_connect)
+    client_id = socket.gethostname() + ".bridge_sample"
+    connect_packet = mosq_test.gen_connect(
+        client_id, keepalive=keepalive, clean_session=False, proto_ver=proto_ver_connect
+    )
     connack_packet = mosq_test.gen_connack(rc=0, proto_ver=proto_ver)
 
     c_connect_packet = mosq_test.gen_connect("client", keepalive=keepalive, proto_ver=proto_ver)
     c_connack_packet = mosq_test.gen_connack(rc=0, proto_ver=proto_ver)
 
     mid = 1
-    publish_packet = mosq_test.gen_publish("bridge/test", qos=1, mid=mid, payload="message", retain=True, proto_ver=proto_ver)
+    publish_packet = mosq_test.gen_publish(
+        "bridge/test",
+        qos=1,
+        mid=mid,
+        payload="message",
+        retain=True,
+        proto_ver=proto_ver,
+    )
 
     if proto_ver == 5:
         puback_packet = mosq_test.gen_puback(mid, proto_ver=proto_ver, reason_code=16)
@@ -58,14 +70,18 @@ def do_test(proto_ver):
     ssock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     ssock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     ssock.settimeout(40)
-    ssock.bind(('', port1))
+    ssock.bind(("", port1))
     ssock.listen(5)
 
     write_config1(conf_file, persistence_file, port1, port2)
 
     try:
-        broker = mosq_test.start_broker(filename=os.path.basename(__file__), port=port2, use_conf=True)
-        client = mosq_test.do_client_connect(c_connect_packet, c_connack_packet, timeout=20, port=port2)
+        broker = mosq_test.start_broker(
+            filename=os.path.basename(__file__), port=port2, use_conf=True
+        )
+        client = mosq_test.do_client_connect(
+            c_connect_packet, c_connack_packet, timeout=20, port=port2
+        )
         mosq_test.do_send_receive(client, publish_packet, puback_packet, "puback")
         client.close()
 
@@ -74,7 +90,9 @@ def do_test(proto_ver):
 
         # Restart, with retained message in place
         write_config2(conf_file, persistence_file, port1, port2, bridge_protocol)
-        broker = mosq_test.start_broker(filename=os.path.basename(__file__), port=port2, use_conf=True)
+        broker = mosq_test.start_broker(
+            filename=os.path.basename(__file__), port=port2, use_conf=True
+        )
 
         (bridge, address) = ssock.accept()
         bridge.settimeout(20)
@@ -106,7 +124,7 @@ def do_test(proto_ver):
         os.remove(persistence_file)
         ssock.close()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             exit(rc)
 
 

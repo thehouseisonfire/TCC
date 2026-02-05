@@ -5,8 +5,7 @@ import time
 import paho.mqtt.client as mqtt
 import typer
 
-from logging_utils import get_logger, setup_logging
-
+from benchmarks.logging_utils import get_logger, setup_logging
 
 logger = get_logger(__name__)
 app = typer.Typer(add_completion=False)
@@ -45,7 +44,7 @@ def run_benchmark(
         if tls_insecure:
             client.tls_insecure_set(True)
 
-    userdata = {"start_time": 0}
+    userdata = {"start_time": 0.0}
     client.user_data_set(userdata)
 
     try:
@@ -82,7 +81,7 @@ def main(
     log_level: str = typer.Option("INFO", "--log-level"),
 ):
     setup_logging(log_level)
-    with open("benchmarks/tokens.json", "r") as f:
+    with open("benchmarks/tokens.json") as f:
         tokens = json.load(f)
 
     results = {}

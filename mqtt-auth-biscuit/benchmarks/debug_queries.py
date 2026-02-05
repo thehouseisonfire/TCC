@@ -10,11 +10,15 @@ import time
 import httpx
 import typer
 
-from logging_utils import get_logger, setup_logging
-
+from benchmarks.logging_utils import get_logger, setup_logging
 
 logger = get_logger(__name__)
 app = typer.Typer(add_completion=False)
+QUERY_TYPES_OPTION = typer.Option(
+    ["instant", "rate"],
+    "--query-types",
+    help="Types of CPU queries to test (default: both instant and rate)",
+)
 
 
 def get_mosquitto_container_id():
@@ -37,9 +41,7 @@ def query_prometheus_debug(query):
     try:
         start_time = time.time()
         with httpx.Client(timeout=5.0, http2=True) as client:
-            resp = client.get(
-                "http://localhost:9090/api/v1/query", params={"query": query}
-            )
+            resp = client.get("http://localhost:9090/api/v1/query", params={"query": query})
             resp.raise_for_status()
             result = resp.json()
         end_time = time.time()
@@ -54,7 +56,9 @@ def query_prometheus_debug(query):
         return {"error": str(e)}
 
 
-def test_queries(query_types=["instant", "rate"]):
+def test_queries(query_types=None):
+    if query_types is None:
+        query_types = ["instant", "rate"]
     container_id = get_mosquitto_container_id()
     logger.info("Container ID: %s", container_id)
 
@@ -73,7 +77,9 @@ def test_queries(query_types=["instant", "rate"]):
 
         # Test CPU query based on type
         if query_type == "rate":
-            cpu_query = f'sum(rate(container_cpu_usage_seconds_total{{id=~".*{container_id}.*"}}[30s]))'
+            cpu_query = (
+                f'sum(rate(container_cpu_usage_seconds_total{{id=~".*{container_id}.*"}}[30s]))'
+            )
         else:  # instant
             cpu_query = f'container_cpu_usage_seconds_total{{id=~".*{container_id}.*"}}'
 
@@ -84,11 +90,7 @@ def test_queries(query_types=["instant", "rate"]):
 
 @app.command()
 def main(
-    query_types: list[str] = typer.Option(
-        ["instant", "rate"],
-        "--query-types",
-        help="Types of CPU queries to test (default: both instant and rate)",
-    ),
+    query_types: list[str] = QUERY_TYPES_OPTION,
     log_level: str = typer.Option("INFO", "--log-level"),
 ):
     setup_logging(log_level)

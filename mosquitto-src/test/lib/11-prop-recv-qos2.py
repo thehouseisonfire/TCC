@@ -15,7 +15,9 @@ connack_packet = mosq_test.gen_connack(rc=0, proto_ver=5)
 mid = 1
 props = mqtt5_props.gen_string_prop(mqtt5_props.PROP_CONTENT_TYPE, "plain/text")
 props += mqtt5_props.gen_string_prop(mqtt5_props.PROP_RESPONSE_TOPIC, "msg/123")
-publish_packet = mosq_test.gen_publish("prop/test", mid=mid, qos=2, payload="message", proto_ver=5, properties=props)
+publish_packet = mosq_test.gen_publish(
+    "prop/test", mid=mid, qos=2, payload="message", proto_ver=5, properties=props
+)
 pubrec_packet = mosq_test.gen_pubrec(mid=mid, proto_ver=5)
 pubrel_packet = mosq_test.gen_pubrel(mid=mid, proto_ver=5)
 pubcomp_packet = mosq_test.gen_pubcomp(mid=mid, proto_ver=5)
@@ -27,18 +29,20 @@ disconnect_packet = mosq_test.gen_disconnect(proto_ver=5)
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 sock.settimeout(10)
-sock.bind(('', port))
+sock.bind(("", port))
 sock.listen(5)
 
 client_args = sys.argv[1:]
 env = dict(os.environ)
-env['LD_LIBRARY_PATH'] = '../../lib:../../lib/cpp'
+env["LD_LIBRARY_PATH"] = "../../lib:../../lib/cpp"
 try:
-    pp = env['PYTHONPATH']
+    pp = env["PYTHONPATH"]
 except KeyError:
-    pp = ''
-env['PYTHONPATH'] = '../../lib/python:'+pp
-client = mosq_test.start_client(filename=sys.argv[1].replace('/', '-'), cmd=client_args, env=env, port=port)
+    pp = ""
+env["PYTHONPATH"] = "../../lib/python:" + pp
+client = mosq_test.start_client(
+    filename=sys.argv[1].replace("/", "-"), cmd=client_args, env=env, port=port
+)
 
 try:
     (conn, address) = sock.accept()

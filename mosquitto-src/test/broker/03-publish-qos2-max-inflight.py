@@ -5,8 +5,9 @@
 
 from mosq_test_helper import *
 
+
 def write_config(filename, port):
-    with open(filename, 'w') as f:
+    with open(filename, "w") as f:
         f.write("port %d\n" % (port))
         f.write("allow_anonymous true\n")
         f.write("max_inflight_messages 1\n")
@@ -14,18 +15,25 @@ def write_config(filename, port):
 
 def do_test(proto_ver):
     port = mosq_test.get_port()
-    conf_file = os.path.basename(__file__).replace('.py', '.conf')
+    conf_file = os.path.basename(__file__).replace(".py", ".conf")
     write_config(conf_file, port)
 
     rc = 1
     keepalive = 60
-    connect_packet = mosq_test.gen_connect("pub-qos2-test", keepalive=keepalive, proto_ver=proto_ver)
-    properties = mqtt5_props.gen_uint16_prop(mqtt5_props.PROP_TOPIC_ALIAS_MAXIMUM, 10) \
-        + mqtt5_props.gen_uint16_prop(mqtt5_props.PROP_RECEIVE_MAXIMUM, 1)
-    connack_packet = mosq_test.gen_connack(rc=0, proto_ver=proto_ver, properties=properties, property_helper=False)
+    connect_packet = mosq_test.gen_connect(
+        "pub-qos2-test", keepalive=keepalive, proto_ver=proto_ver
+    )
+    properties = mqtt5_props.gen_uint16_prop(
+        mqtt5_props.PROP_TOPIC_ALIAS_MAXIMUM, 10
+    ) + mqtt5_props.gen_uint16_prop(mqtt5_props.PROP_RECEIVE_MAXIMUM, 1)
+    connack_packet = mosq_test.gen_connack(
+        rc=0, proto_ver=proto_ver, properties=properties, property_helper=False
+    )
 
     mid = 312
-    publish_packet = mosq_test.gen_publish("pub/qos2/test", qos=2, mid=mid, payload="message", proto_ver=proto_ver)
+    publish_packet = mosq_test.gen_publish(
+        "pub/qos2/test", qos=2, mid=mid, payload="message", proto_ver=proto_ver
+    )
     pubrec_packet = mosq_test.gen_pubrec(mid, proto_ver=proto_ver)
     pubrel_packet = mosq_test.gen_pubrel(mid, proto_ver=proto_ver)
     pubcomp_packet = mosq_test.gen_pubcomp(mid, proto_ver=proto_ver)
@@ -48,7 +56,7 @@ def do_test(proto_ver):
         broker.wait()
         (stdo, stde) = broker.communicate()
         if rc:
-            print(stde.decode('utf-8'))
+            print(stde.decode("utf-8"))
             print("proto_ver=%d" % (proto_ver))
             exit(rc)
 

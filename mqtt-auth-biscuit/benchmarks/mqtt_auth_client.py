@@ -5,7 +5,7 @@ import time
 
 import typer
 
-from logging_utils import get_logger, setup_logging
+from benchmarks.logging_utils import get_logger, setup_logging
 
 
 def _enc_varint(n: int) -> bytes:
@@ -151,19 +151,16 @@ def main(
 
     t0 = time.perf_counter()
     sock.connect((host, port))
-    sock.sendall(
-        _build_connect(client_id, auth_method, token1.encode("utf-8"))
-    )
+    sock.sendall(_build_connect(client_id, auth_method, token1.encode("utf-8")))
 
     pkt_type, payload = _recv_packet(sock)
     t1 = time.perf_counter()
 
     ok = False
     reason = None
-    if pkt_type == 2 and len(payload) >= 2:
-        if len(payload) >= 3:
-            reason = payload[1]
-            ok = reason == 0
+    if pkt_type == 2 and len(payload) >= 2 and len(payload) >= 3:
+        reason = payload[1]
+        ok = reason == 0
 
     connect_ms = (t1 - t0) * 1000.0
 

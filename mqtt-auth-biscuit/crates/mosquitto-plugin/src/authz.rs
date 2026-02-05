@@ -345,11 +345,10 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
                     topic: params.topic,
                     operation,
                 };
-                if let Some(denies) = claims.denies.as_ref() {
-                    if grants_deny(denies, auth_context) {
+                if let Some(denies) = claims.denies.as_ref()
+                    && grants_deny(denies, auth_context) {
                         return AuthzOutcome::Denied;
                     }
-                }
                 if grants_allow(grants, auth_context) {
                     AuthzOutcome::Allowed
                 } else {
@@ -452,11 +451,10 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
             roles: _,
             biscuit,
         } => {
-            if let Some(expires_at) = expires_at {
-                if Utc::now().timestamp() >= *expires_at {
+            if let Some(expires_at) = expires_at
+                && Utc::now().timestamp() >= *expires_at {
                     return AuthzOutcome::Expired;
                 }
-            }
 
             let operation = access_to_operation(params.access);
 

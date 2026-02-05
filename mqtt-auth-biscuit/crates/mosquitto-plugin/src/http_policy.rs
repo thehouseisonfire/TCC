@@ -97,11 +97,10 @@ fn parse_http_response(resp: &[u8]) -> Result<AuthzResponse, String> {
 
     let mut content_type = None;
     for line in lines {
-        if let Some((name, value)) = line.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("content-type") {
+        if let Some((name, value)) = line.split_once(':')
+            && name.trim().eq_ignore_ascii_case("content-type") {
                 content_type = Some(value.trim().to_string());
             }
-        }
     }
 
     let content_type = content_type.ok_or_else(|| "http missing content-type".to_string())?;

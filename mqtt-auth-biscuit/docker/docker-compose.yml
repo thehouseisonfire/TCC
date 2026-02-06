@@ -89,6 +89,16 @@ services:
     networks:
       - mqtt-net
 
+  iperf3:
+    image: networkstatic/iperf3
+    command: ["-s", "-p", "5201"]
+    ports:
+      - "5201:5201"
+    networks:
+      - mqtt-net
+    cap_add:
+      - NET_ADMIN
+
 networks:
   mqtt-net:
     driver: bridge

@@ -337,6 +337,91 @@ You can also monitor resource usage via:
 - **Prometheus**: `http://localhost:9090`
 - **Docker Stats**: `docker stats`
 
+## Network Baseline Measurement (iperf3)
+
+The scenario runner includes automatic network capacity measurement using `iperf3` to establish a baseline before each test batch. This helps interpret throughput results and ensures fair comparisons across scenarios.
+
+### How it works
+
+1. **Automatic measurement**: Before each scenario runs, the runner starts an `iperf3` client that measures network capacity between the host and the Docker network.
+2. **Retry logic**: If the first measurement fails, the runner automatically retries up to 2 times with a brief delay.
+3. **Validity checking**: The runner compares measured throughput against a configurable minimum threshold and warns if network constraints may affect test validity.
+4. **Data inclusion**: Network baseline data is included in each scenario's result JSON under the `network_baseline` field.
+
+### iperf3 CLI Options
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--iperf3` / `--no-iperf3` | Enable/disable baseline measurement | `True` (enabled) |
+| `--iperf3-host` | iperf3 server hostname | `localhost` |
+| `--iperf3-port` | iperf3 server port | `5201` |
+| `--iperf3-duration` | Test duration in seconds | `5` |
+| `--iperf3-streams` | Number of parallel streams | `4` |
+| `--iperf3-min-mbps` | Minimum expected throughput in Mbps | `100.0` |
+
+### Usage Examples
+
+Run with default iperf3 baseline (enabled by default):
+```bash
+python3 benchmarks/run_scenarios.py --scenarios BASE-01,JWT-01
+```
+
+Disable iperf3 baseline (faster startup, no network validation):
+```bash
+python3 benchmarks/run_scenarios.py --no-iperf3
+```
+
+Adjust minimum expected throughput for constrained environments:
+```bash
+python3 benchmarks/run_scenarios.py --iperf3-min-mbps 10.0
+```
+
+### Result Structure
+
+The `network_baseline` field in scenario results contains:
+
+```json
+{
+  "network_baseline": {
+    "enabled": true,
+    "config": {
+      "host": "localhost",
+      "port": 5201,
+      "duration": 5,
+      "streams": 4,
+      "min_mbps": 100.0
+    },
+    "result": {
+      "throughput": {
+        "megabits_per_second": 985.42,
+        "bytes_per_second": 123177500.0
+      },
+      "bytes_transferred": 615887500,
+      "tcp": {
+        "retransmits": 0,
+        "rtt_ms": 0.25
+      }
+    },
+    "validity": {
+      "valid": true,
+      "checks": {
+        "throughput_sufficient": true,
+        "loss_acceptable": true
+      },
+      "metrics": {
+        "throughput_mbps": 985.42,
+        "expected_min_mbps": 100.0
+      },
+      "warnings": []
+    }
+  }
+}
+```
+
+### Docker Compose
+
+The `iperf3` service is defined in `docker/docker-compose.yml` and starts automatically with the scenario runner. The server listens on port 5201 and requires `NET_ADMIN` capability for traffic shaping compatibility.
+
 ## Step 5: Cleanup
 
 When finished, stop the environment:

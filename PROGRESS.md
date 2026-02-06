@@ -329,9 +329,8 @@ machine and record the first results/known issues).
 ## 9) Open Issues (Next Steps, Grouped)
 
 ### **Priority Tier 1: Measurement Accuracy**  
-1. Issue 14: Add iperf3 baseline (throughput interpretation)
-2. Issue 18: Remove Biscuit Base64 (MTU fragmentation bias)
-3. Issue 19: MOSQ_EVT_MESSAGE fan-out validation (per-subscriber costs)
+1. Issue 18: Remove Biscuit Base64 (MTU fragmentation bias)
+2. Issue 19: MOSQ_EVT_MESSAGE fan-out validation (per-subscriber costs)
 
 ### **Priority Tier 2: Enhanced Analysis**
 1. Issue 16: Add perf profiling (CPU analysis)
@@ -402,21 +401,6 @@ machine and record the first results/known issues).
       containers
     - Comparison analysis between custom single-host and emqtt-bench
       containerized approaches
-
-- [ ] **Issue 14: Add network baseline capacity measurement with iperf3**
-  - Goal: implement `iperf3` integration to measure nominal channel capacity as
-    specified in ARTICLE.MD methodology.
-  - Rationale: Establishing baseline network capacity before experiments is
-    essential for interpreting throughput results and ensuring fair comparisons.
-  - Current state: No `iperf3` integration exists; Docker Compose does not
-    include an iperf3 service.
-  - Deliverable:
-    - Add `iperf3` service to docker-compose.yml for network capacity
-      measurement
-    - Automated baseline measurement step in scenario runner before each test
-      batch
-    - Network capacity data included in scenario results JSON
-    - Ability to detect and report when network constraints affect test validity
 
 - [ ] **Issue 15: Add packet-level analysis with tcpdump for fragmentation
      studies**
@@ -733,6 +717,9 @@ machine and record the first results/known issues).
 ---
 
 ## 9) Completed Issues (Backlog)
+
+- [x] **Issue 14: Add iperf3 baseline (throughput interpretation)** — **COMPLETED 2026-02-06**
+  - **Summary**: Implemented `iperf3` integration to measure nominal channel capacity as specified in ARTICLE.MD methodology. Added `iperf3` service to docker-compose.yml, created `benchmarks/iperf3_baseline.py` module with measurement, parsing, and validity checking functions. Integrated automated baseline measurement into `run_scenarios.py` with CLI options (`--iperf3/--no-iperf3`, `--iperf3-host`, `--iperf3-port`, `--iperf3-duration`, `--iperf3-streams`, `--iperf3-min-mbps`). Network capacity data included in scenario results JSON under `network_baseline` field with throughput, RTT, retransmits, and validity assessment. Warns when network constraints may affect test validity.
 
 - [x] **Issue 20.1: Verify ACL_CHECK subtype handling across policy modes**
   - **Summary**: Added `MOSQ_ACL_CONTROL` constant (0x08) for control-plane access; fixed `control_callback` hardcoded `access: 2` → `MOSQ_ACL_CONTROL`; updated `access_to_operation()` to map 0x08 → "control"; added comprehensive unit tests for all ACL subtypes (READ/WRITE/SUBSCRIBE/CONTROL) with priority ordering (WRITE > SUBSCRIBE > CONTROL > READ), bitmask combinations, and edge cases. All 7 policy modes verified to correctly handle distinct ACL subtypes.

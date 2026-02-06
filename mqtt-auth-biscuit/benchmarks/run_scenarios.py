@@ -9,6 +9,10 @@ import httpx
 import typer
 from pydantic import BaseModel, ConfigDict
 
+from benchmarks.iperf3_baseline import (
+    check_network_validity,
+    run_baseline_with_retry,
+)
 from benchmarks.logging_utils import get_logger, setup_logging
 
 
@@ -499,6 +503,13 @@ def main(
     summary_csv: str = "summary.csv",
     no_summary_csv: bool = False,
     log_level: str = typer.Option("INFO", "--log-level"),
+    # iperf3 baseline configuration
+    iperf3_enabled: bool = typer.Option(True, "--iperf3/--no-iperf3"),
+    iperf3_host: str = typer.Option("localhost", "--iperf3-host"),
+    iperf3_port: int = typer.Option(5201, "--iperf3-port"),
+    iperf3_duration: int = typer.Option(5, "--iperf3-duration"),
+    iperf3_streams: int = typer.Option(4, "--iperf3-streams"),
+    iperf3_min_mbps: float = typer.Option(100.0, "--iperf3-min-mbps"),
 ):
     setup_logging(log_level)
 
@@ -1114,6 +1125,7 @@ def main(
             }
         )
 
+        # Add iperf3 service to compose deployment
         _compose(
             [
                 "up",
@@ -1125,11 +1137,37 @@ def main(
                 "metrics-collector",
                 "cadvisor",
                 "token-issuer",
+                "iperf3",
             ],
             extra_env=extra_env,
             compose_files=compose_files,
         )
         time.sleep(1)
+
+        # Run iperf3 baseline measurement before test batch
+        iperf3_baseline_result: dict[str, Any] = {}
+        network_validity: dict[str, Any] = {}
+        if iperf3_enabled:
+            time.sleep(2)  # Give iperf3 server time to start
+            iperf3_baseline_result = run_baseline_with_retry(
+                host=iperf3_host,
+                port=iperf3_port,
+                duration=iperf3_duration,
+                parallel_streams=iperf3_streams,
+                retries=2,
+            )
+            network_validity = check_network_validity(
+                iperf3_baseline_result,
+                expected_min_mbps=iperf3_min_mbps,
+            )
+            if network_validity.get("warnings"):
+                for warning in network_validity["warnings"]:
+                    logger.warning("Network baseline: %s", warning)
+            else:
+                throughput_mbps = iperf3_baseline_result.get("throughput", {}).get(
+                    "megabits_per_second", 0
+                )
+                logger.info("Network baseline: %.2f Mbps capacity confirmed", throughput_mbps)
 
         cfg = s.get("authz")
         if cfg is not None:
@@ -1197,6 +1235,18 @@ def main(
                 "qos_distribution": qos_distribution,
                 "token_issuer_no_default_roles": token_issuer_no_default_roles,
                 "token_issuer_no_default_grants": token_issuer_no_default_grants,
+            },
+            "network_baseline": {
+                "enabled": iperf3_enabled,
+                "config": {
+                    "host": iperf3_host,
+                    "port": iperf3_port,
+                    "duration": iperf3_duration,
+                    "streams": iperf3_streams,
+                    "min_mbps": iperf3_min_mbps,
+                },
+                "result": iperf3_baseline_result,
+                "validity": network_validity,
             },
             "runs": [],
         }

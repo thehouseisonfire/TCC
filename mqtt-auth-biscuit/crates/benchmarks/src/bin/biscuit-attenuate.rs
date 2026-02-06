@@ -12,7 +12,6 @@ struct Args {
     restrict_topic: Option<String>,
     restrict_operation: Option<String>,
     ttl_seconds: Option<i64>,
-    base64url: bool,
     public_key_hex: Option<String>,
     public_key_file: Option<String>,
 }
@@ -21,15 +20,14 @@ fn usage() -> ! {
     eprintln!(
         "Usage: biscuit-attenuate --token <b64> --public-key-hex <hex> [options]\n\
 Options:\n\
-  --token <b64>                 Base64-encoded Biscuit token (or read from stdin)\n\
+  --token <b64>                 Base64URL-encoded Biscuit token (or read from stdin)\n\
   --public-key-hex <hex>        Biscuit root public key (hex)\n\
   --public-key-file <path>      File containing hex-encoded public key\n\
   --deny <op:res>               Append deny fact (repeatable)\n\
   --check <expr>                Append check (repeatable). Accepts 'check if ...' or a raw condition.\n\
   --restrict-topic <topic>      Add check restricting resource to topic\n\
   --restrict-op <op>            Add check restricting operation to op\n\
-  --ttl-seconds <seconds>       Add expiry check (time-based attenuation)\n\
-  --base64url                   Use base64url (no padding) encoding\n"
+  --ttl-seconds <seconds>       Add expiry check (time-based attenuation)\n"
     );
     std::process::exit(2);
 }
@@ -71,7 +69,6 @@ fn parse_args() -> Args {
         restrict_topic: None,
         restrict_operation: None,
         ttl_seconds: None,
-        base64url: false,
         public_key_hex: None,
         public_key_file: None,
     };
@@ -101,7 +98,6 @@ fn parse_args() -> Args {
                 };
                 out.ttl_seconds = value.parse::<i64>().ok();
             }
-            "--base64url" => out.base64url = true,
             "--public-key-hex" => out.public_key_hex = args.next(),
             "--public-key-file" => out.public_key_file = args.next(),
             "--help" | "-h" => usage(),
@@ -152,13 +148,7 @@ fn main() -> Result<(), String> {
 
     let public_key = load_public_key(&args)?;
 
-    let engine = if args.base64url {
-        general_purpose::URL_SAFE_NO_PAD
-    } else {
-        general_purpose::STANDARD
-    };
-
-    let token_bytes = engine
+    let token_bytes = general_purpose::URL_SAFE_NO_PAD
         .decode(token.trim())
         .map_err(|e| format!("token decode failed: {e}"))?;
     let biscuit =
@@ -233,7 +223,7 @@ fn main() -> Result<(), String> {
     let bytes = attenuated
         .to_vec()
         .map_err(|e| format!("encode failed: {e}"))?;
-    let token_out = engine.encode(bytes);
+    let token_out = general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     println!("{token_out}");
     Ok(())
 }

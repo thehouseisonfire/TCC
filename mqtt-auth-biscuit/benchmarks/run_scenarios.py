@@ -281,7 +281,6 @@ def _run_loadgen(
     biscuit_attenuate_ttl: int | None,
     biscuit_public_key_hex: str | None,
     biscuit_public_key_file: str | None,
-    biscuit_base64url: bool,
     biscuit_attenuate_bin: str | None,
     biscuit_delegate: bool,
     biscuit_delegate_denies: list[str] | None,
@@ -291,7 +290,6 @@ def _run_loadgen(
     biscuit_delegate_ttl: int | None,
     biscuit_delegate_public_key_hex: str | None,
     biscuit_delegate_public_key_file: str | None,
-    biscuit_delegate_base64url: bool,
     biscuit_delegate_bin: str | None,
     biscuit_delegate_handoff: bool,
     biscuit_delegate_handoff_topic: str | None,
@@ -368,8 +366,6 @@ def _run_loadgen(
         cmd.extend(["--biscuit-public-key-hex", biscuit_public_key_hex])
     if biscuit_public_key_file:
         cmd.extend(["--biscuit-public-key-file", biscuit_public_key_file])
-    if biscuit_base64url:
-        cmd.append("--biscuit-base64url")
     if biscuit_attenuate_bin:
         cmd.extend(["--biscuit-attenuate-bin", biscuit_attenuate_bin])
     if biscuit_delegate:
@@ -388,8 +384,6 @@ def _run_loadgen(
         cmd.extend(["--biscuit-delegate-public-key-hex", biscuit_delegate_public_key_hex])
     if biscuit_delegate_public_key_file:
         cmd.extend(["--biscuit-delegate-public-key-file", biscuit_delegate_public_key_file])
-    if biscuit_delegate_base64url:
-        cmd.append("--biscuit-delegate-base64url")
     if biscuit_delegate_bin:
         cmd.extend(["--biscuit-delegate-bin", biscuit_delegate_bin])
     if biscuit_delegate_handoff:
@@ -501,7 +495,6 @@ def main(
     scenarios_arg: str | None = None,
     token_issuer_no_default_roles: bool = False,
     token_issuer_no_default_grants: bool = False,
-    biscuit_base64url: bool = False,
     token_refresh_codes: str | None = typer.Option(None, envvar="TOKEN_REFRESH_CODES"),
     tls: bool = False,
     tls_insecure: bool = False,
@@ -1227,7 +1220,6 @@ def main(
                 ),
                 "JWT_NO_DEFAULT_ROLES": "1" if token_issuer_no_default_roles else "0",
                 "JWT_NO_DEFAULT_GRANTS": "1" if token_issuer_no_default_grants else "0",
-                "BISCUIT_BASE64URL": "1" if biscuit_base64url else "0",
             }
         )
 
@@ -1323,7 +1315,6 @@ def main(
             "parity": {
                 "token_issuer_no_default_roles": token_issuer_no_default_roles,
                 "token_issuer_no_default_grants": token_issuer_no_default_grants,
-                "biscuit_base64url": biscuit_base64url,
                 "token_refresh_codes": token_refresh_codes,
             },
             "capability_flags": {
@@ -1449,7 +1440,6 @@ def main(
                     biscuit_public_key_file=s.get(
                         "biscuit_public_key_file", "docker/biscuit_public.key"
                     ),
-                    biscuit_base64url=biscuit_base64url,
                     biscuit_attenuate_bin=s.get("biscuit_attenuate_bin"),
                     biscuit_delegate=bool(s.get("biscuit_delegate")),
                     biscuit_delegate_denies=(
@@ -1481,7 +1471,6 @@ def main(
                     biscuit_delegate_public_key_file=s.get(
                         "biscuit_delegate_public_key_file", "docker/biscuit_public.key"
                     ),
-                    biscuit_delegate_base64url=biscuit_base64url,
                     biscuit_delegate_bin=s.get("biscuit_delegate_bin"),
                     biscuit_delegate_handoff=bool(
                         s.get("biscuit_delegate", {}).get("handoff")

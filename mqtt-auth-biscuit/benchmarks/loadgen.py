@@ -135,7 +135,6 @@ class WorkerConfig:
     biscuit_attenuate_ttl: int | None
     biscuit_public_key_hex: str | None
     biscuit_public_key_file: str | None
-    biscuit_base64url: bool
     biscuit_attenuate_bin: str | None
     biscuit_delegate: bool
     biscuit_delegate_denies: list[str]
@@ -145,7 +144,6 @@ class WorkerConfig:
     biscuit_delegate_ttl: int | None
     biscuit_delegate_public_key_hex: str | None
     biscuit_delegate_public_key_file: str | None
-    biscuit_delegate_base64url: bool
     biscuit_delegate_bin: str | None
     biscuit_delegate_handoff: bool
     biscuit_delegate_handoff_topic: str | None
@@ -242,7 +240,6 @@ def _build_biscuit_attenuate_cmd(
     custom_bin: str | None,
     public_key_hex: str | None,
     public_key_file: str | None,
-    base64url: bool,
     restrict_topic: str | None,
     restrict_operation: str | None,
     ttl_seconds: int | None,
@@ -255,8 +252,6 @@ def _build_biscuit_attenuate_cmd(
         cmd.extend(["--public-key-hex", public_key_hex])
     if public_key_file:
         cmd.extend(["--public-key-file", public_key_file])
-    if base64url:
-        cmd.append("--base64url")
     if restrict_topic:
         cmd.extend(["--restrict-topic", restrict_topic])
     if restrict_operation:
@@ -276,7 +271,6 @@ def _attenuate_biscuit_token(token: str, cfg: WorkerConfig) -> tuple[str, float,
         custom_bin=cfg.biscuit_attenuate_bin,
         public_key_hex=cfg.biscuit_public_key_hex,
         public_key_file=cfg.biscuit_public_key_file,
-        base64url=cfg.biscuit_base64url,
         restrict_topic=cfg.biscuit_attenuate_topic,
         restrict_operation=cfg.biscuit_attenuate_operation,
         ttl_seconds=cfg.biscuit_attenuate_ttl,
@@ -302,7 +296,6 @@ def _delegate_biscuit_token(
     custom_bin: str | None,
     public_key_hex: str | None,
     public_key_file: str | None,
-    base64url: bool,
     restrict_topic: str | None,
     restrict_operation: str | None,
     ttl_seconds: int | None,
@@ -314,7 +307,6 @@ def _delegate_biscuit_token(
         custom_bin=custom_bin,
         public_key_hex=public_key_hex,
         public_key_file=public_key_file,
-        base64url=base64url,
         restrict_topic=restrict_topic,
         restrict_operation=restrict_operation,
         ttl_seconds=ttl_seconds,
@@ -870,7 +862,6 @@ def run_load(
     biscuit_attenuate_ttl: int | None = None,
     biscuit_public_key_hex: str | None = None,
     biscuit_public_key_file: str | None = None,
-    biscuit_base64url: bool = False,
     biscuit_attenuate_bin: str | None = None,
     biscuit_delegate: bool = False,
     biscuit_delegate_denies: list[str] | None = None,
@@ -880,7 +871,6 @@ def run_load(
     biscuit_delegate_ttl: int | None = None,
     biscuit_delegate_public_key_hex: str | None = None,
     biscuit_delegate_public_key_file: str | None = None,
-    biscuit_delegate_base64url: bool = False,
     biscuit_delegate_bin: str | None = None,
     biscuit_delegate_handoff: bool = False,
     biscuit_delegate_handoff_topic: str | None = None,
@@ -933,7 +923,6 @@ def run_load(
                     custom_bin=biscuit_delegate_bin,
                     public_key_hex=biscuit_delegate_public_key_hex,
                     public_key_file=biscuit_delegate_public_key_file,
-                    base64url=biscuit_delegate_base64url,
                     restrict_topic=formatted_delegate_topic,
                     restrict_operation=biscuit_delegate_operation,
                     ttl_seconds=biscuit_delegate_ttl,
@@ -993,7 +982,6 @@ def run_load(
             biscuit_attenuate_ttl=biscuit_attenuate_ttl,
             biscuit_public_key_hex=biscuit_public_key_hex,
             biscuit_public_key_file=biscuit_public_key_file,
-            biscuit_base64url=biscuit_base64url,
             biscuit_attenuate_bin=biscuit_attenuate_bin,
             biscuit_delegate=biscuit_delegate,
             biscuit_delegate_denies=formatted_delegate_denies,
@@ -1003,7 +991,6 @@ def run_load(
             biscuit_delegate_ttl=biscuit_delegate_ttl,
             biscuit_delegate_public_key_hex=biscuit_delegate_public_key_hex,
             biscuit_delegate_public_key_file=biscuit_delegate_public_key_file,
-            biscuit_delegate_base64url=biscuit_delegate_base64url,
             biscuit_delegate_bin=biscuit_delegate_bin,
             biscuit_delegate_handoff=biscuit_delegate_handoff,
             biscuit_delegate_handoff_topic=handoff_topic,
@@ -1125,7 +1112,6 @@ def run_load(
             "biscuit_attenuate_ttl": biscuit_attenuate_ttl,
             "biscuit_public_key_hex": biscuit_public_key_hex,
             "biscuit_public_key_file": biscuit_public_key_file,
-            "biscuit_base64url": biscuit_base64url,
             "biscuit_delegate": biscuit_delegate,
             "biscuit_delegate_denies": delegate_denies,
             "biscuit_delegate_checks": delegate_checks,
@@ -1134,7 +1120,6 @@ def run_load(
             "biscuit_delegate_ttl": biscuit_delegate_ttl,
             "biscuit_delegate_public_key_hex": biscuit_delegate_public_key_hex,
             "biscuit_delegate_public_key_file": biscuit_delegate_public_key_file,
-            "biscuit_delegate_base64url": biscuit_delegate_base64url,
             "biscuit_delegate_bin": biscuit_delegate_bin,
             "biscuit_delegate_handoff": biscuit_delegate_handoff,
             "biscuit_delegate_handoff_topic": handoff_topic,
@@ -1202,7 +1187,6 @@ def main(
     biscuit_attenuate_ttl: int | None = None,
     biscuit_public_key_hex: str | None = None,
     biscuit_public_key_file: str | None = None,
-    biscuit_base64url: bool = False,
     biscuit_attenuate_bin: str | None = None,
     biscuit_delegate: bool = False,
     biscuit_delegate_deny: list[str] = BISCUIT_DELEGATE_DENY_OPTION,
@@ -1212,7 +1196,6 @@ def main(
     biscuit_delegate_ttl: int | None = None,
     biscuit_delegate_public_key_hex: str | None = None,
     biscuit_delegate_public_key_file: str | None = None,
-    biscuit_delegate_base64url: bool = False,
     biscuit_delegate_bin: str | None = None,
     biscuit_delegate_handoff: bool = False,
     biscuit_delegate_handoff_topic: str | None = None,
@@ -1285,7 +1268,6 @@ def main(
         biscuit_attenuate_ttl=biscuit_attenuate_ttl,
         biscuit_public_key_hex=biscuit_public_key_hex,
         biscuit_public_key_file=biscuit_public_key_file,
-        biscuit_base64url=biscuit_base64url,
         biscuit_attenuate_bin=biscuit_attenuate_bin,
         biscuit_delegate=biscuit_delegate,
         biscuit_delegate_denies=biscuit_delegate_deny or [],
@@ -1295,7 +1277,6 @@ def main(
         biscuit_delegate_ttl=biscuit_delegate_ttl,
         biscuit_delegate_public_key_hex=biscuit_delegate_public_key_hex,
         biscuit_delegate_public_key_file=biscuit_delegate_public_key_file,
-        biscuit_delegate_base64url=biscuit_delegate_base64url,
         biscuit_delegate_bin=biscuit_delegate_bin,
         biscuit_delegate_handoff=biscuit_delegate_handoff,
         biscuit_delegate_handoff_topic=biscuit_delegate_handoff_topic,

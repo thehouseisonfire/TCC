@@ -88,11 +88,13 @@ impl AuthEngine {
                     _ => AuthError::Invalid(format!("JWT verification failed: {e}")),
                 })
         } else {
-            // Try Biscuit (assuming it's base64 encoded if string)
+            // Try Biscuit (Base64URL-encoded for transport)
             use base64::{Engine as _, engine::general_purpose};
-            let bytes = general_purpose::STANDARD.decode(token).map_err(|e| {
-                AuthError::Invalid(format!("Invalid token format (base64 error: {e})"))
-            })?;
+            let bytes = general_purpose::URL_SAFE_NO_PAD
+                .decode(token)
+                .map_err(|e| {
+                    AuthError::Invalid(format!("Invalid token format (base64url error: {e})"))
+                })?;
 
             // We just return the bytes for now, authorization will happen per topic
             Ok(TokenType::Biscuit {

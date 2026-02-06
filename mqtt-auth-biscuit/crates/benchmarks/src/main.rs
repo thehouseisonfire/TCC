@@ -308,24 +308,27 @@ fn main() {
         .build(&root_keypair)
         .unwrap();
 
-    // We want the token as base64 for the MQTT password field
+    // We want the token as Base64URL for the MQTT password field
     let biscuit_bytes = biscuit_1_block.to_vec().unwrap();
     use base64::{Engine as _, engine::general_purpose};
-    let biscuit_b64 = general_purpose::STANDARD.encode(&biscuit_bytes);
+    let biscuit_b64 = general_purpose::URL_SAFE_NO_PAD.encode(&biscuit_bytes);
 
-    let biscuit_5_b64 = general_purpose::STANDARD.encode(biscuit_5_blocks.to_vec().unwrap());
-    let biscuit_25_b64 = general_purpose::STANDARD.encode(biscuit_25_blocks.to_vec().unwrap());
+    let biscuit_5_b64 = general_purpose::URL_SAFE_NO_PAD.encode(biscuit_5_blocks.to_vec().unwrap());
+    let biscuit_25_b64 =
+        general_purpose::URL_SAFE_NO_PAD.encode(biscuit_25_blocks.to_vec().unwrap());
     let biscuit_delegated_b64 =
-        general_purpose::STANDARD.encode(biscuit_delegated.to_vec().unwrap());
-    let biscuit_deny_b64 = general_purpose::STANDARD.encode(biscuit_deny.to_vec().unwrap());
-    let biscuit_short_b64 = general_purpose::STANDARD.encode(biscuit_short.to_vec().unwrap());
-    let biscuit_handoff_b64 = general_purpose::STANDARD.encode(biscuit_handoff.to_vec().unwrap());
+        general_purpose::URL_SAFE_NO_PAD.encode(biscuit_delegated.to_vec().unwrap());
+    let biscuit_deny_b64 = general_purpose::URL_SAFE_NO_PAD.encode(biscuit_deny.to_vec().unwrap());
+    let biscuit_short_b64 =
+        general_purpose::URL_SAFE_NO_PAD.encode(biscuit_short.to_vec().unwrap());
+    let biscuit_handoff_b64 =
+        general_purpose::URL_SAFE_NO_PAD.encode(biscuit_handoff.to_vec().unwrap());
     let biscuit_complex_low_b64 =
-        general_purpose::STANDARD.encode(biscuit_complex_low.to_vec().unwrap());
+        general_purpose::URL_SAFE_NO_PAD.encode(biscuit_complex_low.to_vec().unwrap());
     let biscuit_complex_med_b64 =
-        general_purpose::STANDARD.encode(biscuit_complex_med.to_vec().unwrap());
+        general_purpose::URL_SAFE_NO_PAD.encode(biscuit_complex_med.to_vec().unwrap());
     let biscuit_complex_high_b64 =
-        general_purpose::STANDARD.encode(biscuit_complex_high.to_vec().unwrap());
+        general_purpose::URL_SAFE_NO_PAD.encode(biscuit_complex_high.to_vec().unwrap());
 
     let biscuit_pubkey_hex = hex::encode(root_keypair.public().to_bytes());
     std::fs::write("docker/biscuit_public.key", biscuit_pubkey_hex.as_bytes()).unwrap();

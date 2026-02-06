@@ -443,23 +443,25 @@ machine and record the first results/known issues).
     - [ ] At least one scenario run captured for each QoS level and mixed
       configurations
 
-- [ ] **Issue 18: Avoid Base64 encoding for Biscuit tokens (use native bytes /
-   Protobuf wire format)**
+- [ ] **Issue 18: Avoid Base64URL encoding for Biscuit tokens where possible (use native
+   Protobuf format)**
   - Goal: Stop wrapping Biscuit tokens in Base64 for transport where possible,
     using the token's native binary serialization.
-  - Current state: `token-issuer` can emit Base64URL (parity flag), but the
-    plugin still expects Base64 `STANDARD` in `auth.rs`, and MQTT CONNECT uses
-    string password transport only (no binary AUTH data path).
-  - Investigation note: confirm whether `biscuit-auth` serialization
-    (`Biscuit::to_vec`) is already Protobuf-encoded on the wire (expected), and
-    whether Base64 is currently only a _transport_ layer artifact.
+  - Current state: `token-issuer` can emit Base64URL, and the plugin expects
+    Base64URL in `auth.rs`. MQTT CONNECT uses string password transport only
+    (no binary AUTH data path).
+  - `biscuit-auth` serialization (`Biscuit::to_vec`) is already Protobuf-encoded on the wire.
+  - **Technical constraint**: Paho MQTT Python requires the password field to be
+    string-encoded (null-terminated), so the only cases to use Biscuit's native
+    protobuf encoding are those using the AUTH packet (such as with re-authentication)
+    instead of the CONNECT password field.
   - Rationale: Base64 inflates size and may bias MTU/fragmentation experiments
     and JWT-vs-Biscuit parity.
   - Deliverable:
     - Confirm the underlying Biscuit serialization format used by `biscuit-auth`
       (and document it)
     - Add a transport mode option for Biscuit credentials:
-      - `biscuit_transport=base64` (current behavior, CONNECT password
+      - `biscuit_transport=base64url` (current behavior, CONNECT password
         compatible)
       - `biscuit_transport=mqtt5_auth_data` (binary auth data for MQTT v5
         enhanced auth)

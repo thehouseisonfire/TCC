@@ -117,7 +117,6 @@ struct IssuerConfig {
     biscuit_keypair: KeyPair,
     jwt_no_default_roles: bool,
     jwt_no_default_grants: bool,
-    biscuit_base64url: bool,
     tls_config: Option<Arc<ServerConfig>>,
 }
 
@@ -338,11 +337,7 @@ fn handle_biscuit(req: BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<TokenR
     let bytes = biscuit
         .to_vec()
         .map_err(|e| format!("biscuit encode: {e}"))?;
-    let token = if cfg.biscuit_base64url {
-        general_purpose::URL_SAFE_NO_PAD.encode(&bytes)
-    } else {
-        general_purpose::STANDARD.encode(&bytes)
-    };
+    let token = general_purpose::URL_SAFE_NO_PAD.encode(&bytes);
 
     Ok(TokenResponse {
         token,
@@ -439,7 +434,6 @@ async fn main() {
     let allow_default_keys = env_flag("TOKEN_ISSUER_ALLOW_DEFAULT_KEYS");
     let jwt_no_default_roles = env_flag("JWT_NO_DEFAULT_ROLES");
     let jwt_no_default_grants = env_flag("JWT_NO_DEFAULT_GRANTS");
-    let biscuit_base64url = env_flag("BISCUIT_BASE64URL");
     let tls_enabled = env_flag("TOKEN_ISSUER_TLS");
 
     let (jwt_alg, jwt_key, jwt_alg_label, jwt_default_issuer, jwt_default_audience) =
@@ -470,7 +464,6 @@ async fn main() {
         biscuit_keypair,
         jwt_no_default_roles,
         jwt_no_default_grants,
-        biscuit_base64url,
         tls_config: match load_tls_config(tls_enabled) {
             Ok(cfg) => cfg,
             Err(err) => {

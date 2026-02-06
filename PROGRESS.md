@@ -672,16 +672,6 @@ machine and record the first results/known issues).
 
 ## 9) Completed Issues (Backlog)
 
-- [x] **Issue 20: Define CONTROL callback semantics + enforcement paths** — **COMPLETED 2026-02-06**
-  - **Summary**: Implemented complete `MOSQ_EVT_CONTROL` callback with proper control-plane semantics, topic gating, and comprehensive documentation.
-  - **Deliverables**:
-    - **Topic gating**: Added `$CONTROL/` prefix check with `MOSQ_ERR_PLUGIN_DEFER` for non-control topics
-    - **Dedicated access flag**: Uses `MOSQ_ACL_CONTROL` (0x08) for control-plane authorization
-    - **Comprehensive documentation**: Added detailed rustdoc covering authorization flow and enforcement variants
-    - **Benchmark scenarios**: Added 4 CONTROL scenarios (KICK-REAUTH and ACL-READ-NOTIFY variants for JWT/Biscuit)
-    - **Unit tests**: Added `control_callback_defers_non_control_topics` test
-  - **Code Pointers**: @/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/lib.rs#1001-1141
-
 - [x] **Issue 1: Add Dynamic Security module comparison**
   - **Completed**: Full Dynamic Security module implementation with JSON-based policy loading, role-based access control, and comprehensive ACL support. Added anonymous access, benchmark scenarios, and Docker configurations. Provides production-grade comparison against token-based approaches.
 
@@ -761,6 +751,16 @@ machine and record the first results/known issues).
 - [x] **Issue 17: Implement comprehensive QoS configuration and mixing features**
   - **Completed**: Added full QoS 0/1/2 support with configurable per-scenario QoS levels and mixed QoS workload distribution.
   - **Summary**: Implemented QoS distribution parsing (`0:0.6,1:0.3,2:0.1` format) in `loadgen.py` with weighted random selection for realistic traffic patterns. Added `--qos-distribution` CLI option and `qos_distribution` field to `WorkerConfig`. Fixed `BASE-01` to use QoS 0 as required. Added new scenarios: `QOS0-BASE-01`, `QOS2-JWT`, `QOS2-BISCUIT`, `QOS-MIXED-JWT`, `QOS-MIXED-BISCUIT` (60% QoS 0, 30% QoS 1, 10% QoS 2). Updated `metrics_collector.py` to support configurable QoS. Subscribe operations use effective QoS (max of distribution) to ensure reliable fan-out delivery. All QoS infrastructure is ready for experimental runs.
+
+- [x] **Issue 20: Define CONTROL callback semantics + enforcement paths** — **COMPLETED 2026-02-06**
+  - **Summary**: Implemented complete `MOSQ_EVT_CONTROL` callback with proper control-plane semantics, topic gating, and comprehensive documentation.
+  - **Deliverables**:
+    - **Topic gating**: Added `$CONTROL/` prefix check with `MOSQ_ERR_PLUGIN_DEFER` for non-control topics
+    - **Dedicated access flag**: Uses `MOSQ_ACL_CONTROL` (0x08) for control-plane authorization
+    - **Comprehensive documentation**: Added detailed rustdoc covering authorization flow and enforcement variants
+    - **Benchmark scenarios**: Added 4 CONTROL scenarios (KICK-REAUTH and ACL-READ-NOTIFY variants for JWT/Biscuit)
+    - **Unit tests**: Added `control_callback_defers_non_control_topics` test
+  - **Code Pointers**: @/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/lib.rs#1001-1141
 
 - [x] **Issue 20.1: Verify ACL_CHECK subtype handling across policy modes**
   - **Summary**: Added `MOSQ_ACL_CONTROL` constant (0x08) for control-plane access; fixed `control_callback` hardcoded `access: 2` → `MOSQ_ACL_CONTROL`; updated `access_to_operation()` to map 0x08 → "control"; added comprehensive unit tests for all ACL subtypes (READ/WRITE/SUBSCRIBE/CONTROL) with priority ordering (WRITE > SUBSCRIBE > CONTROL > READ), bitmask combinations, and edge cases. All 7 policy modes verified to correctly handle distinct ACL subtypes.

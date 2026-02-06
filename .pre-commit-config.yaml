@@ -9,7 +9,8 @@ repos:
         stages: [commit, push]
       - id: cargo-fmt
         name: cargo fmt
-        entry: cargo fmt --all --manifest-path mqtt-auth-biscuit/Cargo.toml
+        entry: >
+          bash -c 'cargo fmt --all --manifest-path mqtt-auth-biscuit/Cargo.toml || true; cargo fmt --all --manifest-path mqtt-auth-biscuit/Cargo.toml -- --check'
         language: system
         pass_filenames: false
         stages: [commit, push]

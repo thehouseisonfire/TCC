@@ -347,6 +347,7 @@ machine and record the first results/known issues).
 12. Issue 31: Control-triggered kick/re-auth
 13. Issue 32: Control-triggered ACL_READ + notify
 14. Issue 33: Enhance HTTP policy expressiveness for parity
+15. Issue 35: Add Dynamic Security command payloads to CONTROL scenarios
 
 ---
 
@@ -651,6 +652,21 @@ machine and record the first results/known issues).
   - Deliverable:
     - Notification topic publishing (e.g., `system_notification/<client_id>`)
     - Scenario capturing denial after privilege reduction
+
+- [ ] **Issue 35: Add Dynamic Security command payloads to CONTROL scenarios**
+  - Goal: The CONTROL scenarios (CONTROL-KICK-REAUTH-* and CONTROL-ACL-READ-NOTIFY-*)
+    currently publish to `$CONTROL/dynamic-security/v1` without actual Dynamic Security
+    command payloads (e.g., `{"commands": [{"command": "createRole", ...}]}`).
+  - Current state: Scenarios measure control message authorization overhead only;
+    they do not exercise actual policy modifications via Dynamic Security commands.
+  - Deliverable:
+    - Add Dynamic Security JSON command payloads to CONTROL scenarios for actual
+      role/ACL modifications (e.g., createRole, deleteRole, addGroupClient)
+    - Document whether scenarios measure authorization overhead only vs. end-to-end
+      policy churn with actual Dynamic Security state changes
+    - Consider adding separate CONTROL-OVERHEAD (authorization only) and
+      CONTROL-CHURN (actual policy modifications) scenario variants
+    - Ensure JWT/Biscuit parity for both overhead and churn scenarios
 
 ---
 

@@ -5,4 +5,5 @@ pandas-stubs
 pydantic
 typer
 rich
+types-httpx
 paho-mqtt

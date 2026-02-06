@@ -258,7 +258,7 @@ def check_network_validity(
 
     all_passed = all(checks.values())
 
-    assessment = {
+    assessment: dict[str, Any] = {
         "valid": all_passed,
         "checks": checks,
         "metrics": {
@@ -321,6 +321,8 @@ def run_baseline_with_retry(
             return result
 
     # All attempts failed
+    if last_result is None:
+        return {"error": "All attempts failed", "attempts": retries + 1}
     last_result["attempts"] = retries + 1
     last_result["all_attempts_failed"] = True
     return last_result

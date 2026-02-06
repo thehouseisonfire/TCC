@@ -84,7 +84,7 @@ def check_perf_installation() -> dict[str, Any]:
     Returns:
         Dictionary with installation status and version info
     """
-    result = {
+    result: dict[str, Any] = {
         "installed": False,
         "version": None,
         "path": None,
@@ -204,7 +204,7 @@ def _check_perf_permissions(perf_path: str) -> dict[str, Any]:
     Returns:
         Dictionary with permission status and recommendations
     """
-    result = {
+    result: dict[str, Any] = {
         "needs_sudo": True,
         "paranoid_level": None,
         "test_result": None,
@@ -544,7 +544,7 @@ def run_perf_record(
     if config is None:
         config = PerfConfig()
 
-    result = {
+    result: dict[str, Any] = {
         "success": False,
         "pid": target_pid,
         "perf_data_file": None,
@@ -642,7 +642,7 @@ def profile_mosquitto_container(
     if config is None:
         config = PerfConfig()
 
-    result = {
+    result: dict[str, Any] = {
         "success": False,
         "container_name": container_name,
         "container_pid": None,

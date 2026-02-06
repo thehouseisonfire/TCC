@@ -91,7 +91,7 @@ def main(
     require_cmd("cargo")
     check_paho()
 
-    compose_bin = detect_compose_bin(compose_bin)
+    compose_cmd = detect_compose_bin(compose_bin)
     compose_files = ["docker/docker-compose.yml"]
     if tls:
         compose_files.append("docker/docker-compose.tls.yml")
@@ -100,12 +100,12 @@ def main(
         if no_cleanup:
             return
         logger.info("Cleaning up Docker services...")
-        cmd = compose_bin + compose_args(compose_files) + ["down"]
+        cmd = compose_cmd + compose_args(compose_files) + ["down"]
         subprocess.run(cmd, cwd=WORKDIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     atexit.register(cleanup)
 
-    logger.info("Using docker compose: %s", " ".join(compose_bin))
+    logger.info("Using docker compose: %s", " ".join(compose_cmd))
 
     if not skip_build:
         logger.info("Building plugin...")
@@ -149,7 +149,7 @@ def main(
 
     logger.info("Running scenarios...")
     env = os.environ.copy()
-    env["DOCKER_COMPOSE_BIN"] = " ".join(compose_bin)
+    env["DOCKER_COMPOSE_BIN"] = " ".join(compose_cmd)
     run(["python3", "benchmarks/run_scenarios.py", *run_args], cwd=WORKDIR, env=env)
 
 

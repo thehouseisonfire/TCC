@@ -40,7 +40,8 @@ def query_prometheus_debug(query):
     """Query Prometheus with debug output and timing."""
     try:
         start_time = time.time()
-        with httpx.Client(timeout=5.0, http2=True) as client:
+        transport = httpx.HTTPTransport(http1=False, http2=True)
+        with httpx.Client(timeout=5.0, transport=transport) as client:
             resp = client.get("http://localhost:9090/api/v1/query", params={"query": query})
             resp.raise_for_status()
             result = resp.json()

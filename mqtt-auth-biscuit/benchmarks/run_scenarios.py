@@ -132,9 +132,8 @@ def _http_client(ca_file: str | None, insecure: bool) -> httpx.Client:
         verify = False
     elif ca_file:
         verify = ca_file
-    # http2=True enables HTTP/2 (h2c for http://, h2 for https://)
-    # Required for authz-server which uses HTTP/2 prior knowledge (no HTTP/1.1 upgrade)
-    return httpx.Client(verify=verify, timeout=5.0, http2=True)
+    transport = httpx.HTTPTransport(http1=False, http2=True)
+    return httpx.Client(verify=verify, timeout=5.0, transport=transport)
 
 
 def _authz_config(
@@ -177,7 +176,12 @@ CURRENT_DOCKER_COMPOSE_MEM_QUERY = (
 
 
 def _prom_query(base_url: str, query: str, ca_file: str | None, insecure: bool):
-    with _http_client(ca_file, insecure) as client:
+    verify: bool | str = True
+    if insecure:
+        verify = False
+    elif ca_file:
+        verify = ca_file
+    with httpx.Client(verify=verify, timeout=5.0) as client:
         resp = client.get(
             base_url.rstrip("/") + "/api/v1/query",
             params={"query": query},

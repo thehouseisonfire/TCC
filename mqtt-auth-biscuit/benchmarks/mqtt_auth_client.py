@@ -132,7 +132,7 @@ def main(
     auth_method: str = "token",
     token1: str = typer.Option(..., "--token1"),
     token2: str = typer.Option(..., "--token2"),
-    sleep: float = 6.0,
+    sleep: float = 2.0,
     tls: bool = False,
     tls_ca_file: str | None = None,
     tls_insecure: bool = False,

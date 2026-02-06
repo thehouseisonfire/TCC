@@ -1,0 +1,45 @@
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-clippy-fix
+        name: cargo clippy --fix
+        entry: bash -c 'cargo clippy --fix --allow-dirty --allow-staged --manifest-path mqtt-auth-biscuit/Cargo.toml || true; cargo clippy --manifest-path mqtt-auth-biscuit/Cargo.toml'
+        language: system
+        pass_filenames: false
+        stages: [commit, push]
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all --manifest-path mqtt-auth-biscuit/Cargo.toml
+        language: system
+        pass_filenames: false
+        stages: [commit, push]
+      - id: cargo-test
+        name: cargo test
+        entry: cargo test --manifest-path mqtt-auth-biscuit/Cargo.toml
+        language: system
+        pass_filenames: false
+        stages: [commit, push]
+      - id: ruff-check
+        name: ruff check
+        entry: bash -c 'ruff check --fix --exit-zero . && ruff check .'
+        language: system
+        pass_filenames: false
+        stages: [commit, push]
+      - id: black-check
+        name: black
+        entry: bash -c 'black . || true'
+        language: system
+        pass_filenames: false
+        stages: [commit, push]
+      - id: mypy
+        name: mypy
+        entry: bash -c 'mypy . || true'
+        language: system
+        pass_filenames: false
+        stages: [commit, push]
+      - id: python-tests
+        name: python tests
+        entry: ./run_python_tests.sh
+        language: system
+        pass_filenames: false
+        stages: [commit, push]

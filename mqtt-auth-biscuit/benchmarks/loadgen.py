@@ -202,7 +202,8 @@ def _fetch_token(
         verify = False
     elif tls_ca_file:
         verify = tls_ca_file
-    with httpx.Client(verify=verify, timeout=5.0, http2=True) as client:
+    transport = httpx.HTTPTransport(http1=False, http2=True)
+    with httpx.Client(verify=verify, timeout=5.0, transport=transport) as client:
         resp = client.post(
             issuer_url.rstrip("/") + f"/{kind}",
             json=payload,
@@ -349,10 +350,10 @@ def _publish_delegated_tokens(
     tls_insecure: bool,
 ) -> list[str]:
     errors: list[str] = []
-    client = mqtt.Client(
-        mqtt.CallbackAPIVersion.VERSION2,
+    client = cast(Any, mqtt.Client)(
         client_id="delegation_master",
         protocol=cast(Any, protocol),
+        callback_api_version=cast(Any, mqtt.CallbackAPIVersion.VERSION2),
     )
     client.username_pw_set(username, password)
     if tls_enabled:
@@ -415,10 +416,10 @@ def _receive_delegated_token(
             token_holder["token"] = token
             event.set()
 
-    client = mqtt.Client(
-        mqtt.CallbackAPIVersion.VERSION2,
+    client = cast(Any, mqtt.Client)(
         client_id=f"handoff_{cfg.client_id}",
         protocol=cast(Any, cfg.protocol),
+        callback_api_version=cast(Any, mqtt.CallbackAPIVersion.VERSION2),
     )
     client.user_data_set(token_holder)
     client.username_pw_set(cfg.username, cfg.biscuit_delegate_handoff_token)
@@ -503,10 +504,10 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
             except Exception:
                 errors.append("message_parse_failed")
 
-        client = mqtt.Client(
-            mqtt.CallbackAPIVersion.VERSION2,
+        client = cast(Any, mqtt.Client)(
             client_id=cfg.client_id,
             protocol=cast(Any, cfg.protocol),
+            callback_api_version=cast(Any, mqtt.CallbackAPIVersion.VERSION2),
         )
         client.user_data_set(userdata)
         client.username_pw_set(cfg.username, password)
@@ -787,10 +788,10 @@ def _run_fanout_publisher(
     errors: list[str] = []
     qos_rng = np.random.default_rng()
 
-    client = mqtt.Client(
-        mqtt.CallbackAPIVersion.VERSION2,
+    client = cast(Any, mqtt.Client)(
         client_id=client_id,
         protocol=cast(Any, protocol),
+        callback_api_version=cast(Any, mqtt.CallbackAPIVersion.VERSION2),
     )
     client.username_pw_set(username, password)
     if tls_enabled:
@@ -905,7 +906,7 @@ def run_load(
     handoff_nonce = uuid.uuid4().hex if biscuit_delegate_handoff else None
     if biscuit_delegate_handoff and not biscuit_delegate_handoff_token:
         raise ValueError("biscuit_delegate_handoff_token is required")
-    if biscuit_delegate_handoff_topic is None:
+    if biscuit_delegate_handoff and biscuit_delegate_handoff_topic is None:
         raise ValueError("biscuit_delegate_handoff_topic is required")
 
     delegated_tokens_by_client: dict[str, str] = {}

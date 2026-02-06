@@ -1,6 +1,7 @@
 import json
 import statistics
 import time
+from typing import Any, cast
 
 import paho.mqtt.client as mqtt
 import typer
@@ -32,7 +33,10 @@ def run_benchmark(
     def on_publish(client, userdata, mid, reason_code=None, properties=None):
         latencies.append(time.time() - userdata["start_time"])
 
-    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="client_1")
+    client = cast(Any, mqtt.Client)(
+        client_id="client_1",
+        callback_api_version=cast(Any, mqtt.CallbackAPIVersion.VERSION2),
+    )
     client.username_pw_set(username, password)
     client.on_connect = on_connect
     client.on_publish = on_publish

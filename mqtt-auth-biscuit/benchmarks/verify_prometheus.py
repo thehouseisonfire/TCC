@@ -35,7 +35,8 @@ def query_prometheus(query):
     """Query Prometheus and return the result."""
     try:
         url = f"http://localhost:9090/api/v1/query?query={urllib.parse.quote(query, safe='')}"
-        with httpx.Client(timeout=5.0, http2=True) as client:
+        transport = httpx.HTTPTransport(http1=False, http2=True)
+        with httpx.Client(timeout=5.0, transport=transport) as client:
             resp = client.get(url)
             resp.raise_for_status()
             return resp.json()

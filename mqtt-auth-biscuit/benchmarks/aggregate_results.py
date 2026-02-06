@@ -26,7 +26,7 @@ METRIC_FIELDS = [
 def _safe_float(val):
     try:
         return float(val)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -118,7 +118,7 @@ def _extract_prom_value(snap, metric):
         if not results:
             return None
         return _safe_float(results[0]["value"][1])
-    except (KeyError, IndexError, TypeError):
+    except KeyError, IndexError, TypeError:
         return None
 
 

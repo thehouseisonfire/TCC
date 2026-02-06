@@ -25,26 +25,39 @@ logger = get_logger(__name__)
 app = typer.Typer(add_completion=False)
 
 
-def _http_client(ca_file: str | None, insecure: bool) -> httpx.Client:
+def _http_client(
+    ca_file: str | None,
+    insecure: bool,
+    h2_prior_knowledge: bool = False,
+) -> httpx.Client:
     verify: bool | str = True
     if insecure:
         verify = False
     elif ca_file:
         verify = ca_file
-    # http2=True enables HTTP/2 (h2c for http://, h2 for https://)
-    # Required for authz-server which uses HTTP/2 prior knowledge (no HTTP/1.1 upgrade)
-    return httpx.Client(verify=verify, timeout=5.0, http2=True)
+    transport = httpx.HTTPTransport(http1=False, http2=True)
+    return httpx.Client(verify=verify, timeout=5.0, transport=transport)
 
 
-def _http_get(url: str, ca_file: str | None, insecure: bool):
-    with _http_client(ca_file, insecure) as client:
+def _http_get(
+    url: str,
+    ca_file: str | None,
+    insecure: bool,
+    h2_prior_knowledge: bool = False,
+):
+    with _http_client(ca_file, insecure, h2_prior_knowledge=h2_prior_knowledge) as client:
         resp = client.get(url)
         resp.raise_for_status()
         return resp.status_code, resp.text
 
 
 def _health_check(name: str, base_url: str, ca_file: str | None, insecure: bool):
-    status, body = _http_get(base_url.rstrip("/") + "/health", ca_file, insecure)
+    status, body = _http_get(
+        base_url.rstrip("/") + "/health",
+        ca_file,
+        insecure,
+        h2_prior_knowledge=True,
+    )
     if status != 200:
         raise SystemExit(f"{name} health check failed: HTTP {status}")
     try:
@@ -225,7 +238,7 @@ def main(
         results["mqtt5_auth"] = _run_mqtt5_auth(
             mqtt_host,
             mqtt_port,
-            str(tokens_data.get("jwt_short", tokens_data["jwt"])),
+            str(tokens_data["jwt"]),
             str(tokens_data["jwt"]),
             tls,
             tls_ca,

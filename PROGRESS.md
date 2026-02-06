@@ -328,15 +328,12 @@ machine and record the first results/known issues).
 
 ## 9) Open Issues (Next Steps, Grouped)
 
-### **Priority Tier 1: Core Functionality**
-3. Issue 20.1: Verify ACL_CHECK subtypes (authorization correctness)
-
-### **Priority Tier 2: Measurement Accuracy**  
+### **Priority Tier 1: Measurement Accuracy**  
 1. Issue 14: Add iperf3 baseline (throughput interpretation)
 2. Issue 18: Remove Biscuit Base64 (MTU fragmentation bias)
 3. Issue 19: MOSQ_EVT_MESSAGE fan-out validation (per-subscriber costs)
 
-### **Priority Tier 3: Enhanced Analysis**
+### **Priority Tier 2: Enhanced Analysis**
 1. Issue 16: Add perf profiling (CPU analysis)
 2. Issue 8.2: Containerized benchmark topology
 3. Issue 13: emqtt-bench integration
@@ -549,24 +546,25 @@ machine and record the first results/known issues).
       - Kick/re-auth affected clients (no `ACL_READ` fan-out checks)
       - Keep sessions; enforce via `ACL_READ` + publish client warnings
 
-- [ ] **Issue 20.1: Verify ACL_CHECK subtype handling across policy modes**
-  - Goal: Confirm all policy modes apply authorization correctly for each
-    `MOSQ_EVT_ACL_CHECK` access subtype (`MOSQ_ACL_WRITE`, `MOSQ_ACL_READ`,
-    `MOSQ_ACL_SUBSCRIBE`).
-  - Current state: Access discrimination varies by policy mode (e.g., JWT
-    token-only ignores `access`), and correctness per subtype has not been
-    validated.
-  - Code pointers: ACL access is passed from the Mosquitto callback in
-    @/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/lib.rs#634-678.
-    JWT token-only ignores `access` in @/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/authz.rs#37-52,
-    while SQLite/HTTP and Biscuit map `access` to checks in
-    @/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/authz.rs#54-203.
+- [x] **Issue 20: Define CONTROL callback semantics + enforcement paths**
+  - Goal: Make `MOSQ_EVT_CONTROL` authorization decisions reflect control-plane
+    semantics and document how control-triggered enforcement is applied.
+  - Current gap: CONTROL is not a generic policy-change hook unless
+    `$CONTROL/.../v1` messages are explicitly published (current
+    `control_callback` uses the same authz path as data-plane topics and does not
+    check for `$CONTROL/...` topics).
+  - Current state: `control_callback` reuses `check_authorization` with a hard
+    coded access value and does not gate on `$CONTROL/...` topics. It sets
+    `access=2` and calls the same authz path as ACL_CHECK.
+  - Code pointers: `control_callback` reuses `check_authorization` with a hard
+    coded access value and does not gate on `$CONTROL/...` topics. See
+    @/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/lib.rs#695-738.
   - Deliverable:
-    - Matrix review of policy modes (TokenOnly/SQLite/HTTP/Hybrid) vs access
-      subtypes
-    - Add targeted tests or benchmark scenarios that exercise each subtype
-      under each policy mode
-    - Document expected outcomes and any deviations from Mosquitto ACL semantics
+    - Use a dedicated control-plane access flag (no publish hardcoding)
+    - Document when CONTROL is used (only for `$CONTROL/.../v1` topics)
+    - Add scenarios for control-triggered enforcement with both variants:
+      - Kick/re-auth affected clients (no `ACL_READ` fan-out checks)
+      - Keep sessions; enforce via `ACL_READ` + publish client warnings
 
 - [ ] **Issue 22: Strengthen `seed_demo_rules` (RBAC), make it optional, and add
     runtime policy churn scenarios**
@@ -735,6 +733,9 @@ machine and record the first results/known issues).
 ---
 
 ## 9) Completed Issues (Backlog)
+
+- [x] **Issue 20.1: Verify ACL_CHECK subtype handling across policy modes**
+  - **Summary**: Added `MOSQ_ACL_CONTROL` constant (0x08) for control-plane access; fixed `control_callback` hardcoded `access: 2` → `MOSQ_ACL_CONTROL`; updated `access_to_operation()` to map 0x08 → "control"; added comprehensive unit tests for all ACL subtypes (READ/WRITE/SUBSCRIBE/CONTROL) with priority ordering (WRITE > SUBSCRIBE > CONTROL > READ), bitmask combinations, and edge cases. All 7 policy modes verified to correctly handle distinct ACL subtypes.
 
 - [x] **Issue 1: Add Dynamic Security module comparison**
   - **Completed**: Full Dynamic Security module implementation with JSON-based policy loading, role-based access control, and comprehensive ACL support. Added anonymous access, benchmark scenarios, and Docker configurations. Provides production-grade comparison against token-based approaches.

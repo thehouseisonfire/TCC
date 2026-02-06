@@ -126,6 +126,17 @@ pub const MOSQ_ERR_ACL_DENIED: c_int = 12;
 pub const MOSQ_ERR_PLUGIN_DEFER: c_int = 17;
 pub const MOSQ_ERR_AUTH_CONTINUE: c_int = -4;
 
+// Mosquitto ACL access constants
+// Reference: mosquitto.h header - MOSQ_ACL_READ=1, MOSQ_ACL_WRITE=2, MOSQ_ACL_SUBSCRIBE=4
+pub const MOSQ_ACL_READ: c_int = 0x01;
+pub const MOSQ_ACL_WRITE: c_int = 0x02;
+pub const MOSQ_ACL_SUBSCRIBE: c_int = 0x04;
+
+/// Control-plane access flag for $CONTROL topic authorization.
+/// This is distinct from data-plane ACL types (READ/WRITE/SUBSCRIBE)
+/// and allows policy engines to apply different rules for control operations.
+pub const MOSQ_ACL_CONTROL: c_int = 0x08;
+
 // MQTT v5 reason codes (subset needed for auth signaling)
 pub const MQTT_RC_CONTINUE_AUTHENTICATION: u8 = 24;
 pub const MQTT_RC_REAUTHENTICATE: u8 = 25;
@@ -1012,7 +1023,7 @@ extern "C" fn control_callback(
             username: username.as_deref(),
             client_id: &client_id,
             topic: &topic,
-            access: 2,
+            access: MOSQ_ACL_CONTROL,
             biscuit_root_key: &state.config.biscuit.root_public_key,
             policy_mode: state.config.policy.mode,
             sqlite_policy: state.sqlite_policy.as_ref(),

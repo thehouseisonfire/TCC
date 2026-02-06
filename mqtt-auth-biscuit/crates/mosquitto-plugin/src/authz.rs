@@ -9,12 +9,14 @@ use biscuit_auth::PublicKey as BiscuitPublicKey;
 use chrono::Utc;
 
 // Mosquitto ACL access bitmask mapping:
-// MOSQ_ACL_READ=0x01, MOSQ_ACL_WRITE=0x02, MOSQ_ACL_SUBSCRIBE=0x04.
+// MOSQ_ACL_READ=0x01, MOSQ_ACL_WRITE=0x02, MOSQ_ACL_SUBSCRIBE=0x04, MOSQ_ACL_CONTROL=0x08
 fn access_to_operation(access: i32) -> &'static str {
     if (access & 0x02) != 0 {
         "publish"
     } else if (access & 0x04) != 0 {
         "subscribe"
+    } else if (access & 0x08) != 0 {
+        "control"
     } else {
         "read"
     }
@@ -211,12 +213,60 @@ mod tests {
 
     #[test]
     fn access_to_operation_bitmask_priority() {
-        assert_eq!(super::access_to_operation(0x02), "publish");
-        assert_eq!(super::access_to_operation(0x04), "subscribe");
-        assert_eq!(super::access_to_operation(0x01), "read");
-        assert_eq!(super::access_to_operation(0x00), "read");
-        assert_eq!(super::access_to_operation(0x02 | 0x04), "publish");
-        assert_eq!(super::access_to_operation(0x04 | 0x01), "subscribe");
+        // Test individual access types
+        assert_eq!(super::access_to_operation(0x01), "read"); // MOSQ_ACL_READ
+        assert_eq!(super::access_to_operation(0x02), "publish"); // MOSQ_ACL_WRITE
+        assert_eq!(super::access_to_operation(0x04), "subscribe"); // MOSQ_ACL_SUBSCRIBE
+        assert_eq!(super::access_to_operation(0x08), "control"); // MOSQ_ACL_CONTROL
+
+        // Test priority: WRITE > SUBSCRIBE > CONTROL > READ
+        assert_eq!(super::access_to_operation(0x02 | 0x04), "publish"); // WRITE | SUBSCRIBE
+        assert_eq!(super::access_to_operation(0x04 | 0x01), "subscribe"); // SUBSCRIBE | READ
+        assert_eq!(super::access_to_operation(0x08 | 0x01), "control"); // CONTROL | READ
+        assert_eq!(super::access_to_operation(0x02 | 0x08), "publish"); // WRITE | CONTROL
+        assert_eq!(super::access_to_operation(0x04 | 0x08), "subscribe"); // SUBSCRIBE | CONTROL
+        assert_eq!(super::access_to_operation(0x02 | 0x04 | 0x08), "publish"); // All three
+
+        // Test edge cases
+        assert_eq!(super::access_to_operation(0x00), "read"); // No access flags defaults to read
+        assert_eq!(super::access_to_operation(0x10), "read"); // Unknown flags default to read
+        assert_eq!(super::access_to_operation(0xFF), "publish"); // All flags including WRITE
+    }
+
+    #[test]
+    fn grants_allow_control_operations() {
+        use crate::jwt_handler::JwtGrant;
+        let grants = vec![
+            JwtGrant {
+                op: "control".to_string(),
+                res: "$CONTROL/#".to_string(),
+            },
+            JwtGrant {
+                op: "publish".to_string(),
+                res: "sensors/temp".to_string(),
+            },
+        ];
+        assert!(super::grants_allow(
+            &grants,
+            AuthContext {
+                operation: "control",
+                topic: "$CONTROL/dynsec/v1"
+            }
+        ));
+        assert!(!super::grants_allow(
+            &grants,
+            AuthContext {
+                operation: "control",
+                topic: "sensors/temp"
+            }
+        ));
+        assert!(super::grants_allow(
+            &grants,
+            AuthContext {
+                operation: "publish",
+                topic: "sensors/temp"
+            }
+        ));
     }
 }
 

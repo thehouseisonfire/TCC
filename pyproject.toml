@@ -35,6 +35,5 @@ select = [
 python_version = "3.14"
 check_untyped_defs = true
 no_implicit_optional = true
-python_executable = ".venv/bin/python"
 exclude = '(\.venv|mosquitto-src)/'
 

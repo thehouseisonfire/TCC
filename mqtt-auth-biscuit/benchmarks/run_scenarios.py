@@ -14,6 +14,13 @@ from benchmarks.iperf3_baseline import (
     run_baseline_with_retry,
 )
 from benchmarks.logging_utils import get_logger, setup_logging
+from benchmarks.perf_profiler import (
+    PerfConfig,
+    check_perf_installation,
+    format_perf_summary,
+    get_default_perf_scenarios,
+    profile_mosquitto_container,
+)
 
 
 def _read_tokens(path: str) -> dict[str, Any]:
@@ -96,8 +103,8 @@ class ScenarioConfig(TypedDict, total=False):
     biscuit_delegate_public_key_hex: str | None
     biscuit_delegate_public_key_file: str | None
     biscuit_delegate_bin: str | None
-    policy_complexity_kind: Literal["block_chain", "datalog"]
-    mqtt5_auth: Mqtt5AuthConfig
+    policy_complexity_kind: Literal["block_chain", "datalog"] | None
+    mqtt5_auth: Mqtt5AuthConfig | None
     restart_mosquitto: bool
     sync_connect: bool
     repeat: int
@@ -510,8 +517,39 @@ def main(
     iperf3_duration: int = typer.Option(5, "--iperf3-duration"),
     iperf3_streams: int = typer.Option(4, "--iperf3-streams"),
     iperf3_min_mbps: float = typer.Option(100.0, "--iperf3-min-mbps"),
+    # perf profiling configuration
+    perf_enabled: bool = typer.Option(False, "--perf/--no-perf"),
+    perf_duration: int = typer.Option(10, "--perf-duration"),
+    perf_sample_rate: int = typer.Option(1000, "--perf-sample-rate"),
+    perf_events: str = typer.Option("cycles,instructions,cache-misses", "--perf-events"),
+    perf_callgraph: bool = typer.Option(True, "--perf-callgraph/--no-perf-callgraph"),
+    perf_scenarios: str | None = typer.Option(
+        None,
+        "--perf-scenarios",
+        help="Comma-separated list of scenarios to profile (default: key scenarios)",
+    ),
+    perf_output_dir: str = typer.Option("benchmarks/results/perf", "--perf-output-dir"),
 ):
     setup_logging(log_level)
+
+    # Check perf installation if profiling enabled
+    perf_status: dict[str, Any] = {"enabled": perf_enabled}
+    if perf_enabled:
+        perf_check = check_perf_installation()
+        perf_status["installed"] = perf_check["installed"]
+        perf_status["version"] = perf_check.get("version")
+        if not perf_check["installed"]:
+            logger.warning(
+                "perf profiling requested but not installed: %s", perf_check.get("error")
+            )
+            logger.warning(
+                "Install with: sudo apt-get install linux-tools-common linux-tools-generic"
+            )
+        else:
+            logger.info(
+                "perf profiling enabled (version: %s)", perf_check.get("version", "unknown")
+            )
+            logger.info("Events: %s, Duration: %ds", perf_events, perf_duration)
 
     tokens: dict[str, Any] = _read_tokens(
         os.path.join(os.path.dirname(os.path.dirname(__file__)), tokens_path)
@@ -1248,6 +1286,17 @@ def main(
                 "result": iperf3_baseline_result,
                 "validity": network_validity,
             },
+            "perf_profiling": {
+                "enabled": perf_enabled and perf_status.get("installed", False),
+                "config": {
+                    "duration": perf_duration,
+                    "sample_rate": perf_sample_rate,
+                    "events": perf_events,
+                    "callgraph": perf_callgraph,
+                    "output_dir": perf_output_dir,
+                },
+                "status": perf_status,
+            },
             "runs": [],
         }
 
@@ -1399,7 +1448,54 @@ def main(
             except Exception as e:
                 snap = {"error": str(e)}
 
-            out_payload["runs"].append({"loadgen": res, "resources": snap})
+            # Run perf profiling if enabled and scenario matches filter
+            perf_result: dict[str, Any] = {"enabled": False}
+            if perf_enabled and perf_status.get("installed", False):
+                # Check if this scenario should be profiled
+                profile_this_scenario = True
+                if perf_scenarios:
+                    allowed = [p.strip() for p in perf_scenarios.split(",")]
+                    profile_this_scenario = s["id"] in allowed
+                else:
+                    # Default: profile key scenarios for CPU analysis
+                    default_perf_scenarios = get_default_perf_scenarios()
+                    profile_this_scenario = s["id"] in default_perf_scenarios
+
+                if profile_this_scenario:
+                    logger.info("Running perf profiling for scenario %s", s["id"])
+                    events = perf_events.split(",")
+                    perf_config = PerfConfig(
+                        events=events,
+                        sample_rate=perf_sample_rate,
+                        duration=perf_duration,
+                        output_dir=perf_output_dir,
+                        record_callgraph=perf_callgraph,
+                    )
+                    try:
+                        perf_result = profile_mosquitto_container(
+                            container_name="docker-mosquitto-1",
+                            config=perf_config,
+                        )
+                        if perf_result.get("success"):
+                            logger.info("Perf profiling complete for %s", s["id"])
+                            logger.debug(format_perf_summary(perf_result))
+                        else:
+                            logger.warning(
+                                "Perf profiling failed for %s: %s",
+                                s["id"],
+                                perf_result.get("error", "unknown error"),
+                            )
+                    except Exception as e:
+                        logger.error("Error during perf profiling: %s", e)
+                        perf_result = {"enabled": True, "error": str(e)}
+                else:
+                    perf_result = {
+                        "enabled": True,
+                        "skipped": True,
+                        "reason": "not in profile list",
+                    }
+
+            out_payload["runs"].append({"loadgen": res, "resources": snap, "perf": perf_result})
             if s.get("sleep_between"):
                 time.sleep(float(s["sleep_between"]))
 

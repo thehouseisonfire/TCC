@@ -333,22 +333,21 @@ machine and record the first results/known issues).
 2. Issue 19: MOSQ_EVT_MESSAGE fan-out validation (per-subscriber costs)
 
 ### **Priority Tier 2: Enhanced Analysis**
-1. Issue 16: Add perf profiling (CPU analysis)
-2. Issue 8.2: Containerized benchmark topology
-3. Issue 13: emqtt-bench integration
-4. Issue 15: tcpdump fragmentation analysis
-5. Issue 20: Define CONTROL callback semantics
-6. Issue 21: Expand Biscuit authorizer (if current template insufficient)
-7. Issue 22: Strengthen SQLite RBAC (if policies too simple)
-8. Issue 23: Proactive client reauthentication
-9. Issue 24: Multi-step enhanced auth decision
-10. Issue 25: Optional ACL_READ full authz flag
-11. Issue 28: Verify static-policy coverage
-12. Issue 29: Anonymous flow scenario
-13. Issue 30: Dynamic-policy ACL_READ fan-out
-14. Issue 31: Control-triggered kick/re-auth
-15. Issue 32: Control-triggered ACL_READ + notify
-16. Issue 33: Enhance HTTP policy expressiveness for parity
+1. Issue 8.2: Containerized benchmark topology
+2. Issue 13: emqtt-bench integration
+3. Issue 15: tcpdump fragmentation analysis
+4. Issue 20: Define CONTROL callback semantics
+5. Issue 21: Expand Biscuit authorizer (if current template insufficient)
+6. Issue 22: Strengthen SQLite RBAC (if policies too simple)
+7. Issue 23: Proactive client reauthentication
+8. Issue 24: Multi-step enhanced auth decision
+9. Issue 25: Optional ACL_READ full authz flag
+10. Issue 28: Verify static-policy coverage
+11. Issue 29: Anonymous flow scenario
+12. Issue 30: Dynamic-policy ACL_READ fan-out
+13. Issue 31: Control-triggered kick/re-auth
+14. Issue 32: Control-triggered ACL_READ + notify
+15. Issue 33: Enhance HTTP policy expressiveness for parity
 
 ---
 
@@ -417,29 +416,7 @@ machine and record the first results/known issues).
     - Packet analysis results included in scenario outputs
     - Correlation of fragmentation data with latency/throughput metrics
 
-- [ ] **Issue 16: Add host-targeted kernel-level performance profiling with
-     perf**
-  - Goal: integrate `perf` for detailed CPU performance analysis of
-    containerized Mosquitto process during token verification and policy
-    evaluation.
-  - Rationale: Container-level metrics may miss important CPU performance
-    characteristics; host-targeted `perf` provides instruction-level profiling
-    needed for understanding computational costs of JWT vs Biscuit verification
-    while maintaining container isolation.
-  - Current state: No `perf` integration or host-targeted profiling exists.
-  - Deliverable:
-    - Host-level `perf` installation and configuration script
-    - Container PID discovery mechanism to find Mosquitto process within
-      container
-    - Performance profiling integration for key scenarios (baseline, policy
-      complexity)
-    - CPU cycle, instruction, and cache miss data collection targeting
-      containerized process
-    - Performance profiling data included in scenario results
-    - Analysis correlating perf data with token type and policy complexity
-    - Documentation of profiling methodology for reproducibility
-
-- [x] **Issue 17: Implement comprehensive QoS configuration and mixing
+- [ ] **Issue 17: Implement comprehensive QoS configuration and mixing
     features**
   - Goal: Add support for different QoS levels (0, 1, 2) and mixed QoS workloads
     to enable comprehensive performance analysis across quality of service
@@ -717,6 +694,24 @@ machine and record the first results/known issues).
 ---
 
 ## 9) Completed Issues (Backlog)
+
+- [x] **Issue 16: Add host-targeted kernel-level performance profiling with perf** — **COMPLETED 2026-02-06**
+  - **Summary**: Implemented comprehensive `perf` integration for detailed CPU performance analysis of containerized Mosquitto during token verification and policy evaluation.
+  - **Deliverables**:
+    - `benchmarks/perf_profiler.py`: Complete perf profiling module with host-level capabilities
+      - Container PID discovery mechanism for targeting Mosquitto process
+      - Hardware event collection (cycles, instructions, cache-misses)
+      - CPI (cycles per instruction) and cache miss rate calculation
+      - Support for call graph recording with `perf record`
+      - Automatic perf binary detection (handles versioned perf_5.x, perf_6.x)
+    - Integration with `run_scenarios.py`:
+      - `--perf` flag to enable profiling
+      - `--perf-duration`, `--perf-sample-rate`, `--perf-events` configuration
+      - `--perf-scenarios` for selective profiling
+      - Default profiling for key scenarios (BASE-01, JWT-01, BIS-01, POLICY-COMPLEX-*)
+    - Results included in scenario JSON output with structured perf data
+    - `benchmarks/PERF_PROFILING.md`: Comprehensive documentation with methodology, interpretation guide, and troubleshooting
+  - **Research Alignment**: Enables H₂/H₃ validation by quantifying computational costs of JWT vs Biscuit verification at instruction level, complementing container-level metrics with PMU hardware counters.
 
 - [x] **Issue 14: Add iperf3 baseline (throughput interpretation)** — **COMPLETED 2026-02-06**
   - **Summary**: Implemented `iperf3` integration to measure nominal channel capacity as specified in ARTICLE.MD methodology. Added `iperf3` service to docker-compose.yml, created `benchmarks/iperf3_baseline.py` module with measurement, parsing, and validity checking functions. Integrated automated baseline measurement into `run_scenarios.py` with CLI options (`--iperf3/--no-iperf3`, `--iperf3-host`, `--iperf3-port`, `--iperf3-duration`, `--iperf3-streams`, `--iperf3-min-mbps`). Network capacity data included in scenario results JSON under `network_baseline` field with throughput, RTT, retransmits, and validity assessment. Warns when network constraints may affect test validity.

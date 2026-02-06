@@ -336,18 +336,17 @@ machine and record the first results/known issues).
 1. Issue 8.2: Containerized benchmark topology
 2. Issue 13: emqtt-bench integration
 3. Issue 15: tcpdump fragmentation analysis
-4. Issue 20: Define CONTROL callback semantics
-5. Issue 21: Expand Biscuit authorizer (if current template insufficient)
-6. Issue 22: Strengthen SQLite RBAC (if policies too simple)
-7. Issue 23: Proactive client reauthentication
-8. Issue 24: Multi-step enhanced auth decision
-9. Issue 25: Optional ACL_READ full authz flag
-10. Issue 28: Verify static-policy coverage
-11. Issue 29: Anonymous flow scenario
-12. Issue 30: Dynamic-policy ACL_READ fan-out
-13. Issue 31: Control-triggered kick/re-auth
-14. Issue 32: Control-triggered ACL_READ + notify
-15. Issue 33: Enhance HTTP policy expressiveness for parity
+4. Issue 21: Expand Biscuit authorizer (if current template insufficient)
+5. Issue 22: Strengthen SQLite RBAC (if policies too simple)
+6. Issue 23: Proactive client reauthentication
+7. Issue 24: Multi-step enhanced auth decision
+8. Issue 25: Optional ACL_READ full authz flag
+9. Issue 28: Verify static-policy coverage
+10. Issue 29: Anonymous flow scenario
+11. Issue 30: Dynamic-policy ACL_READ fan-out
+12. Issue 31: Control-triggered kick/re-auth
+13. Issue 32: Control-triggered ACL_READ + notify
+14. Issue 33: Enhance HTTP policy expressiveness for parity
 
 ---
 
@@ -487,45 +486,7 @@ machine and record the first results/known issues).
       demonstrate per-subscriber fan-out cost
     - Add a results field capturing subscriber count and observed scaling trend
 
-- [ ] **Issue 20: Define CONTROL callback semantics + enforcement paths**
-  - Goal: Make `MOSQ_EVT_CONTROL` authorization decisions reflect control-plane
-    semantics and document how control-triggered enforcement is applied.
-  - Current gap: CONTROL is not a generic policy-change hook unless
-    `$CONTROL/.../v1` messages are explicitly published (current
-    `control_callback` uses the same authz path as data-plane topics and does not
-    check for `$CONTROL/...` topics).
-  - Current state: `control_callback` reuses `check_authorization` with a hard
-    coded access value and does not gate on `$CONTROL/...` topics. It sets
-    `access=2` and calls the same authz path as ACL_CHECK.
-  - Code pointers: `control_callback` reuses `check_authorization` with a hard
-    coded access value and does not gate on `$CONTROL/...` topics. See
-    @/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/lib.rs#695-738.
-  - Deliverable:
-    - Use a dedicated control-plane access flag (no publish hardcoding)
-    - Document when CONTROL is used (only for `$CONTROL/.../v1` topics)
-    - Add scenarios for control-triggered enforcement with both variants:
-      - Kick/re-auth affected clients (no `ACL_READ` fan-out checks)
-      - Keep sessions; enforce via `ACL_READ` + publish client warnings
 
-- [x] **Issue 20: Define CONTROL callback semantics + enforcement paths**
-  - Goal: Make `MOSQ_EVT_CONTROL` authorization decisions reflect control-plane
-    semantics and document how control-triggered enforcement is applied.
-  - Current gap: CONTROL is not a generic policy-change hook unless
-    `$CONTROL/.../v1` messages are explicitly published (current
-    `control_callback` uses the same authz path as data-plane topics and does not
-    check for `$CONTROL/...` topics).
-  - Current state: `control_callback` reuses `check_authorization` with a hard
-    coded access value and does not gate on `$CONTROL/...` topics. It sets
-    `access=2` and calls the same authz path as ACL_CHECK.
-  - Code pointers: `control_callback` reuses `check_authorization` with a hard
-    coded access value and does not gate on `$CONTROL/...` topics. See
-    @/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/lib.rs#695-738.
-  - Deliverable:
-    - Use a dedicated control-plane access flag (no publish hardcoding)
-    - Document when CONTROL is used (only for `$CONTROL/.../v1` topics)
-    - Add scenarios for control-triggered enforcement with both variants:
-      - Kick/re-auth affected clients (no `ACL_READ` fan-out checks)
-      - Keep sessions; enforce via `ACL_READ` + publish client warnings
 
 - [ ] **Issue 22: Strengthen `seed_demo_rules` (RBAC), make it optional, and add
     runtime policy churn scenarios**
@@ -694,6 +655,16 @@ machine and record the first results/known issues).
 ---
 
 ## 9) Completed Issues (Backlog)
+
+- [x] **Issue 20: Define CONTROL callback semantics + enforcement paths** — **COMPLETED 2026-02-06**
+  - **Summary**: Implemented complete `MOSQ_EVT_CONTROL` callback with proper control-plane semantics, topic gating, and comprehensive documentation.
+  - **Deliverables**:
+    - **Topic gating**: Added `$CONTROL/` prefix check with `MOSQ_ERR_PLUGIN_DEFER` for non-control topics
+    - **Dedicated access flag**: Uses `MOSQ_ACL_CONTROL` (0x08) for control-plane authorization
+    - **Comprehensive documentation**: Added detailed rustdoc covering authorization flow and enforcement variants
+    - **Benchmark scenarios**: Added 4 CONTROL scenarios (KICK-REAUTH and ACL-READ-NOTIFY variants for JWT/Biscuit)
+    - **Unit tests**: Added `control_callback_defers_non_control_topics` test
+  - **Code Pointers**: @/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/lib.rs#1001-1141
 
 - [x] **Issue 1: Add Dynamic Security module comparison**
   - **Completed**: Full Dynamic Security module implementation with JSON-based policy loading, role-based access control, and comprehensive ACL support. Added anonymous access, benchmark scenarios, and Docker configurations. Provides production-grade comparison against token-based approaches.

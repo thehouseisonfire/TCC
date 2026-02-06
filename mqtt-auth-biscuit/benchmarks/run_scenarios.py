@@ -1034,6 +1034,69 @@ def main(
                     "docker/dynamic-security-fanout-churn.json",
                 ],
             },
+            # Issue 20: Control-Triggered Enforcement Scenarios
+            # These scenarios exercise the $CONTROL callback semantics and measure
+            # control-plane overhead vs data-plane operations.
+            "CONTROL-KICK-REAUTH-JWT": {
+                "mosquitto_conf": "./mosquitto_dynsec.conf",
+                "username": "admin",
+                "password": tokens["jwt_admin"],
+                "topic": "$CONTROL/dynamic-security/v1",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 256,
+                "qos": 1,
+                "dynsec_config": "docker/dynamic-security.json",
+                "repeat": 2,
+                "sleep_between": 3,
+            },
+            "CONTROL-KICK-REAUTH-BISCUIT": {
+                "mosquitto_conf": "./mosquitto_dynsec.conf",
+                "username": "admin",
+                "password": tokens["biscuit_admin"],
+                "topic": "$CONTROL/dynamic-security/v1",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 256,
+                "qos": 1,
+                "dynsec_config": "docker/dynamic-security.json",
+                "repeat": 2,
+                "sleep_between": 3,
+            },
+            "CONTROL-ACL-READ-NOTIFY-JWT": {
+                "mosquitto_conf": "./mosquitto_dynsec.conf",
+                "username": "admin",
+                "password": tokens["jwt_admin"],
+                "topic": "$CONTROL/dynamic-security/v1",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 256,
+                "qos": 1,
+                "fanout_publisher_username": "admin",
+                "fanout_publisher_password": tokens["jwt_admin"],
+                "mode": "fanout",
+                "fanout_topic": "system/notifications/acl-change",
+                "dynsec_config": "docker/dynamic-security.json",
+                "repeat": 2,
+                "sleep_between": 3,
+            },
+            "CONTROL-ACL-READ-NOTIFY-BISCUIT": {
+                "mosquitto_conf": "./mosquitto_dynsec.conf",
+                "username": "admin",
+                "password": tokens["biscuit_admin"],
+                "topic": "$CONTROL/dynamic-security/v1",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 256,
+                "qos": 1,
+                "fanout_publisher_username": "admin",
+                "fanout_publisher_password": tokens["biscuit_admin"],
+                "mode": "fanout",
+                "fanout_topic": "system/notifications/acl-change",
+                "dynsec_config": "docker/dynamic-security.json",
+                "repeat": 2,
+                "sleep_between": 3,
+            },
         }
 
         # Add dynamic MTU scenarios
@@ -1105,6 +1168,11 @@ def main(
         logger.info("DYNSEC-READ-FANOUT-CHURN")
         logger.info(
             "STATIC-ACL-JWT, STATIC-ACL-BIS, STATIC-ACL-FANOUT, " "STATIC-ACL-FANOUT-BIS",
+        )
+        # Issue 20: Control-triggered enforcement scenarios
+        logger.info(
+            "CONTROL-KICK-REAUTH-JWT, CONTROL-KICK-REAUTH-BISCUIT, "
+            "CONTROL-ACL-READ-NOTIFY-JWT, CONTROL-ACL-READ-NOTIFY-BISCUIT",
         )
         logger.info("Append -TLS to any scenario id for TLS variants.")
         return

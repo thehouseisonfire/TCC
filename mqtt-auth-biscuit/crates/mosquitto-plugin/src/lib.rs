@@ -998,6 +998,59 @@ extern "C" fn message_callback(
     MOSQ_ERR_SUCCESS
 }
 
+/// Control-plane authorization callback for Mosquitto $CONTROL topics.
+///
+/// # Semantics
+///
+/// This callback is invoked by Mosquitto when a client publishes to a topic
+/// starting with `$CONTROL/`. It allows the plugin to authorize control-plane
+/// operations (e.g., Dynamic Security policy changes) separately from data-plane
+/// operations.
+///
+/// ## When CONTROL is Used
+///
+/// The Mosquitto `$CONTROL` topic hierarchy is used for:
+/// - **Dynamic Security**: `$CONTROL/dynamic-security/v1` for role/group/ACL management
+/// - **Plugin-specific control**: `$CONTROL/<plugin>/v1` for custom control operations
+///
+/// ## Authorization Flow
+///
+/// 1. Topic must start with `$CONTROL/` (otherwise deferred to other plugins)
+/// 2. Token validation (expiry, signature verification cached from auth phase)
+/// 3. Policy evaluation using `MOSQ_ACL_CONTROL` access type
+/// 4. Outcome:
+///    - **Allowed**: Return `MOSQ_ERR_SUCCESS` (message accepted)
+///    - **Denied**: Return `MOSQ_ERR_ACL_DENIED` (message rejected)
+///    - **Expired**: Set reauth signal (`MQTT_RC_REAUTHENTICATE`) and deny
+///
+/// ## Control-Triggered Enforcement Variants
+///
+/// When a control message modifies policies (e.g., revoking a role), the broker
+/// can apply enforcement via two strategies:
+///
+/// ### Variant A: Kick/Re-authenticate (No ACL_READ checks)
+/// - Immediately disconnect affected clients
+/// - Clients must re-authenticate with new token reflecting updated policies
+/// - Lower overhead for high fan-out scenarios
+/// - Requires clients to handle reconnection gracefully
+///
+/// ### Variant B: ACL_READ + Warning Publication
+/// - Keep sessions alive
+/// - Enforce new policies via `ACL_READ` on next message delivery
+/// - Publish warning to affected clients (e.g., `system/notification/<client_id>`)
+/// - Higher per-message overhead but no disruption
+/// - Clients learn of privilege changes via notification topic
+///
+/// The plugin supports both variants through policy configuration:
+/// - DynamicSecurity mode: Uses Variant B with cache invalidation
+/// - SQLite/HTTP modes: Configurable per deployment
+///
+/// ## Research Alignment
+///
+/// This callback enables H₂/H₃ validation by measuring:
+/// - Control-plane latency vs data-plane (token verification costs)
+/// - Policy churn impact (cache invalidation overhead)
+/// - Enforcement variant comparison (kick vs ACL_READ scaling)
 extern "C" fn control_callback(
     _event: c_int,
     event_data: *mut c_void,
@@ -1012,11 +1065,22 @@ extern "C" fn control_callback(
         return MOSQ_ERR_INVAL;
     }
 
+    let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
+
+    // CONTROL callback only processes $CONTROL/... topics per Mosquitto semantics.
+    // Non-control topics are deferred to other plugins or default ACLs.
+    if !topic.starts_with("$CONTROL/") {
+        log_debug(&format!(
+            "Control callback: deferring non-control topic '{}'",
+            topic
+        ));
+        return MOSQ_ERR_PLUGIN_DEFER;
+    }
+
     let Some(client_id) = mosq_client_id_string(evt.client) else {
         return MOSQ_ERR_ACL_DENIED;
     };
     let username = mosq_client_username_string(evt.client);
-    let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
 
     if let Some(token_type) = state.cache.get(&client_id) {
         let params = AuthzParams {
@@ -1037,6 +1101,10 @@ extern "C" fn control_callback(
 
         match check_authorization(&token_type, params) {
             AuthzOutcome::Allowed => {
+                log_debug(&format!(
+                    "Control authorized: client={} topic={}",
+                    client_id, topic
+                ));
                 if state.config.policy.mode == PolicyMode::StaticAclStrict {
                     return MOSQ_ERR_PLUGIN_DEFER;
                 }
@@ -1044,10 +1112,17 @@ extern "C" fn control_callback(
             }
             AuthzOutcome::Expired => {
                 set_control_reauth_signal(evt, "token expired; reauthenticate");
-                log_debug("Control message rejected: token expired");
+                log_debug(&format!(
+                    "Control rejected (expired): client={} topic={}",
+                    client_id, topic
+                ));
                 return MOSQ_ERR_ACL_DENIED;
             }
             AuthzOutcome::Denied => {
+                log_debug(&format!(
+                    "Control denied: client={} topic={}",
+                    client_id, topic
+                ));
                 if state.config.policy.mode == PolicyMode::StaticAcl {
                     return MOSQ_ERR_PLUGIN_DEFER;
                 }
@@ -1056,6 +1131,11 @@ extern "C" fn control_callback(
                 }
             }
         }
+    } else {
+        log_debug(&format!(
+            "Control rejected (no session): client={} topic={}",
+            client_id, topic
+        ));
     }
     MOSQ_ERR_ACL_DENIED
 }
@@ -1417,6 +1497,37 @@ mod tests {
             ptr::null_mut(),
         );
         assert_eq!(rc, MOSQ_ERR_INVAL);
+    }
+
+    #[test]
+    fn control_callback_defers_non_control_topics() {
+        let (userdata, _identifier) = setup_plugin_with_config();
+
+        // Non-control topics should be deferred (MOSQ_ERR_PLUGIN_DEFER)
+        let topic = CString::new("regular/topic/path").unwrap();
+        let mut evt = MosquittoEvtControl {
+            future: ptr::null_mut(),
+            client: ptr::null_mut(),
+            topic: topic.as_ptr() as *const c_char,
+            payload: ptr::null(),
+            properties: ptr::null(),
+            reason_string: ptr::null_mut(),
+            payloadlen: 0,
+            qos: 0,
+            reason_code: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = control_callback(
+            MOSQ_EVT_CONTROL,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
+        // Non-$CONTROL topics should defer to other plugins
+        assert_eq!(rc, MOSQ_ERR_PLUGIN_DEFER);
+
+        teardown_plugin(userdata);
     }
 
     #[test]

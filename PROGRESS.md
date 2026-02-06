@@ -695,30 +695,6 @@ machine and record the first results/known issues).
 
 ## 9) Completed Issues (Backlog)
 
-- [x] **Issue 16: Add host-targeted kernel-level performance profiling with perf** — **COMPLETED 2026-02-06**
-  - **Summary**: Implemented comprehensive `perf` integration for detailed CPU performance analysis of containerized Mosquitto during token verification and policy evaluation.
-  - **Deliverables**:
-    - `benchmarks/perf_profiler.py`: Complete perf profiling module with host-level capabilities
-      - Container PID discovery mechanism for targeting Mosquitto process
-      - Hardware event collection (cycles, instructions, cache-misses)
-      - CPI (cycles per instruction) and cache miss rate calculation
-      - Support for call graph recording with `perf record`
-      - Automatic perf binary detection (handles versioned perf_5.x, perf_6.x)
-    - Integration with `run_scenarios.py`:
-      - `--perf` flag to enable profiling
-      - `--perf-duration`, `--perf-sample-rate`, `--perf-events` configuration
-      - `--perf-scenarios` for selective profiling
-      - Default profiling for key scenarios (BASE-01, JWT-01, BIS-01, POLICY-COMPLEX-*)
-    - Results included in scenario JSON output with structured perf data
-    - `benchmarks/PERF_PROFILING.md`: Comprehensive documentation with methodology, interpretation guide, and troubleshooting
-  - **Research Alignment**: Enables H₂/H₃ validation by quantifying computational costs of JWT vs Biscuit verification at instruction level, complementing container-level metrics with PMU hardware counters.
-
-- [x] **Issue 14: Add iperf3 baseline (throughput interpretation)** — **COMPLETED 2026-02-06**
-  - **Summary**: Implemented `iperf3` integration to measure nominal channel capacity as specified in ARTICLE.MD methodology. Added `iperf3` service to docker-compose.yml, created `benchmarks/iperf3_baseline.py` module with measurement, parsing, and validity checking functions. Integrated automated baseline measurement into `run_scenarios.py` with CLI options (`--iperf3/--no-iperf3`, `--iperf3-host`, `--iperf3-port`, `--iperf3-duration`, `--iperf3-streams`, `--iperf3-min-mbps`). Network capacity data included in scenario results JSON under `network_baseline` field with throughput, RTT, retransmits, and validity assessment. Warns when network constraints may affect test validity.
-
-- [x] **Issue 20.1: Verify ACL_CHECK subtype handling across policy modes**
-  - **Summary**: Added `MOSQ_ACL_CONTROL` constant (0x08) for control-plane access; fixed `control_callback` hardcoded `access: 2` → `MOSQ_ACL_CONTROL`; updated `access_to_operation()` to map 0x08 → "control"; added comprehensive unit tests for all ACL subtypes (READ/WRITE/SUBSCRIBE/CONTROL) with priority ordering (WRITE > SUBSCRIBE > CONTROL > READ), bitmask combinations, and edge cases. All 7 policy modes verified to correctly handle distinct ACL subtypes.
-
 - [x] **Issue 1: Add Dynamic Security module comparison**
   - **Completed**: Full Dynamic Security module implementation with JSON-based policy loading, role-based access control, and comprehensive ACL support. Added anonymous access, benchmark scenarios, and Docker configurations. Provides production-grade comparison against token-based approaches.
 
@@ -774,9 +750,33 @@ machine and record the first results/known issues).
   - Summary: Kani proofs for init/cleanup + all callbacks (null safety,
     lifetimes).
 
+- [x] **Issue 14: Add iperf3 baseline (throughput interpretation)** — **COMPLETED 2026-02-06**
+  - **Summary**: Implemented `iperf3` integration to measure nominal channel capacity as specified in ARTICLE.MD methodology. Added `iperf3` service to docker-compose.yml, created `benchmarks/iperf3_baseline.py` module with measurement, parsing, and validity checking functions. Integrated automated baseline measurement into `run_scenarios.py` with CLI options (`--iperf3/--no-iperf3`, `--iperf3-host`, `--iperf3-port`, `--iperf3-duration`, `--iperf3-streams`, `--iperf3-min-mbps`). Network capacity data included in scenario results JSON under `network_baseline` field with throughput, RTT, retransmits, and validity assessment. Warns when network constraints may affect test validity.
+
+- [x] **Issue 16: Add host-targeted kernel-level performance profiling with perf** — **COMPLETED 2026-02-06**
+  - **Summary**: Implemented comprehensive `perf` integration for detailed CPU performance analysis of containerized Mosquitto during token verification and policy evaluation.
+  - **Deliverables**:
+    - `benchmarks/perf_profiler.py`: Complete perf profiling module with host-level capabilities
+      - Container PID discovery mechanism for targeting Mosquitto process
+      - Hardware event collection (cycles, instructions, cache-misses)
+      - CPI (cycles per instruction) and cache miss rate calculation
+      - Support for call graph recording with `perf record`
+      - Automatic perf binary detection (handles versioned perf_5.x, perf_6.x)
+    - Integration with `run_scenarios.py`:
+      - `--perf` flag to enable profiling
+      - `--perf-duration`, `--perf-sample-rate`, `--perf-events` configuration
+      - `--perf-scenarios` for selective profiling
+      - Default profiling for key scenarios (BASE-01, JWT-01, BIS-01, POLICY-COMPLEX-*)
+    - Results included in scenario JSON output with structured perf data
+    - `benchmarks/PERF_PROFILING.md`: Comprehensive documentation with methodology, interpretation guide, and troubleshooting
+  - **Research Alignment**: Enables H₂/H₃ validation by quantifying computational costs of JWT vs Biscuit verification at instruction level, complementing container-level metrics with PMU hardware counters.
+
 - [x] **Issue 17: Implement comprehensive QoS configuration and mixing features**
   - **Completed**: Added full QoS 0/1/2 support with configurable per-scenario QoS levels and mixed QoS workload distribution.
   - **Summary**: Implemented QoS distribution parsing (`0:0.6,1:0.3,2:0.1` format) in `loadgen.py` with weighted random selection for realistic traffic patterns. Added `--qos-distribution` CLI option and `qos_distribution` field to `WorkerConfig`. Fixed `BASE-01` to use QoS 0 as required. Added new scenarios: `QOS0-BASE-01`, `QOS2-JWT`, `QOS2-BISCUIT`, `QOS-MIXED-JWT`, `QOS-MIXED-BISCUIT` (60% QoS 0, 30% QoS 1, 10% QoS 2). Updated `metrics_collector.py` to support configurable QoS. Subscribe operations use effective QoS (max of distribution) to ensure reliable fan-out delivery. All QoS infrastructure is ready for experimental runs.
+
+- [x] **Issue 20.1: Verify ACL_CHECK subtype handling across policy modes**
+  - **Summary**: Added `MOSQ_ACL_CONTROL` constant (0x08) for control-plane access; fixed `control_callback` hardcoded `access: 2` → `MOSQ_ACL_CONTROL`; updated `access_to_operation()` to map 0x08 → "control"; added comprehensive unit tests for all ACL subtypes (READ/WRITE/SUBSCRIBE/CONTROL) with priority ordering (WRITE > SUBSCRIBE > CONTROL > READ), bitmask combinations, and edge cases. All 7 policy modes verified to correctly handle distinct ACL subtypes.
 
 - [x] **Issue 27: Cache Biscuit expiry via min `expires_at` fact (remove brittle parsing)**
   - Summary: Replaced brittle error-message parsing with structured Datalog query to extract the minimum `expires_at` from Biscuit tokens. Updated `TokenType::Biscuit` to cache the expiry timestamp per session, clamped cache TTL to token expiry with a 5-minute fallback, and rejected already-expired tokens at auth time. Token issuer and benchmark generators now embed `expires_at` facts in authority and attenuation blocks to support stable expiry extraction.

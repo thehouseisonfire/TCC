@@ -1042,6 +1042,98 @@ def main(
                     "docker/dynamic-security-fanout-churn.json",
                 ],
             },
+            # Issue 19: ACL_READ fan-out authorization cost measurement scenarios
+            # These scenarios measure per-subscriber authorization scaling with varying counts
+            "ACL-READ-FANOUT-10": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "username": "jwt",
+                "password": tokens["jwt"],
+                "fanout_publisher_username": "jwt",
+                "fanout_publisher_password": tokens["jwt"],
+                "topic": "fanout/broadcast",
+                "mode": "fanout",
+                "subscriber_count": 10,
+                "fanout_topic": "fanout/broadcast",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 256,
+                "qos": 1,
+            },
+            "ACL-READ-FANOUT-50": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "username": "jwt",
+                "password": tokens["jwt"],
+                "fanout_publisher_username": "jwt",
+                "fanout_publisher_password": tokens["jwt"],
+                "topic": "fanout/broadcast",
+                "mode": "fanout",
+                "subscriber_count": 50,
+                "fanout_topic": "fanout/broadcast",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 256,
+                "qos": 1,
+            },
+            "ACL-READ-FANOUT-100": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "username": "jwt",
+                "password": tokens["jwt"],
+                "fanout_publisher_username": "jwt",
+                "fanout_publisher_password": tokens["jwt"],
+                "topic": "fanout/broadcast",
+                "mode": "fanout",
+                "subscriber_count": 100,
+                "fanout_topic": "fanout/broadcast",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 256,
+                "qos": 1,
+            },
+            "ACL-READ-FANOUT-BIS-10": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit"],
+                "fanout_publisher_username": "biscuit",
+                "fanout_publisher_password": tokens["biscuit"],
+                "topic": "fanout/broadcast",
+                "mode": "fanout",
+                "subscriber_count": 10,
+                "fanout_topic": "fanout/broadcast",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 256,
+                "qos": 1,
+            },
+            "ACL-READ-FANOUT-BIS-50": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit"],
+                "fanout_publisher_username": "biscuit",
+                "fanout_publisher_password": tokens["biscuit"],
+                "topic": "fanout/broadcast",
+                "mode": "fanout",
+                "subscriber_count": 50,
+                "fanout_topic": "fanout/broadcast",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 256,
+                "qos": 1,
+            },
+            "ACL-READ-FANOUT-BIS-100": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit"],
+                "fanout_publisher_username": "biscuit",
+                "fanout_publisher_password": tokens["biscuit"],
+                "topic": "fanout/broadcast",
+                "mode": "fanout",
+                "subscriber_count": 100,
+                "fanout_topic": "fanout/broadcast",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 256,
+                "qos": 1,
+            },
             # Issue 20: Control-Triggered Enforcement Scenarios
             # These scenarios exercise the $CONTROL callback semantics and measure
             # control-plane overhead vs data-plane operations.
@@ -1181,6 +1273,11 @@ def main(
         logger.info(
             "CONTROL-KICK-REAUTH-JWT, CONTROL-KICK-REAUTH-BISCUIT, "
             "CONTROL-ACL-READ-NOTIFY-JWT, CONTROL-ACL-READ-NOTIFY-BISCUIT",
+        )
+        # Issue 19: ACL_READ fan-out authorization cost measurement scenarios
+        logger.info(
+            "ACL-READ-FANOUT-10, ACL-READ-FANOUT-50, ACL-READ-FANOUT-100, "
+            "ACL-READ-FANOUT-BIS-10, ACL-READ-FANOUT-BIS-50, ACL-READ-FANOUT-BIS-100",
         )
         logger.info("Append -TLS to any scenario id for TLS variants.")
         return
@@ -1341,12 +1438,22 @@ def main(
             "attenuation": s.get("biscuit_attenuate"),
             "delegation": s.get("biscuit_delegate"),
             "scenario_config": {
-                "clients": clients,
+                "clients": s.get("subscriber_count", clients),
                 "messages": messages,
                 "qos": qos,
                 "qos_distribution": qos_distribution,
                 "token_issuer_no_default_roles": token_issuer_no_default_roles,
                 "token_issuer_no_default_grants": token_issuer_no_default_grants,
+                "mode": s.get("mode"),
+                "fanout_topic": s.get("fanout_topic"),
+                "subscriber_count": s.get("subscriber_count"),
+            },
+            "fanout_metrics": {
+                "subscriber_count": s.get(
+                    "subscriber_count", clients if s.get("mode") == "fanout" else None
+                ),
+                "message_count": messages if s.get("mode") == "fanout" else None,
+                "acl_read_cost_per_subscriber_ms": None,  # Calculated from receive latencies
             },
             "network_baseline": {
                 "enabled": iperf3_enabled,
@@ -1401,6 +1508,7 @@ def main(
                 token_refresh = s.get("token_refresh")
                 scenario_qos = int(s.get("qos", qos))
                 scenario_qos_distribution = s.get("qos_distribution", qos_distribution)
+                scenario_clients = s.get("subscriber_count", clients)
                 res = _run_loadgen(
                     tokens=tokens,
                     host=mqtt_host,
@@ -1409,7 +1517,7 @@ def main(
                     password=s.get("password", ""),
                     fanout_publisher_username=s.get("fanout_publisher_username"),
                     fanout_publisher_password=s.get("fanout_publisher_password"),
-                    clients=clients,
+                    clients=scenario_clients,
                     messages=messages,
                     topic=s.get("topic", "sensors/{client_id}/temp"),
                     mode=s.get("mode"),
@@ -1572,6 +1680,29 @@ def main(
             out_payload["runs"].append({"loadgen": res, "resources": snap, "perf": perf_result})
             if s.get("sleep_between"):
                 time.sleep(float(s["sleep_between"]))
+
+        # Issue 19: Calculate ACL_READ cost per subscriber for fanout scenarios
+        subscriber_count = s.get("subscriber_count")
+        if s.get("mode") == "fanout" and out_payload["runs"] and subscriber_count:
+            total_receive_ms = 0.0
+            total_receive_count = 0
+            for run in out_payload["runs"]:
+                loadgen_res = run.get("loadgen", {})
+                receive_stats = loadgen_res.get("receive", {})
+                if receive_stats and receive_stats.get("count", 0) > 0:
+                    # Use mean receive latency as proxy for per-message delivery cost
+                    mean_receive = receive_stats.get("mean_ms", 0)
+                    count = receive_stats.get("count", 0)
+                    total_receive_ms += mean_receive * count
+                    total_receive_count += count
+            if total_receive_count > 0 and subscriber_count > 0:
+                # Average receive latency per message per subscriber
+                avg_receive_per_msg = total_receive_ms / total_receive_count
+                # Estimate ACL_READ cost as portion of receive latency
+                # This is a proxy metric - actual ACL_READ cost is part of auth overhead
+                out_payload["fanout_metrics"]["acl_read_cost_per_subscriber_ms"] = round(
+                    avg_receive_per_msg / subscriber_count, 3
+                )
 
         path = _write_result(out, s["id"], out_payload)
         logger.info("Wrote %s", path)

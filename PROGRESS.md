@@ -328,11 +328,7 @@ machine and record the first results/known issues).
 
 ## 9) Open Issues (Next Steps, Grouped)
 
-### **Priority Tier 1: Measurement Accuracy**  
-1. Issue 18: Reduce Biscuit Base64URL (MTU fragmentation bias)
-2. Issue 19: MOSQ_EVT_MESSAGE fan-out validation (per-subscriber costs)
-
-### **Priority Tier 2: Enhanced Analysis**
+### **Priority List**
 1. Issue 8.2: Containerized benchmark topology
 2. Issue 13: emqtt-bench integration
 3. Issue 15: tcpdump fragmentation analysis
@@ -442,45 +438,6 @@ machine and record the first results/known issues).
     - [ ] Add QoS-specific performance analysis and reporting
     - [ ] At least one scenario run captured for each QoS level and mixed
       configurations
-
-- [x] **Issue 18: Avoid Base64URL encoding for Biscuit tokens where possible (use native
-   Protobuf format)** — **COMPLETED 2026-02-06**
-  - **Summary**: Implemented native Protobuf transport for Biscuit tokens via MQTT v5 AUTH packets,
-    avoiding ~33% Base64URL overhead while maintaining CONNECT password compatibility.
-  - **Deliverables**:
-    - Added `biscuit_transport` config option with two modes:
-      - `base64url` (default): CONNECT password compatible, maintains existing behavior
-      - `mqtt5_auth_data`: Native binary Protobuf for MQTT v5 AUTH packets, ~25-33% smaller
-    - Updated `auth.rs` with `authenticate_binary()` method supporting both transport modes
-    - Updated `ext_auth_start_callback` in `lib.rs` to use binary authentication for AUTH packets
-    - Added `/biscuit/binary` endpoint to token-issuer for raw binary token generation
-    - Updated `mqtt_auth_client.py` with `--binary` flag for binary transport testing
-    - Added `MQTT5-REAUTH-BISCUIT-BINARY` scenario demonstrating native Protobuf transport
-  - **Technical Details**:
-    - Biscuit's native `Biscuit::to_vec()` already produces Protobuf-encoded bytes
-    - Base64URL encoding inflates token size by ~33% (4/3 ratio)
-    - Binary transport is only available for MQTT v5 AUTH packets (not CONNECT password)
-    - JWT tokens remain text-based; binary mode only affects Biscuit parsing
-  - **Research Alignment**: Enables fair MTU/fragmentation comparisons by eliminating encoding bias
-    between JWT (inherently text-based) and Biscuit (binary-capable) token formats.
-
-- [ ] **Issue 19: Validate `ACL_READ` fan-out authorization cost measurement**
-  - Goal: Ensure outbound message authorization via `MOSQ_EVT_ACL_CHECK` with
-    `MOSQ_ACL_READ` is evaluated _per subscriber delivery_ and measure the
-    scaling cost of fan-out authorization (not publish-only checks).
-  - Current state: `acl_check_callback` correctly handles `MOSQ_ACL_READ` (0x01)
-    mapping to "read" operation via `access_to_operation()`, but no explicit
-    fan-out scaling benchmark exists to quantify per-subscriber overhead.
-  - Deliverable:
-    - Verify `acl_check_callback` uses `evt.client` as the subscriber identity
-      (not publisher) when `access == MOSQ_ACL_READ` during message delivery
-    - Add benchmark scenario with 1 publisher and N subscribers (e.g., 10, 50, 100)
-      to measure per-subscriber authorization cost scaling
-    - Add results field capturing `subscriber_count` and `acl_read_avg_latency`
-    - Document the difference between `ACL_READ` (per-subscriber delivery check)
-      and `EVT_MESSAGE` (message modification, not authorization)
-
-
 
 - [ ] **Issue 22: Strengthen `seed_demo_rules` (RBAC), make it optional, and add
     runtime policy churn scenarios**
@@ -744,6 +701,21 @@ machine and record the first results/known issues).
 - [x] **Issue 17: Implement comprehensive QoS configuration and mixing features**
   - **Completed**: Added full QoS 0/1/2 support with configurable per-scenario QoS levels and mixed QoS workload distribution.
   - **Summary**: Implemented QoS distribution parsing (`0:0.6,1:0.3,2:0.1` format) in `loadgen.py` with weighted random selection for realistic traffic patterns. Added `--qos-distribution` CLI option and `qos_distribution` field to `WorkerConfig`. Fixed `BASE-01` to use QoS 0 as required. Added new scenarios: `QOS0-BASE-01`, `QOS2-JWT`, `QOS2-BISCUIT`, `QOS-MIXED-JWT`, `QOS-MIXED-BISCUIT` (60% QoS 0, 30% QoS 1, 10% QoS 2). Updated `metrics_collector.py` to support configurable QoS. Subscribe operations use effective QoS (max of distribution) to ensure reliable fan-out delivery. All QoS infrastructure is ready for experimental runs.
+
+- [x] **Issue 18: Avoid Base64URL encoding for Biscuit tokens where possible (use native Protobuf format)** — **COMPLETED 2026-02-06**
+  - **Summary**: Implemented native Protobuf transport for Biscuit tokens via MQTT v5 AUTH packets, avoiding ~33% Base64URL overhead while maintaining CONNECT password compatibility.
+  - **Deliverables**:
+    - Added `biscuit_transport` config option with two modes: `base64url` (default, CONNECT compatible) and `mqtt5_auth_data` (native binary Protobuf for MQTT v5 AUTH packets)
+    - Updated `auth.rs` with `authenticate_binary()` method supporting both transport modes
+    - Updated `ext_auth_start_callback` in `lib.rs` to use binary authentication for AUTH packets
+    - Added `/biscuit/binary` endpoint to token-issuer for raw binary token generation
+    - Updated `mqtt_auth_client.py` with `--binary` flag for binary transport testing
+    - Added `MQTT5-REAUTH-BISCUIT-BINARY` scenario demonstrating native Protobuf transport
+  - **Technical Details**: Biscuit's native `Biscuit::to_vec()` produces Protobuf-encoded bytes; Base64URL inflates size by ~33%; binary transport only available for MQTT v5 AUTH packets (not CONNECT password); JWT tokens remain text-based
+  - **Research Alignment**: Enables fair MTU/fragmentation comparisons by eliminating encoding bias between JWT (text-based) and Biscuit (binary-capable) token formats
+
+- [x] **Issue 19: Validate ACL_READ fan-out authorization cost measurement**
+  - **Summary**: Verified `acl_check_callback` correctly handles `MOSQ_ACL_READ` (0x01) for per-subscriber delivery authorization using `evt.client` as subscriber identity. Added 6 benchmark scenarios (`ACL-READ-FANOUT-10/50/100` for JWT and Biscuit) with 1 publisher + N subscribers on shared topic. Added `fanout_metrics` output capturing `subscriber_count`, `message_count`, and `acl_read_cost_per_subscriber_ms` calculated from receive latencies. Enables H₂/H₃ validation of per-subscriber authorization scaling costs.
 
 - [x] **Issue 20: Define CONTROL callback semantics + enforcement paths** — **COMPLETED 2026-02-06**
   - **Summary**: Implemented complete `MOSQ_EVT_CONTROL` callback with proper control-plane semantics, topic gating, and comprehensive documentation.

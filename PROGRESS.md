@@ -344,7 +344,6 @@ machine and record the first results/known issues).
 13. Issue 31: Control-triggered kick/re-auth
 14. Issue 32: Control-triggered ACL_READ + notify
 15. Issue 33: Enhance HTTP policy expressiveness for parity
-16. Issue 35: Add Dynamic Security command payloads to CONTROL scenarios
 
 ---
 
@@ -608,17 +607,6 @@ machine and record the first results/known issues).
 
 ## 9) Completed Issues (Backlog)
 
-- [x] **Issue 36: Add interleaved control message support for data plane + control plane testing** — **COMPLETED 2026-02-07**
-  - **Summary**: Implemented interleaved control message publishing to measure control plane latency under active data plane load.
-  - **Deliverables**:
-    - Added `--control-after-messages` CLI option to `loadgen.py` with full implementation in `_run_worker()`
-    - Added `control_after_messages` field to `WorkerConfig` and `control_injection_delay_ms` to `WorkerResult`
-    - Implemented message counter tracking that injects control messages after every N data messages
-    - Added `INTERLEAVED-CONTROL-DATA-JWT` and `INTERLEAVED-CONTROL-DATA-BISCUIT` scenarios to `run_scenarios.py`
-    - Captured three key metrics: data message latency (`publish`), control message latency (`control`), and control injection delay (`control_injection_delay`)
-    - Added comprehensive documentation in RUNNING_BENCHMARKS.md with usage examples and research interpretation notes
-  - **Research Alignment**: Enables measurement of broker behavior under realistic mixed data+control plane workloads, supporting H2/H3 validation by quantifying control plane overhead during active data traffic.
-
 - [x] **Issue 1: Add Dynamic Security module comparison**
   - **Completed**: Full Dynamic Security module implementation with JSON-based policy loading, role-based access control, and comprehensive ACL support. Added anonymous access, benchmark scenarios, and Docker configurations. Provides production-grade comparison against token-based approaches.
 
@@ -744,6 +732,17 @@ machine and record the first results/known issues).
     - Added documentation in RUNNING_BENCHMARKS.md explaining scenario differences and CLI usage
     - JWT/Biscuit parity maintained for both overhead and churn scenarios
   - **Research Alignment**: Enables measurement of both authorization overhead and end-to-end policy churn costs, supporting H1 (functional viability) and H2/H3 (performance comparison) validation
+
+- [x] **Issue 36: Add interleaved control message support for data plane + control plane testing** — **COMPLETED 2026-02-07**
+  - **Summary**: Implemented interleaved control message publishing to measure control plane latency under active data plane load.
+  - **Deliverables**:
+    - Added `--control-after-messages` CLI option to `loadgen.py` with full implementation in `_run_worker()`
+    - Added `control_after_messages` field to `WorkerConfig` and `control_injection_delay_ms` to `WorkerResult`
+    - Implemented message counter tracking that injects control messages after every N data messages
+    - Added `INTERLEAVED-CONTROL-DATA-JWT` and `INTERLEAVED-CONTROL-DATA-BISCUIT` scenarios to `run_scenarios.py`
+    - Captured three key metrics: data message latency (`publish`), control message latency (`control`), and control injection delay (`control_injection_delay`)
+    - Added comprehensive documentation in RUNNING_BENCHMARKS.md with usage examples and research interpretation notes
+  - **Research Alignment**: Enables measurement of broker behavior under realistic mixed data+control plane workloads, supporting H2/H3 validation by quantifying control plane overhead during active data traffic.
 
 ---
 

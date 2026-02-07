@@ -345,7 +345,6 @@ machine and record the first results/known issues).
 14. Issue 32: Control-triggered ACL_READ + notify
 15. Issue 33: Enhance HTTP policy expressiveness for parity
 16. Issue 35: Add Dynamic Security command payloads to CONTROL scenarios
-17. Issue 36: Add interleaved control message support for data plane + control plane testing
 
 ---
 
@@ -605,24 +604,20 @@ machine and record the first results/known issues).
     - Notification topic publishing (e.g., `system_notification/<client_id>`)
     - Scenario capturing denial after privilege reduction
 
-- [ ] **Issue 36: Add interleaved control message support for data plane + control plane testing**
-  - **Goal**: Implement support for publishing control messages interleaved with data messages (e.g., publish N data messages, then 1 control message, repeat) to measure control plane latency under active data plane load.
-  - **Rationale**: Current CONTROL scenarios test control plane in isolation (CONTROL-OVERHEAD) or batch policy churn (CONTROL-CHURN), but do not capture the realistic scenario where control messages (policy updates, reauthentication triggers) must be processed while ongoing data traffic continues. This enables measurement of broker behavior under mixed data+control plane stress.
-  - **Current state**: The `--control-after-messages` CLI option was defined in `loadgen.py` but never implemented; it has been removed to avoid technical debt. The feature needs fresh implementation with proper design.
-  - **Deliverable**:
-    - Add `--control-after-messages` CLI option to `loadgen.py` with proper implementation in `_run_worker()`
-    - Track message counter during data publishing; pause/resume data flow to send control messages at specified intervals
-    - Handle interaction with rate limiting (`--rate`) to ensure interleaving works correctly with throttled publishing
-    - Add interleaved CONTROL scenarios to `run_scenarios.py` (e.g., `INTERLEAVED-CONTROL-DATA-JWT`, `INTERLEAVED-CONTROL-DATA-BISCUIT`)
-    - Capture separate metrics for:
-      - Data message latency (baseline under interleaved control)
-      - Control message latency (measured while data flow active)
-      - Control message injection delay (time to pause/resume data flow)
-    - Document in RUNNING_BENCHMARKS.md the methodology for interleaved testing and interpretation of results
-
 ---
 
 ## 9) Completed Issues (Backlog)
+
+- [x] **Issue 36: Add interleaved control message support for data plane + control plane testing** — **COMPLETED 2026-02-07**
+  - **Summary**: Implemented interleaved control message publishing to measure control plane latency under active data plane load.
+  - **Deliverables**:
+    - Added `--control-after-messages` CLI option to `loadgen.py` with full implementation in `_run_worker()`
+    - Added `control_after_messages` field to `WorkerConfig` and `control_injection_delay_ms` to `WorkerResult`
+    - Implemented message counter tracking that injects control messages after every N data messages
+    - Added `INTERLEAVED-CONTROL-DATA-JWT` and `INTERLEAVED-CONTROL-DATA-BISCUIT` scenarios to `run_scenarios.py`
+    - Captured three key metrics: data message latency (`publish`), control message latency (`control`), and control injection delay (`control_injection_delay`)
+    - Added comprehensive documentation in RUNNING_BENCHMARKS.md with usage examples and research interpretation notes
+  - **Research Alignment**: Enables measurement of broker behavior under realistic mixed data+control plane workloads, supporting H2/H3 validation by quantifying control plane overhead during active data traffic.
 
 - [x] **Issue 1: Add Dynamic Security module comparison**
   - **Completed**: Full Dynamic Security module implementation with JSON-based policy loading, role-based access control, and comprehensive ACL support. Added anonymous access, benchmark scenarios, and Docker configurations. Provides production-grade comparison against token-based approaches.

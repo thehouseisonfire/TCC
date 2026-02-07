@@ -153,12 +153,13 @@ class WorkerConfig:
     biscuit_delegate_handoff_nonce: str | None
     delegation_ms: float | None
     delegation_len: int | None
-    # CONTROL message support
     control_topic: str | None
     control_payload: dict[str, Any] | None
     control_mode: bool
     control_repeat: int
     control_qos: int
+    # Issue 36: Interleaved control message support
+    control_after_messages: int
 
 
 @dataclass
@@ -177,6 +178,8 @@ class WorkerResult:
     # CONTROL message metrics
     control_publish_ms: list[float]
     control_errors: list[str]
+    # Issue 36: Interleaved control metrics
+    control_injection_delay_ms: list[float]
 
 
 def _mk_payload(size: int) -> bytes:
@@ -757,7 +760,35 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
             time.sleep(0.01)
     else:
         payload = _mk_payload(cfg.message_size)
+        message_counter = 0
+        # Issue 36: Interleaved control message support
+        interleave_enabled = (
+            cfg.control_after_messages > 0
+            and cfg.control_topic
+            and cfg.control_payload
+            and not cfg.control_mode
+        )
+        control_injection_delay_ms: list[float] = []
+
         for _ in range(cfg.message_count):
+            # Issue 36: Check if we need to inject a control message
+            if interleave_enabled and message_counter >= cfg.control_after_messages:
+                injection_start = time.perf_counter()
+                try:
+                    ctrl_payload = json.dumps(cfg.control_payload).encode()
+                    t0 = time.perf_counter()
+                    info = client.publish(cfg.control_topic, ctrl_payload, qos=cfg.control_qos)
+                    info.wait_for_publish(timeout=10)
+                    t1 = time.perf_counter()
+                    control_publish_ms.append((t1 - t0) * 1000.0)
+                    if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                        control_errors.append(f"control_publish_rc:{info.rc}")
+                except Exception as e:
+                    control_errors.append(f"control_publish_failed:{e}")
+                injection_end = time.perf_counter()
+                control_injection_delay_ms.append((injection_end - injection_start) * 1000.0)
+                message_counter = 0
+
             try:
                 t0 = time.perf_counter()
                 publish_qos = _choose_qos(cfg.qos, cfg.qos_distribution, qos_rng)
@@ -765,6 +796,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                 info.wait_for_publish(timeout=10)
                 t1 = time.perf_counter()
                 publish_ms.append((t1 - t0) * 1000.0)
+                message_counter += 1
                 if info.rc != mqtt.MQTT_ERR_SUCCESS:
                     errors.append(f"publish_rc:{info.rc}")
             except Exception as e:
@@ -796,6 +828,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
             errors,
             control_publish_ms,
             control_errors,
+            control_injection_delay_ms,
         )
     )
 
@@ -923,6 +956,8 @@ def run_load(
     control_mode: bool = False,
     control_repeat: int = 1,
     control_qos: int = 1,
+    # Issue 36: Interleaved control message parameter
+    control_after_messages: int = 0,
 ):
     start_evt = threading.Event()
     out_q: queue.Queue = queue.Queue()
@@ -1053,6 +1088,7 @@ def run_load(
             control_mode=control_mode,
             control_repeat=control_repeat,
             control_qos=control_qos,
+            control_after_messages=control_after_messages,
         )
         t = threading.Thread(target=_run_worker, args=(cfg, start_evt, out_q), daemon=True)
         threads.append(t)
@@ -1124,6 +1160,8 @@ def run_load(
     attenuation_lens = [r.attenuation_len for r in results if r.attenuation_len is not None]
     control_lat = [x for r in results for x in r.control_publish_ms]
     control_errs = [e for r in results for e in r.control_errors]
+    # Issue 36: Aggregate control injection delay metrics
+    control_injection_lat = [x for r in results for x in r.control_injection_delay_ms]
 
     errors = [e for r in results for e in r.errors]
     errors.extend(fanout_errors)
@@ -1186,6 +1224,8 @@ def run_load(
                 "payload": control_payload,
                 "repeat": control_repeat,
                 "qos": control_qos,
+                # Issue 36: Interleaved control message configuration
+                "after_messages": control_after_messages,
             },
         },
         "connect": _summarize_ms(connect_lat),
@@ -1198,6 +1238,8 @@ def run_load(
         "publish": _summarize_ms(publish_lat),
         "receive": _summarize_ms(receive_lat),
         "control": _summarize_ms(control_lat),
+        # Issue 36: Control injection delay metrics
+        "control_injection_delay": _summarize_ms(control_injection_lat),
         "throughput_mps": throughput_mps,
         "publish_throughput_mps": publish_throughput_mps,
         "receive_throughput_mps": receive_throughput_mps,
@@ -1303,6 +1345,14 @@ def main(
         envvar="MQTT_CONTROL_QOS",
         help="QoS level for control messages (default: 1)",
     ),
+    # Issue 36: Interleaved control message CLI option
+    control_after_messages: int = typer.Option(
+        0,
+        "--control-after-messages",
+        envvar="MQTT_CONTROL_AFTER_MESSAGES",
+        help="Publish 1 control message after every N data messages "
+        "(interleaved mode). 0 = disabled.",
+    ),
     mode: str = typer.Option("publish", envvar="MQTT_MODE"),
     fanout_topic: str = typer.Option("fanout/broadcast", envvar="MQTT_FANOUT_TOPIC"),
     fanout_publisher_username: str | None = typer.Option(
@@ -1407,6 +1457,8 @@ def main(
         control_mode=control_mode,
         control_repeat=control_repeat,
         control_qos=control_qos,
+        # Issue 36: Interleaved control message parameter
+        control_after_messages=control_after_messages,
     )
 
     if json_output:

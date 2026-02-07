@@ -122,6 +122,8 @@ class ScenarioConfig(TypedDict, total=False):
     control_payload: dict[str, Any]
     control_mode: bool
     control_repeat: int
+    # Issue 36: Interleaved control message support
+    control_after_messages: int
 
 
 def _compose_bin():
@@ -416,6 +418,8 @@ def _run_loadgen(
         cmd.extend(["--control-payload", json.dumps(control_payload)])
     if control_mode:
         cmd.append("--control-mode")
+    if control_after_messages > 0:
+        cmd.extend(["--control-after-messages", str(control_after_messages)])
     if control_repeat != 1:
         cmd.extend(["--control-repeat", str(control_repeat)])
 
@@ -1355,6 +1359,39 @@ def main(
                 "repeat": 2,
                 "sleep_between": 3,
             },
+            # Issue 36: Interleaved control message scenarios
+            # These scenarios publish control messages interleaved with data messages
+            # to measure control plane latency under active data plane load.
+            "INTERLEAVED-CONTROL-DATA-JWT": {
+                "mosquitto_conf": "./mosquitto_dynsec.conf",
+                "username": "jwt",
+                "password": tokens["jwt"],
+                "topic": "sensors/{client_id}/temp",
+                "control_topic": "$CONTROL/dynamic-security/v1",
+                "control_mode": False,
+                "control_repeat": 1,
+                "control_after_messages": 10,
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 256,
+                "qos": 1,
+                "dynsec_config": "docker/dynamic-security.json",
+            },
+            "INTERLEAVED-CONTROL-DATA-BISCUIT": {
+                "mosquitto_conf": "./mosquitto_dynsec.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit"],
+                "topic": "sensors/{client_id}/temp",
+                "control_topic": "$CONTROL/dynamic-security/v1",
+                "control_mode": False,
+                "control_repeat": 1,
+                "control_after_messages": 10,
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 256,
+                "qos": 1,
+                "dynsec_config": "docker/dynamic-security.json",
+            },
         }
 
         # Add dynamic MTU scenarios
@@ -1437,6 +1474,10 @@ def main(
             "CONTROL-CHURN-CREATE-ROLE-JWT, CONTROL-CHURN-CREATE-ROLE-BISCUIT, "
             "CONTROL-CHURN-GROUP-CLIENT-JWT, CONTROL-CHURN-GROUP-CLIENT-BISCUIT, "
             "CONTROL-CHURN-ACL-MODIFY-JWT, CONTROL-CHURN-ACL-MODIFY-BISCUIT",
+        )
+        # Issue 36: Interleaved control message scenarios for data+control plane testing
+        logger.info(
+            "INTERLEAVED-CONTROL-DATA-JWT, INTERLEAVED-CONTROL-DATA-BISCUIT",
         )
         # Issue 19: ACL_READ fan-out authorization cost measurement scenarios
         logger.info(
@@ -1792,6 +1833,8 @@ def main(
                     or _generate_control_churn_payload(s["id"], "admin"),
                     control_mode=bool(s.get("control_mode", False)),
                     control_repeat=s.get("control_repeat", 1),
+                    # Issue 36: Interleaved control message parameter
+                    control_after_messages=s.get("control_after_messages", 0),
                 )
             # Small delay to ensure container metrics are available after loadgen
             time.sleep(2)

@@ -475,6 +475,85 @@ python3 benchmarks/loadgen.py \
   --password "$(cat admin_token.txt)"
 ```
 
+## INTERLEAVED-CONTROL Scenarios (Issue 36)
+
+These scenarios measure **control plane latency under active data plane load** by publishing control messages interleaved with regular data messages. Unlike CONTROL-OVERHEAD (control-only) and CONTROL-CHURN (batch policy churn), these scenarios simulate realistic mixed workloads where control messages (policy updates, reauthentication triggers) must be processed while ongoing data traffic continues.
+
+### Scenario Configuration
+
+- `INTERLEAVED-CONTROL-DATA-JWT` - JWT tokens with interleaved control messages
+- `INTERLEAVED-CONTROL-DATA-BISCUIT` - Biscuit tokens with interleaved control messages
+
+Default configuration publishes **1 control message after every 10 data messages** (`--control-after-messages 10`).
+
+### How Interleaving Works
+
+1. Clients publish data messages to their normal topic (`sensors/{client_id}/temp`)
+2. After every N data messages (configured by `control_after_messages`), a control message is injected
+3. The control message is published to `$CONTROL/dynamic-security/v1` with a Dynamic Security command
+4. Both data and control message latencies are tracked separately
+
+### Metrics Captured
+
+Interleaved scenarios capture four key metrics:
+
+1. **Data message latency** (`publish` in results): Baseline latency under mixed load
+2. **Control message latency** (`control` in results): Network round-trip time for control operations (now populated from interleaved mode)
+3. **Control injection delay** (`control_injection_delay` in results): Total time to pause/resume data flow including serialization and publish
+4. **Control synchronization overhead**: Difference between injection delay and publish latency (computed as `control_injection_delay - control`)
+
+Example output structure:
+
+```json
+{
+  "inputs": {
+    "control": {
+      "topic": "$CONTROL/dynamic-security/v1",
+      "mode": false,
+      "after_messages": 10,
+      "qos": 1
+    }
+  },
+  "publish": {
+    "count": 500,
+    "mean_ms": 5.2,
+    "p99_ms": 12.3
+  },
+  "control": {
+    "count": 50,
+    "mean_ms": 8.7,
+    "p99_ms": 18.5
+  },
+  "control_injection_delay": {
+    "count": 50,
+    "mean_ms": 1.1,
+    "p99_ms": 2.3
+  }
+}
+```
+
+### CLI Options for Interleaved Control
+
+```bash
+# Run interleaved scenario via run_scenarios.py
+python3 benchmarks/run_scenarios.py --scenarios INTERLEAVED-CONTROL-DATA-JWT
+
+# Direct loadgen usage with interleaved control
+python3 benchmarks/loadgen.py \
+  --username jwt \
+  --password "$(cat jwt_token.txt)" \
+  --control-topic '$CONTROL/dynamic-security/v1' \
+  --control-payload '{"commands":[{"command":"getClient","username":"admin"}]}' \
+  --control-after-messages 5 \
+  --messages 100
+```
+
+### Research Notes
+
+- **Control overhead**: Compare `control.mean_ms` between `INTERLEAVED-CONTROL-*` and `CONTROL-OVERHEAD-*` to measure the impact of concurrent data traffic
+- **Data impact**: Compare `publish.mean_ms` between baseline (`JWT-01`, `BIS-01`) and interleaved scenarios to quantify data plane degradation
+- **Injection efficiency**: `control_injection_delay` should remain low (<5ms); high values indicate broker contention
+
 ## Step 5: Cleanup
 
 When finished, stop the environment:

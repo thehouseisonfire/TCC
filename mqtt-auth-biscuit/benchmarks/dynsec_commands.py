@@ -30,6 +30,10 @@ class DynsecCommand(TypedDict, total=False):
     roles: list[dict[str, Any]] | None
     priority: int | None
     correlationData: str | None
+    # addRoleACL / removeRoleACL specific fields
+    acltype: str | None
+    topic: str | None
+    allow: bool | None
 
 
 def generate_create_role_command(

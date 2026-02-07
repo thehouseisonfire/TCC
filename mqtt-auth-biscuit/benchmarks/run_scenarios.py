@@ -124,6 +124,8 @@ class ScenarioConfig(TypedDict, total=False):
     control_repeat: int
     # Issue 36: Interleaved control message support
     control_after_messages: int
+    # Issue 19: ACL_READ fan-out subscriber count
+    subscriber_count: int
 
 
 def _compose_bin():
@@ -1713,7 +1715,7 @@ def main(
                 token_refresh = s.get("token_refresh")
                 scenario_qos = int(s.get("qos", qos))
                 scenario_qos_distribution = s.get("qos_distribution", qos_distribution)
-                scenario_clients = s.get("subscriber_count", clients)
+                scenario_clients = int(s.get("subscriber_count", clients))
                 res = _run_loadgen(
                     tokens=tokens,
                     host=mqtt_host,

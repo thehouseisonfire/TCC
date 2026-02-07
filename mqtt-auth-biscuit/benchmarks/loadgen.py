@@ -581,6 +581,9 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                     attenuation_ms,
                     attenuation_len,
                     errors,
+                    [],
+                    [],
+                    [],
                 )
             )
             return
@@ -604,6 +607,9 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                     attenuation_ms,
                     attenuation_len,
                     errors,
+                    [],
+                    [],
+                    [],
                 )
             )
             return
@@ -629,6 +635,9 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                     attenuation_ms,
                     attenuation_len,
                     errors,
+                    [],
+                    [],
+                    [],
                 )
             )
             return
@@ -669,6 +678,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                         errors,
                         [],
                         [],
+                        [],
                     )
                 )
                 return
@@ -687,6 +697,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                 attenuation_ms,
                 attenuation_len,
                 errors,
+                [],
                 [],
                 [],
             )
@@ -708,6 +719,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                 attenuation_ms,
                 attenuation_len,
                 errors,
+                [],
                 [],
                 [],
             )
@@ -1024,6 +1036,7 @@ def run_load(
                         None,
                         None,
                         [f"delegation_failed:{e}"],
+                        [],
                         [],
                         [],
                     )

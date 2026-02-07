@@ -1,3 +1,4 @@
+import base64
 import json
 import socket
 import ssl
@@ -132,6 +133,9 @@ def main(
     auth_method: str = "token",
     token1: str = typer.Option(..., "--token1"),
     token2: str = typer.Option(..., "--token2"),
+    binary_mode: bool = typer.Option(
+        False, "--binary/--text", help="Use binary Protobuf format (Biscuit only)"
+    ),
     sleep: float = 2.0,
     tls: bool = False,
     tls_ca_file: str | None = None,
@@ -139,6 +143,20 @@ def main(
     log_level: str = typer.Option("INFO", "--log-level"),
 ):
     setup_logging(log_level)
+
+    # Prepare auth data: binary mode decodes base64 to raw bytes
+    if binary_mode:
+        try:
+            auth_data1 = base64.urlsafe_b64decode(token1 + "==")  # Add padding if needed
+            auth_data2 = base64.urlsafe_b64decode(token2 + "==")
+        except Exception as e:
+            logger.error(f"Failed to decode binary token: {e}")
+            raise typer.Exit(1) from e
+    else:
+        # Text mode (default): encode string as UTF-8
+        auth_data1 = token1.encode("utf-8")
+        auth_data2 = token2.encode("utf-8")
+
     raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     raw_sock.settimeout(10)
     sock: socket.socket = raw_sock
@@ -151,7 +169,7 @@ def main(
 
     t0 = time.perf_counter()
     sock.connect((host, port))
-    sock.sendall(_build_connect(client_id, auth_method, token1.encode("utf-8")))
+    sock.sendall(_build_connect(client_id, auth_method, auth_data1))
 
     pkt_type, payload = _recv_packet(sock)
     t1 = time.perf_counter()
@@ -167,7 +185,7 @@ def main(
     time.sleep(sleep)
 
     t2 = time.perf_counter()
-    sock.sendall(_build_auth(0x19, auth_method, token2.encode("utf-8")))
+    sock.sendall(_build_auth(0x19, auth_method, auth_data2))
 
     pkt_type2, payload2 = _recv_packet(sock)
     t3 = time.perf_counter()
@@ -185,6 +203,9 @@ def main(
         "reauth_ms": reauth_ms,
         "reauth_pkt_type": pkt_type2,
         "reauth_payload_len": len(payload2),
+        "binary_mode": binary_mode,
+        "token1_bytes": len(auth_data1),
+        "token2_bytes": len(auth_data2),
     }
 
     typer.echo(json.dumps(out, indent=2))

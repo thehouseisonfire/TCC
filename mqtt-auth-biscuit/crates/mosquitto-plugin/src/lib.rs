@@ -867,9 +867,11 @@ extern "C" fn ext_auth_start_callback(
 
     let data =
         unsafe { std::slice::from_raw_parts(evt.data_in as *const u8, evt.data_in_len as usize) };
-    let token = String::from_utf8_lossy(data);
 
-    match state.auth_engine.authenticate(&token) {
+    match state
+        .auth_engine
+        .authenticate_binary(data, state.config.biscuit_transport)
+    {
         Ok(token_type) => {
             let token_type =
                 match attach_biscuit_expiry(token_type, &state.config.biscuit.root_public_key) {

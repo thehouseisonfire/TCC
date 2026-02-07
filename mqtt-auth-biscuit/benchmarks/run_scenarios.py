@@ -75,9 +75,10 @@ class TokenRefreshConfig(TypedDict):
     ttl_seconds: int
 
 
-class Mqtt5AuthConfig(TypedDict):
+class Mqtt5AuthConfig(TypedDict, total=False):
     token1: str
     token2: str
+    binary_mode: bool
 
 
 class ScenarioConfig(TypedDict, total=False):
@@ -450,6 +451,7 @@ def _run_mqtt5_auth(
     tls_enabled: bool,
     tls_ca_file: str | None,
     tls_insecure: bool,
+    binary_mode: bool = False,
 ):
     cmd = [
         "python3",
@@ -471,6 +473,8 @@ def _run_mqtt5_auth(
         cmd.extend(["--tls-ca-file", tls_ca_file])
     if tls_insecure:
         cmd.append("--tls-insecure")
+    if binary_mode:
+        cmd.append("--binary")
     out = subprocess.check_output(cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
     return json.loads(out.decode("utf-8"))
 
@@ -891,6 +895,17 @@ def main(
                     "token2": tokens["biscuit"],
                 },
             },
+            # Issue 18: Binary Biscuit transport using native Protobuf format (no Base64URL)
+            "MQTT5-REAUTH-BISCUIT-BINARY": {
+                "mosquitto_conf": "./mosquitto.conf",
+                "authz": None,
+                "netem": {"clear": True},
+                "mqtt5_auth": {
+                    "token1": tokens["biscuit_short"],
+                    "token2": tokens["biscuit"],
+                    "binary_mode": True,
+                },
+            },
             "THUNDERING-HERD": {
                 "mosquitto_conf": "./mosquitto.conf",
                 "username": "biscuit",
@@ -1149,8 +1164,8 @@ def main(
             "BIS-HTTP-200MS, JWT-HTTP-200MS-LOSS1, JWT-HTTP-200MS-LOSS5",
         )
         logger.info(
-            "MQTT5-REAUTH-JWT, MQTT5-REAUTH-BISCUIT, THUNDERING-HERD, "
-            "DELEGATION-TEMP-ONLY, DELEGATION-HANDOFF, DELEGATION-SIMULATED",
+            "MQTT5-REAUTH-JWT, MQTT5-REAUTH-BISCUIT, MQTT5-REAUTH-BISCUIT-BINARY, "
+            "THUNDERING-HERD, DELEGATION-TEMP-ONLY, DELEGATION-HANDOFF, DELEGATION-SIMULATED",
         )
         logger.info(
             "LIFECYCLE-JWT-SHORT-RECONNECT, LIFECYCLE-BIS-SHORT-RECONNECT",
@@ -1371,6 +1386,7 @@ def main(
                 _apply_dynsec_config(churn_list[idx % len(churn_list)])
             mqtt5_cfg = s.get("mqtt5_auth")
             if mqtt5_cfg is not None:
+                binary_mode: bool = mqtt5_cfg.get("binary_mode", False)
                 res = _run_mqtt5_auth(
                     mqtt_host,
                     mqtt_port,
@@ -1379,6 +1395,7 @@ def main(
                     scenario_tls,
                     tls_ca,
                     tls_insecure,
+                    binary_mode,
                 )
             else:
                 token_refresh = s.get("token_refresh")

@@ -329,7 +329,7 @@ machine and record the first results/known issues).
 ## 9) Open Issues (Next Steps, Grouped)
 
 ### **Priority Tier 1: Measurement Accuracy**  
-1. Issue 18: Remove Biscuit Base64 (MTU fragmentation bias)
+1. Issue 18: Reduce Biscuit Base64URL (MTU fragmentation bias)
 2. Issue 19: MOSQ_EVT_MESSAGE fan-out validation (per-subscriber costs)
 
 ### **Priority Tier 2: Enhanced Analysis**
@@ -443,51 +443,42 @@ machine and record the first results/known issues).
     - [ ] At least one scenario run captured for each QoS level and mixed
       configurations
 
-- [ ] **Issue 18: Avoid Base64URL encoding for Biscuit tokens where possible (use native
-   Protobuf format)**
-  - Goal: Stop wrapping Biscuit tokens in Base64 for transport where possible,
-    using the token's native binary serialization.
-  - Current state: `token-issuer` can emit Base64URL, and the plugin expects
-    Base64URL in `auth.rs`. MQTT CONNECT uses string password transport only
-    (no binary AUTH data path).
-  - `biscuit-auth` serialization (`Biscuit::to_vec`) is already Protobuf-encoded on the wire.
-  - **Technical constraint**: Paho MQTT Python requires the password field to be
-    string-encoded (null-terminated), so the only cases to use Biscuit's native
-    protobuf encoding are those using the AUTH packet (such as with re-authentication)
-    instead of the CONNECT password field.
-  - Rationale: Base64 inflates size and may bias MTU/fragmentation experiments
-    and JWT-vs-Biscuit parity.
-  - Deliverable:
-    - Confirm the underlying Biscuit serialization format used by `biscuit-auth`
-      (and document it)
-    - Add a transport mode option for Biscuit credentials:
-      - `biscuit_transport=base64url` (current behavior, CONNECT password
-        compatible)
-      - `biscuit_transport=mqtt5_auth_data` (binary auth data for MQTT v5
-        enhanced auth)
-    - Update `auth.rs` parsing to support the selected transport mode without
-      changing token semantics
-    - Ensure the token issuing HTTP endpoint is updated to use the selected
-      transport mode for the Biscuit token, instead of the JSON payload it uses
-      for both token types
-    - Add at least one scenario that exercises the binary transport path for
-      Biscuit (and documents parity constraints vs JWT)
+- [x] **Issue 18: Avoid Base64URL encoding for Biscuit tokens where possible (use native
+   Protobuf format)** — **COMPLETED 2026-02-06**
+  - **Summary**: Implemented native Protobuf transport for Biscuit tokens via MQTT v5 AUTH packets,
+    avoiding ~33% Base64URL overhead while maintaining CONNECT password compatibility.
+  - **Deliverables**:
+    - Added `biscuit_transport` config option with two modes:
+      - `base64url` (default): CONNECT password compatible, maintains existing behavior
+      - `mqtt5_auth_data`: Native binary Protobuf for MQTT v5 AUTH packets, ~25-33% smaller
+    - Updated `auth.rs` with `authenticate_binary()` method supporting both transport modes
+    - Updated `ext_auth_start_callback` in `lib.rs` to use binary authentication for AUTH packets
+    - Added `/biscuit/binary` endpoint to token-issuer for raw binary token generation
+    - Updated `mqtt_auth_client.py` with `--binary` flag for binary transport testing
+    - Added `MQTT5-REAUTH-BISCUIT-BINARY` scenario demonstrating native Protobuf transport
+  - **Technical Details**:
+    - Biscuit's native `Biscuit::to_vec()` already produces Protobuf-encoded bytes
+    - Base64URL encoding inflates token size by ~33% (4/3 ratio)
+    - Binary transport is only available for MQTT v5 AUTH packets (not CONNECT password)
+    - JWT tokens remain text-based; binary mode only affects Biscuit parsing
+  - **Research Alignment**: Enables fair MTU/fragmentation comparisons by eliminating encoding bias
+    between JWT (inherently text-based) and Biscuit (binary-capable) token formats.
 
-- [ ] **Issue 19: Implement/validate `MOSQ_EVT_MESSAGE` fan-out per subscriber
-    authorization**
-  - Goal: Ensure outbound message authorization is evaluated _per subscriber
-    delivery_ and is not accidentally reduced to a publish-only check.
-  - Current gap: the project wires `MOSQ_EVT_MESSAGE`, but does not explicitly
-    validate subscriber fan-out semantics or measure its scaling effect (current
-    `message_callback` is a no-op).
+- [ ] **Issue 19: Validate `ACL_READ` fan-out authorization cost measurement**
+  - Goal: Ensure outbound message authorization via `MOSQ_EVT_ACL_CHECK` with
+    `MOSQ_ACL_READ` is evaluated _per subscriber delivery_ and measure the
+    scaling cost of fan-out authorization (not publish-only checks).
+  - Current state: `acl_check_callback` correctly handles `MOSQ_ACL_READ` (0x01)
+    mapping to "read" operation via `access_to_operation()`, but no explicit
+    fan-out scaling benchmark exists to quantify per-subscriber overhead.
   - Deliverable:
-    - Confirm Mosquitto semantics: `MOSQ_EVT_MESSAGE` is invoked once per
-      subscriber in the outbound flow (identify whether `evt.client` is the
-      subscriber)
-    - Ensure the callback uses the subscriber identity/topic context correctly
-    - Add at least one benchmark scenario with 1 publisher and N subscribers to
-      demonstrate per-subscriber fan-out cost
-    - Add a results field capturing subscriber count and observed scaling trend
+    - Verify `acl_check_callback` uses `evt.client` as the subscriber identity
+      (not publisher) when `access == MOSQ_ACL_READ` during message delivery
+    - Add benchmark scenario with 1 publisher and N subscribers (e.g., 10, 50, 100)
+      to measure per-subscriber authorization cost scaling
+    - Add results field capturing `subscriber_count` and `acl_read_avg_latency`
+    - Document the difference between `ACL_READ` (per-subscriber delivery check)
+      and `EVT_MESSAGE` (message modification, not authorization)
 
 
 

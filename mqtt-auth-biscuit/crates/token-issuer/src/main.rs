@@ -106,6 +106,18 @@ struct TokenResponse {
     alg: String,
 }
 
+/// Binary token response for MQTT v5 AUTH packet (raw Protobuf, no Base64URL)
+#[derive(Debug, Serialize)]
+struct BinaryTokenResponse {
+    /// Base64-encoded binary data (for JSON transport)
+    data_b64: String,
+    exp: i64,
+    issued_at: i64,
+    alg: String,
+    /// Size of the raw binary data in bytes
+    size_bytes: usize,
+}
+
 struct IssuerConfig {
     host: String,
     port: u16,
@@ -278,16 +290,21 @@ fn handle_jwt(req: JwtIssueRequest, cfg: &IssuerConfig) -> Result<TokenResponse,
     })
 }
 
-fn handle_biscuit(req: BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<TokenResponse, String> {
+/// Build a Biscuit token from the request, returning the serialized bytes, expiry, and issued-at timestamp.
+///
+/// This helper centralizes the fact-building logic shared between `/biscuit` and `/biscuit/binary` endpoints.
+fn build_biscuit_core(
+    req: &BiscuitIssueRequest,
+    cfg: &IssuerConfig,
+) -> Result<(Vec<u8>, i64, i64), String> {
     let now = Utc::now().timestamp();
     let ttl = req.ttl_seconds.unwrap_or(3600).max(1);
     let exp = now + ttl;
-    let client_id = req.client_id.unwrap_or_else(|| "client_1".to_string());
-    let topic = req
-        .topic
-        .unwrap_or_else(|| format!("sensors/{client_id}/temp"));
+    let client_id = req.client_id.as_deref().unwrap_or("client_1");
+    let default_topic = format!("sensors/{client_id}/temp");
+    let topic = req.topic.as_deref().unwrap_or(&default_topic);
 
-    let topic = escape_datalog_str(&topic);
+    let topic = escape_datalog_str(topic);
     let publish_fact = format!("right(\"publish\", \"{topic}\")");
     let subscribe_fact = format!("right(\"subscribe\", \"{topic}\")");
     let expires_fact = format!("expires_at({exp})");
@@ -299,9 +316,9 @@ fn handle_biscuit(req: BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<TokenR
         .fact(expires_fact.as_str())
         .map_err(|e| format!("biscuit fact expires_at: {e}"))?;
 
-    if let Some(roles) = req.roles {
+    if let Some(roles) = &req.roles {
         for role in roles {
-            let role = escape_datalog_str(&role);
+            let role = escape_datalog_str(role);
             let role_fact = format!("role(\"{role}\")");
             builder = builder
                 .fact(role_fact.as_str())
@@ -309,7 +326,7 @@ fn handle_biscuit(req: BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<TokenR
         }
     }
 
-    if let Some(denies) = req.denies {
+    if let Some(denies) = &req.denies {
         for deny in denies {
             let op = escape_datalog_str(&deny.op);
             let res = escape_datalog_str(&deny.res);
@@ -337,6 +354,12 @@ fn handle_biscuit(req: BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<TokenR
     let bytes = biscuit
         .to_vec()
         .map_err(|e| format!("biscuit encode: {e}"))?;
+
+    Ok((bytes, exp, now))
+}
+
+fn handle_biscuit(req: BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<TokenResponse, String> {
+    let (bytes, exp, now) = build_biscuit_core(&req, cfg)?;
     let token = general_purpose::URL_SAFE_NO_PAD.encode(&bytes);
 
     Ok(TokenResponse {
@@ -344,6 +367,27 @@ fn handle_biscuit(req: BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<TokenR
         exp,
         issued_at: now,
         alg: "Biscuit".to_string(),
+    })
+}
+
+/// Generate a Biscuit token and return it in binary format (raw Protobuf)
+/// for MQTT v5 AUTH packet transport without Base64URL overhead.
+fn handle_biscuit_binary(
+    req: BiscuitIssueRequest,
+    cfg: &IssuerConfig,
+) -> Result<BinaryTokenResponse, String> {
+    let (bytes, exp, now) = build_biscuit_core(&req, cfg)?;
+
+    // Return raw binary data (base64-encoded for JSON transport, but represents raw Protobuf)
+    let size_bytes = bytes.len();
+    let data_b64 = general_purpose::URL_SAFE_NO_PAD.encode(&bytes);
+
+    Ok(BinaryTokenResponse {
+        data_b64,
+        exp,
+        issued_at: now,
+        alg: "Biscuit".to_string(),
+        size_bytes,
     })
 }
 
@@ -399,6 +443,29 @@ async fn handle_request(
             match parsed {
                 Ok(req) => handle_biscuit(req, &cfg)
                     .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err)),
+                Err(e) => Err((StatusCode::BAD_REQUEST, format!("invalid json: {e}"))),
+            }
+        }
+        "/biscuit/binary" => {
+            let parsed: Result<BiscuitIssueRequest, _> = serde_json::from_slice(&body);
+            match parsed {
+                Ok(req) => {
+                    match handle_biscuit_binary(req, &cfg) {
+                        Ok(binary_resp) => {
+                            // Return as JSON with base64-encoded data
+                            let body =
+                                serde_json::to_vec(&binary_resp).unwrap_or_else(|_| b"{}".to_vec());
+                            return Ok(Response::builder()
+                                .status(StatusCode::OK)
+                                .header("Content-Type", "application/json")
+                                .body(Full::new(Bytes::from(body)))
+                                .unwrap_or_else(|_| {
+                                    Response::new(Full::new(Bytes::from_static(b"{}")))
+                                }));
+                        }
+                        Err(err) => Err((StatusCode::INTERNAL_SERVER_ERROR, err)),
+                    }
+                }
                 Err(e) => Err((StatusCode::BAD_REQUEST, format!("invalid json: {e}"))),
             }
         }

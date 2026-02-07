@@ -115,9 +115,9 @@ Example client-side attenuation (Rust):
 use biscuit_auth::{Biscuit, BlockBuilder, PublicKey};
 
 fn attenuate_with_deny(token_b64: &str, public_key: &PublicKey) -> Biscuit {
-    let bytes = base64::engine::general_purpose::STANDARD
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(token_b64)
-        .expect("token base64");
+        .expect("token base64url");
     let biscuit = Biscuit::from(&bytes, public_key).expect("token parse");
     let deny_block = BlockBuilder::new()
         .fact("deny(\"read\", \"sensors/client_1/temp\")")

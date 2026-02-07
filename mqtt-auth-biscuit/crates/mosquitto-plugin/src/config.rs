@@ -93,6 +93,16 @@ pub struct PluginConfig {
     pub ext_auth_method: Option<String>,
     pub role_username_prefix: String,
     pub biscuit_role_fact: String,
+    pub biscuit_transport: BiscuitTransportMode,
+}
+
+/// Transport mode for Biscuit tokens
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BiscuitTransportMode {
+    /// Base64URL encoding (CONNECT password compatible, ~33% size overhead)
+    Base64Url,
+    /// Native Protobuf binary (MQTT v5 AUTH packet only, no overhead)
+    Mqtt5AuthData,
 }
 
 /// Builder for PluginConfig with fluent interface and validation
@@ -117,6 +127,7 @@ pub struct PluginConfigBuilder {
     ext_auth_method: Option<String>,
     role_username_prefix: Option<String>,
     biscuit_role_fact: Option<String>,
+    biscuit_transport: Option<BiscuitTransportMode>,
 }
 
 impl Default for PluginConfigBuilder {
@@ -148,6 +159,7 @@ impl PluginConfigBuilder {
             ext_auth_method: None,
             role_username_prefix: None,
             biscuit_role_fact: None,
+            biscuit_transport: None,
         }
     }
 
@@ -251,6 +263,11 @@ impl PluginConfigBuilder {
         self
     }
 
+    pub fn biscuit_transport(mut self, mode: BiscuitTransportMode) -> Self {
+        self.biscuit_transport = Some(mode);
+        self
+    }
+
     pub fn build(self) -> Result<PluginConfig, ConfigError> {
         let jwt_alg = self.jwt_alg.ok_or(ConfigError::MissingJwtAlgorithm)?;
 
@@ -333,6 +350,10 @@ impl PluginConfigBuilder {
             return Err(ConfigError::InvalidBiscuitRoleFact(biscuit_role_fact));
         }
 
+        let biscuit_transport = self
+            .biscuit_transport
+            .unwrap_or(BiscuitTransportMode::Base64Url);
+
         Ok(PluginConfig {
             jwt: JwtConfig {
                 decoding_key,
@@ -348,6 +369,7 @@ impl PluginConfigBuilder {
                 .role_username_prefix
                 .unwrap_or_else(|| "role:".to_string()),
             biscuit_role_fact,
+            biscuit_transport,
         })
     }
 }
@@ -456,6 +478,18 @@ pub fn parse_options(
             "ext_auth_method" => builder.ext_auth_method(value),
             "role_username_prefix" => builder.role_username_prefix(value),
             "biscuit_role_fact" => builder.biscuit_role_fact(value),
+            "biscuit_transport" => {
+                let mode = match value.as_str() {
+                    "base64url" => BiscuitTransportMode::Base64Url,
+                    "mqtt5_auth_data" => BiscuitTransportMode::Mqtt5AuthData,
+                    _ => {
+                        return Err(format!(
+                            "Invalid biscuit_transport: {value}. Use 'base64url' or 'mqtt5_auth_data'"
+                        ));
+                    }
+                };
+                builder.biscuit_transport(mode)
+            }
             _ => builder,
         };
     }

@@ -9,6 +9,7 @@ import httpx
 import typer
 from pydantic import BaseModel, ConfigDict
 
+from benchmarks import dynsec_commands
 from benchmarks.iperf3_baseline import (
     check_network_validity,
     run_baseline_with_retry,
@@ -116,6 +117,11 @@ class ScenarioConfig(TypedDict, total=False):
     token_issuer_no_default_roles: bool
     token_issuer_no_default_grants: bool
     tls: bool
+    # CONTROL scenario support
+    control_topic: str
+    control_payload: dict[str, Any]
+    control_mode: bool
+    control_repeat: int
 
 
 def _compose_bin():
@@ -297,6 +303,12 @@ def _run_loadgen(
     biscuit_delegate_handoff_token: str | None,
     biscuit_delegate_handoff_qos: int | None,
     biscuit_delegate_handoff_retain: bool | None,
+    # CONTROL message parameters
+    control_topic: str | None = None,
+    control_payload: dict[str, Any] | None = None,
+    control_mode: bool = False,
+    control_after_messages: int = 0,
+    control_repeat: int = 1,
 ):
     cmd = [
         "python3",
@@ -397,6 +409,15 @@ def _run_loadgen(
         cmd.extend(["--biscuit-delegate-handoff-qos", str(biscuit_delegate_handoff_qos)])
     if biscuit_delegate_handoff_retain is False:
         cmd.append("--biscuit-delegate-handoff-no-retain")
+    # CONTROL message CLI options
+    if control_topic:
+        cmd.extend(["--control-topic", control_topic])
+    if control_payload:
+        cmd.extend(["--control-payload", json.dumps(control_payload)])
+    if control_mode:
+        cmd.append("--control-mode")
+    if control_repeat != 1:
+        cmd.extend(["--control-repeat", str(control_repeat)])
 
     out = subprocess.check_output(cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
     return json.loads(out.decode("utf-8"))
@@ -441,6 +462,44 @@ def _ensure_paho_mqtt():
         raise SystemExit(
             "Missing dependency 'paho-mqtt'. Install it with: pip install paho-mqtt"
         ) from exc
+
+
+def _generate_control_churn_payload(scenario_id: str, client_id: str) -> dict[str, Any] | None:
+    """Generate Dynamic Security command payload for CONTROL-CHURN scenarios.
+
+    Maps scenario ID patterns to appropriate churn sequences:
+    - CREATE-ROLE -> role churn (createRole + deleteRole)
+    - GROUP-CLIENT -> group client churn (createGroup + addGroupClient +
+                     removeGroupClient + deleteGroup)
+    - ACL-MODIFY -> ACL churn (createRole + addRoleACL + removeRoleACL + deleteRole)
+
+    Args:
+        scenario_id: The scenario identifier (e.g., "CONTROL-CHURN-CREATE-ROLE-JWT")
+        client_id: Client ID for generating unique resource names
+
+    Returns:
+        Command payload dict or None if not a CONTROL-CHURN scenario
+    """
+    if "CONTROL-CHURN" not in scenario_id:
+        return None
+
+    # Extract churn type from scenario ID
+    if "CREATE-ROLE" in scenario_id:
+        sequence_type = "role"
+    elif "GROUP-CLIENT" in scenario_id:
+        sequence_type = "group_client"
+    elif "ACL-MODIFY" in scenario_id:
+        sequence_type = "acl"
+    else:
+        logger.warning(f"Unknown CONTROL-CHURN type in scenario: {scenario_id}")
+        return None
+
+    commands = dynsec_commands.generate_churn_sequence(
+        sequence_type=sequence_type,
+        base_id=client_id,
+        client_id=client_id,
+    )
+    return dynsec_commands.generate_command_payload(commands)
 
 
 def _run_mqtt5_auth(
@@ -1137,7 +1196,8 @@ def main(
             # Issue 20: Control-Triggered Enforcement Scenarios
             # These scenarios exercise the $CONTROL callback semantics and measure
             # control-plane overhead vs data-plane operations.
-            "CONTROL-KICK-REAUTH-JWT": {
+            # Issue 35: Renamed to CONTROL-OVERHEAD to distinguish from CONTROL-CHURN
+            "CONTROL-OVERHEAD-KICK-REAUTH-JWT": {
                 "mosquitto_conf": "./mosquitto_dynsec.conf",
                 "username": "admin",
                 "password": tokens["jwt_admin"],
@@ -1150,7 +1210,7 @@ def main(
                 "repeat": 2,
                 "sleep_between": 3,
             },
-            "CONTROL-KICK-REAUTH-BISCUIT": {
+            "CONTROL-OVERHEAD-KICK-REAUTH-BISCUIT": {
                 "mosquitto_conf": "./mosquitto_dynsec.conf",
                 "username": "admin",
                 "password": tokens["biscuit_admin"],
@@ -1163,7 +1223,7 @@ def main(
                 "repeat": 2,
                 "sleep_between": 3,
             },
-            "CONTROL-ACL-READ-NOTIFY-JWT": {
+            "CONTROL-OVERHEAD-ACL-READ-NOTIFY-JWT": {
                 "mosquitto_conf": "./mosquitto_dynsec.conf",
                 "username": "admin",
                 "password": tokens["jwt_admin"],
@@ -1180,7 +1240,7 @@ def main(
                 "repeat": 2,
                 "sleep_between": 3,
             },
-            "CONTROL-ACL-READ-NOTIFY-BISCUIT": {
+            "CONTROL-OVERHEAD-ACL-READ-NOTIFY-BISCUIT": {
                 "mosquitto_conf": "./mosquitto_dynsec.conf",
                 "username": "admin",
                 "password": tokens["biscuit_admin"],
@@ -1193,6 +1253,104 @@ def main(
                 "fanout_publisher_password": tokens["biscuit_admin"],
                 "mode": "fanout",
                 "fanout_topic": "system/notifications/acl-change",
+                "dynsec_config": "docker/dynamic-security.json",
+                "repeat": 2,
+                "sleep_between": 3,
+            },
+            # Issue 35: CONTROL-CHURN scenarios with actual Dynamic Security command payloads
+            # These scenarios exercise actual policy modifications via Dynamic Security commands
+            "CONTROL-CHURN-CREATE-ROLE-JWT": {
+                "mosquitto_conf": "./mosquitto_dynsec.conf",
+                "username": "admin",
+                "password": tokens["jwt_admin"],
+                "topic": "sensors/{client_id}/temp",
+                "control_topic": "$CONTROL/dynamic-security/v1",
+                "control_mode": True,
+                "control_repeat": 3,
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 256,
+                "qos": 1,
+                "dynsec_config": "docker/dynamic-security.json",
+                "repeat": 2,
+                "sleep_between": 3,
+            },
+            "CONTROL-CHURN-CREATE-ROLE-BISCUIT": {
+                "mosquitto_conf": "./mosquitto_dynsec.conf",
+                "username": "admin",
+                "password": tokens["biscuit_admin"],
+                "topic": "sensors/{client_id}/temp",
+                "control_topic": "$CONTROL/dynamic-security/v1",
+                "control_mode": True,
+                "control_repeat": 3,
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 256,
+                "qos": 1,
+                "dynsec_config": "docker/dynamic-security.json",
+                "repeat": 2,
+                "sleep_between": 3,
+            },
+            "CONTROL-CHURN-GROUP-CLIENT-JWT": {
+                "mosquitto_conf": "./mosquitto_dynsec.conf",
+                "username": "admin",
+                "password": tokens["jwt_admin"],
+                "topic": "sensors/{client_id}/temp",
+                "control_topic": "$CONTROL/dynamic-security/v1",
+                "control_mode": True,
+                "control_repeat": 2,
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 256,
+                "qos": 1,
+                "dynsec_config": "docker/dynamic-security.json",
+                "repeat": 2,
+                "sleep_between": 3,
+            },
+            "CONTROL-CHURN-GROUP-CLIENT-BISCUIT": {
+                "mosquitto_conf": "./mosquitto_dynsec.conf",
+                "username": "admin",
+                "password": tokens["biscuit_admin"],
+                "topic": "sensors/{client_id}/temp",
+                "control_topic": "$CONTROL/dynamic-security/v1",
+                "control_mode": True,
+                "control_repeat": 2,
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 256,
+                "qos": 1,
+                "dynsec_config": "docker/dynamic-security.json",
+                "repeat": 2,
+                "sleep_between": 3,
+            },
+            "CONTROL-CHURN-ACL-MODIFY-JWT": {
+                "mosquitto_conf": "./mosquitto_dynsec.conf",
+                "username": "admin",
+                "password": tokens["jwt_admin"],
+                "topic": "sensors/{client_id}/temp",
+                "control_topic": "$CONTROL/dynamic-security/v1",
+                "control_mode": True,
+                "control_repeat": 2,
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 256,
+                "qos": 1,
+                "dynsec_config": "docker/dynamic-security.json",
+                "repeat": 2,
+                "sleep_between": 3,
+            },
+            "CONTROL-CHURN-ACL-MODIFY-BISCUIT": {
+                "mosquitto_conf": "./mosquitto_dynsec.conf",
+                "username": "admin",
+                "password": tokens["biscuit_admin"],
+                "topic": "sensors/{client_id}/temp",
+                "control_topic": "$CONTROL/dynamic-security/v1",
+                "control_mode": True,
+                "control_repeat": 2,
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 256,
+                "qos": 1,
                 "dynsec_config": "docker/dynamic-security.json",
                 "repeat": 2,
                 "sleep_between": 3,
@@ -1269,10 +1427,16 @@ def main(
         logger.info(
             "STATIC-ACL-JWT, STATIC-ACL-BIS, STATIC-ACL-FANOUT, " "STATIC-ACL-FANOUT-BIS",
         )
-        # Issue 20: Control-triggered enforcement scenarios
+        # Issue 20: Control-triggered enforcement scenarios (renamed to CONTROL-OVERHEAD)
         logger.info(
-            "CONTROL-KICK-REAUTH-JWT, CONTROL-KICK-REAUTH-BISCUIT, "
-            "CONTROL-ACL-READ-NOTIFY-JWT, CONTROL-ACL-READ-NOTIFY-BISCUIT",
+            "CONTROL-OVERHEAD-KICK-REAUTH-JWT, CONTROL-OVERHEAD-KICK-REAUTH-BISCUIT, "
+            "CONTROL-OVERHEAD-ACL-READ-NOTIFY-JWT, CONTROL-OVERHEAD-ACL-READ-NOTIFY-BISCUIT",
+        )
+        # Issue 35: Control-triggered enforcement with actual policy churn (CONTROL-CHURN)
+        logger.info(
+            "CONTROL-CHURN-CREATE-ROLE-JWT, CONTROL-CHURN-CREATE-ROLE-BISCUIT, "
+            "CONTROL-CHURN-GROUP-CLIENT-JWT, CONTROL-CHURN-GROUP-CLIENT-BISCUIT, "
+            "CONTROL-CHURN-ACL-MODIFY-JWT, CONTROL-CHURN-ACL-MODIFY-BISCUIT",
         )
         # Issue 19: ACL_READ fan-out authorization cost measurement scenarios
         logger.info(
@@ -1622,6 +1786,12 @@ def main(
                         if s.get("biscuit_delegate")
                         else None
                     ),
+                    # Issue 35: CONTROL message parameters
+                    control_topic=s.get("control_topic"),
+                    control_payload=s.get("control_payload")
+                    or _generate_control_churn_payload(s["id"], "admin"),
+                    control_mode=bool(s.get("control_mode", False)),
+                    control_repeat=s.get("control_repeat", 1),
                 )
             # Small delay to ensure container metrics are available after loadgen
             time.sleep(2)

@@ -332,18 +332,20 @@ machine and record the first results/known issues).
 1. Issue 8.2: Containerized benchmark topology
 2. Issue 13: emqtt-bench integration
 3. Issue 15: tcpdump fragmentation analysis
-4. Issue 21: Expand Biscuit authorizer (if current template insufficient)
-5. Issue 22: Strengthen SQLite RBAC (if policies too simple)
-6. Issue 23: Proactive client reauthentication
-7. Issue 24: Multi-step enhanced auth decision
-8. Issue 25: Optional ACL_READ full authz flag
-9. Issue 28: Verify static-policy coverage
-10. Issue 29: Anonymous flow scenario
-11. Issue 30: Dynamic-policy ACL_READ fan-out
-12. Issue 31: Control-triggered kick/re-auth
-13. Issue 32: Control-triggered ACL_READ + notify
-14. Issue 33: Enhance HTTP policy expressiveness for parity
-15. Issue 35: Add Dynamic Security command payloads to CONTROL scenarios
+4. Issue 17: comprehensive QoS
+5. Issue 21: Expand Biscuit authorizer (if current template insufficient)
+6. Issue 22: Strengthen SQLite RBAC (if policies too simple)
+7. Issue 23: Proactive client reauthentication
+8. Issue 24: Multi-step enhanced auth decision
+9. Issue 25: Optional ACL_READ full authz flag
+10. Issue 28: Verify static-policy coverage
+11. Issue 29: Anonymous flow scenario
+12. Issue 30: Dynamic-policy ACL_READ fan-out
+13. Issue 31: Control-triggered kick/re-auth
+14. Issue 32: Control-triggered ACL_READ + notify
+15. Issue 33: Enhance HTTP policy expressiveness for parity
+16. Issue 35: Add Dynamic Security command payloads to CONTROL scenarios
+17. Issue 36: Add interleaved control message support for data plane + control plane testing
 
 ---
 
@@ -603,21 +605,6 @@ machine and record the first results/known issues).
     - Notification topic publishing (e.g., `system_notification/<client_id>`)
     - Scenario capturing denial after privilege reduction
 
-- [ ] **Issue 35: Add Dynamic Security command payloads to CONTROL scenarios**
-  - Goal: The CONTROL scenarios (CONTROL-KICK-REAUTH-* and CONTROL-ACL-READ-NOTIFY-*)
-    currently publish to `$CONTROL/dynamic-security/v1` without actual Dynamic Security
-    command payloads (e.g., `{"commands": [{"command": "createRole", ...}]}`).
-  - Current state: Scenarios measure control message authorization overhead only;
-    they do not exercise actual policy modifications via Dynamic Security commands.
-  - Deliverable:
-    - Add Dynamic Security JSON command payloads to CONTROL scenarios for actual
-      role/ACL modifications (e.g., createRole, deleteRole, addGroupClient)
-    - Document whether scenarios measure authorization overhead only vs. end-to-end
-      policy churn with actual Dynamic Security state changes
-    - Consider adding separate CONTROL-OVERHEAD (authorization only) and
-      CONTROL-CHURN (actual policy modifications) scenario variants
-    - Ensure JWT/Biscuit parity for both overhead and churn scenarios
-
 ---
 
 ## 9) Completed Issues (Backlog)
@@ -735,6 +722,33 @@ machine and record the first results/known issues).
 
 - [x] **Issue 34: Implement real LRU eviction in `SessionCache`**
   - Summary: Enforced cache capacity with true LRU eviction, added capacity tracking, edge case handling, and comprehensive unit tests.
+
+- [x] **Issue 35: Add Dynamic Security command payloads to CONTROL scenarios** — **COMPLETED 2026-02-06**
+  - **Summary**: Added Dynamic Security JSON command payloads to CONTROL scenarios, creating separate CONTROL-OVERHEAD (authorization only) and CONTROL-CHURN (actual policy modifications) scenario variants.
+  - **Deliverables**:
+    - Created `benchmarks/dynsec_commands.py` module with Dynamic Security command generators (createRole, deleteRole, addGroupClient, etc.)
+    - Extended `loadgen.py` with CONTROL message publishing support (CLI options: --control-topic, --control-payload, --control-payload-file, --control-mode, --control-repeat)
+    - Renamed existing scenarios to CONTROL-OVERHEAD-* (authorization overhead only)
+    - Added new CONTROL-CHURN-* scenarios with actual policy modifications (CREATE-ROLE, GROUP-CLIENT, ACL-MODIFY variants for JWT/Biscuit)
+    - Updated `run_scenarios.py` with control scenario configuration and _run_loadgen integration
+    - Added documentation in RUNNING_BENCHMARKS.md explaining scenario differences and CLI usage
+    - JWT/Biscuit parity maintained for both overhead and churn scenarios
+  - **Research Alignment**: Enables measurement of both authorization overhead and end-to-end policy churn costs, supporting H1 (functional viability) and H2/H3 (performance comparison) validation
+
+- [ ] **Issue 36: Add interleaved control message support for data plane + control plane testing**
+  - **Goal**: Implement support for publishing control messages interleaved with data messages (e.g., publish N data messages, then 1 control message, repeat) to measure control plane latency under active data plane load.
+  - **Rationale**: Current CONTROL scenarios test control plane in isolation (CONTROL-OVERHEAD) or batch policy churn (CONTROL-CHURN), but do not capture the realistic scenario where control messages (policy updates, reauthentication triggers) must be processed while ongoing data traffic continues. This enables measurement of broker behavior under mixed data+control plane stress.
+  - **Current state**: The `--control-after-messages` CLI option was defined in `loadgen.py` but never implemented; it has been removed to avoid technical debt. The feature needs fresh implementation with proper design.
+  - **Deliverable**:
+    - Add `--control-after-messages` CLI option to `loadgen.py` with proper implementation in `_run_worker()`
+    - Track message counter during data publishing; pause/resume data flow to send control messages at specified intervals
+    - Handle interaction with rate limiting (`--rate`) to ensure interleaving works correctly with throttled publishing
+    - Add interleaved CONTROL scenarios to `run_scenarios.py` (e.g., `INTERLEAVED-CONTROL-DATA-JWT`, `INTERLEAVED-CONTROL-DATA-BISCUIT`)
+    - Capture separate metrics for:
+      - Data message latency (baseline under interleaved control)
+      - Control message latency (measured while data flow active)
+      - Control message injection delay (time to pause/resume data flow)
+    - Document in RUNNING_BENCHMARKS.md the methodology for interleaved testing and interpretation of results
 
 ---
 

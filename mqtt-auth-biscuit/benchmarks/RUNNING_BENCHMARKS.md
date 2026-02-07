@@ -422,6 +422,59 @@ The `network_baseline` field in scenario results contains:
 
 The `iperf3` service is defined in `docker/docker-compose.yml` and starts automatically with the scenario runner. The server listens on port 5201 and requires `NET_ADMIN` capability for traffic shaping compatibility.
 
+## CONTROL Scenarios (Dynamic Security)
+
+The benchmark suite includes two categories of CONTROL scenarios that exercise Mosquitto's Dynamic Security plugin via the `$CONTROL/dynamic-security/v1` topic:
+
+### CONTROL-OVERHEAD Scenarios
+
+These scenarios measure authorization overhead only - they publish to `$CONTROL/dynamic-security/v1` without actual command payloads:
+
+- `CONTROL-OVERHEAD-KICK-REAUTH-JWT` - JWT admin control-plane authorization
+- `CONTROL-OVERHEAD-KICK-REAUTH-BISCUIT` - Biscuit admin control-plane authorization
+- `CONTROL-OVERHEAD-ACL-READ-NOTIFY-JWT` - JWT control with fanout notifications
+- `CONTROL-OVERHEAD-ACL-READ-NOTIFY-BISCUIT` - Biscuit control with fanout notifications
+
+### CONTROL-CHURN Scenarios (Issue 35)
+
+These scenarios exercise actual Dynamic Security policy modifications via JSON command payloads:
+
+- `CONTROL-CHURN-CREATE-ROLE-JWT/BISCUIT` - Create and delete roles dynamically
+- `CONTROL-CHURN-GROUP-CLIENT-JWT/BISCUIT` - Add/remove clients from groups
+- `CONTROL-CHURN-ACL-MODIFY-JWT/BISCUIT` - Modify role ACLs dynamically
+
+Command payloads are generated using the `dynsec_commands.py` module and include operations like:
+
+```json
+{
+  "commands": [
+    {"command": "createRole", "rolename": "dynamic_role_abc123", "acls": [...]},
+    {"command": "addGroupClient", "groupname": "sensors", "username": "client_1"},
+    {"command": "deleteRole", "rolename": "dynamic_role_abc123"}
+  ]
+}
+```
+
+### CLI Options for Control Messages
+
+The `loadgen.py` script supports direct control message testing:
+
+```bash
+# Publish a control message with custom payload
+python3 benchmarks/loadgen.py \
+  --control-mode \
+  --control-topic '$CONTROL/dynamic-security/v1' \
+  --control-payload '{"commands":[{"command":"createRole","rolename":"test"}]}' \
+  --control-repeat 3
+
+# Load payload from file
+python3 benchmarks/loadgen.py \
+  --control-mode \
+  --control-payload-file /path/to/commands.json \
+  --username admin \
+  --password "$(cat admin_token.txt)"
+```
+
 ## Step 5: Cleanup
 
 When finished, stop the environment:

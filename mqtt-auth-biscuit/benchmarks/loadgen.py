@@ -153,6 +153,12 @@ class WorkerConfig:
     biscuit_delegate_handoff_nonce: str | None
     delegation_ms: float | None
     delegation_len: int | None
+    # CONTROL message support
+    control_topic: str | None
+    control_payload: dict[str, Any] | None
+    control_mode: bool
+    control_repeat: int
+    control_qos: int
 
 
 @dataclass
@@ -168,6 +174,9 @@ class WorkerResult:
     attenuation_ms: float | None
     attenuation_len: int | None
     errors: list[str]
+    # CONTROL message metrics
+    control_publish_ms: list[float]
+    control_errors: list[str]
 
 
 def _mk_payload(size: int) -> bytes:
@@ -655,6 +664,8 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                         attenuation_ms,
                         attenuation_len,
                         errors,
+                        [],
+                        [],
                     )
                 )
                 return
@@ -673,6 +684,8 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                 attenuation_ms,
                 attenuation_len,
                 errors,
+                [],
+                [],
             )
         )
         return
@@ -692,6 +705,8 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                 attenuation_ms,
                 attenuation_len,
                 errors,
+                [],
+                [],
             )
         )
         return
@@ -700,6 +715,29 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
 
     if not cfg.sync_connect:
         start_evt.wait()
+
+    # CONTROL message publishing support
+    control_publish_ms: list[float] = []
+    control_errors: list[str] = []
+
+    if cfg.control_mode and cfg.control_topic and cfg.control_payload:
+        for _ in range(cfg.control_repeat):
+            try:
+                t0 = time.perf_counter()
+                payload = json.dumps(cfg.control_payload).encode()
+                info = client.publish(
+                    cfg.control_topic,
+                    payload,
+                    qos=cfg.control_qos,
+                )
+                info.wait_for_publish(timeout=10)
+                t1 = time.perf_counter()
+                control_publish_ms.append((t1 - t0) * 1000.0)
+                if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                    control_errors.append(f"control_publish_rc:{info.rc}")
+            except Exception as e:
+                control_errors.append(f"control_publish_failed:{e}")
+                break
 
     if cfg.mode == "fanout":
         if not cfg.subscribe_topic:
@@ -756,6 +794,8 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
             attenuation_ms,
             attenuation_len,
             errors,
+            control_publish_ms,
+            control_errors,
         )
     )
 
@@ -877,6 +917,12 @@ def run_load(
     biscuit_delegate_handoff_token: str | None = None,
     biscuit_delegate_handoff_qos: int | None = 1,
     biscuit_delegate_handoff_no_retain: bool = False,
+    # CONTROL message parameters
+    control_topic: str | None = None,
+    control_payload: dict[str, Any] | None = None,
+    control_mode: bool = False,
+    control_repeat: int = 1,
+    control_qos: int = 1,
 ):
     start_evt = threading.Event()
     out_q: queue.Queue = queue.Queue()
@@ -943,6 +989,8 @@ def run_load(
                         None,
                         None,
                         [f"delegation_failed:{e}"],
+                        [],
+                        [],
                     )
                 )
                 continue
@@ -1000,6 +1048,11 @@ def run_load(
             biscuit_delegate_handoff_nonce=handoff_nonce,
             delegation_ms=delegation_ms,
             delegation_len=delegation_len,
+            control_topic=control_topic,
+            control_payload=control_payload,
+            control_mode=control_mode,
+            control_repeat=control_repeat,
+            control_qos=control_qos,
         )
         t = threading.Thread(target=_run_worker, args=(cfg, start_evt, out_q), daemon=True)
         threads.append(t)
@@ -1069,10 +1122,13 @@ def run_load(
     delegation_lens = [r.delegation_len for r in results if r.delegation_len is not None]
     attenuation_lat = [r.attenuation_ms for r in results if r.attenuation_ms is not None]
     attenuation_lens = [r.attenuation_len for r in results if r.attenuation_len is not None]
+    control_lat = [x for r in results for x in r.control_publish_ms]
+    control_errs = [e for r in results for e in r.control_errors]
 
     errors = [e for r in results for e in r.errors]
     errors.extend(fanout_errors)
     errors.extend(delegation_errors)
+    errors.extend(control_errs)
 
     duration_s = max(1e-9, t_end - t_start)
     publish_lat.extend(fanout_publish_ms)
@@ -1124,6 +1180,13 @@ def run_load(
             "biscuit_delegate_handoff": biscuit_delegate_handoff,
             "biscuit_delegate_handoff_topic": handoff_topic,
             "biscuit_delegate_handoff_nonce": handoff_nonce,
+            "control": {
+                "topic": control_topic,
+                "mode": control_mode,
+                "payload": control_payload,
+                "repeat": control_repeat,
+                "qos": control_qos,
+            },
         },
         "connect": _summarize_ms(connect_lat),
         "token_refresh": _summarize_ms(refresh_lat),
@@ -1134,6 +1197,7 @@ def run_load(
         "attenuation_len": _summarize_ms(attenuation_lens),
         "publish": _summarize_ms(publish_lat),
         "receive": _summarize_ms(receive_lat),
+        "control": _summarize_ms(control_lat),
         "throughput_mps": throughput_mps,
         "publish_throughput_mps": publish_throughput_mps,
         "receive_throughput_mps": receive_throughput_mps,
@@ -1202,6 +1266,43 @@ def main(
     biscuit_delegate_handoff_token: str | None = None,
     biscuit_delegate_handoff_qos: int = typer.Option(1, min=0, max=2),
     biscuit_delegate_handoff_no_retain: bool = False,
+    # CONTROL message CLI options
+    control_topic: str | None = typer.Option(
+        None,
+        "--control-topic",
+        envvar="MQTT_CONTROL_TOPIC",
+        help="Topic for control messages (default: $CONTROL/dynamic-security/v1)",
+    ),
+    control_payload: str | None = typer.Option(
+        None,
+        "--control-payload",
+        envvar="MQTT_CONTROL_PAYLOAD",
+        help="JSON payload string for control commands",
+    ),
+    control_payload_file: str | None = typer.Option(
+        None,
+        "--control-payload-file",
+        envvar="MQTT_CONTROL_PAYLOAD_FILE",
+        help="Path to JSON file containing control command payload",
+    ),
+    control_mode: bool = typer.Option(
+        False,
+        "--control-mode",
+        envvar="MQTT_CONTROL_MODE",
+        help="Enable control message mode (publish control messages instead of data)",
+    ),
+    control_repeat: int = typer.Option(
+        1,
+        "--control-repeat",
+        envvar="MQTT_CONTROL_REPEAT",
+        help="Number of control messages to publish",
+    ),
+    control_qos: int = typer.Option(
+        1,
+        "--control-qos",
+        envvar="MQTT_CONTROL_QOS",
+        help="QoS level for control messages (default: 1)",
+    ),
     mode: str = typer.Option("publish", envvar="MQTT_MODE"),
     fanout_topic: str = typer.Option("fanout/broadcast", envvar="MQTT_FANOUT_TOPIC"),
     fanout_publisher_username: str | None = typer.Option(
@@ -1233,6 +1334,24 @@ def main(
             parsed_qos_distribution = _parse_qos_distribution(qos_distribution)
         except ValueError as exc:
             raise typer.BadParameter(str(exc)) from exc
+
+    # Parse control payload from string or file
+    parsed_control_payload: dict[str, Any] | None = None
+    if control_payload:
+        try:
+            parsed_control_payload = json.loads(control_payload)
+        except json.JSONDecodeError as exc:
+            raise typer.BadParameter(f"Invalid control payload JSON: {exc}") from exc
+    elif control_payload_file:
+        try:
+            with open(control_payload_file, encoding="utf-8") as f:
+                parsed_control_payload = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError) as exc:
+            raise typer.BadParameter(f"Failed to load control payload file: {exc}") from exc
+
+    # Default control topic if mode enabled but no topic specified
+    if control_mode and not control_topic:
+        control_topic = "$CONTROL/dynamic-security/v1"
 
     res = run_load(
         host=host,
@@ -1283,6 +1402,11 @@ def main(
         biscuit_delegate_handoff_token=biscuit_delegate_handoff_token,
         biscuit_delegate_handoff_qos=biscuit_delegate_handoff_qos,
         biscuit_delegate_handoff_no_retain=biscuit_delegate_handoff_no_retain,
+        control_topic=control_topic,
+        control_payload=parsed_control_payload,
+        control_mode=control_mode,
+        control_repeat=control_repeat,
+        control_qos=control_qos,
     )
 
     if json_output:

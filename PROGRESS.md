@@ -605,6 +605,21 @@ machine and record the first results/known issues).
     - Notification topic publishing (e.g., `system_notification/<client_id>`)
     - Scenario capturing denial after privilege reduction
 
+- [ ] **Issue 36: Add interleaved control message support for data plane + control plane testing**
+  - **Goal**: Implement support for publishing control messages interleaved with data messages (e.g., publish N data messages, then 1 control message, repeat) to measure control plane latency under active data plane load.
+  - **Rationale**: Current CONTROL scenarios test control plane in isolation (CONTROL-OVERHEAD) or batch policy churn (CONTROL-CHURN), but do not capture the realistic scenario where control messages (policy updates, reauthentication triggers) must be processed while ongoing data traffic continues. This enables measurement of broker behavior under mixed data+control plane stress.
+  - **Current state**: The `--control-after-messages` CLI option was defined in `loadgen.py` but never implemented; it has been removed to avoid technical debt. The feature needs fresh implementation with proper design.
+  - **Deliverable**:
+    - Add `--control-after-messages` CLI option to `loadgen.py` with proper implementation in `_run_worker()`
+    - Track message counter during data publishing; pause/resume data flow to send control messages at specified intervals
+    - Handle interaction with rate limiting (`--rate`) to ensure interleaving works correctly with throttled publishing
+    - Add interleaved CONTROL scenarios to `run_scenarios.py` (e.g., `INTERLEAVED-CONTROL-DATA-JWT`, `INTERLEAVED-CONTROL-DATA-BISCUIT`)
+    - Capture separate metrics for:
+      - Data message latency (baseline under interleaved control)
+      - Control message latency (measured while data flow active)
+      - Control message injection delay (time to pause/resume data flow)
+    - Document in RUNNING_BENCHMARKS.md the methodology for interleaved testing and interpretation of results
+
 ---
 
 ## 9) Completed Issues (Backlog)
@@ -734,21 +749,6 @@ machine and record the first results/known issues).
     - Added documentation in RUNNING_BENCHMARKS.md explaining scenario differences and CLI usage
     - JWT/Biscuit parity maintained for both overhead and churn scenarios
   - **Research Alignment**: Enables measurement of both authorization overhead and end-to-end policy churn costs, supporting H1 (functional viability) and H2/H3 (performance comparison) validation
-
-- [ ] **Issue 36: Add interleaved control message support for data plane + control plane testing**
-  - **Goal**: Implement support for publishing control messages interleaved with data messages (e.g., publish N data messages, then 1 control message, repeat) to measure control plane latency under active data plane load.
-  - **Rationale**: Current CONTROL scenarios test control plane in isolation (CONTROL-OVERHEAD) or batch policy churn (CONTROL-CHURN), but do not capture the realistic scenario where control messages (policy updates, reauthentication triggers) must be processed while ongoing data traffic continues. This enables measurement of broker behavior under mixed data+control plane stress.
-  - **Current state**: The `--control-after-messages` CLI option was defined in `loadgen.py` but never implemented; it has been removed to avoid technical debt. The feature needs fresh implementation with proper design.
-  - **Deliverable**:
-    - Add `--control-after-messages` CLI option to `loadgen.py` with proper implementation in `_run_worker()`
-    - Track message counter during data publishing; pause/resume data flow to send control messages at specified intervals
-    - Handle interaction with rate limiting (`--rate`) to ensure interleaving works correctly with throttled publishing
-    - Add interleaved CONTROL scenarios to `run_scenarios.py` (e.g., `INTERLEAVED-CONTROL-DATA-JWT`, `INTERLEAVED-CONTROL-DATA-BISCUIT`)
-    - Capture separate metrics for:
-      - Data message latency (baseline under interleaved control)
-      - Control message latency (measured while data flow active)
-      - Control message injection delay (time to pause/resume data flow)
-    - Document in RUNNING_BENCHMARKS.md the methodology for interleaved testing and interpretation of results
 
 ---
 

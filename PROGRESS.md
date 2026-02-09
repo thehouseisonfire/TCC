@@ -623,6 +623,10 @@ machine and record the first results/known issues).
 - [x] **Issue 14: Add iperf3 baseline (throughput interpretation)** — **COMPLETED 2026-02-06**
   - **Summary**: Implemented `iperf3` integration to measure nominal channel capacity as specified in ARTICLE.MD methodology. Added `iperf3` service to docker-compose.yml, created `benchmarks/iperf3_baseline.py` module with measurement, parsing, and validity checking functions. Integrated automated baseline measurement into `run_scenarios.py` with CLI options (`--iperf3/--no-iperf3`, `--iperf3-host`, `--iperf3-port`, `--iperf3-duration`, `--iperf3-streams`, `--iperf3-min-mbps`). Network capacity data included in scenario results JSON under `network_baseline` field with throughput, RTT, retransmits, and validity assessment. Warns when network constraints may affect test validity.
 
+- [x] **Issue 15: Add packet-level analysis with tcpdump for fragmentation studies**
+  - **Completed**: Integrated tcpdump capture and automated packet analysis for MTU stress test scenarios.
+  - **Summary**: Added tcpdump service to docker-compose.yml with NET_ADMIN/NET_RAW capabilities and network_mode: service:mosquitto for packet capture on the broker interface. Created `benchmarks/packet_analysis.py` with complete pcap parsing (tcpdump JSON output), fragmentation detection, retransmission counting, inter-packet timing analysis (p50/p95/p99), and token size correlation metrics. Auto-activation for MTU scenarios (200B, 500B, 1500B, 9000B) with pcap files saved to `benchmarks/results/pcap/<scenario_id>.pcap`. CLI options: `--tcpdump`, `--tcpdump-filter`, `--tcpdump-duration`, `--tcpdump-output-dir`, `--tcpdump-analyze`. Analysis results included in scenario JSON under `packet_analysis_result` with metrics: fragment_count, retransmission_count, inter_packet_deltas_ms, tcp_streams, fragmentation_stats, token_size_correlation. Follows same integration patterns as iperf3 baseline and perf profiling.
+
 - [x] **Issue 16: Add host-targeted kernel-level performance profiling with perf** — **COMPLETED 2026-02-06**
   - **Summary**: Implemented comprehensive `perf` integration for detailed CPU performance analysis of containerized Mosquitto during token verification and policy evaluation.
   - **Deliverables**:
@@ -643,10 +647,6 @@ machine and record the first results/known issues).
 
 - [x] **Issue 17: Implement comprehensive QoS configuration and mixing features**
   - **Summary**: Added full QoS 0/1/2 support with per-QoS latency tracking. Implemented QoS distribution parsing (`0:0.6,1:0.3,2:0.1` format) in `loadgen.py` with `--qos-distribution` CLI option. `WorkerResult` now tracks `publish_ms_by_qos` per level; `aggregate_results.py` reports per-QoS statistics in JSON and CSV. Added scenarios: `QOS0-BASE-01`, `QOS2-JWT`, `QOS2-BISCUIT`, `QOS-MIXED-JWT`, `QOS-MIXED-BISCUIT`. Enables H₂/H₃ validation of latency differences across QoS levels.
-
-- [x] **Issue 15: Add packet-level analysis with tcpdump for fragmentation studies**
-  - **Completed**: Integrated tcpdump capture and automated packet analysis for MTU stress test scenarios.
-  - **Summary**: Added tcpdump service to docker-compose.yml with NET_ADMIN/NET_RAW capabilities and network_mode: service:mosquitto for packet capture on the broker interface. Created `benchmarks/packet_analysis.py` with complete pcap parsing (tcpdump JSON output), fragmentation detection, retransmission counting, inter-packet timing analysis (p50/p95/p99), and token size correlation metrics. Auto-activation for MTU scenarios (200B, 500B, 1500B, 9000B) with pcap files saved to `benchmarks/results/pcap/<scenario_id>.pcap`. CLI options: `--tcpdump`, `--tcpdump-filter`, `--tcpdump-duration`, `--tcpdump-output-dir`, `--tcpdump-analyze`. Analysis results included in scenario JSON under `packet_analysis_result` with metrics: fragment_count, retransmission_count, inter_packet_deltas_ms, tcp_streams, fragmentation_stats, token_size_correlation. Follows same integration patterns as iperf3 baseline and perf profiling.
 
 - [x] **Issue 18: Avoid Base64URL encoding for Biscuit tokens where possible (use native Protobuf format)** — **COMPLETED 2026-02-06**
   - **Summary**: Implemented native Protobuf transport for Biscuit tokens via MQTT v5 AUTH packets, avoiding ~33% Base64URL overhead while maintaining CONNECT password compatibility.

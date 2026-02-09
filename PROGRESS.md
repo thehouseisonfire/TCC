@@ -331,19 +331,16 @@ machine and record the first results/known issues).
 ### **Priority List**
 1. Issue 8.2: Containerized benchmark topology
 2. Issue 13: emqtt-bench integration
-3. Issue 15: tcpdump fragmentation analysis
-4. Issue 17: comprehensive QoS
-5. Issue 21: Expand Biscuit authorizer (if current template insufficient)
-6. Issue 22: Strengthen SQLite RBAC (if policies too simple)
-7. Issue 23: Proactive client reauthentication
-8. Issue 24: Multi-step enhanced auth decision
-9. Issue 25: Optional ACL_READ full authz flag
-10. Issue 28: Verify static-policy coverage
-11. Issue 29: Anonymous flow scenario
-12. Issue 30: Dynamic-policy ACL_READ fan-out
-13. Issue 31: Control-triggered kick/re-auth
-14. Issue 32: Control-triggered ACL_READ + notify
-15. Issue 33: Enhance HTTP policy expressiveness for parity
+3. Issue 21: Expand Biscuit authorizer (if current template insufficient)
+4. Issue 22: Strengthen SQLite RBAC (if policies too simple)
+5. Issue 23: Proactive client reauthentication
+6. Issue 24: Multi-step enhanced auth decision
+7. Issue 25: Optional ACL_READ full authz flag
+8. Issue 28: Verify static-policy coverage
+9. Issue 30: Dynamic-policy ACL_READ fan-out
+10. Issue 31: Control-triggered kick/re-auth
+11. Issue 32: Control-triggered ACL_READ + notify
+12. Issue 33: Enhance HTTP policy expressiveness for parity
 
 ---
 
@@ -520,23 +517,16 @@ machine and record the first results/known issues).
   - Deliverable:
     - Inventory scenarios for Static ACL, Dynamic Security, SQLite, HTTP
 
-- [ ] **Issue 29: Add anonymous flow scenario via anonymousGroup policy**
-  - Goal: Enable and benchmark anonymous MQTT clients using Mosquitto’s
-    `allow_anonymous true` with a Dynamic Security `anonymousGroup` policy.
-  - Rationale: Demonstrates how Dynamic Security can enforce policies for
-    unauthenticated clients, useful for public/telemetry use cases and to
-    validate that the authz plugin correctly handles `None` usernames.
-  - Current state: Plugin now supports optional usernames in DynamicSecurity
-    checks; broker configs and a minimal anonymousGroup fixture are in place.
-  - Deliverables:
-    - Add `ANON-BASE` scenario to `benchmarks/run_scenarios.py` using
-      `mosquitto_anon.conf` and `dynamic-security-anon.json`.
-    - Clients connect without username/password and publish/subscribe to
-      `public/announce`.
-    - Verify authorization decisions (allow/deny) match the anonymousGroup
-      policy.
-    - Capture latency/throughput metrics for anonymous access vs token-based.
-    - Document when anonymous flows are realistic and their security trade-offs.
+- [x] **Issue 29: Add anonymous flow scenario via anonymousGroup policy** — **COMPLETED 2026-02-09**
+  - **Summary**: Enabled and benchmarked anonymous MQTT clients using Mosquitto's `allow_anonymous true` with a Dynamic Security `anonymousGroup` policy.
+  - **Rationale**: Demonstrates how Dynamic Security can enforce policies for unauthenticated clients, useful for public/telemetry use cases and validates that the authz plugin correctly handles `None` usernames.
+  - **Deliverables**:
+    - Added `ANON-BASE` scenario to `benchmarks/run_scenarios.py` using `mosquitto_anon.conf` and `dynamic-security-anon.json`
+    - Clients connect without username/password and publish/subscribe to `public/announce`
+    - Authorization decisions (allow/deny) match the anonymousGroup policy in `docker/dynamic-security-anon.json`
+    - Latency/throughput metrics captured for anonymous access vs token-based scenarios
+    - Updated scenario documentation in help text
+  - **Research Alignment**: Validates H₁ (functional viability) by demonstrating anonymous access patterns work with Dynamic Security plugin integration
 
 - [ ] **Issue 30: Verify dynamic-policy coverage with ACL_READ fan-out checks**
   - Goal: Ensure dynamic policy scenarios enforce changes via `ACL_READ` for

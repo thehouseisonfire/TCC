@@ -225,6 +225,54 @@ Relevant plugin options (set in `mosquitto_*.conf`):
 
 Ensure the ACL file (`docker/static-acl.conf`) uses the same role names.
 
+### Anonymous Flow Scenario (ANON-BASE)
+
+The `ANON-BASE` scenario demonstrates **unauthenticated MQTT client access** using Mosquitto's `allow_anonymous true` combined with Dynamic Security's `anonymousGroup` policy. This enables clients to connect without username/password while still enforcing authorization constraints via Dynamic Security.
+
+**Configuration:**
+- Mosquitto config: `docker/mosquitto_anon.conf` (`allow_anonymous true`)
+- Dynamic Security policy: `docker/dynamic-security-anon.json`
+- Anonymous group: `anonymous` with role `anonymous_reader`
+- Permitted topic: `public/announce` (subscribe and publish)
+
+**When Anonymous Flows Are Realistic:**
+
+1. **Public telemetry broadcasts**: Weather stations, public sensor networks, or open data feeds where authentication is unnecessary and the data is intended for public consumption.
+
+2. **Device discovery protocols**: Initial device onboarding where unauthenticated clients need to announce presence on a well-known topic before receiving credentials.
+
+3. **Guest/visitor access**: Temporary public WiFi portals or visitor networks where providing per-user credentials is impractical.
+
+4. **Legacy IoT migration**: Transitioning existing unauthenticated device fleets to a policy-controlled model without immediate credential deployment.
+
+**Security Trade-offs:**
+
+| Aspect | With Anonymous Group | Without (allow_anonymous only) |
+|--------|---------------------|-------------------------------|
+| **Authorization** | Enforced via Dynamic Security ACLs | None (full access) |
+| **Topic isolation** | Limited to `anonymousGroup` topics | None (all topics) |
+| **Auditability** | Client ID tracking possible | No identity attribution |
+| **Revocation** | Policy updates apply immediately | Must disable anonymous globally |
+| **Credential theft risk** | N/A (no credentials) | N/A (no credentials) |
+| **DoS susceptibility** | Higher (no auth barrier) | Highest (no auth barrier) |
+
+**Important Considerations:**
+
+- **No identity attribution**: Anonymous clients cannot be distinguished by username; rely on client IDs for logging (which can be spoofed).
+- **DoS vulnerability**: Without authentication, the broker is more susceptible to connection flooding attacks. Rate limiting and connection caps should be applied at the network layer.
+- **Topic scoping**: The `anonymousGroup` should be restricted to a minimal topic hierarchy (`public/` or `announce/`) to prevent unauthorized access to sensitive data.
+- **Cannot coexist with token auth on same topic**: Anonymous clients and authenticated clients sharing a topic create ambiguity in authorization logs.
+
+**Research Alignment:**
+The ANON-BASE scenario validates H₁ (functional viability) by demonstrating that the plugin correctly handles `None` usernames in Dynamic Security checks. Performance comparison against `BASE-01` (no auth) and `JWT-01`/`BIS-01` (token auth) quantifies the overhead of anonymous authorization relative to both unauthenticated and authenticated flows.
+
+**Usage:**
+```bash
+python3 benchmarks/run_scenarios.py --scenarios ANON-BASE
+```
+
+Clients connect with empty username/password and publish/subscribe to `public/announce` as defined by the `anonymousGroup` policy in `dynamic-security-anon.json`.
+
 ### Smoke test
 
 Run a lightweight health check + single publish for JWT and Biscuit:

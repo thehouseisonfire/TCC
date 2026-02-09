@@ -1425,6 +1425,19 @@ def main(
                 "qos": 1,
                 "dynsec_config": "docker/dynamic-security.json",
             },
+            # Issue 29: Anonymous flow scenario using Dynamic Security anonymousGroup
+            # Demonstrates how Dynamic Security can enforce policies for unauthenticated clients
+            "ANON-BASE": {
+                "mosquitto_conf": "./mosquitto_anon.conf",
+                "username": "",
+                "password": "",
+                "topic": "public/announce",
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 256,
+                "qos": 1,
+                "dynsec_config": "docker/dynamic-security-anon.json",
+            },
         }
 
         # Add dynamic MTU scenarios
@@ -1511,6 +1524,10 @@ def main(
         # Issue 36: Interleaved control message scenarios for data+control plane testing
         logger.info(
             "INTERLEAVED-CONTROL-DATA-JWT, INTERLEAVED-CONTROL-DATA-BISCUIT",
+        )
+        # Issue 29: Anonymous flow scenario using Dynamic Security anonymousGroup
+        logger.info(
+            "ANON-BASE (anonymous clients with Dynamic Security policy)",
         )
         # Issue 19: ACL_READ fan-out authorization cost measurement scenarios
         logger.info(

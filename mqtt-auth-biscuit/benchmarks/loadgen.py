@@ -24,6 +24,10 @@ from benchmarks.logging_utils import get_logger, setup_logging
 
 logger = get_logger(__name__)
 app = typer.Typer(add_completion=False)
+
+# Empty QoS metrics structure for consistent initialization
+EMPTY_QOS_METRICS: dict[int, list[float]] = {0: [], 1: [], 2: []}
+
 BISCUIT_ATTENUATE_DENY_OPTION = typer.Option(None, "--biscuit-attenuate-deny")
 BISCUIT_ATTENUATE_CHECK_OPTION = typer.Option(None, "--biscuit-attenuate-check")
 BISCUIT_DELEGATE_DENY_OPTION = typer.Option(None, "--biscuit-delegate-deny")
@@ -167,6 +171,8 @@ class WorkerResult:
     client_id: str
     connect_ms: float | None
     publish_ms: list[float]
+    # Issue 17: Per-QoS publish latency tracking
+    publish_ms_by_qos: dict[int, list[float]]
     receive_ms: list[float]
     token_refresh_ms: float | None
     token_refresh_len: int | None
@@ -469,6 +475,8 @@ def _receive_delegated_token(
 def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queue):
     errors: list[str] = []
     publish_ms: list[float] = []
+    # Issue 17: Per-QoS publish latency tracking
+    publish_ms_by_qos: dict[int, list[float]] = {0: [], 1: [], 2: []}
     receive_ms: list[float] = []
     connect_ms = None
     qos_rng = np.random.default_rng()
@@ -573,9 +581,10 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                     cfg.client_id,
                     None,
                     [],
+                    EMPTY_QOS_METRICS,
                     [],
-                    token_refresh_ms,
-                    token_refresh_len,
+                    None,
+                    None,
                     delegation_ms,
                     delegation_len,
                     attenuation_ms,
@@ -599,9 +608,10 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                     cfg.client_id,
                     None,
                     [],
+                    EMPTY_QOS_METRICS,
                     [],
-                    token_refresh_ms,
-                    token_refresh_len,
+                    None,
+                    None,
                     delegation_ms,
                     delegation_len,
                     attenuation_ms,
@@ -627,9 +637,10 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                     cfg.client_id,
                     None,
                     [],
+                    EMPTY_QOS_METRICS,
                     [],
-                    token_refresh_ms,
-                    token_refresh_len,
+                    None,
+                    None,
                     delegation_ms,
                     delegation_len,
                     attenuation_ms,
@@ -668,6 +679,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                         cfg.client_id,
                         None,
                         [],
+                        EMPTY_QOS_METRICS,
                         [],
                         token_refresh_ms,
                         token_refresh_len,
@@ -689,6 +701,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                 cfg.client_id,
                 None,
                 [],
+                EMPTY_QOS_METRICS,
                 [],
                 token_refresh_ms,
                 token_refresh_len,
@@ -711,6 +724,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                 cfg.client_id,
                 None,
                 [],
+                EMPTY_QOS_METRICS,
                 [],
                 token_refresh_ms,
                 token_refresh_len,
@@ -807,7 +821,9 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                 info = client.publish(cfg.topic, payload, qos=publish_qos)
                 info.wait_for_publish(timeout=10)
                 t1 = time.perf_counter()
-                publish_ms.append((t1 - t0) * 1000.0)
+                latency_ms = (t1 - t0) * 1000.0
+                publish_ms.append(latency_ms)
+                publish_ms_by_qos[publish_qos].append(latency_ms)
                 message_counter += 1
                 if info.rc != mqtt.MQTT_ERR_SUCCESS:
                     errors.append(f"publish_rc:{info.rc}")
@@ -830,6 +846,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
             cfg.client_id,
             connect_ms,
             publish_ms,
+            publish_ms_by_qos,
             receive_ms,
             token_refresh_ms,
             token_refresh_len,
@@ -862,6 +879,8 @@ def _run_fanout_publisher(
     tls_insecure: bool,
 ):
     publish_ms: list[float] = []
+    # Issue 17: Per-QoS publish latency tracking
+    publish_ms_by_qos: dict[int, list[float]] = {0: [], 1: [], 2: []}
     errors: list[str] = []
     qos_rng = np.random.default_rng()
 
@@ -898,7 +917,11 @@ def _run_fanout_publisher(
             info = client.publish(topic, payload, qos=publish_qos)
             info.wait_for_publish(timeout=10)
             t1 = time.perf_counter()
-            publish_ms.append((t1 - t0) * 1000.0)
+            latency_ms = (t1 - t0) * 1000.0
+            publish_ms.append(latency_ms)
+            # Issue 17: Track per-QoS latency
+            if publish_qos in publish_ms_by_qos:
+                publish_ms_by_qos[publish_qos].append(latency_ms)
             if info.rc != mqtt.MQTT_ERR_SUCCESS:
                 errors.append(f"fanout_publish_rc:{info.rc}")
         except Exception as e:
@@ -910,7 +933,7 @@ def _run_fanout_publisher(
     with contextlib.suppress(Exception):
         client.loop_stop()
 
-    return publish_ms, errors
+    return publish_ms, publish_ms_by_qos, errors
 
 
 def run_load(
@@ -1028,6 +1051,8 @@ def run_load(
                         client_id,
                         None,
                         [],
+                        # Issue 17: Empty per-QoS metrics
+                        {0: [], 1: [], 2: []},
                         [],
                         None,
                         None,
@@ -1132,11 +1157,13 @@ def run_load(
     start_evt.set()
 
     fanout_publish_ms: list[float] = []
+    # Issue 17: Per-QoS fanout metrics
+    fanout_publish_ms_by_qos: dict[int, list[float]] = {0: [], 1: [], 2: []}
     fanout_errors: list[str] = []
     if mode == "fanout":
         publisher_username = fanout_publisher_username or username
         publisher_password = fanout_publisher_password or password
-        fanout_publish_ms, fanout_errors = _run_fanout_publisher(
+        fanout_publish_ms, fanout_publish_ms_by_qos, fanout_errors = _run_fanout_publisher(
             host=host,
             port=port,
             username=publisher_username,
@@ -1164,6 +1191,10 @@ def run_load(
 
     connect_lat = [r.connect_ms for r in results if r.connect_ms is not None]
     publish_lat = [x for r in results for x in r.publish_ms]
+    # Issue 17: Aggregate per-QoS latencies
+    publish_lat_qos_0 = [x for r in results for x in r.publish_ms_by_qos.get(0, [])]
+    publish_lat_qos_1 = [x for r in results for x in r.publish_ms_by_qos.get(1, [])]
+    publish_lat_qos_2 = [x for r in results for x in r.publish_ms_by_qos.get(2, [])]
     receive_lat = [x for r in results for x in r.receive_ms]
     refresh_lat = [r.token_refresh_ms for r in results if r.token_refresh_ms is not None]
     refresh_lens = [r.token_refresh_len for r in results if r.token_refresh_len is not None]
@@ -1183,6 +1214,10 @@ def run_load(
 
     duration_s = max(1e-9, t_end - t_start)
     publish_lat.extend(fanout_publish_ms)
+    # Issue 17: Include fanout per-QoS metrics
+    publish_lat_qos_0.extend(fanout_publish_ms_by_qos.get(0, []))
+    publish_lat_qos_1.extend(fanout_publish_ms_by_qos.get(1, []))
+    publish_lat_qos_2.extend(fanout_publish_ms_by_qos.get(2, []))
     publish_throughput_mps = len(publish_lat) / duration_s
     receive_throughput_mps = len(receive_lat) / duration_s
     throughput_mps = publish_throughput_mps if mode != "fanout" else receive_throughput_mps
@@ -1249,6 +1284,15 @@ def run_load(
         "attenuation": _summarize_ms(attenuation_lat),
         "attenuation_len": _summarize_ms(attenuation_lens),
         "publish": _summarize_ms(publish_lat),
+        # Issue 17: Per-QoS publish metrics
+        "publish_qos_0": _summarize_ms(publish_lat_qos_0),
+        "publish_qos_1": _summarize_ms(publish_lat_qos_1),
+        "publish_qos_2": _summarize_ms(publish_lat_qos_2),
+        "qos_distribution_actual": {
+            "qos_0_count": len(publish_lat_qos_0),
+            "qos_1_count": len(publish_lat_qos_1),
+            "qos_2_count": len(publish_lat_qos_2),
+        },
         "receive": _summarize_ms(receive_lat),
         "control": _summarize_ms(control_lat),
         # Issue 36: Control injection delay metrics

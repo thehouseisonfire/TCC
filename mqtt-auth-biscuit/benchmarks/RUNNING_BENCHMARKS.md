@@ -561,3 +561,113 @@ When finished, stop the environment:
 ```bash
 docker compose -f docker/docker-compose.yml down
 ```
+
+## Packet Capture and Fragmentation Analysis (Issue 15)
+
+The benchmark suite includes automated packet capture using `tcpdump` to analyze TCP fragmentation behavior during MTU stress tests. This feature is automatically enabled for MTU scenarios (MTU-200-JWT, MTU-500-BIS-25, etc.) to provide quantitative insights into how token size affects network-level fragmentation.
+
+### How it works
+
+1. **Automatic activation**: tcpdump is automatically started for any scenario with an MTU configuration (`netem: {mtu: N}`)
+2. **Capture filter**: By default captures MQTT traffic on ports 1883 (plaintext) and 8883 (TLS)
+3. **Pcap storage**: Capture files are saved to `benchmarks/results/pcap/<scenario_id>.pcap`
+4. **Automated analysis**: After scenario completion, pcap files are analyzed for fragmentation metrics
+
+### CLI Options
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--tcpdump` / `--no-tcpdump` | Enable/disable packet capture | `True` |
+| `--tcpdump-filter` | Custom tcpdump filter expression | `port 1883 or port 8883` |
+| `--tcpdump-duration` | Max capture duration in seconds | `300` |
+| `--tcpdump-output-dir` | Directory for pcap files | `benchmarks/results/pcap` |
+| `--tcpdump-analyze` / `--no-tcpdump-analyze` | Enable/disable pcap analysis | `True` |
+
+### Usage Examples
+
+Run with default tcpdump capture (auto-enabled for MTU scenarios):
+```bash
+python3 benchmarks/run_scenarios.py --scenarios MTU-200-JWT,MTU-500-BIS-25
+```
+
+Disable packet capture entirely:
+```bash
+python3 benchmarks/run_scenarios.py --no-tcpdump
+```
+
+Capture only, skip analysis (faster for bulk captures):
+```bash
+python3 benchmarks/run_scenarios.py --no-tcpdump-analyze
+```
+
+Custom filter to capture all traffic:
+```bash
+python3 benchmarks/run_scenarios.py --tcpdump-filter "tcp"
+```
+
+### Metrics Captured
+
+Packet analysis results are included in scenario output JSON under `packet_analysis_result`:
+
+```json
+{
+  "packet_analysis_result": {
+    "enabled": true,
+    "pcap_file": "benchmarks/results/pcap/MTU-200-JWT.pcap",
+    "metrics": {
+      "total_packets": 1250,
+      "total_bytes": 456780,
+      "fragment_count": 42,
+      "retransmission_count": 3,
+      "tcp_packets": 1200,
+      "ip_packets": 1250
+    },
+    "inter_packet_deltas_ms": {
+      "p50_ms": 1.234,
+      "p95_ms": 5.678,
+      "p99_ms": 12.345,
+      "mean_ms": 2.345,
+      "max_ms": 45.678,
+      "min_ms": 0.123
+    },
+    "tcp_streams": {
+      "192.168.1.10:54321-192.168.1.20:1883": {
+        "src_ip": "192.168.1.10",
+        "src_port": 54321,
+        "dst_ip": "192.168.1.20",
+        "dst_port": 1883,
+        "packets": 625,
+        "bytes": 228390,
+        "fragments": 21,
+        "retransmissions": 1
+      }
+    },
+    "fragmentation_stats": {
+      "fragments_detected": 42,
+      "fragmented_packets": 28,
+      "max_fragment_chain": 3,
+      "avg_fragment_size": 180.5,
+      "min_fragment_size": 150,
+      "max_fragment_size": 200,
+      "token_size_bytes": 1256,
+      "expected_fragments": 7
+    },
+    "token_size_correlation": {
+      "token_bytes": 1256,
+      "mtu_configured": 200,
+      "fragmentation_ratio": 0.0336,
+      "bytes_per_fragment": 29.9,
+      "packets_per_token_estimate": 9.42
+    }
+  }
+}
+```
+
+### Research Interpretation
+
+- **Fragmentation ratio**: Higher ratios indicate more network overhead from token transmission
+- **Bytes per fragment**: Lower values suggest inefficient fragmentation (more headers per data)
+- **Retransmissions**: Under MTU stress, retransmissions indicate network congestion or packet loss
+- **Token size correlation**: Directly relates token size to network fragmentation costs
+
+This data supports ARTICLE.MD's fragmentation hypothesis (H₂/H₃ validation) by quantifying the network-level impact of token size under varying MTU constraints.

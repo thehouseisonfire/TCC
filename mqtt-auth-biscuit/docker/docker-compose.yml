@@ -99,6 +99,27 @@ services:
     cap_add:
       - NET_ADMIN
 
+  tcpdump:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.tcpdump
+    network_mode: "service:mosquitto"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      - TCPDUMP_IFACE=${TCPDUMP_IFACE:-eth0}
+      - TCPDUMP_FILTER=${TCPDUMP_FILTER:-port 1883 or port 8883}
+      - TCPDUMP_DURATION=${TCPDUMP_DURATION:-300}
+      - TCPDUMP_OUTPUT=${TCPDUMP_OUTPUT:-/pcap/capture.pcap}
+      - TCPDUMP_KEEP_ALIVE=${TCPDUMP_KEEP_ALIVE:-0}
+    volumes:
+      - ${TCPDUMP_OUTPUT_DIR:-./pcap}:/pcap
+    depends_on:
+      - mosquitto
+    profiles:
+      - tcpdump
+
 networks:
   mqtt-net:
     driver: bridge

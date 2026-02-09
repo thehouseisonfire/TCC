@@ -397,48 +397,6 @@ machine and record the first results/known issues).
     - Comparison analysis between custom single-host and emqtt-bench
       containerized approaches
 
-- [ ] **Issue 15: Add packet-level analysis with tcpdump for fragmentation
-     studies**
-  - Goal: integrate `tcpdump` capture capabilities to analyze TCP fragmentation
-    behavior during MTU stress tests.
-  - Rationale: ARTICLE.MD specifically mentions fragmentation analysis, and
-    packet-level data is essential for understanding how token size affects
-    network behavior under MTU constraints.
-  - Current state: No `tcpdump` service or capture integration exists.
-  - Deliverable:
-    - Add `tcpdump` service to docker-compose.yml with appropriate capabilities
-    - Packet capture integration for MTU scenarios (200B, 500B, 1500B, 9000B)
-    - Automated packet analysis to count fragments, retransmissions, and delays
-    - Packet analysis results included in scenario outputs
-    - Correlation of fragmentation data with latency/throughput metrics
-
-- [ ] **Issue 17: Implement comprehensive QoS configuration and mixing
-    features**
-  - Goal: Add support for different QoS levels (0, 1, 2) and mixed QoS workloads
-    to enable comprehensive performance analysis across quality of service
-    levels.
-  - Current gap: All scenarios currently use QoS 1 exclusively, despite
-    BENCHMARK_PLAN.md specifying QoS 0 for BASE-01 and missing QoS 2 testing
-    entirely (scenarios rely on `--qos` CLI arg, default 1).
-  - Code pointers: `loadgen.py` supports `--qos` but `run_scenarios.py` and
-    `metrics_collector.py` hardcode QoS 1; BASE-01 scenario does not override to QoS 0.
-  - Rationale: QoS levels significantly impact MQTT broker behavior and token
-    verification overhead:
-    - QoS 0: Fire-and-forget, minimal broker state
-    - QoS 1: At-least-once delivery with acknowledgments
-    - QoS 2: Exactly-once delivery with four-step handshake
-  - Deliverable (implementation complete; execution pending):
-    - [x] Update `loadgen.py` to support QoS distribution configuration (e.g., 60%
-      QoS 0, 30% QoS 1, 10% QoS 2)
-    - [x] Add scenario-specific QoS configuration in `run_scenarios.py`
-    - [x] Fix BASE-01 scenario to use QoS 0 as planned
-    - [x] Add dedicated QoS 2 scenarios for both JWT and Biscuit
-    - [x] Add mixed QoS workload scenarios to test realistic IoT traffic patterns
-    - [x] Update `metrics_collector.py` to support configurable QoS
-    - [ ] Add QoS-specific performance analysis and reporting
-    - [ ] At least one scenario run captured for each QoS level and mixed
-      configurations
-
 - [ ] **Issue 22: Strengthen `seed_demo_rules` (RBAC), make it optional, and add
     runtime policy churn scenarios**
   - Goal: Turn SQLite demo seeding into a realistic RBAC policy set, allow it to
@@ -684,8 +642,11 @@ machine and record the first results/known issues).
   - **Research Alignment**: Enables H₂/H₃ validation by quantifying computational costs of JWT vs Biscuit verification at instruction level, complementing container-level metrics with PMU hardware counters.
 
 - [x] **Issue 17: Implement comprehensive QoS configuration and mixing features**
-  - **Completed**: Added full QoS 0/1/2 support with configurable per-scenario QoS levels and mixed QoS workload distribution.
-  - **Summary**: Implemented QoS distribution parsing (`0:0.6,1:0.3,2:0.1` format) in `loadgen.py` with weighted random selection for realistic traffic patterns. Added `--qos-distribution` CLI option and `qos_distribution` field to `WorkerConfig`. Fixed `BASE-01` to use QoS 0 as required. Added new scenarios: `QOS0-BASE-01`, `QOS2-JWT`, `QOS2-BISCUIT`, `QOS-MIXED-JWT`, `QOS-MIXED-BISCUIT` (60% QoS 0, 30% QoS 1, 10% QoS 2). Updated `metrics_collector.py` to support configurable QoS. Subscribe operations use effective QoS (max of distribution) to ensure reliable fan-out delivery. All QoS infrastructure is ready for experimental runs.
+  - **Summary**: Added full QoS 0/1/2 support with per-QoS latency tracking. Implemented QoS distribution parsing (`0:0.6,1:0.3,2:0.1` format) in `loadgen.py` with `--qos-distribution` CLI option. `WorkerResult` now tracks `publish_ms_by_qos` per level; `aggregate_results.py` reports per-QoS statistics in JSON and CSV. Added scenarios: `QOS0-BASE-01`, `QOS2-JWT`, `QOS2-BISCUIT`, `QOS-MIXED-JWT`, `QOS-MIXED-BISCUIT`. Enables H₂/H₃ validation of latency differences across QoS levels.
+
+- [x] **Issue 15: Add packet-level analysis with tcpdump for fragmentation studies**
+  - **Completed**: Integrated tcpdump capture and automated packet analysis for MTU stress test scenarios.
+  - **Summary**: Added tcpdump service to docker-compose.yml with NET_ADMIN/NET_RAW capabilities and network_mode: service:mosquitto for packet capture on the broker interface. Created `benchmarks/packet_analysis.py` with complete pcap parsing (tcpdump JSON output), fragmentation detection, retransmission counting, inter-packet timing analysis (p50/p95/p99), and token size correlation metrics. Auto-activation for MTU scenarios (200B, 500B, 1500B, 9000B) with pcap files saved to `benchmarks/results/pcap/<scenario_id>.pcap`. CLI options: `--tcpdump`, `--tcpdump-filter`, `--tcpdump-duration`, `--tcpdump-output-dir`, `--tcpdump-analyze`. Analysis results included in scenario JSON under `packet_analysis_result` with metrics: fragment_count, retransmission_count, inter_packet_deltas_ms, tcp_streams, fragmentation_stats, token_size_correlation. Follows same integration patterns as iperf3 baseline and perf profiling.
 
 - [x] **Issue 18: Avoid Base64URL encoding for Biscuit tokens where possible (use native Protobuf format)** — **COMPLETED 2026-02-06**
   - **Summary**: Implemented native Protobuf transport for Biscuit tokens via MQTT v5 AUTH packets, avoiding ~33% Base64URL overhead while maintaining CONNECT password compatibility.

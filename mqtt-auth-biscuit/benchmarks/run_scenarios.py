@@ -15,6 +15,11 @@ from benchmarks.iperf3_baseline import (
     run_baseline_with_retry,
 )
 from benchmarks.logging_utils import get_logger, setup_logging
+from benchmarks.packet_analysis import (
+    analyze_pcap,
+    check_pcap_parser_available,
+    format_packet_summary,
+)
 from benchmarks.perf_profiler import (
     PerfConfig,
     check_perf_installation,
@@ -591,6 +596,12 @@ def main(
         help="Comma-separated list of scenarios to profile (default: key scenarios)",
     ),
     perf_output_dir: str = typer.Option("benchmarks/results/perf", "--perf-output-dir"),
+    # tcpdump packet capture configuration
+    tcpdump_enabled: bool = typer.Option(True, "--tcpdump/--no-tcpdump"),
+    tcpdump_filter: str = typer.Option("port 1883 or port 8883", "--tcpdump-filter"),
+    tcpdump_duration: int = typer.Option(300, "--tcpdump-duration"),
+    tcpdump_output_dir: str = typer.Option("benchmarks/results/pcap", "--tcpdump-output-dir"),
+    tcpdump_analyze: bool = typer.Option(True, "--tcpdump-analyze/--no-tcpdump-analyze"),
 ):
     setup_logging(log_level)
 
@@ -612,6 +623,26 @@ def main(
                 "perf profiling enabled (version: %s)", perf_check.get("version", "unknown")
             )
             logger.info("Events: %s, Duration: %ds", perf_events, perf_duration)
+
+    # Check pcap parser availability if packet capture enabled
+    tcpdump_status: dict[str, Any] = {"enabled": tcpdump_enabled}
+    if tcpdump_enabled:
+        parser_check = check_pcap_parser_available()
+        tcpdump_status["installed"] = parser_check["installed"]
+        tcpdump_status["parser"] = parser_check.get("parser")
+        tcpdump_status["version"] = parser_check.get("version")
+        if not parser_check["installed"]:
+            logger.warning(
+                "Packet capture requested but no parser available: %s", parser_check.get("error")
+            )
+            logger.warning("Packet analysis will be skipped. Install dpkt (preferred) or tcpdump.")
+        else:
+            logger.info(
+                "Packet capture enabled using %s parser (version: %s)",
+                parser_check.get("parser", "unknown"),
+                parser_check.get("version", "unknown"),
+            )
+            logger.info("Filter: %s, Duration: %ds", tcpdump_filter, tcpdump_duration)
 
     tokens: dict[str, Any] = _read_tokens(
         os.path.join(os.path.dirname(os.path.dirname(__file__)), tokens_path)
@@ -1464,7 +1495,7 @@ def main(
         logger.info("DYNSEC-BASE, DYNSEC-CHURN, DYNSEC-READ-FANOUT")
         logger.info("DYNSEC-READ-FANOUT-CHURN")
         logger.info(
-            "STATIC-ACL-JWT, STATIC-ACL-BIS, STATIC-ACL-FANOUT, " "STATIC-ACL-FANOUT-BIS",
+            "STATIC-ACL-JWT, STATIC-ACL-BIS, STATIC-ACL-FANOUT, STATIC-ACL-FANOUT-BIS",
         )
         # Issue 20: Control-triggered enforcement scenarios (renamed to CONTROL-OVERHEAD)
         logger.info(
@@ -1543,19 +1574,44 @@ def main(
         )
 
         # Add iperf3 service to compose deployment
+        services_to_deploy = [
+            "up",
+            "--build",
+            "-d",
+            "mosquitto",
+            "authz",
+            "netem",
+            "metrics-collector",
+            "cadvisor",
+            "token-issuer",
+            "iperf3",
+        ]
+
+        # Auto-enable tcpdump for MTU scenarios to capture fragmentation data
+        netem = s.get("netem")
+        capture_this_scenario = (
+            tcpdump_enabled
+            and tcpdump_status.get("installed", False)
+            and netem is not None
+            and "mtu" in netem
+        )
+
+        if capture_this_scenario:
+            services_to_deploy.append("tcpdump")
+            pcap_filename = f"{s['id']}.pcap"
+            extra_env.update(
+                {
+                    "TCPDUMP_FILTER": tcpdump_filter,
+                    "TCPDUMP_DURATION": str(tcpdump_duration),
+                    "TCPDUMP_OUTPUT": f"/pcap/{pcap_filename}",
+                    "TCPDUMP_OUTPUT_DIR": tcpdump_output_dir,
+                    "TCPDUMP_KEEP_ALIVE": "0",
+                }
+            )
+            os.makedirs(tcpdump_output_dir, exist_ok=True)
+
         _compose(
-            [
-                "up",
-                "--build",
-                "-d",
-                "mosquitto",
-                "authz",
-                "netem",
-                "metrics-collector",
-                "cadvisor",
-                "token-issuer",
-                "iperf3",
-            ],
+            services_to_deploy,
             extra_env=extra_env,
             compose_files=compose_files,
         )
@@ -1684,6 +1740,16 @@ def main(
                     "output_dir": perf_output_dir,
                 },
                 "status": perf_status,
+            },
+            "packet_analysis": {
+                "enabled": tcpdump_enabled and tcpdump_status.get("installed", False),
+                "config": {
+                    "filter": tcpdump_filter,
+                    "duration": tcpdump_duration,
+                    "output_dir": tcpdump_output_dir,
+                    "analyze": tcpdump_analyze,
+                },
+                "status": tcpdump_status,
             },
             "runs": [],
         }
@@ -1895,6 +1961,42 @@ def main(
             out_payload["runs"].append({"loadgen": res, "resources": snap, "perf": perf_result})
             if s.get("sleep_between"):
                 time.sleep(float(s["sleep_between"]))
+
+        # Issue 15: Run packet analysis if tcpdump was enabled for this scenario
+        packet_analysis_result: dict[str, Any] = {"enabled": False}
+        if capture_this_scenario and tcpdump_analyze:
+            pcap_file = os.path.join(tcpdump_output_dir, f"{s['id']}.pcap")
+            if os.path.exists(pcap_file):
+                logger.info("Running packet analysis for scenario %s", s["id"])
+                try:
+                    # Get MTU and token length for correlation
+                    netem_config = s.get("netem") or {}
+                    mtu = netem_config.get("mtu", 1500) if netem_config else 1500
+                    token_length = len(s.get("password", "")) if s.get("password") else 0
+
+                    packet_analysis_result = analyze_pcap(pcap_file, mtu, token_length)
+                    packet_analysis_result["enabled"] = True
+                    packet_analysis_result["pcap_file"] = pcap_file
+
+                    # Log summary
+                    summary = format_packet_summary(packet_analysis_result)
+                    logger.info("Packet analysis summary:\n%s", summary)
+                except Exception as e:
+                    logger.error("Error during packet analysis: %s", e)
+                    packet_analysis_result = {
+                        "enabled": True,
+                        "error": str(e),
+                        "pcap_file": pcap_file,
+                    }
+            else:
+                logger.warning("Pcap file not found: %s", pcap_file)
+                packet_analysis_result = {
+                    "enabled": True,
+                    "error": f"Pcap file not found: {pcap_file}",
+                }
+
+        # Add packet analysis result to output payload
+        out_payload["packet_analysis_result"] = packet_analysis_result
 
         # Issue 19: Calculate ACL_READ cost per subscriber for fanout scenarios
         subscriber_count = s.get("subscriber_count")

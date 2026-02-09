@@ -18,7 +18,8 @@ $COMPOSE_BIN "${COMPOSE_FILES[@]}" up --build -d "${SERVICES[@]}"
 
 PYTHONPATH="$WORKDIR" \
   pytest "$WORKDIR/benchmarks/test_qos_distribution.py" \
-  "$WORKDIR/benchmarks/test_resource_snapshot.py"
+  "$WORKDIR/benchmarks/test_resource_snapshot.py" \
+  "$WORKDIR/benchmarks/test_packet_analysis.py"
 
 PYTHONPATH="$WORKDIR" python3 "$WORKDIR/benchmarks/smoke_test.py" --no-docker
 

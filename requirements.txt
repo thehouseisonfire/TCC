@@ -7,3 +7,4 @@ typer
 rich
 types-httpx
 paho-mqtt
+dpkt>=1.9.8

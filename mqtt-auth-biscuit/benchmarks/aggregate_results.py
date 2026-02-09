@@ -189,6 +189,10 @@ def _build_summary(input_dir):
                 "receive_throughput_mps": _aggregate_scalar(runs, "receive_throughput_mps"),
                 "connect": _aggregate_metric(runs, "connect"),
                 "publish": _aggregate_metric(runs, "publish"),
+                # Issue 17: Per-QoS metrics aggregation
+                "publish_qos_0": _aggregate_metric(runs, "publish_qos_0"),
+                "publish_qos_1": _aggregate_metric(runs, "publish_qos_1"),
+                "publish_qos_2": _aggregate_metric(runs, "publish_qos_2"),
                 "token_refresh": _aggregate_metric(runs, "token_refresh"),
                 "token_refresh_len": _aggregate_metric(runs, "token_refresh_len"),
                 "delegation": _aggregate_metric(runs, "delegation"),
@@ -242,6 +246,19 @@ def _write_csv(summary, path):
                 "publish_p50_avg": (publish.get("p50_ms") or {}).get("avg"),
                 "publish_p95_avg": (publish.get("p95_ms") or {}).get("avg"),
                 "publish_p99_avg": (publish.get("p99_ms") or {}).get("avg"),
+                # Issue 17: Per-QoS columns
+                "publish_qos_0_p50_avg": (loadgen.get("publish_qos_0") or {})
+                .get("p50_ms", {})
+                .get("avg"),
+                "publish_qos_0_count": (loadgen.get("publish_qos_0") or {}).get("count_total"),
+                "publish_qos_1_p50_avg": (loadgen.get("publish_qos_1") or {})
+                .get("p50_ms", {})
+                .get("avg"),
+                "publish_qos_1_count": (loadgen.get("publish_qos_1") or {}).get("count_total"),
+                "publish_qos_2_p50_avg": (loadgen.get("publish_qos_2") or {})
+                .get("p50_ms", {})
+                .get("avg"),
+                "publish_qos_2_count": (loadgen.get("publish_qos_2") or {}).get("count_total"),
                 "token_refresh_p50_avg": (refresh.get("p50_ms") or {}).get("avg"),
                 "token_refresh_count_total": refresh.get("count_total"),
                 "delegation_p50_avg": (delegation.get("p50_ms") or {}).get("avg"),

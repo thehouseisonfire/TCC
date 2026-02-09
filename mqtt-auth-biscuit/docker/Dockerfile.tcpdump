@@ -1,0 +1,23 @@
+FROM alpine:3.23
+
+RUN apk add --no-cache tcpdump iproute2
+
+# Create non-root user for capture
+RUN adduser -D -s /bin/sh capture
+
+# Create directory for pcap files
+RUN mkdir -p /pcap && chown capture:capture /pcap
+
+WORKDIR /pcap
+
+# Entrypoint script that parses environment variables
+COPY docker/tcpdump_entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+USER root
+
+# Healthcheck: verify pcap file exists and is growing (check modification time within 60s)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD test -f /pcap/capture.pcap && test $(stat -c %Y /pcap/capture.pcap) -gt $(($(date +%s) - 60)) || exit 1
+
+ENTRYPOINT ["/entrypoint.sh"]

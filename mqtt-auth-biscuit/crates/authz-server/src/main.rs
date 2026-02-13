@@ -15,7 +15,7 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{Method, Request, Response, StatusCode, body::Incoming, server::conn::http2};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use rand::Rng;
+use rand::RngExt;
 use rustls::ServerConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};

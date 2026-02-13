@@ -128,7 +128,7 @@ The experimental environment will be standardized with Docker (version 29.0.x), 
 
 To ensure test integrity and minimize neighborhood noise, Docker's `--cpuset` option will be used to pin the *broker* and load generator processes to distinct and consistent physical cores of the host machine.
 
-Network emulation will use `iperf3` to measure the nominal channel capacity, while `tc` (with the `netem` module) will introduce latency, packet loss, and bandwidth limitation in a controlled manner. Load tests will use specialized tools such as `mqtt-stresser` and `emqtt-bench`. More complex topologies will be orchestrated via Mininet or Containernet.
+Network emulation will use `iperf3` to measure the nominal channel capacity, while `tc` (with the `netem` module) will introduce latency, packet loss, and bandwidth limitation in a controlled manner. More complex topologies will be orchestrated via Mininet or Containernet.
 
 ## Test Scenarios
 

@@ -330,17 +330,16 @@ machine and record the first results/known issues).
 
 ### **Priority List**
 1. Issue 8.2: Containerized benchmark topology
-2. Issue 13: emqtt-bench integration
-3. Issue 21: Expand Biscuit authorizer (if current template insufficient)
-4. Issue 22: Strengthen SQLite RBAC (if policies too simple)
-5. Issue 23: Proactive client reauthentication
-6. Issue 24: Multi-step enhanced auth decision
-7. Issue 25: Optional ACL_READ full authz flag
-8. Issue 28: Verify static-policy coverage
-9. Issue 30: Dynamic-policy ACL_READ fan-out
-10. Issue 31: Control-triggered kick/re-auth
-11. Issue 32: Control-triggered ACL_READ + notify
-12. Issue 33: Enhance HTTP policy expressiveness for parity
+2. Issue 21: Expand Biscuit authorizer (if current template insufficient)
+3. Issue 22: Strengthen SQLite RBAC (if policies too simple)
+4. Issue 23: Proactive client reauthentication
+5. Issue 24: Multi-step enhanced auth decision
+6. Issue 25: Optional ACL_READ full authz flag
+7. Issue 28: Verify static-policy coverage
+8. Issue 30: Dynamic-policy ACL_READ fan-out
+9. Issue 31: Control-triggered kick/re-auth
+10. Issue 32: Control-triggered ACL_READ + notify
+11. Issue 33: Enhance HTTP policy expressiveness for parity
 
 ---
 
@@ -369,30 +368,6 @@ machine and record the first results/known issues).
       and collect client-side outputs deterministically
     - Documentation of the measurement trade-offs between the modes and guidance
       for which scenarios require client-per-container to improve realism
-
-- [ ] **Issue 13: Add emqtt-bench as container orchestrating load generator**
-  - Goal: integrate `emqtt-bench` as an alternative to custom Python
-    implementation, designed to orchestrate multiple client containers for
-    better isolation.
-  - Rationale: The ARTICLE.MD methodology specifically mentions
-    industry-standard MQTT benchmarking tools, and `emqtt-bench` provides
-    comprehensive capabilities while aligning with Issue 8.2's
-    client-per-container architecture.
-  - Current state: No `emqtt-bench` integration exists; only custom Python
-    `loadgen.py` is used.
-  - Deliverable:
-    - Add `--loadgen` flag to `benchmarks/run_scenarios.py` to select between:
-      - `custom` (current Python implementation)
-      - `emqtt-bench` (orchestrating multiple client containers)
-    - Docker service definition for `emqtt-bench` orchestrator container
-    - Client container template that can be spawned by emqtt-bench
-    - Parameter mapping from scenario configuration to emqtt-bench command-line
-      interface
-    - Output parsing to normalize results format for consistent JSON output
-    - At least one scenario run captured with emqtt-bench orchestrating N client
-      containers
-    - Comparison analysis between custom single-host and emqtt-bench
-      containerized approaches
 
 - [ ] **Issue 22: Strengthen `seed_demo_rules` (RBAC), make it optional, and add
     runtime policy churn scenarios**

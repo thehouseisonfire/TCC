@@ -5,9 +5,9 @@
 /mqtt-auth-biscuit/*.txt
 
 # Mosquitto build artifacts
-/mosquitto-src/build/
-/mosquitto-src/config.h
-/mosquitto-src/config.mk
+-/mosquitto-src/build/
+-/mosquitto-src/config.h
+-/mosquitto-src/config.mk
 
 # OS generated files
 .DS_Store

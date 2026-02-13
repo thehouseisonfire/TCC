@@ -9,7 +9,6 @@ target-version = ["py314"]
 exclude = '''
 /(
     \.venv
-  | mosquitto-src
 )/
 '''
 
@@ -18,7 +17,6 @@ line-length = 100
 target-version = "py314"
 fix = true
 exclude = [
-  "mosquitto-src",
   ".venv",
 ]
 
@@ -35,6 +33,6 @@ select = [
 python_version = "3.14"
 check_untyped_defs = true
 no_implicit_optional = true
-exclude = '(\.venv|mosquitto-src)/'
+exclude = '(\.venv)/'
 ignore_missing_imports = true
 

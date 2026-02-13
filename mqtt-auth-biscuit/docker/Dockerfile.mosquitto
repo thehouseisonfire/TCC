@@ -11,7 +11,8 @@ COPY crates/authz-server ./crates/authz-server
 
 RUN RUSTFLAGS="-C target-feature=-crt-static" cargo build --release -p mosquitto-auth-biscuit
 
-FROM eclipse-mosquitto:2.0.15
+# TODO: Pin to 2.1.3 once it releases (probably next week)
+FROM eclipse-mosquitto:2
 
 # Install basic C++ libs required by the dynamically linked Rust plugin
 RUN apk add --no-cache libgcc libstdc++

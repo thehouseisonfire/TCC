@@ -162,140 +162,22 @@ MQTT v5 reauthentication microbenchmark:
 
 ---
 
-## 4) Benchmark Design (Formerly BENCHMARK_PLAN.md)
+## 4) Benchmark Design And Policy Specs
 
-### Objectives
+To avoid duplication, the canonical benchmark/scenario policy specification now lives in
+`SCENARIO_POLICIES.md`.
 
-1. Compare latency of connection establishment (CONNECT/CONNACK) between JWT and
-   Biscuit.
-2. Evaluate authorization latency for PUBLISH/SUBSCRIBE operations.
-3. Measure CPU and memory consumption of the Mosquitto broker under various
-   loads.
-4. Assess the impact of token size on network throughput.
+- Benchmark objectives and scenario-to-policy mapping: `SCENARIO_POLICIES.md#2-scenario-to-policy-mapping`
+- Enforcement semantics and policy source behavior: `SCENARIO_POLICIES.md#1-policy-sources-what-decides-access`
+- Reference file index for scenario/policy implementation: `SCENARIO_POLICIES.md#4-reference-file-index`
 
-### Test Matrix 
-
-| Scenario ID                   | Token Type | Operation        | Clients | Planned QoS | Implemented QoS | Status         |
-| ----------------------------- | ---------- | ---------------- | ------- | ----------- | --------------- | -------------- |
-| BASE-01                       | None       | Pub/Sub          | 100     | 0           | 1               | ✅ Implemented |
-| JWT-01                        | JWT        | Pub/Sub          | 100     | 1           | 1               | ✅ Implemented |
-| BIS-01                        | Biscuit    | Pub/Sub          | 100     | 1           | 1               | ✅ Implemented |
-| POLICY-COMPLEX-1              | Biscuit    | Pub/Sub          | 50      | 1           | 1               | ✅ Implemented |
-| POLICY-COMPLEX-5              | Biscuit    | Pub/Sub          | 50      | 1           | 1               | ✅ Implemented |
-| POLICY-COMPLEX-25             | Biscuit    | Pub/Sub          | 50      | 1           | 1               | ✅ Implemented |
-| POLICY-COMPLEX-LOW            | Biscuit    | Pub/Sub          | 50      | 1           | 1               | ✅ Implemented |
-| POLICY-COMPLEX-MED            | Biscuit    | Pub/Sub          | 50      | 1           | 1               | ✅ Implemented |
-| POLICY-COMPLEX-HIGH           | Biscuit    | Pub/Sub          | 50      | 1           | 1               | ✅ Implemented |
-| JWT-HTTP-200MS                | JWT        | HTTP Authz       | 50      | 1           | 1               | ✅ Implemented |
-| JWT-HTTP-1000MS               | JWT        | HTTP Authz       | 50      | 1           | 1               | ✅ Implemented |
-| HYBRID-AUTHZ-DOWN             | JWT        | Hybrid           | 50      | 1           | 1               | ✅ Implemented |
-| MTU-200-JWT                   | JWT        | MTU/Frag         | 50      | 1           | 1               | ✅ Implemented |
-| BIS-HTTP-200MS                | Biscuit    | HTTP Authz       | 50      | 1           | 1               | ✅ Implemented |
-| JWT-HTTP-200MS-LOSS1          | JWT        | HTTP Loss        | 50      | 1           | 1               | ✅ Implemented |
-| JWT-HTTP-200MS-LOSS5          | JWT        | HTTP Loss        | 50      | 1           | 1               | ✅ Implemented |
-| MQTT5-REAUTH-JWT              | JWT        | Reauth           | 1       | 1           | 1               | ✅ Implemented |
-| MQTT5-REAUTH-BISCUIT          | Biscuit    | Reauth           | 1       | 1           | 1               | ✅ Implemented |
-| THUNDERING-HERD               | Biscuit    | Connection Burst | 50      | 1           | 1               | ✅ Implemented |
-| DELEGATION-TEMP-ONLY          | Biscuit    | Delegation       | 50      | 1           | 1               | ✅ Implemented |
-| LIFECYCLE-JWT-SHORT-RECONNECT | JWT        | Lifecycle        | 50      | 1           | 1               | ✅ Implemented |
-| LIFECYCLE-BIS-SHORT-RECONNECT | Biscuit    | Lifecycle        | 50      | 1           | 1               | ✅ Implemented |
-| MTU-500/1500/9000             | Both       | MTU/Frag         | 50      | 1           | 1               | ✅ Implemented |
-
-### Metrics Collection
-
-- **Latency**: Measured from client-side using `paho-mqtt`.
-- **Resource Usage**: Tracked via `docker stats` and Prometheus.
-- **Throughput**: Measured in messages per second (mps).
-
-### Reproducibility
-
-- All tests run within the provided `docker compose` environment.
-- Tokens are generated using the `gen-tokens` tool with deterministic keys.
-- Network conditions (latency/loss) emulated via `tc` on the bridge network.
+This file (`PROGRESS.md`) keeps status, implementation progress, and execution backlog.
 
 ---
 
-## 5) Scenario Coverage (Implemented)
+## 5) Outputs And Artifacts
 
-The harness includes scenarios aligned to the proposal themes:
-
-- **Baseline token-only**: JWT vs Biscuit
-- **Policy complexity**: Biscuit block count scaling (1/5/25) and Datalog rule complexity (LOW/MED/HIGH)
-- **External authorization**: HTTP authz latency and failure injection
-- **Hybrid contingency**: HTTP preferred, fallback on HTTP failure
-- **Network impairment**:
-  - MTU sweeps including very small MTU to induce fragmentation
-  - Optional delay/loss shaping via `tc netem`
-- **Lifecycle and herd behavior**:
-  - short cache TTL configuration
-  - synchronized connect bursts
-- **MQTT v5 reauthentication**:
-  - microbenchmark uses MQTT5 `AUTH` packet flow
-
-### 5.1 Missing Scenario IDs (gap list)
-
-Below are scenario IDs that are **not yet present** in `run_scenarios.py` and
-map directly to the open issues/coverage gaps above.
-
-- [x] **DYNSEC-BASE** (Dynamic Security baseline parity) — **IMPLEMENTED** (see Issue 1)
-- [x] **DYNSEC-CHURN** (Dynamic Security with policy updates) — **IMPLEMENTED as CONTROL-CHURN-*** (see Issue 35)
-- [x] **DYNSEC-READ-FANOUT** (Dynamic Security + `ACL_READ` fan-out checks) — **IMPLEMENTED as DYNSEC-READ-FANOUT/DYNSEC-READ-FANOUT-CHURN** (see Issue 30)
-- [x] **STATIC-ACL-BASE** (Static ACL baseline with `ACL_WRITE`/`ACL_SUBSCRIBE`) — **IMPLEMENTED as STATIC-ACL-JWT/BIS** (see Issue 2)
-- [x] **STATIC-ACL-READ** (Static ACL with `ACL_READ` disabled or documented) — **IMPLEMENTED as STATIC-ACL-FANOUT/FANOUT-BIS** (see Issue 2)
-- [x] **STATIC-ACL-MATRIX** (Static ACL parity across JWT/Biscuit scenarios) — **IMPLEMENTED** (see Issue 2)
-- [ ] **ACL-WRITE-MATRIX** (Explicit `ACL_WRITE` coverage per policy mode)
-- [ ] **ACL-SUBSCRIBE-MATRIX** (Explicit `ACL_SUBSCRIBE` coverage per policy mode)
-- [ ] **ACL-READ-MATRIX** (Explicit `ACL_READ` coverage per policy mode)
-- [x] **CONTROL-KICK-REAUTH** (Control-plane kick/re-auth flow) — **IMPLEMENTED as CONTROL-OVERHEAD-KICK-REAUTH-*** (see Issue 20/35)
-- [x] **CONTROL-READ-NOTIFY** (Control-plane `ACL_READ` + notify flow) — **IMPLEMENTED as CONTROL-OVERHEAD-ACL-READ-NOTIFY-*** (see Issue 20/35)
-- [x] **ACL-READ-FANOUT-*** (formerly FANOUT-SCALE) (1 publisher + N subscribers to measure fan-out cost) — **IMPLEMENTED as ACL-READ-FANOUT-10/50/100** (see Issue 19)
-- [ ] **SQLITE-CHURN-READ** (SQLite churn + `ACL_READ` enforcement)
-- [x] **QOS0-BASE-01** (BASE-01 with QoS 0) — **IMPLEMENTED** (see Issue 17)
-- [x] **QOS2-JWT** / **QOS2-BISCUIT** (QoS 2 scenarios) — **IMPLEMENTED** (see Issue 17)
-- [x] **QOS-MIXED** (Mixed QoS workload) — **IMPLEMENTED as QOS-MIXED-JWT/BISCUIT** (see Issue 17)
-
----
-
-## 6) Authorization Enforcement Matrix
-
-### Static policies (no runtime changes)
-
-**Backends**: Static ACL, Dynamic Security, SQLite, HTTP endpoint.
-
-| Hook | Required? | Notes |
-| --- | --- | --- |
-| `ACL_READ` | Optional | Can be skipped if `ACL_SUBSCRIBE` is authoritative and policies are static; still needed for fan-out enforcement if you want per-message checking. |
-| `ACL_WRITE` | ✅ | Check policy (Biscuit Datalog; JWT via the backend under test). |
-| `ACL_SUBSCRIBE` | ✅ | Check policy (Biscuit Datalog; JWT via the backend under test). |
-| `EVT_CONTROL` | N/A | Only relevant if `$CONTROL/<feature>/v1` is explicitly used. |
-
-### Dynamic policies — ACL_READ enforcement version
-
-**Backends**: Dynamic Security, SQLite.
-
-| Hook | Required? | Notes |
-| --- | --- | --- |
-| `ACL_READ` | ✅ | Enforce dynamic policy changes for existing subscribers (fan-out checks). |
-| `ACL_WRITE` | ✅ | Check policy (Biscuit Datalog + backend query; JWT backend query). |
-| `ACL_SUBSCRIBE` | ✅ | Check policy (Biscuit Datalog + backend query; JWT backend query). |
-| `EVT_CONTROL` | N/A | Dynamic enforcement handled via `ACL_CHECK` only. |
-
-### Dynamic policies — CONTROL-triggered enforcement version
-
-**Backends**: Dynamic Security.
-
-| Hook | Required? | Notes |
-| --- | --- | --- |
-| `ACL_READ` | Conditional | Test both variants: **(A)** kick/re-auth affected clients on policy change (no `ACL_READ`), **(B)** keep sessions and deny fan-out with `ACL_READ`, plus publish a warning (e.g., `system_notification/<client_id>`) so clients learn privileges were reduced. |
-| `ACL_WRITE` | ✅ | Check policy (Biscuit Datalog + backend query; JWT backend query). |
-| `ACL_SUBSCRIBE` | ✅ | Check policy (Biscuit Datalog + backend query; JWT backend query). |
-| `EVT_CONTROL` | ✅ | Authorize control-plane requests and trigger cache invalidation / kick or notification flow. |
-
----
-
-## 7) Outputs and Artifacts
-
-### Scenario runner outputs
+### Scenario Runner Outputs
 
 `benchmarks/run_scenarios.py` writes per-scenario JSON to:
 
@@ -310,16 +192,16 @@ Each file contains:
 
 ---
 
-## 8) Validation Status
+## 6) Validation Status
 
-### Build/syntax
+### Build/Syntax
 
 - Rust plugin builds in release mode (historically validated)
 - Python benchmark scripts syntax-checked successfully:
   - `benchmarks/run_scenarios.py`
   - `benchmarks/mqtt_auth_client.py`
 
-### Important note on "execution vs implementation"
+### Important Note On "Execution Vs Implementation"
 
 The harness and scenarios are implemented and wired, but **the project still
 needs an end-to-end execution pass** (run the full scenario suite on the target
@@ -327,9 +209,28 @@ machine and record the first results/known issues).
 
 ---
 
-## 9) Open Issues (Next Steps, Grouped)
+## 7) Policy Parity Gaps (Tracking)
 
-### **Priority List**
+Source of truth for the detailed policy mapping is `SCENARIO_POLICIES.md`.
+The actionable parity gaps are tracked here as backlog items:
+
+1. Token-only wildcard/filter parity is implemented; preserve this in new scenarios.
+2. Static ACL scenarios should use roles-only tokens to isolate ACL cost
+   (tracked by Issue 28 and Issue 33).
+3. SQLite policy model remains too simple for parity-grade comparisons
+   (tracked by Issue 22 and Issue 30).
+4. `POLICY-COMPLEX-*` naming must stay explicit about what is being stressed
+   (`block_chain` vs Datalog complexity; tracked by Issue 21 and Issue 33).
+5. Dynamic-security parity should continue to prefer policy-source isolation
+   (roles-only token variants; tracked by Issue 28/30/31/32).
+
+Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
+
+---
+
+## 8) Open Issues (Next Steps, Grouped)
+
+### Priority List
 1. Issue 8.2: Containerized benchmark topology
 2. Issue 21: Expand Biscuit authorizer (if current template insufficient)
 3. Issue 22: Strengthen SQLite RBAC (if policies too simple)
@@ -673,7 +574,7 @@ machine and record the first results/known issues).
 
 ---
 
-### 11) Last Phase: Data Analysis & Validation
+### 10) Last Phase: Data Analysis & Validation
 
 - [ ] **Aggregate results**
   - Collect scenario JSONs and generate a summary table (latency p50/p95/p99,
@@ -686,7 +587,7 @@ machine and record the first results/known issues).
 
 ---
 
-## 12) Known Risks / Things to Watch
+## 11) Known Risks / Things To Watch
 
 - **Docker permissions**: `tc netem` requires `CAP_NET_ADMIN` (already
   configured in compose).
@@ -697,7 +598,7 @@ machine and record the first results/known issues).
 
 ---
 
-## 13) Dependency Optimization Note
+## 12) Dependency Optimization Note
 
 Optimize dependency features in `Cargo.toml` by disabling unused default
 features to ensure accurate performance measurements. This should be done
@@ -710,15 +611,15 @@ features to ensure accurate performance measurements. This should be done
 
 ---
 
-## 14) Research Footnotes
+## 13) Research Footnotes
 
-### Biscuit parsing cache vs per-message verification
+### Biscuit Parsing Cache Vs Per-Message Verification
 
 - **Decision**: Parse/verify Biscuit tokens once during authentication, cache the parsed token in session state, and reuse it for per-message authorization checks.
 - **Rationale**: JWT verification is already performed once at auth time; per-message Biscuit re-verification would bias latency/CPU comparisons. Caching preserves fairness while still running Datalog authorization for each ACL check.
 - **Validity guardrail**: Only cryptographic verification is cached; policy evaluation still occurs on every request (ACL defers to authorizer), preserving per-message cost measurement and policy semantics.
 
-### Why `netem` runs in a separate container with `network_mode: service:mosquitto`
+### Why `netem` Runs In A Separate Container With `network_mode: service:mosquitto`
 
 - **Least privilege**: Traffic shaping needs `CAP_NET_ADMIN`. By running `netem`
   in a separate container that joins the Mosquitto network namespace, we avoid
@@ -729,7 +630,7 @@ features to ensure accurate performance measurements. This should be done
 - **Precise targeting**: `network_mode: service:mosquitto` ensures `tc qdisc`
   commands affect the broker's interfaces directly, not a dummy NIC.
 
-### Why `cadvisor` is separate from Prometheus
+### Why `cadvisor` Is Separate From Prometheus
 
 - **Isolation of failure domains**: If cAdvisor or Prometheus restarts/crashes,
   the other remains available.

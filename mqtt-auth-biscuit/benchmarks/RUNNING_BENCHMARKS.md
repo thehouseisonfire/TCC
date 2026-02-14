@@ -1,9 +1,14 @@
-# Running MQTT Auth benchmarks
+# Running MQTT Auth Benchmarks
 
 This guide explains how to run the benchmarks for the JWT and Biscuit
 authentication plugin.
 
-**Important Note**: This implementation supports **MQTT v5 only**. MQTT v3.1 is not implemented and will not be analyzed in these benchmarks.
+**Important Note**: This implementation supports **MQTT v5 only**.
+MQTT v3.1 is not implemented and is out of scope for these benchmarks.
+
+Policy semantics, parity constraints, and scenario meaning are documented in:
+- `../../SCENARIO_POLICIES.md`
+- `../../PROGRESS.md` (gap tracking and implementation status)
 
 ## Prerequisites
 
@@ -12,7 +17,7 @@ authentication plugin.
 - **Python 3**: For running the benchmark scripts.
   - Install dependencies: `uv pip install -r benchmarks/requirements.txt`
 
-## One-command run (recommended)
+## One-Command Run (Recommended)
 
 From the repository root, you can run the full workflow (build, token generation,
 scenario run, cleanup) with:
@@ -51,47 +56,12 @@ This will create/update `benchmarks/tokens.json` and write `docker/biscuit_publi
 The Docker Mosquitto configuration is pre-wired to the deterministic keys used
 by `gen-tokens` (see `docker/mosquitto.conf`).
 
-### JWT grants schema (token-only authz)
+### Token Policy Note
 
-Token-only JWT authorization relies on a `grants` claim. Each grant defines the
-MQTT operation (`publish`, `subscribe`, or `read`) and a topic filter using
-standard MQTT wildcards (`+`, `#`).
+Token claim/fact schema and deny-over-allow semantics are defined in
+`../../SCENARIO_POLICIES.md` (`## 1` and `## 2.1`).
 
-Example issuer request payload:
-
-```json
-{
-  "client_id": "client_1",
-  "roles": ["admin", "sensor"],
-  "grants": [
-    {"op": "publish", "res": "sensors/client_1/temp"},
-    {"op": "subscribe", "res": "sensors/client_1/+"}
-  ],
-  "denies": [
-    {"op": "read", "res": "sensors/client_1/humidity"}
-  ]
-}
-```
-
-The resulting JWT claim set embeds `roles`, `grants`, and `denies`. For Biscuit,
-`roles` are emitted as `role("<name>")` facts, `grants` as `right("<op>", "<res>")`,
-and `denies` as `deny("<op>", "<res>")` facts.
-
-Optional deny rules can be provided under `denies`, using the same `op`/`res`
-shape. Deny rules take precedence over allow rules (deny-over-allow), so a
-matching deny will reject access even if a grant matches. If no `read` rule is
-present for a topic, the plugin falls back to matching `subscribe` grants for
-`ACL_READ` checks.
-
-Biscuit parity: `deny("op", "res")` facts are evaluated before allow rules, and
-`deny("subscribe", ...)` blocks `ACL_READ` when the read operation is evaluated
-via the subscribe fallback.
-
-Attenuation note: clients may append `deny` facts in attenuation blocks to
-further restrict rights. The `BIS-DENY-ATTENUATED` scenario uses a token where
-the deny is in an appended block to exercise this path.
-
-### Client-side (online) attenuation
+### Client-Side (Online) Attenuation
 
 To exercise **online attenuation** (client-side block append), use the new
 `biscuit-attenuate` helper and the `BIS-ATTENUATE-CLIENT` scenario.
@@ -115,28 +85,11 @@ cargo run -p gen-tokens --bin biscuit-attenuate -- \
   --ttl-seconds 300
 ```
 
-Scenario coverage:
+Scenario IDs and parity classification for attenuation/delegation and
+policy-complexity runs are documented in `../../SCENARIO_POLICIES.md` (`## 2.2`
+and `## 2.7`).
 
-- `BIS-ATTENUATE-CLIENT` performs the same attenuation automatically inside the
-  load generator before each client connects, measuring attenuation latency and
-  token length growth in the scenario results.
-- `BIS-ATTENUATE-TTL` tests a TTL-only attenuation block.
-- `BIS-ATTENUATE-DENY` adds a deny fact plus a resource check (template-driven
-  on the client id).
-- `BIS-ATTENUATE-OP-ONLY` restricts only the operation without a topic check.
-- `POLICY-COMPLEX-1/5/25` exercise empty-block chain length (signature chain overhead).
-- `POLICY-COMPLEX-LOW/MED/HIGH` exercise richer Datalog rules (role/group, scoped ownership,
-  capability, region/device constraints) with the same topic/operation to isolate authorizer
-  evaluation cost.
-
-Scenario outputs include a `policy_complexity.kind` marker for these runs (currently
-`"datalog"`) to distinguish them from block-chain length scenarios in downstream analysis.
-
-**Analysis note:** attenuation/delegation scenarios are Biscuit-only capability
-tests. Scenario outputs include `capability_flags.biscuit_only=true` to mark
-them as non-parity comparisons in downstream analysis.
-
-### Client-to-client delegation
+### Client-to-Client Delegation
 
 The delegation benchmark now exercises **real client-side delegation** instead
 of pre-generated delegated tokens.
@@ -197,26 +150,10 @@ You can run the benchmark script to measure latency and throughput:
 python3 benchmarks/metrics_collector.py
 ```
 
-### Static ACL scenarios (compound gate with two authorization sources)
+### Static ACL Scenarios (Compound Gate with Two Authorization Sources)
 
-Static ACL scenarios (`STATIC-ACL-*`) use a **compound gate** with **two authorization sources**:
-
-1. **Token-side policies** (JWT claims or Biscuit Datalog rules) are evaluated first.
-2. **Mosquitto’s native ACL file** is evaluated second, using a synthetic username derived from the token’s role.
-
-**Resolution model (StaticAcl = OR):**
-- If the token **allows**, the plugin returns `MOSQ_ERR_SUCCESS` and Mosquitto **does not** consult the ACL.
-- If the token **denies**, the plugin returns `MOSQ_ERR_PLUGIN_DEFER` so the ACL file decides.
-
-**Control-plane note:** the same OR resolution is applied in `MOSQ_EVT_CONTROL` for StaticAcl runs (token allow short-circuits ACL; token deny defers to ACL).
-
-This means authorization decisions come from **two sources of truth**:
-- The token can grant access even when the ACL would deny.
-- The ACL can still grant access when the token does not include an allow rule.
-
-For fair benchmark comparison, static ACL tokens should carry only role identity (JWT `roles` claim or Biscuit `role(<value>)` fact) without extra policy rules. This isolates ACL cost while still validating each token format. If you want stricter-than-ACL behavior, add extra facts/rules to the token.
-
-**Role selection simplification**: static ACL scenarios are designed for **single-role tokens**. If multiple roles are present, the plugin prefers `admin` first and otherwise the first non-empty role. Avoid multi-role tokens in `STATIC-ACL-*` runs to prevent ambiguity.
+Static ACL policy semantics and parity constraints are centralized in
+`../../SCENARIO_POLICIES.md` (`## 2.4`).
 
 Relevant plugin options (set in `mosquitto_*.conf`):
 
@@ -227,53 +164,17 @@ Ensure the ACL file (`docker/static-acl.conf`) uses the same role names.
 
 ### Anonymous Flow Scenario (ANON-BASE)
 
-The `ANON-BASE` scenario demonstrates **unauthenticated MQTT client access** using Mosquitto's `allow_anonymous true` combined with Dynamic Security's `anonymousGroup` policy. This enables clients to connect without username/password while still enforcing authorization constraints via Dynamic Security.
-
-**Configuration:**
-- Mosquitto config: `docker/mosquitto_anon.conf` (`allow_anonymous true`)
-- Dynamic Security policy: `docker/dynamic-security-anon.json`
-- Anonymous group: `anonymous` with role `anonymous_reader`
-- Permitted topic: `public/announce` (subscribe and publish)
-
-**When Anonymous Flows Are Realistic:**
-
-1. **Public telemetry broadcasts**: Weather stations, public sensor networks, or open data feeds where authentication is unnecessary and the data is intended for public consumption.
-
-2. **Device discovery protocols**: Initial device onboarding where unauthenticated clients need to announce presence on a well-known topic before receiving credentials.
-
-3. **Guest/visitor access**: Temporary public WiFi portals or visitor networks where providing per-user credentials is impractical.
-
-4. **Legacy IoT migration**: Transitioning existing unauthenticated device fleets to a policy-controlled model without immediate credential deployment.
-
-**Security Trade-offs:**
-
-| Aspect | With Anonymous Group | Without (allow_anonymous only) |
-|--------|---------------------|-------------------------------|
-| **Authorization** | Enforced via Dynamic Security ACLs | None (full access) |
-| **Topic isolation** | Limited to `anonymousGroup` topics | None (all topics) |
-| **Auditability** | Client ID tracking possible | No identity attribution |
-| **Revocation** | Policy updates apply immediately | Must disable anonymous globally |
-| **Credential theft risk** | N/A (no credentials) | N/A (no credentials) |
-| **DoS susceptibility** | Higher (no auth barrier) | Highest (no auth barrier) |
-
-**Important Considerations:**
-
-- **No identity attribution**: Anonymous clients cannot be distinguished by username; rely on client IDs for logging (which can be spoofed).
-- **DoS vulnerability**: Without authentication, the broker is more susceptible to connection flooding attacks. Rate limiting and connection caps should be applied at the network layer.
-- **Topic scoping**: The `anonymousGroup` should be restricted to a minimal topic hierarchy (`public/` or `announce/`) to prevent unauthorized access to sensitive data.
-- **Cannot coexist with token auth on same topic**: Anonymous clients and authenticated clients sharing a topic create ambiguity in authorization logs.
-
-**Research Alignment:**
-The ANON-BASE scenario validates H₁ (functional viability) by demonstrating that the plugin correctly handles `None` usernames in Dynamic Security checks. Performance comparison against `BASE-01` (no auth) and `JWT-01`/`BIS-01` (token auth) quantifies the overhead of anonymous authorization relative to both unauthenticated and authenticated flows.
+Policy rationale and security trade-offs are documented in
+`../../SCENARIO_POLICIES.md` (`## 2.8`).
 
 **Usage:**
 ```bash
 python3 benchmarks/run_scenarios.py --scenarios ANON-BASE
 ```
 
-Clients connect with empty username/password and publish/subscribe to `public/announce` as defined by the `anonymousGroup` policy in `dynamic-security-anon.json`.
+This run uses `docker/mosquitto_anon.conf` and `docker/dynamic-security-anon.json`.
 
-### Smoke test
+### Smoke Test
 
 Run a lightweight health check + single publish for JWT and Biscuit:
 
@@ -294,7 +195,7 @@ You can also run the full scenario battery from `ARTICLE.MD` (MTU sweep, thunder
 python3 benchmarks/run_scenarios.py
 ```
 
-### TLS-enabled runs
+### TLS-Enabled Runs
 
 To measure TLS overhead across all network paths (MQTT, token issuer, authz HTTP, Prometheus):
 
@@ -322,7 +223,7 @@ To select a different Mosquitto configuration for a run (e.g. HTTP policy or hyb
 MOSQUITTO_CONF=docker/mosquitto_http.conf python3 benchmarks/run_scenarios.py
 ```
 
-### HTTP policy backend schema (HTTP/Hybrid modes)
+### HTTP Policy Backend Schema (HTTP/Hybrid Modes)
 
 > [!IMPORTANT]
 > The authz-server requires **HTTP/2** (h2c for cleartext, h2 for TLS). Clients must support HTTP/2 prior knowledge (no HTTP/1.1 upgrade). Ensure your HTTP client library supports HTTP/2 before running HTTP policy scenarios.
@@ -389,7 +290,7 @@ You can also monitor resource usage via:
 
 The scenario runner includes automatic network capacity measurement using `iperf3` to establish a baseline before each test batch. This helps interpret throughput results and ensures fair comparisons across scenarios.
 
-### How it works
+### How It Works
 
 1. **Automatic measurement**: Before each scenario runs, the runner starts an `iperf3` client that measures network capacity between the host and the Docker network.
 2. **Retry logic**: If the first measurement fails, the runner automatically retries up to 2 times with a brief delay.
@@ -503,7 +404,7 @@ Command payloads are generated using the `dynsec_commands.py` module and include
 }
 ```
 
-### CLI Options for Control Messages
+### CLI Options For Control Messages
 
 The `loadgen.py` script supports direct control message testing:
 
@@ -580,7 +481,7 @@ Example output structure:
 }
 ```
 
-### CLI Options for Interleaved Control
+### CLI Options For Interleaved Control
 
 ```bash
 # Run interleaved scenario via run_scenarios.py
@@ -614,7 +515,7 @@ docker compose -f docker/docker-compose.yml down
 
 The benchmark suite includes automated packet capture using `tcpdump` to analyze TCP fragmentation behavior during MTU stress tests. This feature is automatically enabled for MTU scenarios (MTU-200-JWT, MTU-500-BIS-25, etc.) to provide quantitative insights into how token size affects network-level fragmentation.
 
-### How it works
+### How It Works
 
 1. **Automatic activation**: tcpdump is automatically started for any scenario with an MTU configuration (`netem: {mtu: N}`)
 2. **Capture filter**: By default captures MQTT traffic on ports 1883 (plaintext) and 8883 (TLS)

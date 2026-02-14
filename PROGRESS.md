@@ -43,6 +43,7 @@ described in `ARTICLE.MD`, including a controllable HTTP authz service and a
 
 ### 2.2 Crates
 
+- `authz-server`: HTTP token issuer service.
 - `mosquitto-plugin`: core authn/authz logic, callback wiring, policy backends
 - `token-issuer`: JWT/Biscuit issuance service for refresh scenarios
 - `benchmarks`: token generation + scenario runner + load generator

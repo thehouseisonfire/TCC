@@ -172,7 +172,7 @@ MQTT v5 reauthentication microbenchmark:
    loads.
 4. Assess the impact of token size on network throughput.
 
-### Test Matrix (Planned vs Implemented)
+### Test Matrix 
 
 | Scenario ID                   | Token Type | Operation        | Clients | Planned QoS | Implemented QoS | Status         |
 | ----------------------------- | ---------- | ---------------- | ------- | ----------- | --------------- | -------------- |
@@ -236,60 +236,26 @@ The harness includes scenarios aligned to the proposal themes:
 Below are scenario IDs that are **not yet present** in `run_scenarios.py` and
 map directly to the open issues/coverage gaps above.
 
-- [ ] **DYNSEC-BASE** (Dynamic Security baseline parity)
-- [ ] **DYNSEC-CHURN** (Dynamic Security with policy updates)
-- [ ] **DYNSEC-READ-FANOUT** (Dynamic Security + `ACL_READ` fan-out checks)
-- [ ] **STATIC-ACL-BASE** (Static ACL baseline with `ACL_WRITE`/`ACL_SUBSCRIBE`)
-- [ ] **STATIC-ACL-READ** (Static ACL with `ACL_READ` disabled or documented)
-- [ ] **STATIC-ACL-MATRIX** (Static ACL parity across JWT/Biscuit scenarios)
+- [x] **DYNSEC-BASE** (Dynamic Security baseline parity) — **IMPLEMENTED** (see Issue 1)
+- [x] **DYNSEC-CHURN** (Dynamic Security with policy updates) — **IMPLEMENTED as CONTROL-CHURN-*** (see Issue 35)
+- [x] **DYNSEC-READ-FANOUT** (Dynamic Security + `ACL_READ` fan-out checks) — **IMPLEMENTED as DYNSEC-READ-FANOUT/DYNSEC-READ-FANOUT-CHURN** (see Issue 30)
+- [x] **STATIC-ACL-BASE** (Static ACL baseline with `ACL_WRITE`/`ACL_SUBSCRIBE`) — **IMPLEMENTED as STATIC-ACL-JWT/BIS** (see Issue 2)
+- [x] **STATIC-ACL-READ** (Static ACL with `ACL_READ` disabled or documented) — **IMPLEMENTED as STATIC-ACL-FANOUT/FANOUT-BIS** (see Issue 2)
+- [x] **STATIC-ACL-MATRIX** (Static ACL parity across JWT/Biscuit scenarios) — **IMPLEMENTED** (see Issue 2)
 - [ ] **ACL-WRITE-MATRIX** (Explicit `ACL_WRITE` coverage per policy mode)
 - [ ] **ACL-SUBSCRIBE-MATRIX** (Explicit `ACL_SUBSCRIBE` coverage per policy mode)
 - [ ] **ACL-READ-MATRIX** (Explicit `ACL_READ` coverage per policy mode)
-- [ ] **CONTROL-KICK-REAUTH** (Control-plane kick/re-auth flow)
-- [ ] **CONTROL-READ-NOTIFY** (Control-plane `ACL_READ` + notify flow)
-- [ ] **FANOUT-SCALE** (1 publisher + N subscribers to measure fan-out cost)
+- [x] **CONTROL-KICK-REAUTH** (Control-plane kick/re-auth flow) — **IMPLEMENTED as CONTROL-OVERHEAD-KICK-REAUTH-*** (see Issue 20/35)
+- [x] **CONTROL-READ-NOTIFY** (Control-plane `ACL_READ` + notify flow) — **IMPLEMENTED as CONTROL-OVERHEAD-ACL-READ-NOTIFY-*** (see Issue 20/35)
+- [x] **ACL-READ-FANOUT-*** (formerly FANOUT-SCALE) (1 publisher + N subscribers to measure fan-out cost) — **IMPLEMENTED as ACL-READ-FANOUT-10/50/100** (see Issue 19)
 - [ ] **SQLITE-CHURN-READ** (SQLite churn + `ACL_READ` enforcement)
-- [ ] **QOS0-BASE-01** (BASE-01 with QoS 0)
-- [ ] **QOS2-JWT** / **QOS2-BISCUIT** (QoS 2 scenarios)
-- [ ] **QOS-MIXED** (Mixed QoS workload)
+- [x] **QOS0-BASE-01** (BASE-01 with QoS 0) — **IMPLEMENTED** (see Issue 17)
+- [x] **QOS2-JWT** / **QOS2-BISCUIT** (QoS 2 scenarios) — **IMPLEMENTED** (see Issue 17)
+- [x] **QOS-MIXED** (Mixed QoS workload) — **IMPLEMENTED as QOS-MIXED-JWT/BISCUIT** (see Issue 17)
 
 ---
 
-## 6) Outputs and Artifacts
-
-### Scenario runner outputs
-
-`benchmarks/run_scenarios.py` writes per-scenario JSON to:
-
-- `mqtt-auth-biscuit/benchmarks/results/<SCENARIO_ID>.json`
-
-Each file contains:
-
-- **Latency percentiles** (p50/p95/p99 where applicable) from the load generator
-- **Throughput** summary from the load generator
-- **Error reporting** (connect/publish failures)
-- **Resource snapshot** collected via Prometheus/cAdvisor (container CPU/memory)
-
----
-
-## 7) Validation Status
-
-### Build/syntax
-
-- Rust plugin builds in release mode (historically validated)
-- Python benchmark scripts syntax-checked successfully:
-  - `benchmarks/run_scenarios.py`
-  - `benchmarks/mqtt_auth_client.py`
-
-### Important note on "execution vs implementation"
-
-The harness and scenarios are implemented and wired, but **the project still
-needs an end-to-end execution pass** (run the full scenario suite on the target
-machine and record the first results/known issues).
-
----
-
-## 8 Authorization Enforcement Matrix
+## 6) Authorization Enforcement Matrix
 
 ### Static policies (no runtime changes)
 
@@ -323,6 +289,40 @@ machine and record the first results/known issues).
 | `ACL_WRITE` | ✅ | Check policy (Biscuit Datalog + backend query; JWT backend query). |
 | `ACL_SUBSCRIBE` | ✅ | Check policy (Biscuit Datalog + backend query; JWT backend query). |
 | `EVT_CONTROL` | ✅ | Authorize control-plane requests and trigger cache invalidation / kick or notification flow. |
+
+---
+
+## 7) Outputs and Artifacts
+
+### Scenario runner outputs
+
+`benchmarks/run_scenarios.py` writes per-scenario JSON to:
+
+- `mqtt-auth-biscuit/benchmarks/results/<SCENARIO_ID>.json`
+
+Each file contains:
+
+- **Latency percentiles** (p50/p95/p99 where applicable) from the load generator
+- **Throughput** summary from the load generator
+- **Error reporting** (connect/publish failures)
+- **Resource snapshot** collected via Prometheus/cAdvisor (container CPU/memory)
+
+---
+
+## 8) Validation Status
+
+### Build/syntax
+
+- Rust plugin builds in release mode (historically validated)
+- Python benchmark scripts syntax-checked successfully:
+  - `benchmarks/run_scenarios.py`
+  - `benchmarks/mqtt_auth_client.py`
+
+### Important note on "execution vs implementation"
+
+The harness and scenarios are implemented and wired, but **the project still
+needs an end-to-end execution pass** (run the full scenario suite on the target
+machine and record the first results/known issues).
 
 ---
 

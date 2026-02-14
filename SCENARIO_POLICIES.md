@@ -144,9 +144,6 @@ instead of pure ACL performance.
 | DYNSEC-READ-FANOUT | JWT | Dynamic Security | fanout roles/ACLs enabled | Allows |
 | DYNSEC-READ-FANOUT-CHURN | JWT | Dynamic Security | fanout ACLs change on churn | Mixed |
 
-Policies live in `docker/dynamic-security*.json` and are evaluated by
-`dynamic_security_policy.rs` (@/home/eagle/TCC2/mqtt-auth-biscuit/docker/dynamic-security.json,
-@/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/dynamic_security_policy.rs#27-83).
 
 ### 2.6 Lifecycle and reauthentication
 

@@ -389,6 +389,15 @@ fn cstr_to_string(ptr: *const c_char) -> Option<String> {
     )
 }
 
+fn normalize_username(username: Option<String>) -> Option<String> {
+    username.and_then(|u| if u.is_empty() { None } else { Some(u) })
+}
+
+fn should_defer_no_token_basic_auth(mode: PolicyMode, allow_anonymous_no_token: bool) -> bool {
+    matches!(mode, PolicyMode::StaticAcl | PolicyMode::StaticAclStrict)
+        || (mode == PolicyMode::DynamicSecurity && allow_anonymous_no_token)
+}
+
 fn mosq_client_id_string(client: *const c_void) -> Option<String> {
     if client.is_null() {
         return None;
@@ -787,10 +796,27 @@ extern "C" fn basic_auth_callback(
     let state = unsafe { &*(userdata as *mut PluginState) };
 
     if evt.password.is_null() {
-        return MOSQ_ERR_AUTH;
+        return if should_defer_no_token_basic_auth(
+            state.config.policy.mode,
+            state.config.allow_anonymous_no_token,
+        ) {
+            MOSQ_ERR_PLUGIN_DEFER
+        } else {
+            MOSQ_ERR_AUTH
+        };
     }
 
     let password = unsafe { CStr::from_ptr(evt.password).to_string_lossy() };
+    if password.is_empty() {
+        return if should_defer_no_token_basic_auth(
+            state.config.policy.mode,
+            state.config.allow_anonymous_no_token,
+        ) {
+            MOSQ_ERR_PLUGIN_DEFER
+        } else {
+            MOSQ_ERR_AUTH
+        };
+    }
 
     match state.auth_engine.authenticate(&password) {
         Ok(token_type) => {
@@ -940,7 +966,7 @@ extern "C" fn acl_check_callback(
     let Some(client_id) = mosq_client_id_string(evt.client) else {
         return MOSQ_ERR_ACL_DENIED;
     };
-    let username = mosq_client_username_string(evt.client);
+    let username = normalize_username(mosq_client_username_string(evt.client));
     let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
 
     if let Some(token_type) = state.cache.get(&client_id) {
@@ -982,7 +1008,23 @@ extern "C" fn acl_check_callback(
         }
     }
 
-    MOSQ_ERR_ACL_DENIED
+    match state.config.policy.mode {
+        PolicyMode::DynamicSecurity if state.config.allow_anonymous_no_token => {
+            let Some(policy) = state.dynamic_security_policy.as_ref() else {
+                return MOSQ_ERR_ACL_DENIED;
+            };
+            let allowed = policy
+                .check(username.as_deref(), Some(&client_id), &topic, evt.access)
+                .unwrap_or(false);
+            if allowed {
+                MOSQ_ERR_SUCCESS
+            } else {
+                MOSQ_ERR_ACL_DENIED
+            }
+        }
+        PolicyMode::StaticAcl | PolicyMode::StaticAclStrict => MOSQ_ERR_PLUGIN_DEFER,
+        _ => MOSQ_ERR_ACL_DENIED,
+    }
 }
 
 extern "C" fn message_callback(
@@ -1205,6 +1247,28 @@ mod tests {
     fn ffi_init_and_cleanup_are_miri_safe() {
         let (userdata, _identifier) = setup_plugin_with_config();
         teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn normalize_username_maps_empty_to_none() {
+        assert_eq!(normalize_username(None), None);
+        assert_eq!(normalize_username(Some(String::new())), None);
+        assert_eq!(
+            normalize_username(Some("device_a".to_string())),
+            Some("device_a".to_string())
+        );
+    }
+
+    #[test]
+    fn no_token_basic_auth_defer_policy_matrix() {
+        assert!(!should_defer_no_token_basic_auth(PolicyMode::TokenOnly, false));
+        assert!(!should_defer_no_token_basic_auth(PolicyMode::DynamicSecurity, false));
+        assert!(should_defer_no_token_basic_auth(PolicyMode::DynamicSecurity, true));
+        assert!(should_defer_no_token_basic_auth(PolicyMode::StaticAcl, false));
+        assert!(should_defer_no_token_basic_auth(
+            PolicyMode::StaticAclStrict,
+            false
+        ));
     }
 
     #[test]

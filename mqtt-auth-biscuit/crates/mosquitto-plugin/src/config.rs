@@ -90,6 +90,7 @@ pub struct PluginConfig {
     pub biscuit: BiscuitConfig,
     pub policy: PolicyBackendConfig,
     pub cache_ttl_seconds: u64,
+    pub allow_anonymous_no_token: bool,
     pub ext_auth_method: Option<String>,
     pub role_username_prefix: String,
     pub biscuit_role_fact: String,
@@ -124,6 +125,7 @@ pub struct PluginConfigBuilder {
     dynamic_security_password: Option<String>,
     dynamic_security_reload_interval_seconds: Option<u64>,
     cache_ttl_seconds: Option<u64>,
+    allow_anonymous_no_token: Option<bool>,
     ext_auth_method: Option<String>,
     role_username_prefix: Option<String>,
     biscuit_role_fact: Option<String>,
@@ -156,6 +158,7 @@ impl PluginConfigBuilder {
             dynamic_security_password: None,
             dynamic_security_reload_interval_seconds: None,
             cache_ttl_seconds: None,
+            allow_anonymous_no_token: None,
             ext_auth_method: None,
             role_username_prefix: None,
             biscuit_role_fact: None,
@@ -245,6 +248,11 @@ impl PluginConfigBuilder {
 
     pub fn cache_ttl_seconds(mut self, ttl: u64) -> Self {
         self.cache_ttl_seconds = Some(ttl);
+        self
+    }
+
+    pub fn allow_anonymous_no_token(mut self, enabled: bool) -> Self {
+        self.allow_anonymous_no_token = Some(enabled);
         self
     }
 
@@ -364,6 +372,7 @@ impl PluginConfigBuilder {
             },
             policy,
             cache_ttl_seconds,
+            allow_anonymous_no_token: self.allow_anonymous_no_token.unwrap_or(false),
             ext_auth_method: self.ext_auth_method.or_else(|| Some("token".to_string())),
             role_username_prefix: self
                 .role_username_prefix
@@ -475,6 +484,12 @@ pub fn parse_options(
                     .map_err(|e| format!("Invalid cache_ttl_seconds: {e}"))?;
                 builder.cache_ttl_seconds(ttl)
             }
+            "allow_anonymous_no_token" => {
+                let enabled = value
+                    .parse::<bool>()
+                    .map_err(|e| format!("Invalid allow_anonymous_no_token: {e}"))?;
+                builder.allow_anonymous_no_token(enabled)
+            }
             "ext_auth_method" => builder.ext_auth_method(value),
             "role_username_prefix" => builder.role_username_prefix(value),
             "biscuit_role_fact" => builder.biscuit_role_fact(value),
@@ -540,5 +555,44 @@ mod tests {
             .build();
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn defaults_allow_anonymous_no_token_to_false() {
+        let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
+        let biscuit_root_key_file = format!(
+            "{}/../../docker/biscuit_public.key",
+            env!("CARGO_MANIFEST_DIR")
+        );
+
+        let config = PluginConfigBuilder::new()
+            .jwt_algorithm("ES256")
+            .jwt_key_file(jwt_pub_pem)
+            .biscuit_root_key_file(biscuit_root_key_file)
+            .build()
+            .expect("config should build");
+
+        assert!(!config.allow_anonymous_no_token);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn accepts_allow_anonymous_no_token_true() {
+        let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
+        let biscuit_root_key_file = format!(
+            "{}/../../docker/biscuit_public.key",
+            env!("CARGO_MANIFEST_DIR")
+        );
+
+        let config = PluginConfigBuilder::new()
+            .jwt_algorithm("ES256")
+            .jwt_key_file(jwt_pub_pem)
+            .biscuit_root_key_file(biscuit_root_key_file)
+            .allow_anonymous_no_token(true)
+            .build()
+            .expect("config should build");
+
+        assert!(config.allow_anonymous_no_token);
     }
 }

@@ -233,6 +233,11 @@ def _fetch_token(
     return token
 
 
+def _set_credentials_if_present(client: Any, username: str, password: str) -> None:
+    if username or password:
+        client.username_pw_set(username, password)
+
+
 def _resolve_attenuate_cmd(custom_bin: str | None) -> list[str]:
     if custom_bin:
         return [custom_bin]
@@ -522,7 +527,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
             callback_api_version=cast(Any, mqtt.CallbackAPIVersion.VERSION2),
         )
         client.user_data_set(userdata)
-        client.username_pw_set(cfg.username, password)
+        _set_credentials_if_present(client, cfg.username, password)
         if cfg.tls_enabled:
             if cfg.tls_ca_file:
                 client.tls_set(ca_certs=cfg.tls_ca_file)
@@ -889,7 +894,7 @@ def _run_fanout_publisher(
         protocol=cast(Any, protocol),
         callback_api_version=cast(Any, mqtt.CallbackAPIVersion.VERSION2),
     )
-    client.username_pw_set(username, password)
+    _set_credentials_if_present(client, username, password)
     if tls_enabled:
         if tls_ca_file:
             client.tls_set(ca_certs=tls_ca_file)

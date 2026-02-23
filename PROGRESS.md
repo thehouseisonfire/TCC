@@ -394,17 +394,6 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
   - Deliverable:
     - Inventory scenarios for Static ACL, Dynamic Security, SQLite, HTTP
 
-- [x] **Issue 29: Add anonymous flow scenario via anonymousGroup policy** — **COMPLETED 2026-02-09**
-  - **Summary**: Enabled and benchmarked anonymous MQTT clients using Mosquitto's `allow_anonymous true` with a Dynamic Security `anonymousGroup` policy.
-  - **Rationale**: Demonstrates how Dynamic Security can enforce policies for unauthenticated clients, useful for public/telemetry use cases and validates that the authz plugin correctly handles `None` usernames.
-  - **Deliverables**:
-    - Added `ANON-BASE` scenario to `benchmarks/run_scenarios.py` using `mosquitto_anon.conf` and `dynamic-security-anon.json`
-    - Clients connect without username/password and publish/subscribe to `public/announce`
-    - Authorization decisions (allow/deny) match the anonymousGroup policy in `docker/dynamic-security-anon.json`
-    - Latency/throughput metrics captured for anonymous access vs token-based scenarios
-    - Updated scenario documentation in help text
-  - **Research Alignment**: Validates H₁ (functional viability) by demonstrating anonymous access patterns work with Dynamic Security plugin integration
-
 - [ ] **Issue 30: Verify dynamic-policy coverage with ACL_READ fan-out checks**
   - Goal: Ensure dynamic policy scenarios enforce changes via `ACL_READ` for
     existing subscribers (fan-out), not just on subscribe.
@@ -545,6 +534,9 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 
 - [x] **Issue 27: Cache Biscuit expiry via min `expires_at` fact (remove brittle parsing)**
   - Summary: Replaced brittle error-message parsing with structured Datalog query to extract the minimum `expires_at` from Biscuit tokens. Updated `TokenType::Biscuit` to cache the expiry timestamp per session, clamped cache TTL to token expiry with a 5-minute fallback, and rejected already-expired tokens at auth time. Token issuer and benchmark generators now embed `expires_at` facts in authority and attenuation blocks to support stable expiry extraction.
+
+- [x] **Issue 29: Anonymous flow scenario via anonymousGroup policy**
+  - **Completed**: Enabled anonymous MQTT clients using Mosquitto's `allow_anonymous true` with Dynamic Security `anonymousGroup` policy. Added `allow_anonymous_no_token=true` config option and `ANON-BASE` scenario with proper plugin defer logic for no-token clients.
 
 - [x] **Issue 34: Implement real LRU eviction in `SessionCache`**
   - Summary: Enforced cache capacity with true LRU eviction, added capacity tracking, edge case handling, and comprehensive unit tests.

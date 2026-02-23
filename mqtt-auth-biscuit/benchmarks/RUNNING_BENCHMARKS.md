@@ -174,6 +174,14 @@ python3 benchmarks/run_scenarios.py --scenarios ANON-BASE
 
 This run uses `docker/mosquitto_anon.conf` and `docker/dynamic-security-anon.json`.
 
+Anonymous flow is explicitly gated by plugin config:
+
+- `plugin_opt_allow_anonymous_no_token true`
+
+In this mode, clients with no token/password are admitted by Mosquitto
+(`allow_anonymous true`) and authorized by Dynamic Security `anonymousGroup`
+policy during ACL checks.
+
 ### Smoke Test
 
 Run a lightweight health check + single publish for JWT and Biscuit:

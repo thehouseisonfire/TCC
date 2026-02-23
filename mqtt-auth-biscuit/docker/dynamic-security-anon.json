@@ -14,6 +14,12 @@
       "rolename": "anonymous_reader",
       "acls": [
         {
+          "acltype": "publishClientSend",
+          "topic": "public/announce",
+          "priority": 0,
+          "allow": true
+        },
+        {
           "acltype": "subscribeLiteral",
           "topic": "public/announce",
           "priority": 0,

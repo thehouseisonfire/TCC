@@ -8,9 +8,18 @@
 // - Fixed http2::Builder executor
 // - Simplified service with TowerToHyperService
 
-use std::{convert::Infallible, env, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    convert::Infallible,
+    env,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use arc_swap::ArcSwap;
+use base64::Engine as _;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{Method, Request, Response, StatusCode, body::Incoming, server::conn::http2};
@@ -46,6 +55,40 @@ enum AllowMode {
     TopicPrefix,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum PolicyProfile {
+    #[default]
+    LegacyPrefix,
+    Simple,
+    Med,
+    Complex,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum RuleEffect {
+    #[default]
+    Allow,
+    Deny,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, Eq, PartialEq)]
+struct Rule {
+    effect: RuleEffect,
+    #[serde(default)]
+    ops: Vec<String>,
+    #[serde(default)]
+    topics: Vec<String>,
+    #[serde(default)]
+    client_ids: Vec<String>,
+    #[serde(default)]
+    roles: Vec<String>,
+    #[serde(default)]
+    id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AppConfig {
     delay_ms: u64,
@@ -53,6 +96,12 @@ struct AppConfig {
     fail_rate: f64,
     allow_mode: AllowMode,
     topic_prefix: String,
+    #[serde(default)]
+    policy_profile: PolicyProfile,
+    #[serde(default)]
+    rules: Vec<Rule>,
+    #[serde(default)]
+    client_roles: HashMap<String, Vec<String>>,
     max_conns: usize,
 }
 
@@ -64,6 +113,9 @@ impl Default for AppConfig {
             fail_rate: 0.0,
             allow_mode: AllowMode::TopicPrefix,
             topic_prefix: "sensors/".to_string(),
+            policy_profile: PolicyProfile::LegacyPrefix,
+            rules: Vec::new(),
+            client_roles: HashMap::new(),
             max_conns: 1024,
         }
     }
@@ -104,6 +156,18 @@ impl AppConfig {
         let topic_prefix =
             env::var("AUTHZ_TOPIC_PREFIX").unwrap_or_else(|_| "sensors/".to_string());
 
+        let policy_profile = env::var("AUTHZ_POLICY_PROFILE")
+            .ok()
+            .and_then(|s| match s.to_ascii_lowercase().as_str() {
+                "legacy_prefix" => Some(PolicyProfile::LegacyPrefix),
+                "simple" => Some(PolicyProfile::Simple),
+                "med" => Some(PolicyProfile::Med),
+                "complex" => Some(PolicyProfile::Complex),
+                "custom" => Some(PolicyProfile::Custom),
+                _ => None,
+            })
+            .unwrap_or(PolicyProfile::LegacyPrefix);
+
         let max_conns = env::var("AUTHZ_MAX_CONNS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -115,6 +179,9 @@ impl AppConfig {
             fail_rate,
             allow_mode,
             topic_prefix,
+            policy_profile,
+            rules: Vec::new(),
+            client_roles: HashMap::new(),
             max_conns,
         }
     }
@@ -127,16 +194,66 @@ struct ConfigUpdate {
     fail_rate: Option<f64>,
     allow_mode: Option<AllowMode>,
     topic_prefix: Option<String>,
+    policy_profile: Option<PolicyProfile>,
+    rules: Option<Vec<Rule>>,
+    client_roles: Option<HashMap<String, Vec<String>>>,
+}
+
+fn apply_config_update(next: &mut AppConfig, update: ConfigUpdate) {
+    if let Some(v) = update.delay_ms {
+        next.delay_ms = v;
+    }
+    if let Some(v) = update.fail_mode {
+        next.fail_mode = v;
+    }
+    if let Some(v) = update.fail_rate {
+        next.fail_rate = v;
+    }
+    if let Some(v) = update.allow_mode {
+        next.allow_mode = v;
+    }
+    if let Some(v) = update.topic_prefix {
+        next.topic_prefix = v;
+    }
+    if let Some(v) = update.policy_profile {
+        next.policy_profile = v;
+    }
+    if let Some(v) = update.rules {
+        next.rules = v;
+    }
+    if let Some(v) = update.client_roles {
+        next.client_roles = v;
+    }
+}
+
+fn config_summary_body(next: &AppConfig) -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "delay_ms": next.delay_ms,
+        "fail_mode": next.fail_mode,
+        "fail_rate": next.fail_rate,
+        "allow_mode": next.allow_mode,
+        "topic_prefix": next.topic_prefix,
+        "policy_profile": next.policy_profile,
+        "rules_count": effective_rules(next).len(),
+        "client_roles_count": next.client_roles.len(),
+    })
 }
 
 #[derive(Debug, Deserialize)]
 struct AuthRequest {
     #[serde(default)]
+    client_id: String,
+    #[serde(default)]
     topic: String,
+    #[serde(default)]
+    access: i32,
+    token: Option<String>,
 }
 
 struct AppState {
     config: Arc<ArcSwap<AppConfig>>,
+    baseline_config: Arc<AppConfig>,
     conn_sema: Arc<Semaphore>,
     max_conns: usize,
 }
@@ -145,6 +262,7 @@ impl Clone for AppState {
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),
+            baseline_config: self.baseline_config.clone(),
             conn_sema: self.conn_sema.clone(),
             max_conns: self.max_conns,
         }
@@ -166,6 +284,390 @@ fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> Response<Full
         Ok(body) => json_response_bytes(status, Bytes::from(body)),
         Err(_) => json_response_bytes(StatusCode::INTERNAL_SERVER_ERROR, Bytes::from_static(b"{}")),
     }
+}
+
+fn access_to_operation(access: i32) -> &'static str {
+    if (access & 0x02) != 0 {
+        "publish"
+    } else if (access & 0x04) != 0 {
+        "subscribe"
+    } else if (access & 0x08) != 0 {
+        "control"
+    } else {
+        "read"
+    }
+}
+
+fn is_valid_filter(filter: &str) -> bool {
+    let mut saw_hash = false;
+    let parts: Vec<&str> = filter.split('/').collect();
+    for (idx, part) in parts.iter().enumerate() {
+        if part.contains('#') {
+            if *part != "#" || saw_hash || idx != parts.len() - 1 {
+                return false;
+            }
+            saw_hash = true;
+            continue;
+        }
+        if part.contains('+') && *part != "+" {
+            return false;
+        }
+    }
+    true
+}
+
+fn topic_matches(filter: &str, topic: &str) -> bool {
+    if !is_valid_filter(filter) {
+        return false;
+    }
+    if filter == "#" {
+        return true;
+    }
+
+    let filter_parts: Vec<&str> = filter.split('/').collect();
+    let topic_parts: Vec<&str> = topic.split('/').collect();
+    let mut i = 0;
+
+    while i < filter_parts.len() {
+        let fp = filter_parts[i];
+        if fp == "#" {
+            return true;
+        }
+        if i >= topic_parts.len() {
+            return false;
+        }
+        if fp != "+" && fp != topic_parts[i] {
+            return false;
+        }
+        i += 1;
+    }
+
+    i == topic_parts.len()
+}
+
+fn make_rule(
+    effect: RuleEffect,
+    ops: &[&str],
+    topics: &[&str],
+    client_ids: &[&str],
+    roles: &[&str],
+    id: &str,
+) -> Rule {
+    Rule {
+        effect,
+        ops: ops.iter().map(|v| v.to_string()).collect(),
+        topics: topics.iter().map(|v| v.to_string()).collect(),
+        client_ids: client_ids.iter().map(|v| v.to_string()).collect(),
+        roles: roles.iter().map(|v| v.to_string()).collect(),
+        id: Some(id.to_string()),
+    }
+}
+
+fn simple_profile_rules() -> Vec<Rule> {
+    vec![
+        make_rule(
+            RuleEffect::Deny,
+            &["control"],
+            &["#"],
+            &[],
+            &[],
+            "simple_deny_control",
+        ),
+        make_rule(
+            RuleEffect::Allow,
+            &["publish", "subscribe", "read"],
+            &["sensors/+/temp"],
+            &[],
+            &[],
+            "simple_allow_sensor_temp",
+        ),
+    ]
+}
+
+fn med_profile_rules() -> Vec<Rule> {
+    vec![
+        make_rule(
+            RuleEffect::Deny,
+            &["publish", "subscribe", "read"],
+            &["sensors/+/private/#"],
+            &[],
+            &[],
+            "med_deny_private_tree",
+        ),
+        make_rule(
+            RuleEffect::Deny,
+            &["read"],
+            &["sensors/+/temp/raw"],
+            &[],
+            &[],
+            "med_deny_raw_read",
+        ),
+        make_rule(
+            RuleEffect::Allow,
+            &["publish"],
+            &["devices/+/status"],
+            &[],
+            &["writer", "admin"],
+            "med_allow_role_device_publish",
+        ),
+        make_rule(
+            RuleEffect::Allow,
+            &["subscribe", "read"],
+            &["devices/+/status"],
+            &[],
+            &["reader", "admin"],
+            "med_allow_role_device_read",
+        ),
+        make_rule(
+            RuleEffect::Allow,
+            &["publish"],
+            &["sensors/+/temp"],
+            &[],
+            &[],
+            "med_allow_sensor_publish",
+        ),
+        make_rule(
+            RuleEffect::Allow,
+            &["subscribe", "read"],
+            &["sensors/+/temp"],
+            &[],
+            &[],
+            "med_allow_sensor_read",
+        ),
+    ]
+}
+
+fn complex_profile_rules() -> Vec<Rule> {
+    vec![
+        make_rule(
+            RuleEffect::Deny,
+            &["publish", "subscribe", "read"],
+            &["sensors/+/private/#"],
+            &[],
+            &[],
+            "complex_deny_private_tree",
+        ),
+        make_rule(
+            RuleEffect::Deny,
+            &["publish", "subscribe", "read"],
+            &["sensors/+/restricted/#"],
+            &["blocked_client", "revoked_client"],
+            &[],
+            "complex_deny_blocked_clients",
+        ),
+        make_rule(
+            RuleEffect::Deny,
+            &["control"],
+            &["$CONTROL/#"],
+            &[],
+            &["observer", "reader"],
+            "complex_deny_control_readers",
+        ),
+        make_rule(
+            RuleEffect::Deny,
+            &["read"],
+            &["sensors/+/temp/raw"],
+            &[],
+            &[],
+            "complex_deny_raw_read",
+        ),
+        make_rule(
+            RuleEffect::Allow,
+            &["control"],
+            &["$CONTROL/#"],
+            &[],
+            &["admin"],
+            "complex_allow_control_admin",
+        ),
+        make_rule(
+            RuleEffect::Allow,
+            &["publish"],
+            &["devices/+/status"],
+            &[],
+            &["writer", "admin"],
+            "complex_allow_role_device_publish",
+        ),
+        make_rule(
+            RuleEffect::Allow,
+            &["subscribe", "read"],
+            &["devices/+/status", "alerts/#"],
+            &[],
+            &["reader", "admin"],
+            "complex_allow_role_device_read",
+        ),
+        make_rule(
+            RuleEffect::Allow,
+            &["publish", "subscribe", "read"],
+            &["sensors/+/temp"],
+            &[],
+            &[],
+            "complex_allow_sensor_temp",
+        ),
+        make_rule(
+            RuleEffect::Allow,
+            &["publish"],
+            &["telemetry/+/events/#"],
+            &["client_1", "client_2", "client_3"],
+            &[],
+            "complex_allow_selected_clients_telemetry",
+        ),
+        make_rule(
+            RuleEffect::Allow,
+            &["subscribe", "read"],
+            &["telemetry/+/events/#"],
+            &["client_1", "client_2", "client_3"],
+            &["observer", "admin"],
+            "complex_allow_selected_clients_observer",
+        ),
+    ]
+}
+
+fn effective_rules(cfg: &AppConfig) -> Vec<Rule> {
+    let mut rules = match cfg.policy_profile {
+        PolicyProfile::LegacyPrefix => Vec::new(),
+        PolicyProfile::Simple => simple_profile_rules(),
+        PolicyProfile::Med => med_profile_rules(),
+        PolicyProfile::Complex => complex_profile_rules(),
+        PolicyProfile::Custom => Vec::new(),
+    };
+    rules.extend(cfg.rules.clone());
+    rules
+}
+
+#[derive(Debug, Deserialize)]
+struct JwtClaimsLite {
+    roles: Option<Vec<String>>,
+    client_id: Option<String>,
+    sub: Option<String>,
+}
+
+fn extract_token_roles(token: &str, expected_client_id: &str) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut parts = token.split('.');
+    let _header = parts.next();
+    let Some(payload) = parts.next() else {
+        return out;
+    };
+
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload));
+    let Ok(payload_bytes) = decoded else {
+        return out;
+    };
+    let Ok(claims) = serde_json::from_slice::<JwtClaimsLite>(&payload_bytes) else {
+        return out;
+    };
+
+    let token_client = claims
+        .client_id
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .or_else(|| claims.sub.as_deref().filter(|v| !v.is_empty()));
+    if let Some(token_client) = token_client
+        && !expected_client_id.is_empty()
+        && token_client != expected_client_id
+    {
+        return out;
+    }
+
+    for role in claims.roles.unwrap_or_default() {
+        let normalized = role.trim().to_ascii_lowercase();
+        if !normalized.is_empty() {
+            out.insert(normalized);
+        }
+    }
+    out
+}
+
+#[derive(Debug)]
+struct EvalContext<'a> {
+    operation: &'a str,
+    topic: &'a str,
+    client_id: &'a str,
+    roles: &'a HashSet<String>,
+}
+
+fn rule_matches(rule: &Rule, ctx: &EvalContext<'_>) -> bool {
+    if !rule.ops.is_empty()
+        && !rule
+            .ops
+            .iter()
+            .any(|op| op.trim().eq_ignore_ascii_case(ctx.operation))
+    {
+        return false;
+    }
+    if !rule.topics.is_empty()
+        && !rule
+            .topics
+            .iter()
+            .any(|f| topic_matches(f.trim(), ctx.topic))
+    {
+        return false;
+    }
+    if !rule.client_ids.is_empty()
+        && !rule
+            .client_ids
+            .iter()
+            .any(|id| id.trim().eq_ignore_ascii_case(ctx.client_id))
+    {
+        return false;
+    }
+    if !rule.roles.is_empty()
+        && !rule
+            .roles
+            .iter()
+            .map(|r| r.trim().to_ascii_lowercase())
+            .any(|r| ctx.roles.contains(&r))
+    {
+        return false;
+    }
+    true
+}
+
+fn evaluate_rules(rules: &[Rule], ctx: &EvalContext<'_>) -> bool {
+    if rules
+        .iter()
+        .any(|rule| rule.effect == RuleEffect::Deny && rule_matches(rule, ctx))
+    {
+        return false;
+    }
+    rules
+        .iter()
+        .any(|rule| rule.effect == RuleEffect::Allow && rule_matches(rule, ctx))
+}
+
+fn evaluate_authorization(cfg: &AppConfig, req: &AuthRequest) -> bool {
+    let operation = access_to_operation(req.access);
+    let mut roles = HashSet::new();
+    if let Some(role_list) = cfg.client_roles.get(req.client_id.trim()) {
+        for role in role_list {
+            let normalized = role.trim().to_ascii_lowercase();
+            if !normalized.is_empty() {
+                roles.insert(normalized);
+            }
+        }
+    }
+    if let Some(token) = req.token.as_deref() {
+        roles.extend(extract_token_roles(token, req.client_id.trim()));
+    }
+
+    let rules = effective_rules(cfg);
+    if cfg.policy_profile == PolicyProfile::LegacyPrefix && rules.is_empty() {
+        return match cfg.allow_mode {
+            AllowMode::AllowAll => true,
+            AllowMode::DenyAll => false,
+            AllowMode::TopicPrefix => req.topic.starts_with(&cfg.topic_prefix),
+        };
+    }
+
+    let ctx = EvalContext {
+        operation,
+        topic: req.topic.trim(),
+        client_id: req.client_id.trim(),
+        roles: &roles,
+    };
+    evaluate_rules(&rules, &ctx)
 }
 
 // ------------------- Request handler -------------------
@@ -207,34 +709,18 @@ async fn handle(
 
             let current = state.config.load_full();
             let mut next = (*current).clone();
-
-            if let Some(v) = update.delay_ms {
-                next.delay_ms = v;
-            }
-            if let Some(v) = update.fail_mode {
-                next.fail_mode = v;
-            }
-            if let Some(v) = update.fail_rate {
-                next.fail_rate = v;
-            }
-            if let Some(v) = update.allow_mode {
-                next.allow_mode = v;
-            }
-            if let Some(v) = update.topic_prefix {
-                next.topic_prefix = v;
-            }
+            apply_config_update(&mut next, update);
 
             state.config.store(Arc::new(next.clone()));
+            let body = config_summary_body(&next);
 
-            let body = serde_json::json!({
-                "ok": true,
-                "delay_ms": next.delay_ms,
-                "fail_mode": next.fail_mode,
-                "fail_rate": next.fail_rate,
-                "allow_mode": next.allow_mode,
-                "topic_prefix": next.topic_prefix,
-            });
+            Ok(json_response(StatusCode::OK, &body))
+        }
 
+        (Method::POST, "/config/reset") => {
+            let next = (*state.baseline_config).clone();
+            state.config.store(Arc::new(next.clone()));
+            let body = config_summary_body(&next);
             Ok(json_response(StatusCode::OK, &body))
         }
 
@@ -287,13 +773,17 @@ async fn handle(
             }
 
             // Authorization logic
-            let allowed = match cfg.allow_mode {
-                AllowMode::AllowAll => true,
-                AllowMode::DenyAll => false,
-                AllowMode::TopicPrefix => ar.topic.starts_with(&cfg.topic_prefix),
-            };
+            let allowed = evaluate_authorization(&cfg, &ar);
 
-            debug!(topic = %ar.topic, allowed = allowed, "authorize");
+            debug!(
+                topic = %ar.topic,
+                client_id = %ar.client_id,
+                access = ar.access,
+                operation = access_to_operation(ar.access),
+                profile = ?cfg.policy_profile,
+                allowed = allowed,
+                "authorize"
+            );
 
             let body = serde_json::json!({"allow": allowed});
             Ok(json_response(StatusCode::OK, &body))
@@ -353,6 +843,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState {
         config: Arc::new(ArcSwap::from_pointee(shared_config.clone())),
+        baseline_config: Arc::new(shared_config.clone()),
         conn_sema: Arc::new(Semaphore::new(shared_config.max_conns)),
         max_conns: shared_config.max_conns,
     };
@@ -491,4 +982,252 @@ async fn main() -> anyhow::Result<()> {
 
     info!("shutting down");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_cfg() -> AppConfig {
+        AppConfig::default()
+    }
+
+    fn make_token(payload: serde_json::Value) -> String {
+        let header = serde_json::json!({"alg":"none","typ":"JWT"});
+        let h = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&header).expect("header json"));
+        let p = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).expect("payload json"));
+        format!("{h}.{p}.signature")
+    }
+
+    #[test]
+    fn operation_mapping_matches_plugin_priority() {
+        assert_eq!(access_to_operation(0x01), "read");
+        assert_eq!(access_to_operation(0x02), "publish");
+        assert_eq!(access_to_operation(0x04), "subscribe");
+        assert_eq!(access_to_operation(0x08), "control");
+        assert_eq!(access_to_operation(0x02 | 0x04), "publish");
+        assert_eq!(access_to_operation(0x04 | 0x08), "subscribe");
+        assert_eq!(access_to_operation(0x08 | 0x01), "control");
+    }
+
+    #[test]
+    fn topic_match_honors_wildcards_and_invalid_filters() {
+        assert!(topic_matches("sensors/+/temp", "sensors/client_1/temp"));
+        assert!(topic_matches("sensors/#", "sensors/client_1/temp"));
+        assert!(!topic_matches("sensors/#/temp", "sensors/client_1/temp"));
+        assert!(!topic_matches(
+            "sensors/+/temp",
+            "sensors/client_1/temp/extra"
+        ));
+    }
+
+    #[test]
+    fn deny_overrides_allow() {
+        let rules = vec![
+            make_rule(
+                RuleEffect::Allow,
+                &["publish"],
+                &["sensors/+/temp"],
+                &[],
+                &[],
+                "allow",
+            ),
+            make_rule(
+                RuleEffect::Deny,
+                &["publish"],
+                &["sensors/client_1/temp"],
+                &[],
+                &[],
+                "deny",
+            ),
+        ];
+        let roles = HashSet::new();
+        let ctx = EvalContext {
+            operation: "publish",
+            topic: "sensors/client_1/temp",
+            client_id: "client_1",
+            roles: &roles,
+        };
+        assert!(!evaluate_rules(&rules, &ctx));
+    }
+
+    #[test]
+    fn rule_supports_client_id_constraints() {
+        let rules = vec![make_rule(
+            RuleEffect::Allow,
+            &["publish"],
+            &["sensors/+/temp"],
+            &["client_7"],
+            &[],
+            "allow_client7",
+        )];
+        let roles = HashSet::new();
+        let allow_ctx = EvalContext {
+            operation: "publish",
+            topic: "sensors/client_7/temp",
+            client_id: "client_7",
+            roles: &roles,
+        };
+        let deny_ctx = EvalContext {
+            operation: "publish",
+            topic: "sensors/client_8/temp",
+            client_id: "client_8",
+            roles: &roles,
+        };
+        assert!(evaluate_rules(&rules, &allow_ctx));
+        assert!(!evaluate_rules(&rules, &deny_ctx));
+    }
+
+    #[test]
+    fn token_roles_are_extracted_and_applied() {
+        let token = make_token(serde_json::json!({
+            "sub": "client_1",
+            "roles": ["reader"]
+        }));
+        let mut cfg = base_cfg();
+        cfg.policy_profile = PolicyProfile::Custom;
+        cfg.rules = vec![make_rule(
+            RuleEffect::Allow,
+            &["read"],
+            &["alerts/#"],
+            &[],
+            &["reader"],
+            "reader_alerts",
+        )];
+        let req = AuthRequest {
+            client_id: "client_1".to_string(),
+            topic: "alerts/critical".to_string(),
+            access: 0x01,
+            token: Some(token),
+        };
+        assert!(evaluate_authorization(&cfg, &req));
+    }
+
+    #[test]
+    fn token_roles_are_ignored_when_client_binding_mismatches() {
+        let token = make_token(serde_json::json!({
+            "sub": "client_2",
+            "roles": ["reader"]
+        }));
+        let mut cfg = base_cfg();
+        cfg.policy_profile = PolicyProfile::Custom;
+        cfg.rules = vec![make_rule(
+            RuleEffect::Allow,
+            &["read"],
+            &["alerts/#"],
+            &[],
+            &["reader"],
+            "reader_alerts",
+        )];
+        let req = AuthRequest {
+            client_id: "client_1".to_string(),
+            topic: "alerts/critical".to_string(),
+            access: 0x01,
+            token: Some(token),
+        };
+        assert!(!evaluate_authorization(&cfg, &req));
+    }
+
+    #[test]
+    fn legacy_mode_stays_backward_compatible() {
+        let cfg = base_cfg();
+        let req_allow = AuthRequest {
+            client_id: "client_1".to_string(),
+            topic: "sensors/client_1/temp".to_string(),
+            access: 0x02,
+            token: None,
+        };
+        let req_deny = AuthRequest {
+            client_id: "client_1".to_string(),
+            topic: "devices/client_1/temp".to_string(),
+            access: 0x02,
+            token: None,
+        };
+        assert!(evaluate_authorization(&cfg, &req_allow));
+        assert!(!evaluate_authorization(&cfg, &req_deny));
+    }
+
+    #[test]
+    fn client_roles_map_can_satisfy_role_rule_without_token() {
+        let mut cfg = base_cfg();
+        cfg.policy_profile = PolicyProfile::Custom;
+        cfg.rules = vec![make_rule(
+            RuleEffect::Allow,
+            &["read"],
+            &["alerts/#"],
+            &[],
+            &["reader"],
+            "reader_alerts",
+        )];
+        cfg.client_roles.insert(
+            "client_1".to_string(),
+            vec!["reader".to_string(), "observer".to_string()],
+        );
+        let req = AuthRequest {
+            client_id: "client_1".to_string(),
+            topic: "alerts/critical".to_string(),
+            access: 0x01,
+            token: None,
+        };
+        assert!(evaluate_authorization(&cfg, &req));
+    }
+
+    #[test]
+    fn config_update_remains_incremental() {
+        let mut cfg = base_cfg();
+        cfg.policy_profile = PolicyProfile::Complex;
+        cfg.client_roles
+            .insert("client_1".to_string(), vec!["admin".to_string()]);
+        apply_config_update(
+            &mut cfg,
+            ConfigUpdate {
+                delay_ms: Some(200),
+                fail_mode: Some(FailMode::Rate),
+                fail_rate: Some(0.05),
+                allow_mode: None,
+                topic_prefix: None,
+                policy_profile: None,
+                rules: None,
+                client_roles: None,
+            },
+        );
+        assert_eq!(cfg.delay_ms, 200);
+        assert!(matches!(cfg.fail_mode, FailMode::Rate));
+        assert_eq!(cfg.fail_rate, 0.05);
+        assert_eq!(cfg.policy_profile, PolicyProfile::Complex);
+        assert_eq!(cfg.client_roles.len(), 1);
+    }
+
+    #[test]
+    fn config_reset_restores_startup_baseline() {
+        let baseline = AppConfig {
+            allow_mode: AllowMode::DenyAll,
+            topic_prefix: "private/".to_string(),
+            policy_profile: PolicyProfile::Simple,
+            max_conns: 2048,
+            ..base_cfg()
+        };
+        let mut cfg = baseline.clone();
+        cfg.delay_ms = 123;
+        cfg.fail_mode = FailMode::Always;
+        cfg.fail_rate = 0.8;
+        cfg.policy_profile = PolicyProfile::Complex;
+        cfg.rules = complex_profile_rules();
+        cfg.client_roles
+            .insert("client_2".to_string(), vec!["reader".to_string()]);
+
+        cfg = baseline;
+
+        assert_eq!(cfg.delay_ms, 0);
+        assert!(matches!(cfg.fail_mode, FailMode::None));
+        assert_eq!(cfg.fail_rate, 0.0);
+        assert!(matches!(cfg.allow_mode, AllowMode::DenyAll));
+        assert_eq!(cfg.topic_prefix, "private/");
+        assert_eq!(cfg.policy_profile, PolicyProfile::Simple);
+        assert!(cfg.rules.is_empty());
+        assert!(cfg.client_roles.is_empty());
+        assert_eq!(cfg.max_conns, 2048);
+    }
 }

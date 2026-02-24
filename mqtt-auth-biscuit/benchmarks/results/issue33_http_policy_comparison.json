@@ -1,0 +1,50 @@
+[
+  {
+    "tier": "simple",
+    "jwt_throughput_mps": 23.83432569080107,
+    "bis_throughput_mps": 23.914433955001616,
+    "throughput_delta_pct_bis_vs_jwt": 0.3361045965376938,
+    "jwt_publish_p95_ms": 2065.1239856004395,
+    "bis_publish_p95_ms": 2066.027942148503,
+    "publish_p95_delta_pct_bis_vs_jwt": 0.043772507334498195,
+    "jwt_connect_p95_ms": 32.259584950043056,
+    "bis_connect_p95_ms": 101.71389855040616,
+    "connect_p95_delta_pct_bis_vs_jwt": 215.29822441274277,
+    "jwt_cpu_avg": null,
+    "bis_cpu_avg": null,
+    "jwt_memory_avg": null,
+    "bis_memory_avg": null
+  },
+  {
+    "tier": "med",
+    "jwt_throughput_mps": 23.79047879827324,
+    "bis_throughput_mps": 23.840232603293625,
+    "throughput_delta_pct_bis_vs_jwt": 0.20913326479160585,
+    "jwt_publish_p95_ms": 2068.8628018981035,
+    "bis_publish_p95_ms": 2060.193685748709,
+    "publish_p95_delta_pct_bis_vs_jwt": -0.4190280835172325,
+    "jwt_connect_p95_ms": 13.960406048317962,
+    "bis_connect_p95_ms": 102.96196295039407,
+    "connect_p95_delta_pct_bis_vs_jwt": 637.528425706497,
+    "jwt_cpu_avg": null,
+    "bis_cpu_avg": null,
+    "jwt_memory_avg": null,
+    "bis_memory_avg": null
+  },
+  {
+    "tier": "complex",
+    "jwt_throughput_mps": 23.832203913631812,
+    "bis_throughput_mps": 23.875259178616187,
+    "throughput_delta_pct_bis_vs_jwt": 0.18066002263327186,
+    "jwt_publish_p95_ms": 2067.447258901666,
+    "bis_publish_p95_ms": 2061.0969192985067,
+    "publish_p95_delta_pct_bis_vs_jwt": -0.3071584813502258,
+    "jwt_connect_p95_ms": 39.91525130131777,
+    "bis_connect_p95_ms": 102.23067579991039,
+    "connect_p95_delta_pct_bis_vs_jwt": 156.119334006386,
+    "jwt_cpu_avg": null,
+    "bis_cpu_avg": null,
+    "jwt_memory_avg": null,
+    "bis_memory_avg": null
+  }
+]

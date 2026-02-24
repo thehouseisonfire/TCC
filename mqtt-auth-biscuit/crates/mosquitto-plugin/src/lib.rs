@@ -1261,10 +1261,22 @@ mod tests {
 
     #[test]
     fn no_token_basic_auth_defer_policy_matrix() {
-        assert!(!should_defer_no_token_basic_auth(PolicyMode::TokenOnly, false));
-        assert!(!should_defer_no_token_basic_auth(PolicyMode::DynamicSecurity, false));
-        assert!(should_defer_no_token_basic_auth(PolicyMode::DynamicSecurity, true));
-        assert!(should_defer_no_token_basic_auth(PolicyMode::StaticAcl, false));
+        assert!(!should_defer_no_token_basic_auth(
+            PolicyMode::TokenOnly,
+            false
+        ));
+        assert!(!should_defer_no_token_basic_auth(
+            PolicyMode::DynamicSecurity,
+            false
+        ));
+        assert!(should_defer_no_token_basic_auth(
+            PolicyMode::DynamicSecurity,
+            true
+        ));
+        assert!(should_defer_no_token_basic_auth(
+            PolicyMode::StaticAcl,
+            false
+        ));
         assert!(should_defer_no_token_basic_auth(
             PolicyMode::StaticAclStrict,
             false

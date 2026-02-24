@@ -31,7 +31,14 @@ from benchmarks.perf_profiler import (
 
 def _read_tokens(path: str) -> dict[str, Any]:
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        tokens = json.load(f)
+    # Backward-compatible aliases for older fixtures.
+    if isinstance(tokens, dict):
+        if "jwt_admin" not in tokens and "jwt" in tokens:
+            tokens["jwt_admin"] = tokens["jwt"]
+        if "biscuit_admin" not in tokens and "biscuit" in tokens:
+            tokens["biscuit_admin"] = tokens["biscuit"]
+    return tokens
 
 
 logger = get_logger(__name__)
@@ -50,6 +57,40 @@ class AuthzConfig(TypedDict, total=False):
     delay_ms: int
     fail_mode: str
     fail_rate: float
+    policy_profile: str
+    rules: list[dict[str, Any]]
+    client_roles: dict[str, list[str]]
+
+
+AUTHZ_BASELINE_STATE: dict[str, object] = {
+    "delay_ms": 0,
+    "fail_mode": "none",
+    "fail_rate": 0.0,
+    "allow_mode": "topic_prefix",
+    "topic_prefix": "sensors/",
+    "policy_profile": "legacy_prefix",
+    "rules_count": 0,
+    "client_roles_count": 0,
+}
+
+AUTHZ_STATE_KEYS: tuple[str, ...] = (
+    "delay_ms",
+    "fail_mode",
+    "fail_rate",
+    "allow_mode",
+    "topic_prefix",
+    "policy_profile",
+    "rules_count",
+    "client_roles_count",
+)
+
+AUTHZ_PROFILE_RULE_COUNT: dict[str, int] = {
+    "legacy_prefix": 0,
+    "simple": 2,
+    "med": 6,
+    "complex": 10,
+    "custom": 0,
+}
 
 
 class BiscuitAttenuateConfig(TypedDict, total=False):
@@ -110,7 +151,8 @@ class ScenarioConfig(TypedDict, total=False):
     biscuit_delegate_public_key_hex: str | None
     biscuit_delegate_public_key_file: str | None
     biscuit_delegate_bin: str | None
-    policy_complexity_kind: Literal["block_chain", "datalog"] | None
+    policy_complexity_kind: Literal["block_chain", "datalog", "http_policy"] | None
+    policy_complexity_tier: Literal["simple", "med", "complex"] | None
     mqtt5_auth: Mqtt5AuthConfig | None
     restart_mosquitto: bool
     sync_connect: bool
@@ -168,6 +210,9 @@ def _authz_config(
     delay_ms: int | None = None,
     fail_mode: str | None = None,
     fail_rate: float | None = None,
+    policy_profile: str | None = None,
+    rules: list[dict[str, Any]] | None = None,
+    client_roles: dict[str, list[str]] | None = None,
     ca_file: str | None = None,
     insecure: bool = False,
 ):
@@ -178,6 +223,12 @@ def _authz_config(
         body["fail_mode"] = fail_mode
     if fail_rate is not None:
         body["fail_rate"] = fail_rate
+    if policy_profile is not None:
+        body["policy_profile"] = policy_profile
+    if rules is not None:
+        body["rules"] = rules
+    if client_roles is not None:
+        body["client_roles"] = client_roles
 
     with _http_client(ca_file, insecure) as client:
         resp = client.post(
@@ -187,6 +238,87 @@ def _authz_config(
         )
         resp.raise_for_status()
         return resp.json()
+
+
+def _authz_reset(authz_url: str, ca_file: str | None = None, insecure: bool = False):
+    with _http_client(ca_file, insecure) as client:
+        resp = client.post(
+            authz_url.rstrip("/") + "/config/reset",
+            headers={"Content-Type": "application/json"},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+def _validated_authz_state_baseline(
+    scenario_id: str,
+    step: str,
+    observed: dict[str, Any],
+) -> dict[str, object]:
+    missing = [key for key in AUTHZ_STATE_KEYS if key not in observed]
+    if missing:
+        raise RuntimeError(
+            f"Authz state missing keys after {step} in scenario {scenario_id}: {missing}"
+        )
+
+    baseline: dict[str, object] = {}
+    for key in AUTHZ_STATE_KEYS:
+        value = observed[key]
+        if key == "fail_rate":
+            try:
+                baseline[key] = float(value)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Authz state invalid after {step} in scenario {scenario_id}: "
+                    f"fail_rate is not numeric ({value!r})"
+                ) from exc
+            continue
+        baseline[key] = value
+    return baseline
+
+
+def _expected_authz_state(
+    cfg: AuthzConfig | None,
+    baseline_state: dict[str, object],
+) -> dict[str, object]:
+    expected = dict(baseline_state)
+    expected["fail_rate"] = float(expected["fail_rate"])
+    if cfg is None:
+        return expected
+    if "delay_ms" in cfg:
+        expected["delay_ms"] = cfg["delay_ms"]
+    if "fail_mode" in cfg:
+        expected["fail_mode"] = cfg["fail_mode"]
+    if "fail_rate" in cfg:
+        expected["fail_rate"] = float(cfg["fail_rate"])
+    if "policy_profile" in cfg:
+        expected["policy_profile"] = cfg["policy_profile"]
+    profile = cast(str, expected["policy_profile"])
+    expected["rules_count"] = AUTHZ_PROFILE_RULE_COUNT.get(profile, 0) + len(cfg.get("rules", []))
+    expected["client_roles_count"] = len(cfg.get("client_roles", {}))
+    return expected
+
+
+def _assert_authz_state(
+    scenario_id: str,
+    step: str,
+    observed: dict[str, Any],
+    expected: dict[str, object],
+):
+    mismatches: dict[str, dict[str, object]] = {}
+    for key in AUTHZ_STATE_KEYS:
+        actual = observed.get(key)
+        want = expected[key]
+        if key == "fail_rate":
+            if float(actual) != float(want):
+                mismatches[key] = {"expected": want, "observed": actual}
+        elif actual != want:
+            mismatches[key] = {"expected": want, "observed": actual}
+    if mismatches:
+        raise RuntimeError(
+            f"Authz state mismatch after {step} in scenario {scenario_id}: "
+            f"{json.dumps(mismatches, sort_keys=True)}"
+        )
 
 
 # Prometheus query templates
@@ -558,6 +690,20 @@ class ScenarioModel(BaseModel):
     topic: str | None = None
 
 
+def _http_policy_authz_config(tier: Literal["simple", "med", "complex"]) -> AuthzConfig:
+    return {
+        "delay_ms": 0,
+        "fail_mode": "none",
+        "policy_profile": tier,
+        # Deterministic local role source for role-aware rule paths.
+        "client_roles": {
+            "client_1": ["admin", "writer"],
+            "client_2": ["reader"],
+            "client_3": ["observer"],
+        },
+    }
+
+
 @app.command()
 def main(
     tokens_path: str = "benchmarks/tokens.json",
@@ -922,6 +1068,39 @@ def main(
                 "netem": {"clear": True},
                 "message_size": 0,
             },
+            "HTTP-POLICY-SIMPLE-JWT": {
+                "mosquitto_conf": "./mosquitto_http.conf",
+                "username": "jwt",
+                "password": tokens["jwt"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": _http_policy_authz_config("simple"),
+                "netem": {"clear": True},
+                "message_size": 0,
+                "policy_complexity_kind": "http_policy",
+                "policy_complexity_tier": "simple",
+            },
+            "HTTP-POLICY-MED-JWT": {
+                "mosquitto_conf": "./mosquitto_http.conf",
+                "username": "jwt",
+                "password": tokens["jwt"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": _http_policy_authz_config("med"),
+                "netem": {"clear": True},
+                "message_size": 0,
+                "policy_complexity_kind": "http_policy",
+                "policy_complexity_tier": "med",
+            },
+            "HTTP-POLICY-COMPLEX-JWT": {
+                "mosquitto_conf": "./mosquitto_http.conf",
+                "username": "jwt",
+                "password": tokens["jwt"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": _http_policy_authz_config("complex"),
+                "netem": {"clear": True},
+                "message_size": 0,
+                "policy_complexity_kind": "http_policy",
+                "policy_complexity_tier": "complex",
+            },
             "JWT-HTTP-1000MS": {
                 "mosquitto_conf": "./mosquitto_http.conf",
                 "username": "jwt",
@@ -957,6 +1136,39 @@ def main(
                 "authz": {"delay_ms": 200, "fail_mode": "none"},
                 "netem": {"clear": True},
                 "message_size": 0,
+            },
+            "HTTP-POLICY-SIMPLE-BIS": {
+                "mosquitto_conf": "./mosquitto_http.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": _http_policy_authz_config("simple"),
+                "netem": {"clear": True},
+                "message_size": 0,
+                "policy_complexity_kind": "http_policy",
+                "policy_complexity_tier": "simple",
+            },
+            "HTTP-POLICY-MED-BIS": {
+                "mosquitto_conf": "./mosquitto_http.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": _http_policy_authz_config("med"),
+                "netem": {"clear": True},
+                "message_size": 0,
+                "policy_complexity_kind": "http_policy",
+                "policy_complexity_tier": "med",
+            },
+            "HTTP-POLICY-COMPLEX-BIS": {
+                "mosquitto_conf": "./mosquitto_http.conf",
+                "username": "biscuit",
+                "password": tokens["biscuit"],
+                "topic": "sensors/{client_id}/temp",
+                "authz": _http_policy_authz_config("complex"),
+                "netem": {"clear": True},
+                "message_size": 0,
+                "policy_complexity_kind": "http_policy",
+                "policy_complexity_tier": "complex",
             },
             "JWT-HTTP-200MS-LOSS1": {
                 "mosquitto_conf": "./mosquitto_http.conf",
@@ -1498,7 +1710,9 @@ def main(
             "JWT-HTTP-200MS, JWT-HTTP-1000MS, HYBRID-AUTHZ-DOWN, MTU-200-JWT",
         )
         logger.info(
-            "BIS-HTTP-200MS, JWT-HTTP-200MS-LOSS1, JWT-HTTP-200MS-LOSS5",
+            "BIS-HTTP-200MS, JWT-HTTP-200MS-LOSS1, JWT-HTTP-200MS-LOSS5, "
+            "HTTP-POLICY-SIMPLE-JWT, HTTP-POLICY-MED-JWT, HTTP-POLICY-COMPLEX-JWT, "
+            "HTTP-POLICY-SIMPLE-BIS, HTTP-POLICY-MED-BIS, HTTP-POLICY-COMPLEX-BIS",
         )
         logger.info(
             "MQTT5-REAUTH-JWT, MQTT5-REAUTH-BISCUIT, MQTT5-REAUTH-BISCUIT-BINARY, "
@@ -1664,14 +1878,51 @@ def main(
                 logger.info("Network baseline: %.2f Mbps capacity confirmed", throughput_mbps)
 
         cfg = s.get("authz")
+        uses_http_authz = (
+            "mosquitto_http.conf" in s["mosquitto_conf"]
+            or "mosquitto_hybrid.conf" in s["mosquitto_conf"]
+            or cfg is not None
+        )
+        reset_baseline: dict[str, object] | None = None
+        if uses_http_authz:
+            reset_res = _authz_reset(
+                authz_base,
+                ca_file=tls_ca,
+                insecure=tls_insecure,
+            )
+            reset_baseline = _validated_authz_state_baseline(
+                s["id"],
+                "authz reset",
+                reset_res,
+            )
+            _assert_authz_state(
+                s["id"],
+                "authz reset",
+                reset_res,
+                reset_baseline,
+            )
+
         if cfg is not None:
-            _authz_config(
+            if reset_baseline is None:
+                raise RuntimeError(
+                    f"Authz reset baseline unavailable before config apply in scenario {s['id']}"
+                )
+            apply_res = _authz_config(
                 authz_base,
                 delay_ms=cfg.get("delay_ms"),
                 fail_mode=cfg.get("fail_mode"),
                 fail_rate=cfg.get("fail_rate"),
+                policy_profile=cfg.get("policy_profile"),
+                rules=cfg.get("rules"),
+                client_roles=cfg.get("client_roles"),
                 ca_file=tls_ca,
                 insecure=tls_insecure,
+            )
+            _assert_authz_state(
+                s["id"],
+                "authz config apply",
+                apply_res,
+                _expected_authz_state(cfg, reset_baseline),
             )
 
         repeats = int(s.get("repeat", 1))
@@ -1694,6 +1945,7 @@ def main(
 
         biscuit_only = bool(s.get("biscuit_attenuate") or s.get("biscuit_delegate"))
         policy_complexity_kind = s.get("policy_complexity_kind")
+        policy_complexity_tier = s.get("policy_complexity_tier")
         out_payload: dict[str, Any] = {
             "scenario": s["id"],
             "token_len": token_len,
@@ -1718,6 +1970,7 @@ def main(
             },
             "policy_complexity": {
                 "kind": policy_complexity_kind,
+                "tier": policy_complexity_tier,
             },
             "attenuation": s.get("biscuit_attenuate"),
             "delegation": s.get("biscuit_delegate"),
@@ -2048,9 +2301,11 @@ def main(
     summary_json_path = summary_json
     if not os.path.isabs(summary_json_path):
         summary_json_path = os.path.join(out, summary_json_path)
+    summary_json_path = os.path.abspath(summary_json_path)
     summary_csv_path = summary_csv
     if not os.path.isabs(summary_csv_path):
         summary_csv_path = os.path.join(out, summary_csv_path)
+    summary_csv_path = os.path.abspath(summary_csv_path)
 
     agg_cmd = [
         "python3",

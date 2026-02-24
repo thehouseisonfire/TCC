@@ -2,7 +2,7 @@
 
 **Project**: Eclipse Mosquitto Auth Biscuit Plugin (Rust)\
 **Started**: 2026-01-04\
-**Last Updated**: 2026-01-23\
+**Last Updated**: 2026-02-23\
 **Current Focus**: Reproducible benchmark/scenario harness aligned with
 `ARTICLE.MD`
 
@@ -43,7 +43,7 @@ described in `ARTICLE.MD`, including a controllable HTTP authz service and a
 
 ### 2.2 Crates
 
-- `authz-server`: HTTP token issuer service.
+- `authz-server`: HTTP authorization/introspection service.
 - `mosquitto-plugin`: core authn/authz logic, callback wiring, policy backends
 - `token-issuer`: JWT/Biscuit issuance service for refresh scenarios
 - `benchmarks`: token generation + scenario runner + load generator
@@ -156,7 +156,7 @@ MQTT v5 reauthentication microbenchmark:
 - `mqtt-auth-biscuit/docker/prometheus.yml`
 - `mqtt-auth-biscuit/docker/Dockerfile.mosquitto`
 - `mqtt-auth-biscuit/docker/Dockerfile.authz`
-- `mqtt-auth-biscuit/docker/authz_server.py`
+- `mqtt-auth-biscuit/crates/authz-server/src/main.rs`
 - `mqtt-auth-biscuit/docker/Dockerfile.netem`
 - `mqtt-auth-biscuit/docker/netem_entrypoint.sh`
 
@@ -201,11 +201,37 @@ Each file contains:
   - `benchmarks/run_scenarios.py`
   - `benchmarks/mqtt_auth_client.py`
 
-### Important Note On "Execution Vs Implementation"
+### Execution Status (2026-02-23)
 
-The harness and scenarios are implemented and wired, but **the project still
-needs an end-to-end execution pass** (run the full scenario suite on the target
-machine and record the first results/known issues).
+End-to-end execution has now been performed for the Issue 33 parity slice:
+
+- HTTP policy parity matrix:
+  - `HTTP-POLICY-SIMPLE-JWT`, `HTTP-POLICY-MED-JWT`,
+    `HTTP-POLICY-COMPLEX-JWT`
+  - `HTTP-POLICY-SIMPLE-BIS`, `HTTP-POLICY-MED-BIS`,
+    `HTTP-POLICY-COMPLEX-BIS`
+- Complexity comparator scenarios:
+  - `POLICY-COMPLEX-LOW`, `POLICY-COMPLEX-MED`, `POLICY-COMPLEX-HIGH`
+
+Artifacts produced:
+
+- Per-scenario results in `mqtt-auth-biscuit/benchmarks/results/*.json`
+- Comparison summaries:
+  - `mqtt-auth-biscuit/benchmarks/results/issue33_http_policy_comparison.csv`
+  - `mqtt-auth-biscuit/benchmarks/results/issue33_http_policy_comparison.json`
+  - `mqtt-auth-biscuit/benchmarks/results/issue33_policy_complexity_comparison.csv`
+  - `mqtt-auth-biscuit/benchmarks/results/issue33_policy_complexity_comparison.json`
+
+Runner reliability fixes applied during this execution pass:
+
+- `benchmarks/loadgen.py`: fixed percentile helper to handle NumPy arrays
+  safely (avoids ambiguous truth-value error).
+- `benchmarks/run_scenarios.py`:
+  - fixed summary path handoff to aggregator (absolute paths now used),
+    eliminating `benchmarks/results/benchmarks/results/...` failures.
+  - added backward-compatible token alias fallback
+    (`jwt_admin -> jwt`, `biscuit_admin -> biscuit`) so older fixtures run
+    without manual compatibility files.
 
 ---
 
@@ -241,7 +267,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 8. Issue 30: Dynamic-policy ACL_READ fan-out
 9. Issue 31: Control-triggered kick/re-auth
 10. Issue 32: Control-triggered ACL_READ + notify
-11. Issue 33: Enhance HTTP policy expressiveness for parity
+11. Issue 33: Completed (HTTP policy expressiveness parity)
 
 ---
 
@@ -289,29 +315,26 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Ensure scenarios document when policy churn is enabled and how it affects
       cache validity
 
-- [ ] **Issue 33: Enhance HTTP policy expressiveness for parity with token-based
+- [x] **Issue 33: Enhance HTTP policy expressiveness for parity with token-based
     authorization**
   - Goal: Improve HTTP policy backend to support complex authorization rules
     comparable to JWT/Biscuit token policies, enabling fair policy complexity
     comparisons.
-  - Current issue: HTTP policy only supports simple topic prefix matching and
-    lacks operation-specific, client-specific, and deny rule support, making it
-    less expressive than token-based policies (see `docker/authz_server.py`).
-  - Note: HTTP policy complexity scenarios are the recommended parity path for
-    JWT policy complexity comparisons, since JWT grants are otherwise limited to
-    flat `op/res` matches in token-only mode.
-  - Deliverable:
-    - Extend HTTP policy server to support:
-      - Operation-specific rules (different policies for publish/subscribe/read)
-      - Client/role-based access control using JWT claims or client ID
-      - Deny rules that override allow rules
-      - Complex topic patterns beyond simple prefix matching
-    - Add HTTP policy complexity scenarios (HTTP-POLICY-SIMPLE, HTTP-POLICY-MED,
-      HTTP-POLICY-COMPLEX) to test policy evaluation cost vs token-based
-    - Update scenario documentation to reflect HTTP policy capabilities and
-      limitations
-    - Ensure HTTP policy scenarios can be compared directly against equivalent
-      JWT/Biscuit policy scenarios
+  - Implemented:
+    - Extended HTTP policy backend in `crates/authz-server/src/main.rs` with:
+      - Operation-specific matching (`publish|subscribe|read|control`)
+      - Client/role-based matching (client ID map + JWT `roles` extraction)
+      - Deny-over-allow precedence
+      - MQTT wildcard topic filter matching (`+`, `#`) with invalid-filter guard
+      - Built-in profiles (`simple`, `med`, `complex`) and custom rules
+    - Added HTTP policy complexity scenarios in
+      `benchmarks/run_scenarios.py`:
+      - `HTTP-POLICY-SIMPLE-JWT`, `HTTP-POLICY-MED-JWT`,
+        `HTTP-POLICY-COMPLEX-JWT`
+      - `HTTP-POLICY-SIMPLE-BIS`, `HTTP-POLICY-MED-BIS`,
+        `HTTP-POLICY-COMPLEX-BIS`
+    - Updated `SCENARIO_POLICIES.md` to document HTTP policy capabilities and
+      scenario mapping.
 
 - [ ] **Issue 21: Strengthen Biscuit authorizer template complexity**
   - Goal: Expand the Biscuit authorizer template beyond the minimal
@@ -431,8 +454,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
   - **Completed**: Replaced demo JWT token-only checks with structured grants
     schema (`grants` + `denies`) and access-aware enforcement (`publish`,
     `subscribe`, `read` with `ACL_READ` fallback to `subscribe`). Token issuer
-    and deterministic token generator updated to mint the new schema. **Note:**
-    scenario run capture is pending due to current runner bug.
+    and deterministic token generator updated to mint the new schema.
 
 - [x] **Issue 3.1: Add explicit deny semantics for token-only policy model**
   - **Completed**: Added `denies` to JWT claims and Biscuit `deny(op, res)`

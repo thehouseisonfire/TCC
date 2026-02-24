@@ -54,6 +54,7 @@ services:
       - AUTHZ_FAIL_RATE=0
       - AUTHZ_ALLOW_MODE=topic_prefix
       - AUTHZ_TOPIC_PREFIX=sensors/
+      - AUTHZ_POLICY_PROFILE=legacy_prefix
     ports:
       - "8081:8081"
     networks:

@@ -13,7 +13,7 @@ Execution commands and run workflow are documented in
 | Policy Source | Where Defined | Used By | Notes |
 | --- | --- | --- | --- |
 | Token-only rules | JWT claims (`grants`, `denies`), Biscuit facts (`right`, `deny`) | `policy_mode=token` | Same deny-over-allow semantics. JWT uses MQTT wildcard filters; Biscuit uses MQTT wildcard filters via topic matching. |
-| HTTP policy (introspection) | `docker/authz_server.py` | `policy_mode=http` or `hybrid` | Simple topic-prefix allow/deny with injected latency/failure for parity experiments. |
+| HTTP policy (introspection) | `crates/authz-server/src/main.rs` | `policy_mode=http` or `hybrid` | Rule engine with deny-over-allow semantics, operation/client/role/topic matching, MQTT wildcards, and optional legacy prefix mode. |
 | Static ACL file | `docker/static-acl.conf` | `policy_mode=static_acl` | Compound gate with token + Mosquitto native ACLs. Token allow short-circuits; token deny defers to ACL. |
 | Dynamic Security snapshot | `docker/dynamic-security*.json` | `policy_mode=dynamic_security` | Local snapshot of Mosquitto dynsec-like RBAC, reloaded on interval. |
 | SQLite policy | `sqlite_policy.rs` | `policy_mode=sqlite` | Simple `acl` table with a single demo rule. **Not parity-grade** yet. |
@@ -113,9 +113,14 @@ defined in `gen-tokens` (see `biscuit_complex_*` in
 | BIS-HTTP-200MS | Biscuit | HTTP | Same allow policy, no JWT token in request | Allows |
 | JWT-HTTP-200MS-LOSS1/LOSS5 | JWT | HTTP | Same allow policy, injected failures | Flaky by design |
 | HYBRID-AUTHZ-DOWN | JWT | Hybrid | HTTP always fails, fallback to token-only | Allows (token-only) |
+| HTTP-POLICY-SIMPLE-JWT/BIS | JWT/Biscuit | HTTP | Profile `simple`: operation-aware + wildcard allow/deny baseline | Allows |
+| HTTP-POLICY-MED-JWT/BIS | JWT/Biscuit | HTTP | Profile `med`: adds deny rules and role-aware rules | Allows |
+| HTTP-POLICY-COMPLEX-JWT/BIS | JWT/Biscuit | HTTP | Profile `complex`: deny-first with client/role/topic constraints | Allows |
 
-HTTP server behavior is defined in `docker/authz_server.py`
-(@/home/eagle/TCC2/mqtt-auth-biscuit/docker/authz_server.py#31-120).
+HTTP server behavior is defined in `crates/authz-server/src/main.rs`.
+It now evaluates rules in this order: `deny` first, then `allow`, then default deny.
+Rule selectors include operation, MQTT filter topic, client ID, and roles
+(roles can come from static `client_roles` mapping and JWT claims when present).
 
 ### 2.4 Static ACL (Compound Gate)
 
@@ -214,7 +219,7 @@ This file remains the source of truth for:
 - Scenario definitions: `benchmarks/run_scenarios.py`
 - Token fixtures: `benchmarks/tokens.json` + `crates/benchmarks/src/main.rs`
 - JWT/Biscuit authz: `crates/mosquitto-plugin/src/authz.rs`, `biscuit_handler.rs`
-- HTTP policy server: `docker/authz_server.py`
+- HTTP policy server: `crates/authz-server/src/main.rs`
 - Static ACL file: `docker/static-acl.conf`
 - Dynamic security snapshots: `docker/dynamic-security*.json`
 - SQLite policy: `crates/mosquitto-plugin/src/sqlite_policy.rs`

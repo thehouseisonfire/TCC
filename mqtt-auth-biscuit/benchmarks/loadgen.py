@@ -35,7 +35,9 @@ BISCUIT_DELEGATE_CHECK_OPTION = typer.Option(None, "--biscuit-delegate-check")
 
 
 def _percentile(values, p):
-    if not values:
+    if values is None:
+        return None
+    if len(values) == 0:
         return None
     return float(np.percentile(values, p))
 

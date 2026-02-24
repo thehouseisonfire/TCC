@@ -172,6 +172,10 @@ def _build_summary(input_dir):
         if not os.path.isfile(path):
             continue
         data = _load_scenario(path)
+        if not isinstance(data, dict):
+            continue
+        if "runs" not in data or not isinstance(data.get("runs"), list):
+            continue
         runs = data.get("runs", [])
         scenario_id = data.get("scenario") or os.path.splitext(entry)[0]
         mqtt5 = _aggregate_mqtt5(runs)

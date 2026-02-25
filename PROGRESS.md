@@ -378,13 +378,13 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 - [ ] **Issue 28: Verify static-policy benchmark coverage (ACL_SUBSCRIBE/WRITE)**
   - Goal: Confirm scenarios exist for static policies where `ACL_SUBSCRIBE` and
     `ACL_WRITE` are enforced, and `ACL_READ` is either disabled or documented
-    when used.
+    when used (through acl_read_full_authz).
   - Deliverable:
     - Inventory scenarios for Static ACL, Dynamic Security, SQLite, HTTP
 
 - [ ] **Issue 30: Verify dynamic-policy coverage with ACL_READ fan-out checks**
   - Goal: Ensure dynamic policy scenarios enforce changes via `ACL_READ` for
-    existing subscribers (fan-out), not just on subscribe.
+    existing subscribers (fan-out), not just on subscribe (through acl_read_full_authz).
   - Deliverable:
     - Scenario(s) for Dynamic Security with `ACL_READ` checks enabled
     - Scenario(s) for SQLite with policy churn + `ACL_READ` checks enabled

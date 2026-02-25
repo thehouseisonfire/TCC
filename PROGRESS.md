@@ -267,7 +267,6 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 8. Issue 30: Dynamic-policy ACL_READ fan-out
 9. Issue 31: Control-triggered kick/re-auth
 10. Issue 32: Control-triggered ACL_READ + notify
-11. Issue 33: Completed (HTTP policy expressiveness parity)
 
 ---
 
@@ -314,27 +313,6 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
       during the run (e.g., every N seconds), to simulate dynamic policy updates
     - Ensure scenarios document when policy churn is enabled and how it affects
       cache validity
-
-- [x] **Issue 33: Enhance HTTP policy expressiveness for parity with token-based
-    authorization**
-  - Goal: Improve HTTP policy backend to support complex authorization rules
-    comparable to JWT/Biscuit token policies, enabling fair policy complexity
-    comparisons.
-  - Implemented:
-    - Extended HTTP policy backend in `crates/authz-server/src/main.rs` with:
-      - Operation-specific matching (`publish|subscribe|read|control`)
-      - Client/role-based matching (client ID map + JWT `roles` extraction)
-      - Deny-over-allow precedence
-      - MQTT wildcard topic filter matching (`+`, `#`) with invalid-filter guard
-      - Built-in profiles (`simple`, `med`, `complex`) and custom rules
-    - Added HTTP policy complexity scenarios in
-      `benchmarks/run_scenarios.py`:
-      - `HTTP-POLICY-SIMPLE-JWT`, `HTTP-POLICY-MED-JWT`,
-        `HTTP-POLICY-COMPLEX-JWT`
-      - `HTTP-POLICY-SIMPLE-BIS`, `HTTP-POLICY-MED-BIS`,
-        `HTTP-POLICY-COMPLEX-BIS`
-    - Updated `SCENARIO_POLICIES.md` to document HTTP policy capabilities and
-      scenario mapping.
 
 - [ ] **Issue 21: Strengthen Biscuit authorizer template complexity**
   - Goal: Expand the Biscuit authorizer template beyond the minimal
@@ -559,6 +537,27 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 
 - [x] **Issue 29: Anonymous flow scenario via anonymousGroup policy**
   - **Completed**: Enabled anonymous MQTT clients using Mosquitto's `allow_anonymous true` with Dynamic Security `anonymousGroup` policy. Added `allow_anonymous_no_token=true` config option and `ANON-BASE` scenario with proper plugin defer logic for no-token clients.
+
+- [x] **Issue 33: Enhance HTTP policy expressiveness for parity with token-based
+    authorization**
+  - Goal: Improve HTTP policy backend to support complex authorization rules
+    comparable to JWT/Biscuit token policies, enabling fair policy complexity
+    comparisons.
+  - Implemented:
+    - Extended HTTP policy backend in `crates/authz-server/src/main.rs` with:
+      - Operation-specific matching (`publish|subscribe|read|control`)
+      - Client/role-based matching (client ID map + JWT `roles` extraction)
+      - Deny-over-allow precedence
+      - MQTT wildcard topic filter matching (`+`, `#`) with invalid-filter guard
+      - Built-in profiles (`simple`, `med`, `complex`) and custom rules
+    - Added HTTP policy complexity scenarios in
+      `benchmarks/run_scenarios.py`:
+      - `HTTP-POLICY-SIMPLE-JWT`, `HTTP-POLICY-MED-JWT`,
+        `HTTP-POLICY-COMPLEX-JWT`
+      - `HTTP-POLICY-SIMPLE-BIS`, `HTTP-POLICY-MED-BIS`,
+        `HTTP-POLICY-COMPLEX-BIS`
+    - Updated `SCENARIO_POLICIES.md` to document HTTP policy capabilities and
+      scenario mapping.
 
 - [x] **Issue 34: Implement real LRU eviction in `SessionCache`**
   - Summary: Enforced cache capacity with true LRU eviction, added capacity tracking, edge case handling, and comprehensive unit tests.

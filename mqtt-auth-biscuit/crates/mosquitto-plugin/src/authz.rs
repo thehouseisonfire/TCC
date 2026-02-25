@@ -30,7 +30,10 @@ pub struct AuthContext<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthContext, topic_matches};
+    use super::{AuthContext, AuthzOutcome, check_token_expiry, topic_matches};
+    use crate::auth::TokenType;
+    use crate::jwt_handler::Claims;
+    use chrono::Utc;
 
     #[test]
     fn topic_matches_exact() {
@@ -268,6 +271,67 @@ mod tests {
             }
         ));
     }
+
+    #[test]
+    fn check_token_expiry_handles_jwt() {
+        let now = Utc::now().timestamp();
+        let valid = TokenType::Jwt {
+            claims: Claims {
+                sub: "client_1".to_string(),
+                exp: now + 60,
+                iss: None,
+                aud: None,
+                client_id: None,
+                roles: None,
+                grants: None,
+                denies: None,
+            },
+            raw: "token".to_string(),
+        };
+        let expired = TokenType::Jwt {
+            claims: Claims {
+                sub: "client_1".to_string(),
+                exp: now - 1,
+                iss: None,
+                aud: None,
+                client_id: None,
+                roles: None,
+                grants: None,
+                denies: None,
+            },
+            raw: "token".to_string(),
+        };
+
+        assert_eq!(check_token_expiry(&valid), AuthzOutcome::Allowed);
+        assert_eq!(check_token_expiry(&expired), AuthzOutcome::Expired);
+    }
+
+    #[test]
+    fn check_token_expiry_handles_biscuit() {
+        let now = Utc::now().timestamp();
+        let valid = TokenType::Biscuit {
+            bytes: vec![1, 2, 3],
+            expires_at: Some(now + 60),
+            roles: None,
+            biscuit: None,
+        };
+        let expired = TokenType::Biscuit {
+            bytes: vec![1, 2, 3],
+            expires_at: Some(now - 1),
+            roles: None,
+            biscuit: None,
+        };
+        let no_expiry = TokenType::Biscuit {
+            bytes: vec![1, 2, 3],
+            expires_at: None,
+            roles: None,
+            biscuit: None,
+        };
+
+        assert_eq!(check_token_expiry(&valid), AuthzOutcome::Allowed);
+        assert_eq!(check_token_expiry(&expired), AuthzOutcome::Expired);
+        assert_eq!(check_token_expiry(&no_expiry), AuthzOutcome::Allowed);
+    }
 }
 
 fn is_valid_filter(filter: &str) -> bool {
@@ -379,13 +443,34 @@ pub enum AuthzOutcome {
     Expired,
 }
 
+pub fn check_token_expiry(token_type: &TokenType) -> AuthzOutcome {
+    match token_type {
+        TokenType::Jwt { claims, .. } => {
+            if Utc::now().timestamp() >= claims.exp {
+                AuthzOutcome::Expired
+            } else {
+                AuthzOutcome::Allowed
+            }
+        }
+        TokenType::Biscuit { expires_at, .. } => {
+            if let Some(expires_at) = expires_at
+                && Utc::now().timestamp() >= *expires_at
+            {
+                AuthzOutcome::Expired
+            } else {
+                AuthzOutcome::Allowed
+            }
+        }
+    }
+}
+
 pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> AuthzOutcome {
+    if check_token_expiry(token_type) == AuthzOutcome::Expired {
+        return AuthzOutcome::Expired;
+    }
+
     match token_type {
         TokenType::Jwt { claims, raw } => {
-            if Utc::now().timestamp() >= claims.exp {
-                return AuthzOutcome::Expired;
-            }
-
             let token_only = || {
                 let Some(grants) = claims.grants.as_ref() else {
                     return AuthzOutcome::Denied;
@@ -498,16 +583,10 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
         }
         TokenType::Biscuit {
             bytes,
-            expires_at,
+            expires_at: _,
             roles: _,
             biscuit,
         } => {
-            if let Some(expires_at) = expires_at
-                && Utc::now().timestamp() >= *expires_at
-            {
-                return AuthzOutcome::Expired;
-            }
-
             let operation = access_to_operation(params.access);
 
             let token_only = || {

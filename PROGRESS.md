@@ -262,11 +262,10 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 3. Issue 22: Strengthen SQLite RBAC (if policies too simple)
 4. Issue 23: Proactive client reauthentication
 5. Issue 24: Multi-step enhanced auth decision
-6. Issue 25: Optional ACL_READ full authz flag
-7. Issue 28: Verify static-policy coverage
-8. Issue 30: Dynamic-policy ACL_READ fan-out
-9. Issue 31: Control-triggered kick/re-auth
-10. Issue 32: Control-triggered ACL_READ + notify
+6. Issue 28: Verify static-policy coverage
+7. Issue 30: Dynamic-policy ACL_READ fan-out
+8. Issue 31: Control-triggered kick/re-auth
+9. Issue 32: Control-triggered ACL_READ + notify
 
 ---
 
@@ -375,18 +374,6 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - If in-scope:
       - Implement multi-step auth state handling (per client/session) and add at
         least one scenario measuring multi-step overhead
-
-- [ ] **Issue 25: Optional full authz on ACL_READ behind a flag (default expiry-only)**
-  - Goal: Support full authorization checks on `MOSQ_EVT_ACL_CHECK` +
-    `MOSQ_ACL_READ` behind a config flag (disabled by default) to avoid
-    per-subscriber performance penalties in high fan-out scenarios.
-  - Rationale: Full Datalog/HTTP/SQLite checks on every read can be too costly;
-    default behavior should only validate token expiry for read fan-out, while
-    leaving the full authz path available for correctness experiments.
-  - Deliverable:
-    - Add a config option (e.g., `acl_read_full_authz`) defaulting to false.
-    - When false, `ACL_READ` only validates expiry (no full authz).
-    - When true, run full authz checks and document the expected performance hit.
 
 - [ ] **Issue 28: Verify static-policy benchmark coverage (ACL_SUBSCRIBE/WRITE)**
   - Goal: Confirm scenarios exist for static policies where `ACL_SUBSCRIBE` and
@@ -531,6 +518,9 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 
 - [x] **Issue 20.1: Verify ACL_CHECK subtype handling across policy modes**
   - **Summary**: Added `MOSQ_ACL_CONTROL` constant (0x08) for control-plane access; fixed `control_callback` hardcoded `access: 2` → `MOSQ_ACL_CONTROL`; updated `access_to_operation()` to map 0x08 → "control"; added comprehensive unit tests for all ACL subtypes (READ/WRITE/SUBSCRIBE/CONTROL) with priority ordering (WRITE > SUBSCRIBE > CONTROL > READ), bitmask combinations, and edge cases. All 7 policy modes verified to correctly handle distinct ACL subtypes.
+
+- [x] **Issue 25: Optional full authz on ACL_READ behind a flag (default expiry-only)** — **COMPLETED 2026-02-25**
+  - **Summary**: Added `acl_read_full_authz` plugin config option (default `false`) to control `MOSQ_ACL_READ` fan-out behavior. When disabled, ACL read checks use expiry-only validation for cached sessions; when enabled, the plugin executes full authorization (token/SQLite/HTTP/hybrid/dynamic-security paths) for each read. Added unit tests for config parsing/defaults, expiry helper behavior, and ACL callback fast-path semantics (`ACL_READ` allow on unexpired cached token, strict behavior when enabled, no bypass for `ACL_WRITE`, and expired-token denial). Added operator documentation to `benchmarks/RUNNING_BENCHMARKS.md`.
 
 - [x] **Issue 27: Cache Biscuit expiry via min `expires_at` fact (remove brittle parsing)**
   - Summary: Replaced brittle error-message parsing with structured Datalog query to extract the minimum `expires_at` from Biscuit tokens. Updated `TokenType::Biscuit` to cache the expiry timestamp per session, clamped cache TTL to token expiry with a 5-minute fallback, and rejected already-expired tokens at auth time. Token issuer and benchmark generators now embed `expires_at` facts in authority and attenuation blocks to support stable expiry extraction.

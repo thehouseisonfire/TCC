@@ -162,6 +162,23 @@ Relevant plugin options (set in `mosquitto_*.conf`):
 
 Ensure the ACL file (`docker/static-acl.conf`) uses the same role names.
 
+### ACL_READ Fan-out Mode (`acl_read_full_authz`)
+
+`MOSQ_ACL_READ` fan-out checks can be configured with:
+
+- `plugin_opt_acl_read_full_authz false` (default): expiry-only checks for cached sessions on `ACL_READ`; optimized for high fan-out throughput experiments.
+- `plugin_opt_acl_read_full_authz true`: run full authorization on `ACL_READ` (token/HTTP/SQLite/dynamic policy path), useful for correctness and churn-focused experiments.
+
+Example:
+
+```conf
+plugin_opt_acl_read_full_authz true
+```
+
+Trade-off:
+- `false` minimizes per-subscriber callback cost.
+- `true` enforces full policy semantics per delivery and may significantly increase CPU/latency as subscriber count grows.
+
 ### Anonymous Flow Scenario (ANON-BASE)
 
 Policy rationale and security trade-offs are documented in

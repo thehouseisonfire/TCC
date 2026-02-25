@@ -1,5 +1,5 @@
 use crate::auth::{AuthEngine, AuthError, TokenType};
-use crate::authz::{AuthzOutcome, AuthzParams, check_authorization};
+use crate::authz::{AuthzOutcome, AuthzParams, check_authorization, check_token_expiry};
 use crate::biscuit_handler::{
     expiry_stats, extract_min_expiry_from_biscuit, extract_roles_from_biscuit, has_right_facts,
     parse_biscuit,
@@ -396,6 +396,11 @@ fn normalize_username(username: Option<String>) -> Option<String> {
 fn should_defer_no_token_basic_auth(mode: PolicyMode, allow_anonymous_no_token: bool) -> bool {
     matches!(mode, PolicyMode::StaticAcl | PolicyMode::StaticAclStrict)
         || (mode == PolicyMode::DynamicSecurity && allow_anonymous_no_token)
+}
+
+fn is_acl_read_only(access: c_int) -> bool {
+    (access & MOSQ_ACL_READ) != 0
+        && (access & (MOSQ_ACL_WRITE | MOSQ_ACL_SUBSCRIBE | MOSQ_ACL_CONTROL)) == 0
 }
 
 fn mosq_client_id_string(client: *const c_void) -> Option<String> {
@@ -970,6 +975,17 @@ extern "C" fn acl_check_callback(
     let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
 
     if let Some(token_type) = state.cache.get(&client_id) {
+        if is_acl_read_only(evt.access) && !state.config.acl_read_full_authz {
+            match check_token_expiry(&token_type) {
+                AuthzOutcome::Allowed => return MOSQ_ERR_SUCCESS,
+                AuthzOutcome::Expired => {
+                    log_debug("ACL check rejected: token expired");
+                    return MOSQ_ERR_ACL_DENIED;
+                }
+                AuthzOutcome::Denied => {}
+            }
+        }
+
         let params = AuthzParams {
             username: username.as_deref(),
             client_id: &client_id,
@@ -1187,7 +1203,10 @@ extern "C" fn control_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jwt_handler::Claims;
+    use chrono::Utc;
     use std::ffi::CString;
+    use std::time::Duration;
 
     fn setup_plugin_with_config() -> (*mut c_void, MosquittoPluginId) {
         let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
@@ -1243,6 +1262,44 @@ mod tests {
         assert_eq!(rc, MOSQ_ERR_SUCCESS);
     }
 
+    fn set_acl_read_full_authz(userdata: *mut c_void, enabled: bool) {
+        let state = unsafe { &mut *(userdata as *mut PluginState) };
+        state.config.acl_read_full_authz = enabled;
+    }
+
+    fn cache_test_jwt(userdata: *mut c_void, exp: i64) {
+        let state = unsafe { &mut *(userdata as *mut PluginState) };
+        let token = TokenType::Jwt {
+            claims: Claims {
+                sub: "test_client".to_string(),
+                exp,
+                iss: None,
+                aud: None,
+                client_id: None,
+                roles: None,
+                grants: None,
+                denies: None,
+            },
+            raw: "cached_token".to_string(),
+        };
+        state
+            .cache
+            .insert("test_client".to_string(), token, Duration::from_secs(60));
+    }
+
+    fn cache_test_biscuit(userdata: *mut c_void, expires_at: Option<i64>) {
+        let state = unsafe { &mut *(userdata as *mut PluginState) };
+        let token = TokenType::Biscuit {
+            bytes: vec![1, 2, 3],
+            expires_at,
+            roles: None,
+            biscuit: None,
+        };
+        state
+            .cache
+            .insert("test_client".to_string(), token, Duration::from_secs(60));
+    }
+
     #[test]
     fn ffi_init_and_cleanup_are_miri_safe() {
         let (userdata, _identifier) = setup_plugin_with_config();
@@ -1280,6 +1337,21 @@ mod tests {
         assert!(should_defer_no_token_basic_auth(
             PolicyMode::StaticAclStrict,
             false
+        ));
+    }
+
+    #[test]
+    fn is_acl_read_only_bitmask_matrix() {
+        assert!(!is_acl_read_only(0));
+        assert!(is_acl_read_only(MOSQ_ACL_READ));
+        assert!(!is_acl_read_only(MOSQ_ACL_WRITE));
+        assert!(!is_acl_read_only(MOSQ_ACL_SUBSCRIBE));
+        assert!(!is_acl_read_only(MOSQ_ACL_CONTROL));
+        assert!(!is_acl_read_only(MOSQ_ACL_READ | MOSQ_ACL_WRITE));
+        assert!(!is_acl_read_only(MOSQ_ACL_READ | MOSQ_ACL_SUBSCRIBE));
+        assert!(!is_acl_read_only(MOSQ_ACL_READ | MOSQ_ACL_CONTROL));
+        assert!(!is_acl_read_only(
+            MOSQ_ACL_READ | MOSQ_ACL_WRITE | MOSQ_ACL_SUBSCRIBE
         ));
     }
 
@@ -1472,6 +1544,216 @@ mod tests {
             payload: ptr::null(),
             properties: ptr::null_mut(),
             access: 1,
+            payloadlen: 0,
+            qos: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = acl_check_callback(
+            MOSQ_EVT_ACL_CHECK,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
+        assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
+
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn acl_read_expiry_only_allows_without_grants_when_flag_disabled() {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        set_acl_read_full_authz(userdata, false);
+        cache_test_jwt(userdata, Utc::now().timestamp() + 60);
+
+        let topic = CString::new("fanout/broadcast").unwrap();
+        let mut evt = MosquittoEvtAclCheck {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr(),
+            payload: ptr::null(),
+            properties: ptr::null_mut(),
+            access: MOSQ_ACL_READ,
+            payloadlen: 0,
+            qos: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = acl_check_callback(
+            MOSQ_EVT_ACL_CHECK,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
+        assert_eq!(rc, MOSQ_ERR_SUCCESS);
+
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn acl_read_uses_full_authz_when_flag_enabled() {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        set_acl_read_full_authz(userdata, true);
+        cache_test_jwt(userdata, Utc::now().timestamp() + 60);
+
+        let topic = CString::new("fanout/broadcast").unwrap();
+        let mut evt = MosquittoEvtAclCheck {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr(),
+            payload: ptr::null(),
+            properties: ptr::null_mut(),
+            access: MOSQ_ACL_READ,
+            payloadlen: 0,
+            qos: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = acl_check_callback(
+            MOSQ_EVT_ACL_CHECK,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
+        assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
+
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn acl_write_still_requires_full_authz_when_read_fast_path_disabled() {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        set_acl_read_full_authz(userdata, false);
+        cache_test_jwt(userdata, Utc::now().timestamp() + 60);
+
+        let topic = CString::new("fanout/broadcast").unwrap();
+        let mut evt = MosquittoEvtAclCheck {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr(),
+            payload: ptr::null(),
+            properties: ptr::null_mut(),
+            access: MOSQ_ACL_WRITE,
+            payloadlen: 0,
+            qos: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = acl_check_callback(
+            MOSQ_EVT_ACL_CHECK,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
+        assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
+
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn acl_read_rejects_expired_token_when_read_fast_path_disabled() {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        set_acl_read_full_authz(userdata, false);
+        cache_test_jwt(userdata, Utc::now().timestamp() - 1);
+
+        let topic = CString::new("fanout/broadcast").unwrap();
+        let mut evt = MosquittoEvtAclCheck {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr(),
+            payload: ptr::null(),
+            properties: ptr::null_mut(),
+            access: MOSQ_ACL_READ,
+            payloadlen: 0,
+            qos: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = acl_check_callback(
+            MOSQ_EVT_ACL_CHECK,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
+        assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
+
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn acl_read_expiry_only_allows_biscuit_when_flag_disabled() {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        set_acl_read_full_authz(userdata, false);
+        cache_test_biscuit(userdata, Some(Utc::now().timestamp() + 60));
+
+        let topic = CString::new("fanout/broadcast").unwrap();
+        let mut evt = MosquittoEvtAclCheck {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr(),
+            payload: ptr::null(),
+            properties: ptr::null_mut(),
+            access: MOSQ_ACL_READ,
+            payloadlen: 0,
+            qos: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = acl_check_callback(
+            MOSQ_EVT_ACL_CHECK,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
+        assert_eq!(rc, MOSQ_ERR_SUCCESS);
+
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn acl_read_uses_full_authz_for_biscuit_when_flag_enabled() {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        set_acl_read_full_authz(userdata, true);
+        cache_test_biscuit(userdata, Some(Utc::now().timestamp() + 60));
+
+        let topic = CString::new("fanout/broadcast").unwrap();
+        let mut evt = MosquittoEvtAclCheck {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr(),
+            payload: ptr::null(),
+            properties: ptr::null_mut(),
+            access: MOSQ_ACL_READ,
+            payloadlen: 0,
+            qos: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = acl_check_callback(
+            MOSQ_EVT_ACL_CHECK,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
+        assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
+
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn acl_read_rejects_expired_biscuit_when_flag_disabled() {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        set_acl_read_full_authz(userdata, false);
+        cache_test_biscuit(userdata, Some(Utc::now().timestamp() - 1));
+
+        let topic = CString::new("fanout/broadcast").unwrap();
+        let mut evt = MosquittoEvtAclCheck {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr(),
+            payload: ptr::null(),
+            properties: ptr::null_mut(),
+            access: MOSQ_ACL_READ,
             payloadlen: 0,
             qos: 0,
             retain: false,
@@ -1685,7 +1967,12 @@ mod verification {
                 http_tls_insecure: false,
             },
             cache_ttl_seconds: 3600,
+            allow_anonymous_no_token: false,
+            acl_read_full_authz: false,
             ext_auth_method: Some("token".to_string()),
+            role_username_prefix: "role:".to_string(),
+            biscuit_role_fact: "role".to_string(),
+            biscuit_transport: crate::config::BiscuitTransportMode::Base64Url,
         };
 
         let state = Box::new(PluginState {
@@ -1696,6 +1983,7 @@ mod verification {
             cache: Arc::new(SessionCache::new(10)),
             config,
             sqlite_policy: None,
+            dynamic_security_policy: None,
         });
 
         Box::into_raw(state)

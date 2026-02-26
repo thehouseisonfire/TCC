@@ -262,11 +262,10 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 3. Issue 22: Strengthen SQLite RBAC (if policies too simple)
 4. Issue 23: Proactive client reauthentication
 5. Issue 24: Multi-step enhanced auth decision
-6. Issue 28: Verify static-policy coverage
-7. Issue 30: Dynamic-policy ACL_READ fan-out
-8. Issue 31: Control-triggered kick/re-auth
-9. Issue 32: Control-triggered ACL_READ + notify
-10. Issue 37: ACL_READ fan-out scenarios across policy profiles
+6. Issue 30: Dynamic-policy ACL_READ fan-out
+7. Issue 31: Control-triggered kick/re-auth
+8. Issue 32: Control-triggered ACL_READ + notify
+9. Issue 37: ACL_READ fan-out scenarios across policy profiles
 
 ---
 
@@ -375,23 +374,6 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - If in-scope:
       - Implement multi-step auth state handling (per client/session) and add at
         least one scenario measuring multi-step overhead
-
-- [x] **Issue 28: Verify static-policy benchmark coverage (ACL_SUBSCRIBE/WRITE)** — **COMPLETED 2026-02-25**
-  - Goal: Confirm scenarios exist for static policies where `ACL_SUBSCRIBE` and
-    `ACL_WRITE` are enforced, and `ACL_READ` is either disabled or documented
-    when used (through acl_read_full_authz).
-  - Completed:
-    - Static ACL scenarios now use role-only JWT/Biscuit fixtures (no token
-      grants/rights) so Mosquitto ACL file rules are authoritative for access.
-    - Preserved scenario IDs while making coverage explicit:
-      - `STATIC-ACL-JWT` / `STATIC-ACL-BIS`: publish path (`ACL_WRITE`)
-      - `STATIC-ACL-FANOUT` / `STATIC-ACL-FANOUT-BIS`: subscribe path
-        (`ACL_SUBSCRIBE`) plus documented fan-out delivery (`ACL_READ`)
-    - Static Mosquitto configs explicitly set
-      `plugin_opt_acl_read_full_authz false` to document the intended
-      Issue-28 behavior (expiry-only `ACL_READ` checks).
-    - Added benchmark and plugin regression tests for static scenario coverage
-      and `ACL_SUBSCRIBE` fast-path guard behavior.
 
 - [ ] **Issue 30: Verify dynamic-policy coverage with ACL_READ fan-out checks**
   - Goal: Ensure dynamic policy scenarios enforce changes via `ACL_READ` for

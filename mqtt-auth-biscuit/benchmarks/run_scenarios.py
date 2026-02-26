@@ -704,6 +704,56 @@ def _http_policy_authz_config(tier: Literal["simple", "med", "complex"]) -> Auth
     }
 
 
+def _static_acl_scenarios(tokens: dict[str, Any]) -> dict[str, ScenarioConfig]:
+    """Static ACL scenarios with role-only tokens to isolate ACL-file enforcement."""
+    return {
+        "STATIC-ACL-JWT": {
+            "mosquitto_conf": "./mosquitto_static.conf",
+            "username": "jwt",
+            "password": tokens["jwt_static_writer"],
+            "topic": "sensors/{client_id}/temp",
+            "authz": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+        },
+        "STATIC-ACL-BIS": {
+            "mosquitto_conf": "./mosquitto_static.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit_static_writer"],
+            "topic": "sensors/{client_id}/temp",
+            "authz": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+        },
+        "STATIC-ACL-FANOUT": {
+            "mosquitto_conf": "./mosquitto_static.conf",
+            "username": "jwt",
+            "password": tokens["jwt_static_reader"],
+            "fanout_publisher_username": "jwt",
+            "fanout_publisher_password": tokens["jwt_static_writer"],
+            "topic": "fanout/broadcast",
+            "mode": "fanout",
+            "fanout_topic": "fanout/broadcast",
+            "authz": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+        },
+        "STATIC-ACL-FANOUT-BIS": {
+            "mosquitto_conf": "./mosquitto_static.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit_static_reader"],
+            "fanout_publisher_username": "biscuit",
+            "fanout_publisher_password": tokens["biscuit_static_writer"],
+            "topic": "fanout/broadcast",
+            "mode": "fanout",
+            "fanout_topic": "fanout/broadcast",
+            "authz": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+        },
+    }
+
+
 @app.command()
 def main(
     tokens_path: str = "benchmarks/tokens.json",
@@ -1015,50 +1065,7 @@ def main(
                 "message_size": 0,
                 "policy_complexity_kind": "datalog",
             },
-            "STATIC-ACL-JWT": {
-                "mosquitto_conf": "./mosquitto_static.conf",
-                "username": "jwt",
-                "password": tokens["jwt"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-            },
-            "STATIC-ACL-BIS": {
-                "mosquitto_conf": "./mosquitto_static.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-            },
-            "STATIC-ACL-FANOUT": {
-                "mosquitto_conf": "./mosquitto_static.conf",
-                "username": "jwt",
-                "password": tokens["jwt"],
-                "fanout_publisher_username": "jwt",
-                "fanout_publisher_password": tokens["jwt"],
-                "topic": "fanout/broadcast",
-                "mode": "fanout",
-                "fanout_topic": "fanout/broadcast",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-            },
-            "STATIC-ACL-FANOUT-BIS": {
-                "mosquitto_conf": "./mosquitto_static.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit"],
-                "fanout_publisher_username": "biscuit",
-                "fanout_publisher_password": tokens["biscuit"],
-                "topic": "fanout/broadcast",
-                "mode": "fanout",
-                "fanout_topic": "fanout/broadcast",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-            },
+            **_static_acl_scenarios(tokens),
             "JWT-HTTP-200MS": {
                 "mosquitto_conf": "./mosquitto_http.conf",
                 "username": "jwt",

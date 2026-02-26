@@ -2,7 +2,7 @@
 
 **Project**: Eclipse Mosquitto Auth Biscuit Plugin (Rust)\
 **Started**: 2026-01-04\
-**Last Updated**: 2026-02-23\
+**Last Updated**: 2026-02-25\
 **Current Focus**: Reproducible benchmark/scenario harness aligned with
 `ARTICLE.MD`
 
@@ -241,8 +241,8 @@ Source of truth for the detailed policy mapping is `SCENARIO_POLICIES.md`.
 The actionable parity gaps are tracked here as backlog items:
 
 1. Token-only wildcard/filter parity is implemented; preserve this in new scenarios.
-2. Static ACL scenarios should use roles-only tokens to isolate ACL cost
-   (tracked by Issue 28 and Issue 33).
+2. Static ACL scenarios now use roles-only tokens to isolate ACL cost
+   (implemented in Issue 28; preserve this invariant in new scenarios).
 3. SQLite policy model remains too simple for parity-grade comparisons
    (tracked by Issue 22 and Issue 30).
 4. `POLICY-COMPLEX-*` naming must stay explicit about what is being stressed
@@ -266,6 +266,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 7. Issue 30: Dynamic-policy ACL_READ fan-out
 8. Issue 31: Control-triggered kick/re-auth
 9. Issue 32: Control-triggered ACL_READ + notify
+10. Issue 37: ACL_READ fan-out scenarios across policy profiles
 
 ---
 
@@ -375,12 +376,22 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
       - Implement multi-step auth state handling (per client/session) and add at
         least one scenario measuring multi-step overhead
 
-- [ ] **Issue 28: Verify static-policy benchmark coverage (ACL_SUBSCRIBE/WRITE)**
+- [x] **Issue 28: Verify static-policy benchmark coverage (ACL_SUBSCRIBE/WRITE)** — **COMPLETED 2026-02-25**
   - Goal: Confirm scenarios exist for static policies where `ACL_SUBSCRIBE` and
     `ACL_WRITE` are enforced, and `ACL_READ` is either disabled or documented
     when used (through acl_read_full_authz).
-  - Deliverable:
-    - Inventory scenarios for Static ACL, Dynamic Security, SQLite, HTTP
+  - Completed:
+    - Static ACL scenarios now use role-only JWT/Biscuit fixtures (no token
+      grants/rights) so Mosquitto ACL file rules are authoritative for access.
+    - Preserved scenario IDs while making coverage explicit:
+      - `STATIC-ACL-JWT` / `STATIC-ACL-BIS`: publish path (`ACL_WRITE`)
+      - `STATIC-ACL-FANOUT` / `STATIC-ACL-FANOUT-BIS`: subscribe path
+        (`ACL_SUBSCRIBE`) plus documented fan-out delivery (`ACL_READ`)
+    - Static Mosquitto configs explicitly set
+      `plugin_opt_acl_read_full_authz false` to document the intended
+      Issue-28 behavior (expiry-only `ACL_READ` checks).
+    - Added benchmark and plugin regression tests for static scenario coverage
+      and `ACL_SUBSCRIBE` fast-path guard behavior.
 
 - [ ] **Issue 30: Verify dynamic-policy coverage with ACL_READ fan-out checks**
   - Goal: Ensure dynamic policy scenarios enforce changes via `ACL_READ` for
@@ -404,6 +415,27 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
   - Deliverable:
     - Notification topic publishing (e.g., `system_notification/<client_id>`)
     - Scenario capturing denial after privilege reduction
+
+- [ ] **Issue 37: Add `ACL_READ` fan-out authorization scenarios across policy profiles**
+  - Goal: Add benchmark scenarios that explicitly exercise read/fan-out
+    authorization (`MOSQ_ACL_READ`) with full authz enabled for each relevant
+    policy profile/source, so comparisons are not limited to subscribe-time
+    (`ACL_SUBSCRIBE`) checks.
+  - Scope:
+    - Cover policy sources where fan-out authorization semantics are meaningful:
+      Token-only, HTTP (`simple|med|complex`), Hybrid, Dynamic Security, and
+      SQLite (after parity-grade policy model is available).
+    - Static ACL should remain documented as expiry-only `ACL_READ` in Issue 28
+      baseline scenarios unless explicitly running a strict variant.
+  - Deliverable:
+    - New scenario IDs (or matrix variants) that run with
+      `plugin_opt_acl_read_full_authz true` and `mode=fanout`
+    - Profile-aware policy inputs for fan-out topics (allow/deny cases) per
+      source/profile
+    - Subscriber-count scaling slices (e.g., 10/50/100) for at least one
+      profile per source
+    - Result metadata documenting active `acl_read_full_authz` mode and policy
+      profile for each run
 
 ---
 
@@ -521,6 +553,17 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 
 - [x] **Issue 25: Optional full authz on ACL_READ behind a flag (default expiry-only)** — **COMPLETED 2026-02-25**
   - **Summary**: Added `acl_read_full_authz` plugin config option (default `false`) to control `MOSQ_ACL_READ` fan-out behavior. When disabled, ACL read checks use expiry-only validation for cached sessions; when enabled, the plugin executes full authorization (token/SQLite/HTTP/hybrid/dynamic-security paths) for each read. Added unit tests for config parsing/defaults, expiry helper behavior, and ACL callback fast-path semantics (`ACL_READ` allow on unexpired cached token, strict behavior when enabled, no bypass for `ACL_WRITE`, and expired-token denial). Added operator documentation to `benchmarks/RUNNING_BENCHMARKS.md`.
+
+- [x] **Issue 28: Verify static-policy benchmark coverage (ACL_SUBSCRIBE/WRITE)** — **COMPLETED 2026-02-25**
+  - **Summary**: Corrected static-policy scenario design so ACL-file enforcement
+    is measured without token-rule bias. Added role-only static fixtures for
+    JWT/Biscuit and rewired static scenarios to use writer/reader role tokens
+    by path (`ACL_WRITE` publish, `ACL_SUBSCRIBE` fanout subscribe). Explicitly
+    documented static-mode `ACL_READ` handling via
+    `plugin_opt_acl_read_full_authz false` in static Mosquitto configs.
+  - **Validation Additions**: Added benchmark scenario coverage tests and a
+    plugin unit test proving the `ACL_READ` fast path does not bypass full
+    authorization for `ACL_SUBSCRIBE`.
 
 - [x] **Issue 27: Cache Biscuit expiry via min `expires_at` fact (remove brittle parsing)**
   - Summary: Replaced brittle error-message parsing with structured Datalog query to extract the minimum `expires_at` from Biscuit tokens. Updated `TokenType::Biscuit` to cache the expiry timestamp per session, clamped cache TTL to token expiry with a 5-minute fallback, and rejected already-expired tokens at auth time. Token issuer and benchmark generators now embed `expires_at` facts in authority and attenuation blocks to support stable expiry extraction.

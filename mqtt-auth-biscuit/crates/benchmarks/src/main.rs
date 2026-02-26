@@ -129,6 +129,40 @@ fn main() {
         encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
     };
 
+    // Static ACL isolation fixtures: role identity only (no token grants/denies).
+    let jwt_static_admin = {
+        let claims = Claims {
+            sub: "client_1".to_string(),
+            exp: LONG_EXP,
+            roles: Some(vec!["admin".to_string()]),
+            grants: None,
+            denies: None,
+        };
+        encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
+    };
+
+    let jwt_static_writer = {
+        let claims = Claims {
+            sub: "client_1".to_string(),
+            exp: LONG_EXP,
+            roles: Some(vec!["writer".to_string()]),
+            grants: None,
+            denies: None,
+        };
+        encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
+    };
+
+    let jwt_static_reader = {
+        let claims = Claims {
+            sub: "client_1".to_string(),
+            exp: LONG_EXP,
+            roles: Some(vec!["reader".to_string()]),
+            grants: None,
+            denies: None,
+        };
+        encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
+    };
+
     // Biscuit
     let root_bytes = TEST_BISCUIT_ROOT_BYTES;
     let root_keypair = KeyPair::from(
@@ -201,6 +235,31 @@ fn main() {
             .unwrap();
         biscuit_base.append(deny_block).unwrap()
     };
+
+    // Static ACL isolation fixtures: role identity only (no right/deny facts).
+    let biscuit_static_admin = Biscuit::builder()
+        .fact(r#"role("admin")"#)
+        .unwrap()
+        .fact("expires_at(2000000000)")
+        .unwrap()
+        .build(&root_keypair)
+        .unwrap();
+
+    let biscuit_static_writer = Biscuit::builder()
+        .fact(r#"role("writer")"#)
+        .unwrap()
+        .fact("expires_at(2000000000)")
+        .unwrap()
+        .build(&root_keypair)
+        .unwrap();
+
+    let biscuit_static_reader = Biscuit::builder()
+        .fact(r#"role("reader")"#)
+        .unwrap()
+        .fact("expires_at(2000000000)")
+        .unwrap()
+        .build(&root_keypair)
+        .unwrap();
 
     let biscuit_complex_base = Biscuit::builder()
         .fact(r#"role("sensor")"#)
@@ -321,6 +380,12 @@ fn main() {
     let biscuit_deny_b64 = general_purpose::URL_SAFE_NO_PAD.encode(biscuit_deny.to_vec().unwrap());
     let biscuit_short_b64 =
         general_purpose::URL_SAFE_NO_PAD.encode(biscuit_short.to_vec().unwrap());
+    let biscuit_static_admin_b64 =
+        general_purpose::URL_SAFE_NO_PAD.encode(biscuit_static_admin.to_vec().unwrap());
+    let biscuit_static_writer_b64 =
+        general_purpose::URL_SAFE_NO_PAD.encode(biscuit_static_writer.to_vec().unwrap());
+    let biscuit_static_reader_b64 =
+        general_purpose::URL_SAFE_NO_PAD.encode(biscuit_static_reader.to_vec().unwrap());
     let biscuit_handoff_b64 =
         general_purpose::URL_SAFE_NO_PAD.encode(biscuit_handoff.to_vec().unwrap());
     let biscuit_complex_low_b64 =
@@ -350,6 +415,9 @@ fn main() {
         "jwt": jwt_long,
         "jwt_short": jwt_short,
         "jwt_deny": jwt_deny,
+        "jwt_static_admin": jwt_static_admin,
+        "jwt_static_writer": jwt_static_writer,
+        "jwt_static_reader": jwt_static_reader,
         "jwt_alg": "ES256",
         "jwt_grants_schema": jwt_grants_schema,
         "jwt_denies_schema": jwt_denies_schema,
@@ -359,6 +427,9 @@ fn main() {
         "biscuit_delegated": biscuit_delegated_b64,
         "biscuit_deny": biscuit_deny_b64,
         "biscuit_short": biscuit_short_b64,
+        "biscuit_static_admin": biscuit_static_admin_b64,
+        "biscuit_static_writer": biscuit_static_writer_b64,
+        "biscuit_static_reader": biscuit_static_reader_b64,
         "biscuit_delegation_handoff": biscuit_handoff_b64,
         "biscuit_complex_low": biscuit_complex_low_b64,
         "biscuit_complex_med": biscuit_complex_med_b64,

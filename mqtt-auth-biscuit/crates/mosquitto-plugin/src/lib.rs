@@ -1651,6 +1651,36 @@ mod tests {
     }
 
     #[test]
+    fn acl_subscribe_still_requires_full_authz_when_read_fast_path_disabled() {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        set_acl_read_full_authz(userdata, false);
+        cache_test_jwt(userdata, Utc::now().timestamp() + 60);
+
+        let topic = CString::new("fanout/broadcast").unwrap();
+        let mut evt = MosquittoEvtAclCheck {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr(),
+            payload: ptr::null(),
+            properties: ptr::null_mut(),
+            access: MOSQ_ACL_SUBSCRIBE,
+            payloadlen: 0,
+            qos: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = acl_check_callback(
+            MOSQ_EVT_ACL_CHECK,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
+        assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
+
+        teardown_plugin(userdata);
+    }
+
+    #[test]
     fn acl_read_rejects_expired_token_when_read_fast_path_disabled() {
         let (userdata, _identifier) = setup_plugin_with_config();
         set_acl_read_full_authz(userdata, false);

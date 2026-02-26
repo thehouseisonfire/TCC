@@ -159,8 +159,14 @@ Relevant plugin options (set in `mosquitto_*.conf`):
 
 - `plugin_opt_role_username_prefix` (default: `role:`)
 - `plugin_opt_biscuit_role_fact` (default: `role`, must be a simple predicate identifier like `role` or `device_role`)
+- `plugin_opt_acl_read_full_authz false` in static configs (documents expiry-only `ACL_READ` fan-out behavior for static-policy runs)
 
 Ensure the ACL file (`docker/static-acl.conf`) uses the same role names.
+
+Static scenario ACL coverage:
+- `STATIC-ACL-JWT`, `STATIC-ACL-BIS`: publish path (`ACL_WRITE`) with writer role tokens.
+- `STATIC-ACL-FANOUT`, `STATIC-ACL-FANOUT-BIS`: subscribe path (`ACL_SUBSCRIBE`) with reader subscribers and writer publisher; fan-out delivery invokes `ACL_READ` as documented above.
+- Static scenarios are wired to role-only token fixtures so ACL file rules remain authoritative.
 
 ### ACL_READ Fan-out Mode (`acl_read_full_authz`)
 

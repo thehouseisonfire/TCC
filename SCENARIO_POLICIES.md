@@ -126,10 +126,10 @@ Rule selectors include operation, MQTT filter topic, client ID, and roles
 
 | Scenario | Token | Policy Source | Policy Detail | Expected Outcome |
 | --- | --- | --- | --- | --- |
-| STATIC-ACL-JWT | JWT | Token + ACL | Token rules + `static-acl.conf` | Allows |
-| STATIC-ACL-BIS | Biscuit | Token + ACL | Token rules + `static-acl.conf` | Allows |
-| STATIC-ACL-FANOUT | JWT | Token + ACL | `fanout/broadcast` ACL rules | Allows |
-| STATIC-ACL-FANOUT-BIS | Biscuit | Token + ACL | `fanout/broadcast` ACL rules | Allows |
+| STATIC-ACL-JWT | JWT | Token role identity + ACL | Writer role token (`roles=["writer"]`) + `static-acl.conf` on `sensors/{client_id}/temp` | Allows publish path |
+| STATIC-ACL-BIS | Biscuit | Token role identity + ACL | Writer role token (`role("writer")`) + `static-acl.conf` on `sensors/{client_id}/temp` | Allows publish path |
+| STATIC-ACL-FANOUT | JWT | Token role identity + ACL | Reader subscribers + writer publisher on `fanout/broadcast` | Allows subscribe/fanout path |
+| STATIC-ACL-FANOUT-BIS | Biscuit | Token role identity + ACL | Reader subscribers + writer publisher on `fanout/broadcast` | Allows subscribe/fanout path |
 
 ACL rules in `docker/static-acl.conf` grant:
 - `role:admin` read/write on all topics
@@ -138,10 +138,16 @@ ACL rules in `docker/static-acl.conf` grant:
 - fallback `pattern readwrite sensors/%c/#`
 - `fanout/broadcast` grants for the same roles
 
-**Parity requirement:** tokens should carry **roles only** (no extra allow rules) in
-STATIC-ACL runs so the ACL file is the authoritative policy. The current tokens include
-explicit publish/subscribe rights, so these scenarios represent a **compound** gate
-instead of pure ACL performance.
+**Parity requirement (implemented):** STATIC-ACL scenarios use **roles-only**
+tokens (no JWT `grants`/`denies`, no Biscuit `right`/`deny`) so the ACL file is
+the authoritative access policy.
+
+**ACL subtype coverage:**
+- `STATIC-ACL-JWT` / `STATIC-ACL-BIS`: cover `ACL_WRITE` via publish operations.
+- `STATIC-ACL-FANOUT` / `STATIC-ACL-FANOUT-BIS`: cover `ACL_SUBSCRIBE` on
+  subscriber setup and include `ACL_READ` during fan-out delivery.
+- For static ACL benchmark mode, `acl_read_full_authz` is set to `false` in
+  `mosquitto_static.conf` to keep `ACL_READ` as documented expiry-only behavior.
 
 ### 2.5 Dynamic Security (Snapshot RBAC)
 

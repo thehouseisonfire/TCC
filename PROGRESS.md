@@ -391,7 +391,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 
 - [ ] **Issue 37: Add `ACL_READ` fan-out authorization scenarios across policy profiles**
   - Goal: Add benchmark scenarios that explicitly exercise read/fan-out
-    authorization (`MOSQ_ACL_READ`) with full authz enabled for each relevant
+    authorization (`MOSQ_ACL_READ`) with full authz (acl_read_full_authz) enabled for each relevant
     policy profile/source, so comparisons are not limited to subscribe-time
     (`ACL_SUBSCRIBE`) checks.
   - Scope:

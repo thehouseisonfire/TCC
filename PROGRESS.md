@@ -265,7 +265,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 6. Issue 31: Control-triggered kick/re-auth
 7. Issue 32: Control-triggered ACL_READ + notify
 8. Issue 37: ACL_READ fan-out scenarios across policy profiles
-
+9. Issue 38: Expiry enforcement in ACL_CHECK
 ---
 
 #### A) Policy Source Parity
@@ -294,6 +294,23 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Documentation of the measurement trade-offs between the modes and guidance
       for which scenarios require client-per-container to improve realism
 
+- [ ] **Issue 21: Strengthen Biscuit authorizer template complexity**
+  - Goal: Expand the Biscuit authorizer template beyond the minimal
+    `right(op,res)` match to represent more realistic policy complexity (while
+    preserving request-context injection and Biscuit scoping constraints).
+  - Rationale: current template is too "thin" and may under-represent the
+    cost/benefit of Biscuit's Datalog evaluation compared to intended research
+    scenarios.
+  - Deliverable:
+    - Add configurable authorizer "profiles" (e.g., `simple`, `rbac`,
+      `contextual`) or a template file option
+    - Include policies with:
+      - role membership / derived permissions
+      - topic prefix/wildcard patterns
+      - time-based constraints using authorizer-provided `time(...)`
+    - Add at least one scenario that measures increasing authorizer complexity
+      at constant token size
+
 - [ ] **Issue 22: Strengthen `seed_demo_rules` (RBAC), make it optional, and add
     runtime policy churn scenarios**
   - Goal: Turn SQLite demo seeding into a realistic RBAC policy set, allow it to
@@ -312,41 +329,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Ensure scenarios document when policy churn is enabled and how it affects
       cache validity
 
-- [ ] **Issue 21: Strengthen Biscuit authorizer template complexity**
-  - Goal: Expand the Biscuit authorizer template beyond the minimal
-    `right(op,res)` match to represent more realistic policy complexity (while
-    preserving request-context injection and Biscuit scoping constraints).
-  - Rationale: current template is too "thin" and may under-represent the
-    cost/benefit of Biscuit's Datalog evaluation compared to intended research
-    scenarios.
-  - Deliverable:
-    - Add configurable authorizer "profiles" (e.g., `simple`, `rbac`,
-      `contextual`) or a template file option
-    - Include policies with:
-      - role membership / derived permissions
-      - topic prefix/wildcard patterns
-      - time-based constraints using authorizer-provided `time(...)`
-    - Add at least one scenario that measures increasing authorizer complexity
-      at constant token size
-
 #### F) Matrix Coverage (Benchmark Verification)
-
-- [ ] **Issue 22: Expiry enforcement in ACL_CHECK with disconnect (no reason codes)**
-  - Goal: On expired tokens, rely on `MOSQ_EVT_ACL_CHECK` to deny access and
-    forcibly disconnect the client, since ACL checks do not support MQTT v5
-    reason codes/strings for explicit expiry signaling.
-  - Current state: `ACL_CHECK` returns `MOSQ_ERR_ACL_DENIED` on
-    `AuthzOutcome::Expired` but does **not** disconnect the client.
-  - Constraints:
-    - Do not send or depend on reason codes in ACL checks.
-    - Avoid full token signature verification in `ACL_CHECK`; only validate
-      expiry and policy evaluation (authz). Cryptographic verification should
-      remain in auth/enhanced-auth entrypoints.
-  - Deliverable:
-    - Add explicit disconnect path when `AuthzOutcome::Expired` is returned in
-      `ACL_CHECK` (document which Mosquitto API is used).
-    - Document rationale: ACL_CHECK is the authoritative access gate; expiry
-      means immediate disconnect without reason codes.
 
 - [ ] **Issue 23: Proactive client reauthentication before expiry**
   - Goal: Clients refresh tokens proactively and initiate MQTT v5 reauth at
@@ -409,6 +392,23 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
       profile per source
     - Result metadata documenting active `acl_read_full_authz` mode and policy
       profile for each run
+
+- [ ] **Issue 38: Expiry enforcement in ACL_CHECK with disconnect (no reason codes)**
+  - Goal: On expired tokens, rely on `MOSQ_EVT_ACL_CHECK` to deny access and
+    forcibly disconnect the client, since ACL checks do not support MQTT v5
+    reason codes/strings for explicit expiry signaling.
+  - Current state: `ACL_CHECK` returns `MOSQ_ERR_ACL_DENIED` on
+    `AuthzOutcome::Expired` but does **not** disconnect the client.
+  - Constraints:
+    - Do not send or depend on reason codes in ACL checks.
+    - Avoid full token signature verification in `ACL_CHECK`; only validate
+      expiry and policy evaluation (authz). Cryptographic verification should
+      remain in auth/enhanced-auth entrypoints.
+  - Deliverable:
+    - Add explicit disconnect path when `AuthzOutcome::Expired` is returned in
+      `ACL_CHECK` (document which Mosquitto API is used).
+    - Document rationale: ACL_CHECK is the authoritative access gate; expiry
+      means immediate disconnect without reason codes.
 
 ---
 

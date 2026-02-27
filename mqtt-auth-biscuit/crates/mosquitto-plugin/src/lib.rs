@@ -14,6 +14,8 @@ use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
 use std::sync::{Arc, Once};
 use std::time::Duration;
+#[cfg(test)]
+use std::{cell::RefCell, thread_local};
 
 mod auth;
 mod authz;
@@ -246,6 +248,7 @@ unsafe extern "C" {
     pub fn mosquitto_client_username(client: *const c_void) -> *const c_char;
     pub fn mosquitto_malloc(size: usize) -> *mut c_void;
     pub fn mosquitto_set_username(client: *mut c_void, username: *const c_char) -> c_int;
+    pub fn mosquitto_kick_client_by_clientid(clientid: *const c_char, with_will: bool) -> c_int;
 }
 
 #[cfg(not(any(test, miri, kani)))]
@@ -272,8 +275,29 @@ pub extern "C" fn mosquitto_set_username(_client: *mut c_void, _username: *const
 }
 
 #[cfg(any(test, miri, kani))]
+#[unsafe(no_mangle)]
+pub extern "C" fn mosquitto_kick_client_by_clientid(
+    clientid: *const c_char,
+    with_will: bool,
+) -> c_int {
+    #[cfg(test)]
+    record_kick_client_call(clientid, with_will);
+    MOSQ_ERR_SUCCESS
+}
+
+#[cfg(any(test, miri, kani))]
 fn set_username_raw(client: *mut c_void, username: *const c_char) -> c_int {
     mosquitto_set_username(client, username)
+}
+
+#[cfg(not(any(test, miri, kani)))]
+fn kick_client_by_clientid_raw(clientid: *const c_char, with_will: bool) -> c_int {
+    unsafe { mosquitto_kick_client_by_clientid(clientid, with_will) }
+}
+
+#[cfg(any(test, miri, kani))]
+fn kick_client_by_clientid_raw(clientid: *const c_char, with_will: bool) -> c_int {
+    mosquitto_kick_client_by_clientid(clientid, with_will)
 }
 
 #[cfg(any(test, miri, kani))]
@@ -281,6 +305,41 @@ static TEST_CLIENT_ID: &[u8; 12] = b"test_client\0";
 
 #[cfg(any(test, miri, kani))]
 static TEST_USERNAME: &[u8; 10] = b"test_user\0";
+
+#[cfg(test)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct KickClientCall {
+    count: usize,
+    last_client_id: Option<String>,
+    last_with_will: Option<bool>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_KICK_CLIENT_CALL: RefCell<KickClientCall> = RefCell::new(KickClientCall::default());
+}
+
+#[cfg(test)]
+fn reset_kick_client_call() {
+    TEST_KICK_CLIENT_CALL.with(|call| {
+        *call.borrow_mut() = KickClientCall::default();
+    });
+}
+
+#[cfg(test)]
+fn kick_client_call_snapshot() -> KickClientCall {
+    TEST_KICK_CLIENT_CALL.with(|call| call.borrow().clone())
+}
+
+#[cfg(test)]
+fn record_kick_client_call(clientid: *const c_char, with_will: bool) {
+    TEST_KICK_CLIENT_CALL.with(|call| {
+        let mut state = call.borrow_mut();
+        state.count += 1;
+        state.last_client_id = cstr_to_string(clientid);
+        state.last_with_will = Some(with_will);
+    });
+}
 
 #[cfg(any(test, miri, kani))]
 #[unsafe(no_mangle)]
@@ -468,6 +527,33 @@ fn set_reason_string(target: *mut *mut c_char, message: &str) {
 fn set_control_reauth_signal(evt: &mut MosquittoEvtControl, message: &str) {
     evt.reason_code = MQTT_RC_REAUTHENTICATE;
     set_reason_string(&mut evt.reason_string, message);
+}
+
+fn disconnect_expired_acl_client(client_id: &str) {
+    let client_id_cstr = match CString::new(client_id) {
+        Ok(value) => value,
+        Err(_) => {
+            log_debug(&format!(
+                "ACL expiry disconnect skipped: invalid client id '{}'",
+                client_id
+            ));
+            return;
+        }
+    };
+    // ACL callbacks do not support MQTT v5 reason signaling.
+    // Enforce expiry by denying ACL and forcefully disconnecting the client.
+    let rc = kick_client_by_clientid_raw(client_id_cstr.as_ptr(), false);
+    if rc == MOSQ_ERR_SUCCESS {
+        log_debug(&format!(
+            "ACL expiry disconnect applied: client={} with_will=false",
+            client_id
+        ));
+    } else {
+        log_debug(&format!(
+            "ACL expiry disconnect failed: client={} with_will=false rc={}",
+            client_id, rc
+        ));
+    }
 }
 
 fn attach_biscuit_expiry(
@@ -958,6 +1044,8 @@ extern "C" fn acl_check_callback(
     event_data: *mut c_void,
     userdata: *mut c_void,
 ) -> c_int {
+    // ACL callbacks are the authoritative data-plane gate but do not carry
+    // MQTT v5 reason signaling fields. Expired sessions are denied and kicked.
     if event_data.is_null() || userdata.is_null() {
         return MOSQ_ERR_INVAL;
     }
@@ -979,7 +1067,8 @@ extern "C" fn acl_check_callback(
             match check_token_expiry(&token_type) {
                 AuthzOutcome::Allowed => return MOSQ_ERR_SUCCESS,
                 AuthzOutcome::Expired => {
-                    log_debug("ACL check rejected: token expired");
+                    log_debug("ACL check rejected: token expired; disconnecting client");
+                    disconnect_expired_acl_client(&client_id);
                     return MOSQ_ERR_ACL_DENIED;
                 }
                 AuthzOutcome::Denied => {}
@@ -1010,7 +1099,8 @@ extern "C" fn acl_check_callback(
                 return MOSQ_ERR_SUCCESS;
             }
             AuthzOutcome::Expired => {
-                log_debug("ACL check rejected: token expired");
+                log_debug("ACL check rejected: token expired; disconnecting client");
+                disconnect_expired_acl_client(&client_id);
                 return MOSQ_ERR_ACL_DENIED;
             }
             AuthzOutcome::Denied => {
@@ -1592,6 +1682,7 @@ mod tests {
 
     #[test]
     fn acl_read_uses_full_authz_when_flag_enabled() {
+        reset_kick_client_call();
         let (userdata, _identifier) = setup_plugin_with_config();
         set_acl_read_full_authz(userdata, true);
         cache_test_jwt(userdata, Utc::now().timestamp() + 60);
@@ -1616,12 +1707,15 @@ mod tests {
             userdata,
         );
         assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
+        let kick = kick_client_call_snapshot();
+        assert_eq!(kick.count, 0);
 
         teardown_plugin(userdata);
     }
 
     #[test]
     fn acl_write_still_requires_full_authz_when_read_fast_path_disabled() {
+        reset_kick_client_call();
         let (userdata, _identifier) = setup_plugin_with_config();
         set_acl_read_full_authz(userdata, false);
         cache_test_jwt(userdata, Utc::now().timestamp() + 60);
@@ -1646,6 +1740,8 @@ mod tests {
             userdata,
         );
         assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
+        let kick = kick_client_call_snapshot();
+        assert_eq!(kick.count, 0);
 
         teardown_plugin(userdata);
     }
@@ -1682,6 +1778,7 @@ mod tests {
 
     #[test]
     fn acl_read_rejects_expired_token_when_read_fast_path_disabled() {
+        reset_kick_client_call();
         let (userdata, _identifier) = setup_plugin_with_config();
         set_acl_read_full_authz(userdata, false);
         cache_test_jwt(userdata, Utc::now().timestamp() - 1);
@@ -1706,6 +1803,45 @@ mod tests {
             userdata,
         );
         assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
+        let kick = kick_client_call_snapshot();
+        assert_eq!(kick.count, 1);
+        assert_eq!(kick.last_client_id.as_deref(), Some("test_client"));
+        assert_eq!(kick.last_with_will, Some(false));
+
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn acl_read_rejects_expired_token_with_disconnect_when_full_authz_enabled() {
+        reset_kick_client_call();
+        let (userdata, _identifier) = setup_plugin_with_config();
+        set_acl_read_full_authz(userdata, true);
+        cache_test_jwt(userdata, Utc::now().timestamp() - 1);
+
+        let topic = CString::new("fanout/broadcast").unwrap();
+        let mut evt = MosquittoEvtAclCheck {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr(),
+            payload: ptr::null(),
+            properties: ptr::null_mut(),
+            access: MOSQ_ACL_READ,
+            payloadlen: 0,
+            qos: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = acl_check_callback(
+            MOSQ_EVT_ACL_CHECK,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
+        assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
+        let kick = kick_client_call_snapshot();
+        assert_eq!(kick.count, 1);
+        assert_eq!(kick.last_client_id.as_deref(), Some("test_client"));
+        assert_eq!(kick.last_with_will, Some(false));
 
         teardown_plugin(userdata);
     }
@@ -1772,6 +1908,7 @@ mod tests {
 
     #[test]
     fn acl_read_rejects_expired_biscuit_when_flag_disabled() {
+        reset_kick_client_call();
         let (userdata, _identifier) = setup_plugin_with_config();
         set_acl_read_full_authz(userdata, false);
         cache_test_biscuit(userdata, Some(Utc::now().timestamp() - 1));
@@ -1796,6 +1933,10 @@ mod tests {
             userdata,
         );
         assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
+        let kick = kick_client_call_snapshot();
+        assert_eq!(kick.count, 1);
+        assert_eq!(kick.last_client_id.as_deref(), Some("test_client"));
+        assert_eq!(kick.last_with_will, Some(false));
 
         teardown_plugin(userdata);
     }

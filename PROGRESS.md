@@ -265,7 +265,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 6. Issue 31: Control-triggered kick/re-auth
 7. Issue 32: Control-triggered ACL_READ + notify
 8. Issue 37: ACL_READ fan-out scenarios across policy profiles
-9. Issue 38: Expiry enforcement in ACL_CHECK
+9. Issue 39: Broker-level integration assertions for runtime enforcement
 ---
 
 #### A) Policy Source Parity
@@ -393,22 +393,56 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Result metadata documenting active `acl_read_full_authz` mode and policy
       profile for each run
 
-- [ ] **Issue 38: Expiry enforcement in ACL_CHECK with disconnect (no reason codes)**
-  - Goal: On expired tokens, rely on `MOSQ_EVT_ACL_CHECK` to deny access and
-    forcibly disconnect the client, since ACL checks do not support MQTT v5
-    reason codes/strings for explicit expiry signaling.
-  - Current state: `ACL_CHECK` returns `MOSQ_ERR_ACL_DENIED` on
-    `AuthzOutcome::Expired` but does **not** disconnect the client.
-  - Constraints:
-    - Do not send or depend on reason codes in ACL checks.
-    - Avoid full token signature verification in `ACL_CHECK`; only validate
-      expiry and policy evaluation (authz). Cryptographic verification should
-      remain in auth/enhanced-auth entrypoints.
+#### G) Broker Runtime Verification (Integration Assertions)
+
+- [ ] **Issue 39: Add broker-level integration assertions for runtime enforcement semantics**
+  - Goal: Add deterministic end-to-end tests against a real Mosquitto broker +
+    loaded plugin, so runtime enforcement behavior is validated beyond unit
+    tests with mocked broker symbols.
+  - Rationale:
+    - Issue 38 added disconnect-on-expiry behavior in `ACL_CHECK`, but current
+      coverage is unit-level only.
+    - Several security-critical paths depend on broker callback semantics and
+      timing (`ACL_CHECK`, `$CONTROL`, reconnect/reauth), which should be
+      validated in a real broker process.
+  - Scope (what must be asserted):
+    - **Expiry enforcement in `ACL_CHECK` (Issue 38):**
+      - JWT + Biscuit expired-token cases
+      - `acl_read_full_authz=false` (`ACL_READ` expiry-only fast path) and
+        `acl_read_full_authz=true` (full-authz path)
+      - Assert ACL denial *and* client disconnect within a bounded timeout
+    - **Negative controls (no false disconnects):**
+      - Non-expired deny outcomes on `ACL_READ`, `ACL_WRITE`, and
+        `ACL_SUBSCRIBE` return denial/defer semantics without forced disconnect
+      - Valid non-expired allow paths remain connected
+    - **Control-plane enforcement parity (Issues 31/32):**
+      - Kick/re-auth workflow after `$CONTROL` policy changes
+      - `ACL_READ` + notification workflow: policy churn causes read denial and
+        client-visible notification behavior
+    - **Fan-out and churn behavior (Issue 37 + Issue 30):**
+      - Subscriber fan-out scenarios (10/50/100) under dynamic policy updates
+      - Verify post-churn delivery drops/denials reflect effective policy state
+    - **Session lifecycle correctness:**
+      - Reconnect with a fresh token succeeds after forced disconnect
+      - Cache/session state does not leave stale authorization effects
+    - **Protocol/transport coverage:**
+      - Basic auth and MQTT v5 enhanced auth entrypoints
+      - Plain TCP and TLS broker modes
+    - **Kick semantics detail:**
+      - Assert `with_will=false` behavior (no unintended LWT emission) on
+        broker-initiated disconnects
   - Deliverable:
-    - Add explicit disconnect path when `AuthzOutcome::Expired` is returned in
-      `ACL_CHECK` (document which Mosquitto API is used).
-    - Document rationale: ACL_CHECK is the authoritative access gate; expiry
-      means immediate disconnect without reason codes.
+    - New integration suite (e.g., `tests/integration/`) runnable via `pytest`
+      with a dedicated marker (e.g., `-m broker_integration`)
+    - Deterministic fixtures for:
+      - docker-compose lifecycle (`mosquitto`, authz, issuer)
+      - short-lived token issuance (JWT + Biscuit)
+      - client observers for disconnect/reconnect/notification events
+    - Assertions sourced from both client-side events and broker/plugin logs
+      where needed to disambiguate denials vs disconnects
+    - Documentation:
+      - exact commands for local runs and CI-compatible runs
+      - expected timing bounds and flake-control strategy (timeouts/retries)
 
 ---
 
@@ -567,6 +601,18 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Coverage tests:
       - `benchmarks/test_issue30_acl_read_fanout_coverage.py`
       - `benchmarks/test_policy_churn.py`
+
+- [x] **Issue 38: Expiry enforcement in ACL_CHECK with disconnect (no reason codes)** — **COMPLETED 2026-02-27**
+  - **Summary**: `MOSQ_EVT_ACL_CHECK` now enforces immediate disconnect on
+    `AuthzOutcome::Expired` by calling `mosquitto_kick_client_by_clientid`
+    (`with_will=false`) and returning `MOSQ_ERR_ACL_DENIED`.
+  - **Rationale/Constraints Preserved**:
+    - No MQTT reason codes/strings are used in ACL callbacks.
+    - `ACL_CHECK` remains expiry/authz-only; cryptographic token verification
+      stays in basic/enhanced auth entrypoints.
+  - **Validation**: Added unit coverage for JWT and Biscuit expired-token
+    branches, including both ACL read fast path and full-authz path, plus
+    assertions that non-expired deny paths do not trigger disconnect.
 
 - [x] **Issue 33: Enhance HTTP policy expressiveness for parity with token-based
     authorization**

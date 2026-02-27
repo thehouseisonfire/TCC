@@ -185,6 +185,40 @@ Trade-off:
 - `false` minimizes per-subscriber callback cost.
 - `true` enforces full policy semantics per delivery and may significantly increase CPU/latency as subscriber count grows.
 
+### Issue 30: Dynamic-Policy `ACL_READ` Fan-Out Churn Coverage
+
+These scenarios validate that policy changes are enforced for **already subscribed**
+clients during fan-out delivery (`MOSQ_ACL_READ`), not just at subscribe time.
+
+Dynamic Security (strict `ACL_READ`):
+- `DYNSEC-ACLREAD-FANOUT-CHURN-JWT-10/50/100`
+- `DYNSEC-ACLREAD-FANOUT-CHURN-BIS-10/50/100`
+- Uses `mosquitto_dynsec_acl_read.conf` (`plugin_opt_acl_read_full_authz true`)
+- Seeds baseline from `dynamic-security-fanout-read-allow-unpinned.json`
+  so one subscriber username can authorize all declared fan-out clients
+- Mid-run churn swaps to `dynamic-security-fanout-read-deny-unpinned.json`
+  after message 5
+
+SQLite (strict `ACL_READ`):
+- `SQLITE-ACLREAD-FANOUT-CHURN-JWT-10/50/100`
+- `SQLITE-ACLREAD-FANOUT-CHURN-BIS-10/50/100`
+- Uses `mosquitto_sqlite_acl_read.conf` (`policy_mode=sqlite`,
+  `plugin_opt_acl_read_full_authz true`)
+- Seeds fan-out ACL rows before each run and revokes subscriber `ACL_READ` rows
+  mid-run after message 5
+
+Example run:
+
+```bash
+python3 benchmarks/run_scenarios.py \
+  --scenarios DYNSEC-ACLREAD-FANOUT-CHURN-JWT-10,SQLITE-ACLREAD-FANOUT-CHURN-BIS-10
+```
+
+Validation signal in scenario result JSON (`runs[].loadgen.fanout_churn`):
+- `triggered=true`
+- `received_pre_churn > 0`
+- `received_post_churn` drops below `expected_post_churn`
+
 ### Anonymous Flow Scenario (ANON-BASE)
 
 Policy rationale and security trade-offs are documented in

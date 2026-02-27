@@ -16,7 +16,7 @@ Execution commands and run workflow are documented in
 | HTTP policy (introspection) | `crates/authz-server/src/main.rs` | `policy_mode=http` or `hybrid` | Rule engine with deny-over-allow semantics, operation/client/role/topic matching, MQTT wildcards, and optional legacy prefix mode. |
 | Static ACL file | `docker/static-acl.conf` | `policy_mode=static_acl` | Compound gate with token + Mosquitto native ACLs. Token allow short-circuits; token deny defers to ACL. |
 | Dynamic Security snapshot | `docker/dynamic-security*.json` | `policy_mode=dynamic_security` | Local snapshot of Mosquitto dynsec-like RBAC, reloaded on interval. |
-| SQLite policy | `sqlite_policy.rs` | `policy_mode=sqlite` | Simple `acl` table with a single demo rule. **Not parity-grade** yet. |
+| SQLite policy | `sqlite_policy.rs` + `benchmarks/policy_churn.py` | `policy_mode=sqlite` | Simple `acl` table with deterministic fan-out seed/churn helpers for Issue 30. **Not parity-grade RBAC** yet. |
 
 ### Token-Only Authorization Semantics
 
@@ -157,6 +157,25 @@ the authoritative access policy.
 | DYNSEC-CHURN | JWT | Dynamic Security | `dynamic-security.json`/`dynamic-security-alt.json` swap | Mixed (read-only) |
 | DYNSEC-READ-FANOUT | JWT | Dynamic Security | fanout roles/ACLs enabled | Allows |
 | DYNSEC-READ-FANOUT-CHURN | JWT | Dynamic Security | fanout ACLs change on churn | Mixed |
+| DYNSEC-ACLREAD-FANOUT-CHURN-JWT-{10,50,100} | JWT | Dynamic Security | `acl_read_full_authz=true`; churn after message 5 swaps to `dynamic-security-fanout-read-deny.json` (subscribe kept, receive removed) | Existing subscribers denied on post-churn fan-out |
+| DYNSEC-ACLREAD-FANOUT-CHURN-BIS-{10,50,100} | Biscuit | Dynamic Security | Same as JWT variant with Biscuit token path | Existing subscribers denied on post-churn fan-out |
+
+Issue 30 dynamic-security notes:
+- Uses strict config `mosquitto_dynsec_acl_read.conf` (`plugin_opt_acl_read_full_authz true`) so fan-out delivery checks go through full policy authorization.
+- Churn is applied mid-run (not between repeats), targeting already-subscribed clients.
+- Result payload includes pre/post churn receive counters under `fanout_churn`.
+
+### 2.5.1 SQLite Fan-Out Churn Coverage (Issue 30)
+
+| Scenario | Token | Policy Source | Policy Detail | Expected Outcome |
+| --- | --- | --- | --- | --- |
+| SQLITE-ACLREAD-FANOUT-CHURN-JWT-{10,50,100} | JWT | SQLite | `acl_read_full_authz=true`; seeded fan-out ACL rows (subscribe+read) then mid-run revoke of subscriber `ACL_READ` rows after message 5 | Existing subscribers denied on post-churn fan-out |
+| SQLITE-ACLREAD-FANOUT-CHURN-BIS-{10,50,100} | Biscuit | SQLite | Same as JWT variant with Biscuit token path | Existing subscribers denied on post-churn fan-out |
+
+Issue 30 sqlite notes:
+- Uses `mosquitto_sqlite_acl_read.conf` with `policy_mode=sqlite` and `plugin_opt_acl_read_full_authz true`.
+- `benchmarks/policy_churn.py` seeds deterministic rows for `client_1..N` and `fanout_publisher`.
+- Mid-run churn removes only subscriber `ACL_READ` rows for `fanout/broadcast` (subscribe rows remain).
 
 
 ### 2.6 Lifecycle And Reauthentication
@@ -229,3 +248,4 @@ This file remains the source of truth for:
 - Static ACL file: `docker/static-acl.conf`
 - Dynamic security snapshots: `docker/dynamic-security*.json`
 - SQLite policy: `crates/mosquitto-plugin/src/sqlite_policy.rs`
+- Policy churn helpers: `benchmarks/policy_churn.py`

@@ -12,6 +12,7 @@ services:
       - ./static-acl.conf:/mosquitto/config/static-acl.conf
       - ./dynamic-security.json:/mosquitto/config/dynamic-security.json
       - ./dynamic-security-churn.json:/mosquitto/config/dynamic-security-churn.json
+      - ./sqlite:/mosquitto/config/sqlite
     cpuset: "0-1"
     mem_limit: 512m
     networks:

@@ -1,0 +1,78 @@
+{
+  "clients": [
+    {
+      "username": "dynsec_client_1",
+      "clientid": "client_1",
+      "roles": [{"rolename": "sensor_writer", "priority": 0}],
+      "disabled": false
+    },
+    {
+      "username": "dynsec_publisher",
+      "clientid": "fanout_publisher",
+      "roles": [{"rolename": "fanout_writer", "priority": 0}],
+      "disabled": false
+    }
+  ],
+  "groups": [
+    {
+      "groupname": "sensors",
+      "roles": [
+        {"rolename": "sensor_reader", "priority": 0},
+        {"rolename": "fanout_reader", "priority": 0}
+      ],
+      "clients": [{"username": "dynsec_client_1", "priority": 0}]
+    }
+  ],
+  "roles": [
+    {
+      "rolename": "sensor_writer",
+      "acls": [
+        {
+          "acltype": "publishClientSend",
+          "topic": "sensors/+/#",
+          "priority": 0,
+          "allow": true
+        }
+      ]
+    },
+    {
+      "rolename": "sensor_reader",
+      "acls": [
+        {
+          "acltype": "publishClientReceive",
+          "topic": "sensors/+/#",
+          "priority": 0,
+          "allow": true
+        }
+      ]
+    },
+    {
+      "rolename": "fanout_reader",
+      "acls": [
+        {
+          "acltype": "subscribeLiteral",
+          "topic": "fanout/broadcast",
+          "priority": 0,
+          "allow": true
+        }
+      ]
+    },
+    {
+      "rolename": "fanout_writer",
+      "acls": [
+        {
+          "acltype": "publishClientSend",
+          "topic": "fanout/broadcast",
+          "priority": 0,
+          "allow": true
+        }
+      ]
+    }
+  ],
+  "defaultACLAccess": {
+    "publishClientSend": false,
+    "publishClientReceive": false,
+    "subscribe": false,
+    "unsubscribe": false
+  }
+}

@@ -244,11 +244,11 @@ The actionable parity gaps are tracked here as backlog items:
 2. Static ACL scenarios now use roles-only tokens to isolate ACL cost
    (implemented in Issue 28; preserve this invariant in new scenarios).
 3. SQLite policy model remains too simple for parity-grade comparisons
-   (tracked by Issue 22 and Issue 30).
+   (tracked by Issue 22).
 4. `POLICY-COMPLEX-*` naming must stay explicit about what is being stressed
    (`block_chain` vs Datalog complexity; tracked by Issue 21 and Issue 33).
 5. Dynamic-security parity should continue to prefer policy-source isolation
-   (roles-only token variants; tracked by Issue 28/30/31/32).
+   (roles-only token variants; tracked by Issue 28/31/32).
 
 Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 
@@ -262,10 +262,9 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 3. Issue 22: Strengthen SQLite RBAC (if policies too simple)
 4. Issue 23: Proactive client reauthentication
 5. Issue 24: Multi-step enhanced auth decision
-6. Issue 30: Dynamic-policy ACL_READ fan-out
-7. Issue 31: Control-triggered kick/re-auth
-8. Issue 32: Control-triggered ACL_READ + notify
-9. Issue 37: ACL_READ fan-out scenarios across policy profiles
+6. Issue 31: Control-triggered kick/re-auth
+7. Issue 32: Control-triggered ACL_READ + notify
+8. Issue 37: ACL_READ fan-out scenarios across policy profiles
 
 ---
 
@@ -374,14 +373,6 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - If in-scope:
       - Implement multi-step auth state handling (per client/session) and add at
         least one scenario measuring multi-step overhead
-
-- [ ] **Issue 30: Verify dynamic-policy coverage with ACL_READ fan-out checks**
-  - Goal: Ensure dynamic policy scenarios enforce changes via `ACL_READ` for
-    existing subscribers (fan-out), not just on subscribe (through acl_read_full_authz).
-  - Deliverable:
-    - Scenario(s) for Dynamic Security with `ACL_READ` checks enabled
-    - Scenario(s) for SQLite with policy churn + `ACL_READ` checks enabled
-    - Results include subscriber counts to observe scaling effects
 
 - [ ] **Issue 31: Verify control-triggered dynamic enforcement (kick/re-auth)**
   - Goal: Implement/control scenarios where `$CONTROL/.../v1` triggers
@@ -552,6 +543,30 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 
 - [x] **Issue 29: Anonymous flow scenario via anonymousGroup policy**
   - **Completed**: Enabled anonymous MQTT clients using Mosquitto's `allow_anonymous true` with Dynamic Security `anonymousGroup` policy. Added `allow_anonymous_no_token=true` config option and `ANON-BASE` scenario with proper plugin defer logic for no-token clients.
+
+- [x] **Issue 30: Verify dynamic-policy coverage with ACL_READ fan-out checks** — **COMPLETED 2026-02-26**
+  - **Summary**: Added deterministic mid-run fan-out churn scenarios that
+    enforce policy changes for already-subscribed clients through strict
+    `ACL_READ` authorization (`plugin_opt_acl_read_full_authz true`) for both
+    Dynamic Security and SQLite.
+  - **Deliverables**:
+    - New strict configs:
+      - `docker/mosquitto_dynsec_acl_read.conf` (+ TLS variant)
+      - `docker/mosquitto_sqlite_acl_read.conf` (+ TLS variant)
+    - New scenario matrix with subscriber scaling (10/50/100), JWT+Biscuit:
+      - `DYNSEC-ACLREAD-FANOUT-CHURN-{JWT|BIS}-{10|50|100}`
+      - `SQLITE-ACLREAD-FANOUT-CHURN-{JWT|BIS}-{10|50|100}`
+    - Deterministic fan-out orchestration in `loadgen.py`:
+      subscriber-ready barrier, mid-run churn trigger, and pre/post-churn
+      receive counters in `fanout_churn` result metadata.
+    - Dynamic-security churn snapshot:
+      `docker/dynamic-security-fanout-read-deny.json` (subscribe retained,
+      fan-out read removed).
+    - SQLite churn helpers in `benchmarks/policy_churn.py`:
+      deterministic fan-out seed + `ACL_READ` revoke during active runs.
+    - Coverage tests:
+      - `benchmarks/test_issue30_acl_read_fanout_coverage.py`
+      - `benchmarks/test_policy_churn.py`
 
 - [x] **Issue 33: Enhance HTTP policy expressiveness for parity with token-based
     authorization**

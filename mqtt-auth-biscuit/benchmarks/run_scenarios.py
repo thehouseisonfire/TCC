@@ -1,6 +1,5 @@
 import json
 import os
-import shutil
 import subprocess
 import time
 from typing import Any, Literal, TypedDict, cast
@@ -9,7 +8,7 @@ import httpx
 import typer
 from pydantic import BaseModel, ConfigDict
 
-from benchmarks import dynsec_commands
+from benchmarks import dynsec_commands, policy_churn
 from benchmarks.iperf3_baseline import (
     check_network_validity,
     run_baseline_with_retry,
@@ -161,6 +160,17 @@ class ScenarioConfig(TypedDict, total=False):
     token_refresh: TokenRefreshConfig
     dynsec_config: str
     dynsec_churn: list[str]
+    fanout_churn_kind: str
+    fanout_churn_after_messages: int
+    fanout_churn_settle_ms: int
+    fanout_churn_dynsec_source: str
+    fanout_churn_sqlite_db: str
+    fanout_churn_sqlite_topic: str
+    fanout_churn_sqlite_subscribers: int
+    sqlite_seed_fanout: bool
+    sqlite_seed_db: str
+    sqlite_seed_topic: str
+    sqlite_seed_subscribers: int
     token_issuer_no_default_roles: bool
     token_issuer_no_default_grants: bool
     tls: bool
@@ -450,6 +460,13 @@ def _run_loadgen(
     control_mode: bool = False,
     control_after_messages: int = 0,
     control_repeat: int = 1,
+    fanout_churn_kind: str | None = None,
+    fanout_churn_after_messages: int = 0,
+    fanout_churn_settle_ms: int = 0,
+    fanout_churn_dynsec_source: str | None = None,
+    fanout_churn_sqlite_db: str | None = None,
+    fanout_churn_sqlite_topic: str | None = None,
+    fanout_churn_sqlite_subscribers: int | None = None,
 ):
     cmd = [
         "python3",
@@ -561,19 +578,117 @@ def _run_loadgen(
         cmd.extend(["--control-after-messages", str(control_after_messages)])
     if control_repeat != 1:
         cmd.extend(["--control-repeat", str(control_repeat)])
+    if fanout_churn_kind:
+        cmd.extend(["--fanout-churn-kind", fanout_churn_kind])
+    if fanout_churn_after_messages > 0:
+        cmd.extend(["--fanout-churn-after-messages", str(fanout_churn_after_messages)])
+    if fanout_churn_settle_ms > 0:
+        cmd.extend(["--fanout-churn-settle-ms", str(fanout_churn_settle_ms)])
+    if fanout_churn_dynsec_source:
+        cmd.extend(["--fanout-churn-dynsec-source", fanout_churn_dynsec_source])
+    if fanout_churn_sqlite_db:
+        cmd.extend(["--fanout-churn-sqlite-db", fanout_churn_sqlite_db])
+    if fanout_churn_sqlite_topic:
+        cmd.extend(["--fanout-churn-sqlite-topic", fanout_churn_sqlite_topic])
+    if fanout_churn_sqlite_subscribers is not None:
+        cmd.extend(["--fanout-churn-sqlite-subscribers", str(fanout_churn_sqlite_subscribers)])
 
     out = subprocess.check_output(cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
     return json.loads(out.decode("utf-8"))
 
 
 def _apply_dynsec_config(source_path: str):
-    repo_root = os.path.dirname(os.path.dirname(__file__))
-    src = os.path.join(repo_root, source_path)
-    dest = os.path.join(repo_root, "docker", "dynamic-security.json")
-    shutil.copyfile(src, dest)
-    tls_dest = os.path.join(repo_root, "docker", "tls", "dynamic-security.json")
-    if os.path.exists(os.path.dirname(tls_dest)):
-        shutil.copyfile(src, tls_dest)
+    policy_churn.apply_dynsec_snapshot(source_path)
+
+
+def _resolve_repo_path(path: str) -> str:
+    if os.path.isabs(path):
+        return path
+    return os.path.join(os.path.dirname(os.path.dirname(__file__)), path)
+
+
+def _load_dynsec_snapshot(path: str) -> dict[str, Any]:
+    resolved = _resolve_repo_path(path)
+    try:
+        with open(resolved, encoding="utf-8") as f:
+            payload = json.load(f)
+    except FileNotFoundError as exc:
+        raise ValueError(f"dynsec snapshot file not found: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"dynsec snapshot parse failed: {path}: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise ValueError(f"dynsec snapshot must be a JSON object: {path}")
+    return payload
+
+
+def _validate_dynsec_snapshot_supports_fanout_subscribers(
+    *,
+    scenario_id: str,
+    snapshot_path: str,
+    subscriber_username: str,
+    subscriber_count: int,
+) -> None:
+    snapshot = _load_dynsec_snapshot(snapshot_path)
+    clients = snapshot.get("clients")
+    if not isinstance(clients, list):
+        raise ValueError(f"{scenario_id}: dynsec snapshot missing clients list: {snapshot_path}")
+
+    matching_client: dict[str, Any] | None = None
+    for client in clients:
+        if isinstance(client, dict) and client.get("username") == subscriber_username:
+            matching_client = client
+            break
+
+    if matching_client is None:
+        raise ValueError(
+            f"{scenario_id}: dynsec snapshot '{snapshot_path}' has no client for username "
+            f"'{subscriber_username}'"
+        )
+
+    pinned_client_id = matching_client.get("clientid")
+    if isinstance(pinned_client_id, str) and pinned_client_id:
+        raise ValueError(
+            f"{scenario_id}: dynsec snapshot '{snapshot_path}' pins username "
+            f"'{subscriber_username}' to clientid '{pinned_client_id}' but scenario "
+            f"declares subscriber_count={subscriber_count}. Remove clientid pinning or "
+            "expand identities to match subscriber_count."
+        )
+
+
+def _validate_dynsec_fanout_alignment(scenario_id: str, scenario: ScenarioConfig) -> None:
+    if scenario.get("mode") != "fanout":
+        return
+
+    subscriber_count = int(scenario.get("subscriber_count", 0) or 0)
+    if subscriber_count <= 1:
+        return
+
+    dynsec_config = scenario.get("dynsec_config")
+    subscriber_username = scenario.get("username")
+    if not dynsec_config or not subscriber_username:
+        return
+
+    _validate_dynsec_snapshot_supports_fanout_subscribers(
+        scenario_id=scenario_id,
+        snapshot_path=dynsec_config,
+        subscriber_username=subscriber_username,
+        subscriber_count=subscriber_count,
+    )
+
+    if scenario.get("fanout_churn_kind") == "dynsec_swap":
+        churn_snapshot = scenario.get("fanout_churn_dynsec_source")
+        if not churn_snapshot:
+            raise ValueError(
+                f"{scenario_id}: fanout_churn_kind=dynsec_swap requires "
+                "fanout_churn_dynsec_source"
+            )
+        _validate_dynsec_snapshot_supports_fanout_subscribers(
+            scenario_id=scenario_id,
+            snapshot_path=churn_snapshot,
+            subscriber_username=subscriber_username,
+            subscriber_count=subscriber_count,
+        )
 
 
 def _expand_tls_matrix(
@@ -752,6 +867,107 @@ def _static_acl_scenarios(tokens: dict[str, Any]) -> dict[str, ScenarioConfig]:
             "message_size": 0,
         },
     }
+
+
+def _issue30_acl_read_fanout_scenarios(tokens: dict[str, Any]) -> dict[str, ScenarioConfig]:
+    scenarios: dict[str, ScenarioConfig] = {}
+    subscriber_slices = [10, 50, 100]
+    base_topic = "fanout/broadcast"
+
+    for subscribers in subscriber_slices:
+        scenarios[f"DYNSEC-ACLREAD-FANOUT-CHURN-JWT-{subscribers}"] = {
+            "mosquitto_conf": "./mosquitto_dynsec_acl_read.conf",
+            "username": "dynsec_client_1",
+            "password": tokens["jwt"],
+            "fanout_publisher_username": "dynsec_publisher",
+            "fanout_publisher_password": tokens["jwt"],
+            "topic": base_topic,
+            "mode": "fanout",
+            "subscriber_count": subscribers,
+            "fanout_topic": base_topic,
+            "authz": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "dynsec_config": "docker/dynamic-security-fanout-read-allow-unpinned.json",
+            "fanout_churn_kind": "dynsec_swap",
+            "fanout_churn_after_messages": 5,
+            "fanout_churn_settle_ms": 1200,
+            "fanout_churn_dynsec_source": "docker/dynamic-security-fanout-read-deny-unpinned.json",
+        }
+        scenarios[f"DYNSEC-ACLREAD-FANOUT-CHURN-BIS-{subscribers}"] = {
+            "mosquitto_conf": "./mosquitto_dynsec_acl_read.conf",
+            "username": "dynsec_client_1",
+            "password": tokens["biscuit"],
+            "fanout_publisher_username": "dynsec_publisher",
+            "fanout_publisher_password": tokens["biscuit"],
+            "topic": base_topic,
+            "mode": "fanout",
+            "subscriber_count": subscribers,
+            "fanout_topic": base_topic,
+            "authz": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "dynsec_config": "docker/dynamic-security-fanout-read-allow-unpinned.json",
+            "fanout_churn_kind": "dynsec_swap",
+            "fanout_churn_after_messages": 5,
+            "fanout_churn_settle_ms": 1200,
+            "fanout_churn_dynsec_source": "docker/dynamic-security-fanout-read-deny-unpinned.json",
+        }
+
+        scenarios[f"SQLITE-ACLREAD-FANOUT-CHURN-JWT-{subscribers}"] = {
+            "mosquitto_conf": "./mosquitto_sqlite_acl_read.conf",
+            "username": "jwt",
+            "password": tokens["jwt"],
+            "fanout_publisher_username": "jwt",
+            "fanout_publisher_password": tokens["jwt"],
+            "topic": base_topic,
+            "mode": "fanout",
+            "subscriber_count": subscribers,
+            "fanout_topic": base_topic,
+            "authz": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "sqlite_seed_fanout": True,
+            "sqlite_seed_db": "docker/sqlite/policy.db",
+            "sqlite_seed_topic": base_topic,
+            "sqlite_seed_subscribers": subscribers,
+            "fanout_churn_kind": "sqlite_revoke_read",
+            "fanout_churn_after_messages": 5,
+            "fanout_churn_settle_ms": 1200,
+            "fanout_churn_sqlite_db": "docker/sqlite/policy.db",
+            "fanout_churn_sqlite_topic": base_topic,
+            "fanout_churn_sqlite_subscribers": subscribers,
+        }
+        scenarios[f"SQLITE-ACLREAD-FANOUT-CHURN-BIS-{subscribers}"] = {
+            "mosquitto_conf": "./mosquitto_sqlite_acl_read.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "fanout_publisher_username": "biscuit",
+            "fanout_publisher_password": tokens["biscuit"],
+            "topic": base_topic,
+            "mode": "fanout",
+            "subscriber_count": subscribers,
+            "fanout_topic": base_topic,
+            "authz": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "sqlite_seed_fanout": True,
+            "sqlite_seed_db": "docker/sqlite/policy.db",
+            "sqlite_seed_topic": base_topic,
+            "sqlite_seed_subscribers": subscribers,
+            "fanout_churn_kind": "sqlite_revoke_read",
+            "fanout_churn_after_messages": 5,
+            "fanout_churn_settle_ms": 1200,
+            "fanout_churn_sqlite_db": "docker/sqlite/policy.db",
+            "fanout_churn_sqlite_topic": base_topic,
+            "fanout_churn_sqlite_subscribers": subscribers,
+        }
+
+    return scenarios
 
 
 @app.command()
@@ -1066,6 +1282,7 @@ def main(
                 "policy_complexity_kind": "datalog",
             },
             **_static_acl_scenarios(tokens),
+            **_issue30_acl_read_fanout_scenarios(tokens),
             "JWT-HTTP-200MS": {
                 "mosquitto_conf": "./mosquitto_http.conf",
                 "username": "jwt",
@@ -1733,6 +1950,14 @@ def main(
         logger.info("DYNSEC-BASE, DYNSEC-CHURN, DYNSEC-READ-FANOUT")
         logger.info("DYNSEC-READ-FANOUT-CHURN")
         logger.info(
+            "DYNSEC-ACLREAD-FANOUT-CHURN-JWT-10/50/100, "
+            "DYNSEC-ACLREAD-FANOUT-CHURN-BIS-10/50/100",
+        )
+        logger.info(
+            "SQLITE-ACLREAD-FANOUT-CHURN-JWT-10/50/100, "
+            "SQLITE-ACLREAD-FANOUT-CHURN-BIS-10/50/100",
+        )
+        logger.info(
             "STATIC-ACL-JWT, STATIC-ACL-BIS, STATIC-ACL-FANOUT, STATIC-ACL-FANOUT-BIS",
         )
         # Issue 20: Control-triggered enforcement scenarios (renamed to CONTROL-OVERHEAD)
@@ -1991,6 +2216,9 @@ def main(
                 "mode": s.get("mode"),
                 "fanout_topic": s.get("fanout_topic"),
                 "subscriber_count": s.get("subscriber_count"),
+                "fanout_churn_kind": s.get("fanout_churn_kind"),
+                "fanout_churn_after_messages": s.get("fanout_churn_after_messages"),
+                "fanout_churn_settle_ms": s.get("fanout_churn_settle_ms"),
             },
             "fanout_metrics": {
                 "subscriber_count": s.get(
@@ -2039,12 +2267,22 @@ def main(
             _compose(["restart", "mosquitto"], extra_env=extra_env)
             time.sleep(1)
 
+        _validate_dynsec_fanout_alignment(s["id"], s)
+
         for idx in range(repeats):
             if s.get("dynsec_config"):
                 _apply_dynsec_config(s["dynsec_config"])
             elif s.get("dynsec_churn"):
                 churn_list = s["dynsec_churn"]
                 _apply_dynsec_config(churn_list[idx % len(churn_list)])
+            if s.get("sqlite_seed_fanout"):
+                policy_churn.seed_sqlite_fanout_policy(
+                    s.get("sqlite_seed_db", "docker/sqlite/policy.db"),
+                    topic=s.get("sqlite_seed_topic", s.get("fanout_topic", "fanout/broadcast")),
+                    subscriber_count=int(
+                        s.get("sqlite_seed_subscribers", s.get("subscriber_count", clients))
+                    ),
+                )
             mqtt5_cfg = s.get("mqtt5_auth")
             if mqtt5_cfg is not None:
                 binary_mode: bool = mqtt5_cfg.get("binary_mode", False)
@@ -2184,6 +2422,13 @@ def main(
                     control_repeat=s.get("control_repeat", 1),
                     # Issue 36: Interleaved control message parameter
                     control_after_messages=s.get("control_after_messages", 0),
+                    fanout_churn_kind=s.get("fanout_churn_kind"),
+                    fanout_churn_after_messages=s.get("fanout_churn_after_messages", 0),
+                    fanout_churn_settle_ms=s.get("fanout_churn_settle_ms", 0),
+                    fanout_churn_dynsec_source=s.get("fanout_churn_dynsec_source"),
+                    fanout_churn_sqlite_db=s.get("fanout_churn_sqlite_db"),
+                    fanout_churn_sqlite_topic=s.get("fanout_churn_sqlite_topic"),
+                    fanout_churn_sqlite_subscribers=s.get("fanout_churn_sqlite_subscribers"),
                 )
             # Small delay to ensure container metrics are available after loadgen
             time.sleep(2)

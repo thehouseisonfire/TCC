@@ -6,7 +6,7 @@ import subprocess
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, cast
 
 import httpx
@@ -20,13 +20,15 @@ except ModuleNotFoundError as exc:
         "Missing dependency 'paho-mqtt'. Install it with: pip install paho-mqtt"
     ) from exc
 
+from benchmarks import policy_churn
 from benchmarks.logging_utils import get_logger, setup_logging
 
 logger = get_logger(__name__)
 app = typer.Typer(add_completion=False)
 
-# Empty QoS metrics structure for consistent initialization
+# Backward-compatible export used by packet analysis tests/importers.
 EMPTY_QOS_METRICS: dict[int, list[float]] = {0: [], 1: [], 2: []}
+FANOUT_SUBACK_TIMEOUT_S = 10.0
 
 BISCUIT_ATTENUATE_DENY_OPTION = typer.Option(None, "--biscuit-attenuate-deny")
 BISCUIT_ATTENUATE_CHECK_OPTION = typer.Option(None, "--biscuit-attenuate-check")
@@ -107,6 +109,41 @@ def _effective_subscribe_qos(
     return max(qos for qos, _ in distribution)
 
 
+def _normalize_suback_reason_code(reason_code: Any) -> int | None:
+    if isinstance(reason_code, int):
+        return reason_code
+    value = getattr(reason_code, "value", None)
+    if isinstance(value, int):
+        return value
+    try:
+        return int(reason_code)
+    except TypeError, ValueError:
+        return None
+
+
+def _suback_reason_values(reason_codes: list[Any] | None) -> list[int] | None:
+    if not reason_codes:
+        return []
+    values: list[int] = []
+    for reason_code in reason_codes:
+        normalized = _normalize_suback_reason_code(reason_code)
+        if normalized is None:
+            return None
+        values.append(normalized)
+    return values
+
+
+def _suback_succeeded(reason_codes: list[Any] | None) -> bool:
+    values = _suback_reason_values(reason_codes)
+    if values is None:
+        return False
+    if not values:
+        # MQTT v3 callbacks may provide an empty reason list; callback arrival
+        # still confirms the SUBACK handshake in that case.
+        return True
+    return all(value in (0, 1, 2) for value in values)
+
+
 @dataclass
 class WorkerConfig:
     host: str
@@ -166,6 +203,9 @@ class WorkerConfig:
     control_qos: int
     # Issue 36: Interleaved control message support
     control_after_messages: int
+    fanout_subscribe_barrier: FanoutSubscribeBarrier | None
+    fanout_churn_after_messages: int
+    fanout_abort_evt: threading.Event | None = None
 
 
 @dataclass
@@ -188,6 +228,43 @@ class WorkerResult:
     control_errors: list[str]
     # Issue 36: Interleaved control metrics
     control_injection_delay_ms: list[float]
+    receive_pre_churn: int | None
+    receive_post_churn: int | None
+
+
+@dataclass
+class FanoutSubscribeBarrier:
+    expected: int
+    ready: int = 0
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    event: threading.Event = field(default_factory=threading.Event)
+
+    def set_expected(self, expected: int) -> None:
+        with self.lock:
+            self.expected = expected
+            if self.ready >= self.expected:
+                self.event.set()
+
+    def mark_ready(self) -> None:
+        with self.lock:
+            self.ready += 1
+            if self.ready >= self.expected:
+                self.event.set()
+
+
+@dataclass
+class FanoutChurnConfig:
+    kind: str | None = None
+    after_messages: int = 0
+    settle_ms: int = 0
+    dynsec_source: str | None = None
+    sqlite_db: str | None = None
+    sqlite_topic: str | None = None
+    sqlite_subscribers: int | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.kind) and self.after_messages > 0
 
 
 def _mk_payload(size: int) -> bytes:
@@ -479,7 +556,41 @@ def _receive_delegated_token(
     return token
 
 
-def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queue):
+def _apply_fanout_churn(cfg: FanoutChurnConfig) -> str | None:
+    if not cfg.enabled or cfg.kind is None:
+        return None
+    try:
+        if cfg.kind == "dynsec_swap":
+            if not cfg.dynsec_source:
+                return "fanout_churn_missing_dynsec_source"
+            policy_churn.apply_dynsec_snapshot(cfg.dynsec_source)
+        elif cfg.kind == "sqlite_revoke_read":
+            if not cfg.sqlite_db:
+                return "fanout_churn_missing_sqlite_db"
+            if not cfg.sqlite_topic:
+                return "fanout_churn_missing_sqlite_topic"
+            if not cfg.sqlite_subscribers:
+                return "fanout_churn_missing_sqlite_subscribers"
+            policy_churn.revoke_sqlite_read_fanout(
+                cfg.sqlite_db,
+                topic=cfg.sqlite_topic,
+                subscriber_count=cfg.sqlite_subscribers,
+            )
+        else:
+            return f"fanout_churn_unknown_kind:{cfg.kind}"
+        if cfg.settle_ms > 0:
+            time.sleep(cfg.settle_ms / 1000.0)
+    except Exception as exc:
+        return f"fanout_churn_failed:{exc}"
+    return None
+
+
+def _run_worker(
+    cfg: WorkerConfig,
+    start_evt: threading.Event,
+    fanout_publish_start_evt: threading.Event,
+    out_q: queue.Queue,
+):
     errors: list[str] = []
     publish_ms: list[float] = []
     # Issue 17: Per-QoS publish latency tracking
@@ -493,6 +604,67 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
     delegation_len = cfg.delegation_len
     attenuation_ms = None
     attenuation_len = None
+    receive_pre_churn = 0
+    receive_post_churn = 0
+    fanout_ready_marked = False
+    fanout_suback_evt = threading.Event()
+    fanout_suback_lock = threading.Lock()
+    fanout_suback_mid: int | None = None
+    fanout_suback_reason_codes: list[Any] | None = None
+    fanout_receive_aborted = False
+
+    def mark_fanout_ready() -> None:
+        nonlocal fanout_ready_marked
+        if fanout_ready_marked:
+            return
+        if cfg.mode != "fanout":
+            return
+        barrier = cfg.fanout_subscribe_barrier
+        if barrier is None:
+            return
+        barrier.mark_ready()
+        fanout_ready_marked = True
+
+    def reset_fanout_suback_state() -> None:
+        nonlocal fanout_suback_mid, fanout_suback_reason_codes
+        with fanout_suback_lock:
+            fanout_suback_mid = None
+            fanout_suback_reason_codes = None
+        fanout_suback_evt.clear()
+
+    def mark_fanout_receive_aborted() -> None:
+        nonlocal fanout_receive_aborted
+        if fanout_receive_aborted:
+            return
+        errors.append("fanout_receive_aborted:subscribe_ready_timeout")
+        fanout_receive_aborted = True
+
+    def emit_result(connect_value: float | None) -> None:
+        out_q.put(
+            WorkerResult(
+                cfg.client_id,
+                connect_value,
+                publish_ms,
+                publish_ms_by_qos,
+                receive_ms,
+                token_refresh_ms,
+                token_refresh_len,
+                delegation_ms,
+                delegation_len,
+                attenuation_ms,
+                attenuation_len,
+                errors,
+                control_publish_ms,
+                control_errors,
+                control_injection_delay_ms,
+                receive_pre_churn if cfg.fanout_churn_after_messages > 0 else None,
+                receive_post_churn if cfg.fanout_churn_after_messages > 0 else None,
+            )
+        )
+
+    control_publish_ms: list[float] = []
+    control_errors: list[str] = []
+    control_injection_delay_ms: list[float] = []
 
     def attempt_connect(password: str):
         userdata = {
@@ -513,15 +685,29 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
             ud["disconnected"] = True
 
         def on_message(client, ud, msg):
+            nonlocal receive_pre_churn, receive_post_churn
             if cfg.mode != "fanout":
                 return
             payload = msg.payload or b""
             try:
-                prefix = payload.split(b"|", 1)[0]
-                sent_ts = float(prefix.decode("utf-8"))
+                parts = payload.split(b"|", 2)
+                sent_ts = float(parts[0].decode("utf-8"))
                 receive_ms.append((time.perf_counter() - sent_ts) * 1000.0)
+                if cfg.fanout_churn_after_messages > 0 and len(parts) > 1:
+                    sequence_id = int(parts[1].decode("utf-8"))
+                    if sequence_id < cfg.fanout_churn_after_messages:
+                        receive_pre_churn += 1
+                    else:
+                        receive_post_churn += 1
             except Exception:
                 errors.append("message_parse_failed")
+
+        def on_subscribe(client, ud, mid, reason_codes, properties=None):
+            nonlocal fanout_suback_mid, fanout_suback_reason_codes
+            with fanout_suback_lock:
+                fanout_suback_mid = mid
+                fanout_suback_reason_codes = list(reason_codes) if reason_codes is not None else []
+            fanout_suback_evt.set()
 
         client = cast(Any, mqtt.Client)(
             client_id=cfg.client_id,
@@ -540,6 +726,7 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
         client.on_connect = on_connect
         client.on_disconnect = on_disconnect
         client.on_message = on_message
+        client.on_subscribe = on_subscribe
 
         if cfg.sync_connect:
             start_evt.wait()
@@ -577,240 +764,84 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
     client = None
     userdata = None
 
-    if cfg.biscuit_attenuate:
-        try:
-            password, attenuation_ms, attenuation_len = _attenuate_biscuit_token(password, cfg)
-        except Exception as e:
-            errors.append(f"attenuation_failed:{e}")
-            logger.exception("Biscuit attenuation failed", exc_info=e)
-            out_q.put(
-                WorkerResult(
-                    cfg.client_id,
-                    None,
-                    [],
-                    EMPTY_QOS_METRICS,
-                    [],
-                    None,
-                    None,
-                    delegation_ms,
-                    delegation_len,
-                    attenuation_ms,
-                    attenuation_len,
-                    errors,
-                    [],
-                    [],
-                    [],
-                )
-            )
-            return
-
-    if cfg.biscuit_delegate_handoff:
-        try:
-            password = _receive_delegated_token(cfg)
-        except Exception as e:
-            errors.append(str(e))
-            logger.exception("Delegation handoff failed", exc_info=e)
-            out_q.put(
-                WorkerResult(
-                    cfg.client_id,
-                    None,
-                    [],
-                    EMPTY_QOS_METRICS,
-                    [],
-                    None,
-                    None,
-                    delegation_ms,
-                    delegation_len,
-                    attenuation_ms,
-                    attenuation_len,
-                    errors,
-                    [],
-                    [],
-                    [],
-                )
-            )
-            return
-
-    for _ in range(2):
-        client, err, reason, connect_userdata = attempt_connect(password)
-        if client is not None:
-            userdata = connect_userdata
-            break
-
-        if token_refreshed:
-            errors.append(err)
-            out_q.put(
-                WorkerResult(
-                    cfg.client_id,
-                    None,
-                    [],
-                    EMPTY_QOS_METRICS,
-                    [],
-                    None,
-                    None,
-                    delegation_ms,
-                    delegation_len,
-                    attenuation_ms,
-                    attenuation_len,
-                    errors,
-                    [],
-                    [],
-                    [],
-                )
-            )
-            return
-
-        if cfg.token_issuer_url and cfg.token_issuer_kind and reason in cfg.token_refresh_codes:
+    try:
+        if cfg.biscuit_attenuate:
             try:
-                t_refresh_start = time.perf_counter()
-                password = _fetch_token(
-                    cfg.token_issuer_url,
-                    cfg.token_issuer_kind,
-                    cfg.client_id,
-                    cfg.topic,
-                    cfg.token_issuer_ttl,
-                    cfg.token_issuer_no_default_roles,
-                    cfg.token_issuer_no_default_grants,
-                    cfg.tls_ca_file,
-                    cfg.tls_insecure,
-                )
-                token_refresh_ms = (time.perf_counter() - t_refresh_start) * 1000.0
-                token_refresh_len = len(password)
-                token_refreshed = True
-                continue
+                password, attenuation_ms, attenuation_len = _attenuate_biscuit_token(password, cfg)
             except Exception as e:
-                errors.append(f"token_refresh_failed:{e}")
-                logger.exception("Token refresh failed", exc_info=e)
-                out_q.put(
-                    WorkerResult(
-                        cfg.client_id,
-                        None,
-                        [],
-                        EMPTY_QOS_METRICS,
-                        [],
-                        token_refresh_ms,
-                        token_refresh_len,
-                        delegation_ms,
-                        delegation_len,
-                        attenuation_ms,
-                        attenuation_len,
-                        errors,
-                        [],
-                        [],
-                        [],
-                    )
-                )
+                errors.append(f"attenuation_failed:{e}")
+                logger.exception("Biscuit attenuation failed", exc_info=e)
+                emit_result(None)
                 return
 
-        errors.append(err)
-        out_q.put(
-            WorkerResult(
-                cfg.client_id,
-                None,
-                [],
-                EMPTY_QOS_METRICS,
-                [],
-                token_refresh_ms,
-                token_refresh_len,
-                delegation_ms,
-                delegation_len,
-                attenuation_ms,
-                attenuation_len,
-                errors,
-                [],
-                [],
-                [],
-            )
-        )
-        return
-
-    if userdata is None or client is None:
-        errors.append("connect_failed")
-        out_q.put(
-            WorkerResult(
-                cfg.client_id,
-                None,
-                [],
-                EMPTY_QOS_METRICS,
-                [],
-                token_refresh_ms,
-                token_refresh_len,
-                delegation_ms,
-                delegation_len,
-                attenuation_ms,
-                attenuation_len,
-                errors,
-                [],
-                [],
-                [],
-            )
-        )
-        return
-
-    connect_ms = (userdata["connect_done"] - userdata["connect_start"]) * 1000.0
-
-    if not cfg.sync_connect:
-        start_evt.wait()
-
-    # CONTROL message publishing support
-    control_publish_ms: list[float] = []
-    control_errors: list[str] = []
-
-    if cfg.control_mode and cfg.control_topic and cfg.control_payload:
-        for _ in range(cfg.control_repeat):
+        if cfg.biscuit_delegate_handoff:
             try:
-                t0 = time.perf_counter()
-                payload = json.dumps(cfg.control_payload).encode()
-                info = client.publish(
-                    cfg.control_topic,
-                    payload,
-                    qos=cfg.control_qos,
-                )
-                info.wait_for_publish(timeout=10)
-                t1 = time.perf_counter()
-                control_publish_ms.append((t1 - t0) * 1000.0)
-                if info.rc != mqtt.MQTT_ERR_SUCCESS:
-                    control_errors.append(f"control_publish_rc:{info.rc}")
+                password = _receive_delegated_token(cfg)
             except Exception as e:
-                control_errors.append(f"control_publish_failed:{e}")
+                errors.append(str(e))
+                logger.exception("Delegation handoff failed", exc_info=e)
+                emit_result(None)
+                return
+
+        for _ in range(2):
+            client, err, reason, connect_userdata = attempt_connect(password)
+            if client is not None:
+                userdata = connect_userdata
                 break
 
-    if cfg.mode == "fanout":
-        if not cfg.subscribe_topic:
-            errors.append("fanout_missing_topic")
-        else:
-            try:
-                subscribe_qos = _effective_subscribe_qos(cfg.qos, cfg.qos_distribution)
-                res, _ = client.subscribe(cfg.subscribe_topic, qos=subscribe_qos)
-                if res != mqtt.MQTT_ERR_SUCCESS:
-                    errors.append(f"subscribe_rc:{res}")
-            except Exception as e:
-                errors.append(f"subscribe_failed:{e}")
+            if token_refreshed:
+                errors.append(err)
+                emit_result(None)
+                return
 
-        start_evt.wait()
-        deadline = time.time() + max(10.0, cfg.expect_messages * 0.2)
-        while len(receive_ms) < cfg.expect_messages and time.time() < deadline:
-            time.sleep(0.01)
-    else:
-        payload = _mk_payload(cfg.message_size)
-        message_counter = 0
-        # Issue 36: Interleaved control message support
-        interleave_enabled = (
-            cfg.control_after_messages > 0
-            and cfg.control_topic
-            and cfg.control_payload
-            and not cfg.control_mode
-        )
-        control_injection_delay_ms: list[float] = []
-
-        for _ in range(cfg.message_count):
-            # Issue 36: Check if we need to inject a control message
-            if interleave_enabled and message_counter >= cfg.control_after_messages:
-                injection_start = time.perf_counter()
+            if cfg.token_issuer_url and cfg.token_issuer_kind and reason in cfg.token_refresh_codes:
                 try:
-                    ctrl_payload = json.dumps(cfg.control_payload).encode()
+                    t_refresh_start = time.perf_counter()
+                    password = _fetch_token(
+                        cfg.token_issuer_url,
+                        cfg.token_issuer_kind,
+                        cfg.client_id,
+                        cfg.topic,
+                        cfg.token_issuer_ttl,
+                        cfg.token_issuer_no_default_roles,
+                        cfg.token_issuer_no_default_grants,
+                        cfg.tls_ca_file,
+                        cfg.tls_insecure,
+                    )
+                    token_refresh_ms = (time.perf_counter() - t_refresh_start) * 1000.0
+                    token_refresh_len = len(password)
+                    token_refreshed = True
+                    continue
+                except Exception as e:
+                    errors.append(f"token_refresh_failed:{e}")
+                    logger.exception("Token refresh failed", exc_info=e)
+                    emit_result(None)
+                    return
+
+            errors.append(err)
+            emit_result(None)
+            return
+
+        if userdata is None or client is None:
+            errors.append("connect_failed")
+            emit_result(None)
+            return
+
+        connect_ms = (userdata["connect_done"] - userdata["connect_start"]) * 1000.0
+
+        if not cfg.sync_connect:
+            start_evt.wait()
+
+        if cfg.control_mode and cfg.control_topic and cfg.control_payload:
+            for _ in range(cfg.control_repeat):
+                try:
                     t0 = time.perf_counter()
-                    info = client.publish(cfg.control_topic, ctrl_payload, qos=cfg.control_qos)
+                    payload = json.dumps(cfg.control_payload).encode()
+                    info = client.publish(
+                        cfg.control_topic,
+                        payload,
+                        qos=cfg.control_qos,
+                    )
                     info.wait_for_publish(timeout=10)
                     t1 = time.perf_counter()
                     control_publish_ms.append((t1 - t0) * 1000.0)
@@ -818,55 +849,131 @@ def _run_worker(cfg: WorkerConfig, start_evt: threading.Event, out_q: queue.Queu
                         control_errors.append(f"control_publish_rc:{info.rc}")
                 except Exception as e:
                     control_errors.append(f"control_publish_failed:{e}")
-                injection_end = time.perf_counter()
-                control_injection_delay_ms.append((injection_end - injection_start) * 1000.0)
-                message_counter = 0
+                    break
 
-            try:
-                t0 = time.perf_counter()
-                publish_qos = _choose_qos(cfg.qos, cfg.qos_distribution, qos_rng)
-                info = client.publish(cfg.topic, payload, qos=publish_qos)
-                info.wait_for_publish(timeout=10)
-                t1 = time.perf_counter()
-                latency_ms = (t1 - t0) * 1000.0
-                publish_ms.append(latency_ms)
-                publish_ms_by_qos[publish_qos].append(latency_ms)
-                message_counter += 1
-                if info.rc != mqtt.MQTT_ERR_SUCCESS:
-                    errors.append(f"publish_rc:{info.rc}")
-            except Exception as e:
-                errors.append(f"publish_failed:{e}")
-                break
+        if cfg.mode == "fanout":
+            fanout_subscribe_confirmed = False
+            if not cfg.subscribe_topic:
+                errors.append("fanout_missing_topic")
+            else:
+                try:
+                    reset_fanout_suback_state()
+                    subscribe_qos = _effective_subscribe_qos(cfg.qos, cfg.qos_distribution)
+                    res, subscribe_mid = client.subscribe(cfg.subscribe_topic, qos=subscribe_qos)
+                    if res != mqtt.MQTT_ERR_SUCCESS:
+                        errors.append(f"subscribe_rc:{res}")
+                    else:
+                        # SUBACK is control-plane readiness, not data-plane throughput.
+                        suback_deadline = time.time() + FANOUT_SUBACK_TIMEOUT_S
+                        suback_rejected = False
+                        while time.time() < suback_deadline:
+                            wait_timeout = min(0.05, max(0.0, suback_deadline - time.time()))
+                            if wait_timeout <= 0:
+                                break
+                            if not fanout_suback_evt.wait(timeout=wait_timeout):
+                                continue
+                            with fanout_suback_lock:
+                                ack_mid = fanout_suback_mid
+                                ack_reason_codes = fanout_suback_reason_codes
+                            if ack_mid != subscribe_mid:
+                                fanout_suback_evt.clear()
+                                continue
+                            if _suback_succeeded(ack_reason_codes):
+                                mark_fanout_ready()
+                                fanout_subscribe_confirmed = True
+                            else:
+                                suback_rejected = True
+                                reason_values = _suback_reason_values(ack_reason_codes)
+                                if reason_values:
+                                    reason_text = ",".join(str(code) for code in reason_values)
+                                elif reason_values == []:
+                                    reason_text = "empty"
+                                else:
+                                    reason_text = "unknown"
+                                errors.append(f"fanout_suback_rejected:{reason_text}")
+                            break
+                        if not fanout_subscribe_confirmed and not suback_rejected:
+                            errors.append("fanout_suback_timeout")
+                except Exception as e:
+                    errors.append(f"subscribe_failed:{e}")
+            if fanout_subscribe_confirmed:
+                while not fanout_publish_start_evt.is_set():
+                    abort_evt = cfg.fanout_abort_evt
+                    if abort_evt is not None and abort_evt.is_set():
+                        mark_fanout_receive_aborted()
+                        break
+                    fanout_publish_start_evt.wait(timeout=0.05)
+                if not fanout_receive_aborted:
+                    deadline = time.time() + max(10.0, cfg.expect_messages * 0.2)
+                    while len(receive_ms) < cfg.expect_messages and time.time() < deadline:
+                        abort_evt = cfg.fanout_abort_evt
+                        if abort_evt is not None and abort_evt.is_set():
+                            mark_fanout_receive_aborted()
+                            break
+                        time.sleep(0.01)
+        else:
+            payload = _mk_payload(cfg.message_size)
+            message_counter = 0
+            interleave_enabled = (
+                cfg.control_after_messages > 0
+                and cfg.control_topic
+                and cfg.control_payload
+                and not cfg.control_mode
+            )
 
-    with contextlib.suppress(Exception):
-        client.disconnect()
+            for _ in range(cfg.message_count):
+                if interleave_enabled and message_counter >= cfg.control_after_messages:
+                    injection_start = time.perf_counter()
+                    try:
+                        ctrl_payload = json.dumps(cfg.control_payload).encode()
+                        t0 = time.perf_counter()
+                        info = client.publish(cfg.control_topic, ctrl_payload, qos=cfg.control_qos)
+                        info.wait_for_publish(timeout=10)
+                        t1 = time.perf_counter()
+                        control_publish_ms.append((t1 - t0) * 1000.0)
+                        if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                            control_errors.append(f"control_publish_rc:{info.rc}")
+                    except Exception as e:
+                        control_errors.append(f"control_publish_failed:{e}")
+                    injection_end = time.perf_counter()
+                    control_injection_delay_ms.append((injection_end - injection_start) * 1000.0)
+                    message_counter = 0
 
-    t_deadline = time.time() + 5
-    while not userdata["disconnected"] and time.time() < t_deadline:
-        time.sleep(0.01)
+                try:
+                    t0 = time.perf_counter()
+                    publish_qos = _choose_qos(cfg.qos, cfg.qos_distribution, qos_rng)
+                    info = client.publish(cfg.topic, payload, qos=publish_qos)
+                    info.wait_for_publish(timeout=10)
+                    t1 = time.perf_counter()
+                    latency_ms = (t1 - t0) * 1000.0
+                    publish_ms.append(latency_ms)
+                    publish_ms_by_qos[publish_qos].append(latency_ms)
+                    message_counter += 1
+                    if info.rc != mqtt.MQTT_ERR_SUCCESS:
+                        errors.append(f"publish_rc:{info.rc}")
+                except Exception as e:
+                    errors.append(f"publish_failed:{e}")
+                    break
 
-    with contextlib.suppress(Exception):
-        client.loop_stop()
+        with contextlib.suppress(Exception):
+            client.disconnect()
 
-    out_q.put(
-        WorkerResult(
-            cfg.client_id,
-            connect_ms,
-            publish_ms,
-            publish_ms_by_qos,
-            receive_ms,
-            token_refresh_ms,
-            token_refresh_len,
-            cfg.delegation_ms,
-            cfg.delegation_len,
-            attenuation_ms,
-            attenuation_len,
-            errors,
-            control_publish_ms,
-            control_errors,
-            control_injection_delay_ms,
-        )
-    )
+        t_deadline = time.time() + 5
+        while not userdata["disconnected"] and time.time() < t_deadline:
+            time.sleep(0.01)
+
+        with contextlib.suppress(Exception):
+            client.loop_stop()
+
+        emit_result(connect_ms)
+    finally:
+        if client is not None:
+            disconnected = isinstance(userdata, dict) and bool(userdata.get("disconnected"))
+            if not disconnected:
+                with contextlib.suppress(Exception):
+                    client.disconnect()
+            with contextlib.suppress(Exception):
+                client.loop_stop()
 
 
 def _run_fanout_publisher(
@@ -884,12 +991,14 @@ def _run_fanout_publisher(
     tls_enabled: bool,
     tls_ca_file: str | None,
     tls_insecure: bool,
+    fanout_churn: FanoutChurnConfig | None = None,
 ):
     publish_ms: list[float] = []
     # Issue 17: Per-QoS publish latency tracking
     publish_ms_by_qos: dict[int, list[float]] = {0: [], 1: [], 2: []}
     errors: list[str] = []
     qos_rng = np.random.default_rng()
+    churn_triggered = False
 
     client = cast(Any, mqtt.Client)(
         client_id=client_id,
@@ -908,15 +1017,26 @@ def _run_fanout_publisher(
     try:
         client.connect(host, port, 30)
     except Exception as e:
-        return publish_ms, [f"fanout_connect_failed:{e}"]
+        return publish_ms, publish_ms_by_qos, [f"fanout_connect_failed:{e}"], churn_triggered
 
     client.loop_start()
     time.sleep(0.2)
 
-    for _ in range(message_count):
+    for sequence_id in range(message_count):
+        if (
+            fanout_churn is not None
+            and fanout_churn.enabled
+            and not churn_triggered
+            and sequence_id == fanout_churn.after_messages
+        ):
+            churn_error = _apply_fanout_churn(fanout_churn)
+            if churn_error:
+                errors.append(churn_error)
+            else:
+                churn_triggered = True
         try:
             sent_ts = time.perf_counter()
-            payload = f"{sent_ts:.9f}|".encode()
+            payload = f"{sent_ts:.9f}|{sequence_id}|".encode()
             if message_size > len(payload):
                 payload += b"A" * (message_size - len(payload))
             t0 = time.perf_counter()
@@ -940,7 +1060,7 @@ def _run_fanout_publisher(
     with contextlib.suppress(Exception):
         client.loop_stop()
 
-    return publish_ms, publish_ms_by_qos, errors
+    return publish_ms, publish_ms_by_qos, errors, churn_triggered
 
 
 def run_load(
@@ -1000,12 +1120,23 @@ def run_load(
     control_qos: int = 1,
     # Issue 36: Interleaved control message parameter
     control_after_messages: int = 0,
+    # Issue 30: Fan-out churn controls
+    fanout_churn_kind: str | None = None,
+    fanout_churn_after_messages: int = 0,
+    fanout_churn_settle_ms: int = 0,
+    fanout_churn_dynsec_source: str | None = None,
+    fanout_churn_sqlite_db: str | None = None,
+    fanout_churn_sqlite_topic: str | None = None,
+    fanout_churn_sqlite_subscribers: int | None = None,
 ):
     start_evt = threading.Event()
+    fanout_publish_start_evt = threading.Event()
+    fanout_abort_evt = threading.Event()
     out_q: queue.Queue = queue.Queue()
 
     threads: list[threading.Thread] = []
     expected_results = clients
+    spawned_worker_count = 0
 
     attenuate_denies = biscuit_attenuate_denies or []
     attenuate_checks = biscuit_attenuate_checks or []
@@ -1021,6 +1152,17 @@ def run_load(
         raise ValueError("biscuit_delegate_handoff_token is required")
     if biscuit_delegate_handoff and biscuit_delegate_handoff_topic is None:
         raise ValueError("biscuit_delegate_handoff_topic is required")
+
+    fanout_subscribe_barrier = FanoutSubscribeBarrier(expected=0) if mode == "fanout" else None
+    fanout_churn_cfg = FanoutChurnConfig(
+        kind=fanout_churn_kind,
+        after_messages=fanout_churn_after_messages,
+        settle_ms=fanout_churn_settle_ms,
+        dynsec_source=fanout_churn_dynsec_source,
+        sqlite_db=fanout_churn_sqlite_db,
+        sqlite_topic=fanout_churn_sqlite_topic or fanout_topic,
+        sqlite_subscribers=fanout_churn_sqlite_subscribers or clients,
+    )
 
     delegated_tokens_by_client: dict[str, str] = {}
     for i in range(clients):
@@ -1071,6 +1213,8 @@ def run_load(
                         [],
                         [],
                         [],
+                        None,
+                        None,
                     )
                 )
                 continue
@@ -1134,9 +1278,20 @@ def run_load(
             control_repeat=control_repeat,
             control_qos=control_qos,
             control_after_messages=control_after_messages,
+            fanout_subscribe_barrier=fanout_subscribe_barrier,
+            fanout_churn_after_messages=fanout_churn_after_messages,
+            fanout_abort_evt=fanout_abort_evt,
         )
-        t = threading.Thread(target=_run_worker, args=(cfg, start_evt, out_q), daemon=True)
+        t = threading.Thread(
+            target=_run_worker,
+            args=(cfg, start_evt, fanout_publish_start_evt, out_q),
+            daemon=True,
+        )
         threads.append(t)
+        spawned_worker_count += 1
+
+    if fanout_subscribe_barrier is not None:
+        fanout_subscribe_barrier.set_expected(spawned_worker_count)
 
     for t in threads:
         t.start()
@@ -1160,17 +1315,41 @@ def run_load(
         )
 
     time.sleep(0.2)
-    t_start = time.perf_counter()
-    start_evt.set()
+    fanout_subscribe_ready_timed_out = False
+    if mode == "fanout":
+        start_evt.set()
+        if fanout_subscribe_barrier is not None:
+            fanout_subscribe_timeout = max(10.0, spawned_worker_count * 0.25)
+            if not fanout_subscribe_barrier.event.wait(timeout=fanout_subscribe_timeout):
+                fanout_subscribe_ready_timed_out = True
+                logger.warning(
+                    "Fan-out subscribe readiness timed out after %.2fs",
+                    fanout_subscribe_timeout,
+                )
+        t_start = time.perf_counter()
+    else:
+        t_start = time.perf_counter()
+        start_evt.set()
 
     fanout_publish_ms: list[float] = []
     # Issue 17: Per-QoS fanout metrics
     fanout_publish_ms_by_qos: dict[int, list[float]] = {0: [], 1: [], 2: []}
     fanout_errors: list[str] = []
-    if mode == "fanout":
+    if fanout_subscribe_ready_timed_out:
+        fanout_errors.append("fanout_subscribe_ready_timeout")
+        fanout_abort_evt.set()
+    fanout_churn_triggered = False
+    if mode == "fanout" and not fanout_subscribe_ready_timed_out:
+        fanout_publish_start_evt.set()
         publisher_username = fanout_publisher_username or username
         publisher_password = fanout_publisher_password or password
-        fanout_publish_ms, fanout_publish_ms_by_qos, fanout_errors = _run_fanout_publisher(
+        publisher_errors: list[str]
+        (
+            fanout_publish_ms,
+            fanout_publish_ms_by_qos,
+            publisher_errors,
+            fanout_churn_triggered,
+        ) = _run_fanout_publisher(
             host=host,
             port=port,
             username=publisher_username,
@@ -1185,7 +1364,9 @@ def run_load(
             tls_enabled=tls_enabled,
             tls_ca_file=tls_ca_file,
             tls_insecure=tls_insecure,
+            fanout_churn=fanout_churn_cfg,
         )
+        fanout_errors.extend(publisher_errors)
 
     results: list[WorkerResult] = []
     for _ in range(expected_results):
@@ -1213,6 +1394,8 @@ def run_load(
     control_errs = [e for r in results for e in r.control_errors]
     # Issue 36: Aggregate control injection delay metrics
     control_injection_lat = [x for r in results for x in r.control_injection_delay_ms]
+    received_pre_churn = sum((r.receive_pre_churn or 0) for r in results)
+    received_post_churn = sum((r.receive_post_churn or 0) for r in results)
 
     errors = [e for r in results for e in r.errors]
     errors.extend(fanout_errors)
@@ -1234,6 +1417,14 @@ def run_load(
         qos_distribution_payload = [
             {"qos": qos, "weight": weight} for qos, weight in qos_distribution
         ]
+    fanout_churn_expected_pre = None
+    fanout_churn_expected_post = None
+    if fanout_churn_cfg.enabled and mode == "fanout":
+        pre_messages = min(max(fanout_churn_cfg.after_messages, 0), message_count)
+        post_messages = max(message_count - pre_messages, 0)
+        fanout_churn_expected_pre = pre_messages * clients
+        fanout_churn_expected_post = post_messages * clients
+
     return {
         "inputs": {
             "host": host,
@@ -1282,6 +1473,15 @@ def run_load(
                 # Issue 36: Interleaved control message configuration
                 "after_messages": control_after_messages,
             },
+            "fanout_churn": {
+                "kind": fanout_churn_cfg.kind,
+                "after_messages": fanout_churn_cfg.after_messages,
+                "settle_ms": fanout_churn_cfg.settle_ms,
+                "dynsec_source": fanout_churn_cfg.dynsec_source,
+                "sqlite_db": fanout_churn_cfg.sqlite_db,
+                "sqlite_topic": fanout_churn_cfg.sqlite_topic,
+                "sqlite_subscribers": fanout_churn_cfg.sqlite_subscribers,
+            },
         },
         "connect": _summarize_ms(connect_lat),
         "token_refresh": _summarize_ms(refresh_lat),
@@ -1310,6 +1510,17 @@ def run_load(
         "received_messages": {
             "count": len(receive_lat),
             "expected": message_count * clients if mode == "fanout" else 0,
+        },
+        "fanout_churn": {
+            "enabled": fanout_churn_cfg.enabled and mode == "fanout",
+            "kind": fanout_churn_cfg.kind if mode == "fanout" else None,
+            "after_messages": fanout_churn_cfg.after_messages if mode == "fanout" else None,
+            "settle_ms": fanout_churn_cfg.settle_ms if mode == "fanout" else None,
+            "triggered": fanout_churn_triggered if mode == "fanout" else None,
+            "received_pre_churn": received_pre_churn if mode == "fanout" else None,
+            "received_post_churn": received_post_churn if mode == "fanout" else None,
+            "expected_pre_churn": fanout_churn_expected_pre if mode == "fanout" else None,
+            "expected_post_churn": fanout_churn_expected_post if mode == "fanout" else None,
         },
         "errors": errors,
     }
@@ -1417,6 +1628,48 @@ def main(
         help="Publish 1 control message after every N data messages "
         "(interleaved mode). 0 = disabled.",
     ),
+    fanout_churn_kind: str | None = typer.Option(
+        None,
+        "--fanout-churn-kind",
+        envvar="MQTT_FANOUT_CHURN_KIND",
+        help="Fan-out churn mode: dynsec_swap or sqlite_revoke_read.",
+    ),
+    fanout_churn_after_messages: int = typer.Option(
+        0,
+        "--fanout-churn-after-messages",
+        envvar="MQTT_FANOUT_CHURN_AFTER_MESSAGES",
+        help="Apply churn after N publisher fan-out messages.",
+    ),
+    fanout_churn_settle_ms: int = typer.Option(
+        0,
+        "--fanout-churn-settle-ms",
+        envvar="MQTT_FANOUT_CHURN_SETTLE_MS",
+        help="Wait time after churn operation before continuing publisher loop.",
+    ),
+    fanout_churn_dynsec_source: str | None = typer.Option(
+        None,
+        "--fanout-churn-dynsec-source",
+        envvar="MQTT_FANOUT_CHURN_DYNSEC_SOURCE",
+        help="Dynamic Security snapshot to copy into docker/dynamic-security.json.",
+    ),
+    fanout_churn_sqlite_db: str | None = typer.Option(
+        None,
+        "--fanout-churn-sqlite-db",
+        envvar="MQTT_FANOUT_CHURN_SQLITE_DB",
+        help="SQLite DB path for fan-out churn.",
+    ),
+    fanout_churn_sqlite_topic: str | None = typer.Option(
+        None,
+        "--fanout-churn-sqlite-topic",
+        envvar="MQTT_FANOUT_CHURN_SQLITE_TOPIC",
+        help="SQLite topic used for fan-out read revocation.",
+    ),
+    fanout_churn_sqlite_subscribers: int | None = typer.Option(
+        None,
+        "--fanout-churn-sqlite-subscribers",
+        envvar="MQTT_FANOUT_CHURN_SQLITE_SUBSCRIBERS",
+        help="Subscriber count for SQLite read revocation.",
+    ),
     mode: str = typer.Option("publish", envvar="MQTT_MODE"),
     fanout_topic: str = typer.Option("fanout/broadcast", envvar="MQTT_FANOUT_TOPIC"),
     fanout_publisher_username: str | None = typer.Option(
@@ -1466,6 +1719,17 @@ def main(
     # Default control topic if mode enabled but no topic specified
     if control_mode and not control_topic:
         control_topic = "$CONTROL/dynamic-security/v1"
+    if fanout_churn_kind and mode != "fanout":
+        raise typer.BadParameter("fanout churn options require --mode fanout")
+    if fanout_churn_kind == "dynsec_swap" and not fanout_churn_dynsec_source:
+        raise typer.BadParameter("--fanout-churn-dynsec-source is required for dynsec_swap")
+    if fanout_churn_kind == "sqlite_revoke_read":
+        if not fanout_churn_sqlite_db:
+            raise typer.BadParameter("--fanout-churn-sqlite-db is required for sqlite_revoke_read")
+        if not fanout_churn_sqlite_topic:
+            fanout_churn_sqlite_topic = fanout_topic
+        if fanout_churn_sqlite_subscribers is None:
+            fanout_churn_sqlite_subscribers = clients
 
     res = run_load(
         host=host,
@@ -1523,6 +1787,13 @@ def main(
         control_qos=control_qos,
         # Issue 36: Interleaved control message parameter
         control_after_messages=control_after_messages,
+        fanout_churn_kind=fanout_churn_kind,
+        fanout_churn_after_messages=fanout_churn_after_messages,
+        fanout_churn_settle_ms=fanout_churn_settle_ms,
+        fanout_churn_dynsec_source=fanout_churn_dynsec_source,
+        fanout_churn_sqlite_db=fanout_churn_sqlite_db,
+        fanout_churn_sqlite_topic=fanout_churn_sqlite_topic,
+        fanout_churn_sqlite_subscribers=fanout_churn_sqlite_subscribers,
     )
 
     if json_output:

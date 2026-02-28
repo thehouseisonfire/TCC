@@ -5,8 +5,8 @@ use crate::http_policy;
 use crate::jwt_handler::JwtGrant;
 use crate::policy::PolicyMode;
 use crate::sqlite_policy::SqlitePolicy;
+use crate::time::unix_timestamp_now;
 use biscuit_auth::PublicKey as BiscuitPublicKey;
-use chrono::Utc;
 
 const MOSQ_ACL_WRITE: i32 = 0x02;
 
@@ -50,10 +50,13 @@ mod tests {
     use crate::dynamic_security_policy::DynamicSecurityPolicy;
     use crate::jwt_handler::Claims;
     use crate::policy::PolicyMode;
+    use crate::time::unix_timestamp_now;
     use biscuit_auth::{Algorithm, PublicKey};
-    use chrono::Utc;
     use std::fs;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    static DYNSEC_PATH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn topic_matches_exact() {
@@ -266,12 +269,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn dynamic_security_mode_preserves_unsubscribe_outside_control_context() {
-        let now = Utc::now().timestamp();
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should be after unix epoch")
-            .as_nanos();
+        let now = unix_timestamp_now();
+        let unique = DYNSEC_PATH_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("dynsec-authz-{unique}.json"));
         let config = r#"{
   "clients": [
@@ -391,7 +392,7 @@ mod tests {
 
     #[test]
     fn check_token_expiry_handles_jwt() {
-        let now = Utc::now().timestamp();
+        let now = unix_timestamp_now();
         let valid = TokenType::Jwt {
             claims: Claims {
                 sub: "client_1".to_string(),
@@ -425,7 +426,7 @@ mod tests {
 
     #[test]
     fn check_token_expiry_handles_biscuit() {
-        let now = Utc::now().timestamp();
+        let now = unix_timestamp_now();
         let valid = TokenType::Biscuit {
             bytes: vec![1, 2, 3],
             expires_at: Some(now + 60),
@@ -562,18 +563,17 @@ pub enum AuthzOutcome {
 }
 
 pub fn check_token_expiry(token_type: &TokenType) -> AuthzOutcome {
+    let now = unix_timestamp_now();
     match token_type {
         TokenType::Jwt { claims, .. } => {
-            if Utc::now().timestamp() >= claims.exp {
+            if now >= claims.exp {
                 AuthzOutcome::Expired
             } else {
                 AuthzOutcome::Allowed
             }
         }
         TokenType::Biscuit { expires_at, .. } => {
-            if let Some(expires_at) = expires_at
-                && Utc::now().timestamp() >= *expires_at
-            {
+            if let Some(expires_at) = expires_at && now >= *expires_at {
                 AuthzOutcome::Expired
             } else {
                 AuthzOutcome::Allowed

@@ -9,7 +9,6 @@ use crate::config::{PluginConfig, parse_options};
 use crate::dynamic_security_policy::DynamicSecurityPolicy;
 use crate::policy::PolicyMode;
 use crate::sqlite_policy::SqlitePolicy;
-use chrono::Utc;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
 use std::sync::{Arc, Once};
@@ -69,6 +68,7 @@ mod http_policy;
 mod jwt_handler;
 mod policy;
 mod sqlite_policy;
+mod time;
 
 static STATIC_ACL_BIAS_WARN_ONCE: Once = Once::new();
 static STATIC_ACL_ROLE_MISSING_WARN_ONCE: Once = Once::new();
@@ -393,7 +393,7 @@ fn cache_ttl_for_token(
     configured_ttl_seconds: u64,
 ) -> Result<Duration, CacheTtlError> {
     let configured_ttl = Duration::from_secs(configured_ttl_seconds);
-    let now = Utc::now().timestamp();
+    let now = time::unix_timestamp_now();
     let expires_at = match token_type {
         TokenType::Jwt { claims, .. } => Some(claims.exp),
         TokenType::Biscuit { expires_at, .. } => *expires_at,
@@ -1302,7 +1302,6 @@ extern "C" fn control_callback(
 mod tests {
     use super::*;
     use crate::jwt_handler::Claims;
-    use chrono::Utc;
     use std::ffi::CString;
     use std::time::Duration;
 
@@ -1676,7 +1675,7 @@ mod tests {
     fn acl_read_expiry_only_allows_without_grants_when_flag_disabled() {
         let (userdata, _identifier) = setup_plugin_with_config();
         set_acl_read_full_authz(userdata, false);
-        cache_test_jwt(userdata, Utc::now().timestamp() + 60);
+        cache_test_jwt(userdata, time::unix_timestamp_now() + 60);
 
         let topic = CString::new("fanout/broadcast").unwrap();
         let mut evt = MosquittoEvtAclCheck {
@@ -1707,7 +1706,7 @@ mod tests {
         reset_kick_client_call();
         let (userdata, _identifier) = setup_plugin_with_config();
         set_acl_read_full_authz(userdata, true);
-        cache_test_jwt(userdata, Utc::now().timestamp() + 60);
+        cache_test_jwt(userdata, time::unix_timestamp_now() + 60);
 
         let topic = CString::new("fanout/broadcast").unwrap();
         let mut evt = MosquittoEvtAclCheck {
@@ -1740,7 +1739,7 @@ mod tests {
         reset_kick_client_call();
         let (userdata, _identifier) = setup_plugin_with_config();
         set_acl_read_full_authz(userdata, false);
-        cache_test_jwt(userdata, Utc::now().timestamp() + 60);
+        cache_test_jwt(userdata, time::unix_timestamp_now() + 60);
 
         let topic = CString::new("fanout/broadcast").unwrap();
         let mut evt = MosquittoEvtAclCheck {
@@ -1772,7 +1771,7 @@ mod tests {
     fn acl_subscribe_still_requires_full_authz_when_read_fast_path_disabled() {
         let (userdata, _identifier) = setup_plugin_with_config();
         set_acl_read_full_authz(userdata, false);
-        cache_test_jwt(userdata, Utc::now().timestamp() + 60);
+        cache_test_jwt(userdata, time::unix_timestamp_now() + 60);
 
         let topic = CString::new("fanout/broadcast").unwrap();
         let mut evt = MosquittoEvtAclCheck {
@@ -1803,7 +1802,7 @@ mod tests {
         reset_kick_client_call();
         let (userdata, _identifier) = setup_plugin_with_config();
         set_acl_read_full_authz(userdata, false);
-        cache_test_jwt(userdata, Utc::now().timestamp() - 1);
+        cache_test_jwt(userdata, time::unix_timestamp_now() - 1);
 
         let topic = CString::new("fanout/broadcast").unwrap();
         let mut evt = MosquittoEvtAclCheck {
@@ -1834,12 +1833,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn acl_read_expired_token_does_not_fall_back_to_dynamic_security_anonymous_after_kick() {
         reset_kick_client_call();
         let (userdata, _identifier) = setup_plugin_with_config();
         set_acl_read_full_authz(userdata, false);
         enable_dynamic_security_anonymous_mode(userdata);
-        cache_test_jwt(userdata, Utc::now().timestamp() - 1);
+        cache_test_jwt(userdata, time::unix_timestamp_now() - 1);
 
         let topic = CString::new("public/announce").unwrap();
         let mut evt = MosquittoEvtAclCheck {
@@ -1882,7 +1882,7 @@ mod tests {
         reset_kick_client_call();
         let (userdata, _identifier) = setup_plugin_with_config();
         set_acl_read_full_authz(userdata, true);
-        cache_test_jwt(userdata, Utc::now().timestamp() - 1);
+        cache_test_jwt(userdata, time::unix_timestamp_now() - 1);
 
         let topic = CString::new("fanout/broadcast").unwrap();
         let mut evt = MosquittoEvtAclCheck {
@@ -1916,7 +1916,7 @@ mod tests {
     fn acl_read_expiry_only_allows_biscuit_when_flag_disabled() {
         let (userdata, _identifier) = setup_plugin_with_config();
         set_acl_read_full_authz(userdata, false);
-        cache_test_biscuit(userdata, Some(Utc::now().timestamp() + 60));
+        cache_test_biscuit(userdata, Some(time::unix_timestamp_now() + 60));
 
         let topic = CString::new("fanout/broadcast").unwrap();
         let mut evt = MosquittoEvtAclCheck {
@@ -1946,7 +1946,7 @@ mod tests {
     fn acl_read_uses_full_authz_for_biscuit_when_flag_enabled() {
         let (userdata, _identifier) = setup_plugin_with_config();
         set_acl_read_full_authz(userdata, true);
-        cache_test_biscuit(userdata, Some(Utc::now().timestamp() + 60));
+        cache_test_biscuit(userdata, Some(time::unix_timestamp_now() + 60));
 
         let topic = CString::new("fanout/broadcast").unwrap();
         let mut evt = MosquittoEvtAclCheck {
@@ -1977,7 +1977,7 @@ mod tests {
         reset_kick_client_call();
         let (userdata, _identifier) = setup_plugin_with_config();
         set_acl_read_full_authz(userdata, false);
-        cache_test_biscuit(userdata, Some(Utc::now().timestamp() - 1));
+        cache_test_biscuit(userdata, Some(time::unix_timestamp_now() - 1));
 
         let topic = CString::new("fanout/broadcast").unwrap();
         let mut evt = MosquittoEvtAclCheck {

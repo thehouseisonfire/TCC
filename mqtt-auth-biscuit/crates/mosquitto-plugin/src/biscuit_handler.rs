@@ -1,6 +1,6 @@
 use crate::authz::{AuthContext, topic_matches};
+use crate::time::unix_timestamp_now;
 use biscuit_auth::{Biscuit, PublicKey};
-use chrono::Utc;
 use std::collections::HashMap;
 use std::sync::Arc;
 #[cfg(feature = "expiry_stats")]
@@ -222,7 +222,7 @@ pub fn authorize_biscuit(
         "#,
         topic = topic,
         operation = operation,
-        time = Utc::now().timestamp()
+        time = unix_timestamp_now()
     )
     .build(biscuit)
     .map_err(|_| biscuit_auth::error::Token::InternalError);

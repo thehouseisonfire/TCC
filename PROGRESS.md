@@ -265,7 +265,6 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 6. Issue 31: Control-triggered kick/re-auth
 7. Issue 32: Control-triggered ACL_READ + notify
 8. Issue 37: ACL_READ fan-out scenarios across policy profiles
-9. Issue 39: Broker-level integration assertions for runtime enforcement
 ---
 
 #### A) Policy Source Parity
@@ -395,69 +394,6 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 
 #### G) Broker Runtime Verification (Integration Assertions)
 
-- [ ] **Issue 39: Add broker-level integration assertions for runtime enforcement semantics**
-  - Goal: Add deterministic end-to-end tests against a real Mosquitto broker +
-    loaded plugin, so runtime enforcement behavior is validated beyond unit
-    tests with mocked broker symbols.
-  - Rationale:
-    - Issue 38 added disconnect-on-expiry behavior in `ACL_CHECK`, but current
-      coverage is unit-level only.
-    - Several security-critical paths depend on broker callback semantics and
-      timing (`ACL_CHECK`, `$CONTROL`, reconnect/reauth), which should be
-      validated in a real broker process.
-  - Scope (what must be asserted):
-    - **Expiry enforcement in `ACL_CHECK` (Issue 38):**
-      - JWT + Biscuit expired-token cases
-      - `acl_read_full_authz=false` (`ACL_READ` expiry-only fast path) and
-        `acl_read_full_authz=true` (full-authz path)
-      - Assert ACL denial *and* client disconnect within a bounded timeout
-    - **Negative controls (no false disconnects):**
-      - Non-expired deny outcomes on `ACL_READ`, `ACL_WRITE`, and
-        `ACL_SUBSCRIBE` return denial/defer semantics without forced disconnect
-      - Valid non-expired allow paths remain connected
-    - **Control-plane enforcement parity (Issues 31/32):**
-      - Kick/re-auth workflow after `$CONTROL` policy changes
-      - `ACL_READ` + notification workflow: policy churn causes read denial and
-        client-visible notification behavior
-    - **Fan-out and churn behavior (Issue 37 + Issue 30):**
-      - Subscriber fan-out scenarios (10/50/100) under dynamic policy updates
-      - Verify post-churn delivery drops/denials reflect effective policy state
-    - **Session lifecycle correctness:**
-      - Reconnect with a fresh token succeeds after forced disconnect
-      - Cache/session state does not leave stale authorization effects
-    - **Protocol/transport coverage:**
-      - Basic auth and MQTT v5 enhanced auth entrypoints
-      - Plain TCP and TLS broker modes
-    - **Kick semantics detail:**
-      - Assert `with_will=false` behavior (no unintended LWT emission) on
-        broker-initiated disconnects
-  - Deliverable:
-    - New integration suite (e.g., `tests/integration/`) runnable via `pytest`
-      with a dedicated marker (e.g., `-m broker_integration`)
-    - Deterministic fixtures for:
-      - docker-compose lifecycle (`mosquitto`, authz, issuer)
-      - short-lived token issuance (JWT + Biscuit)
-      - client observers for disconnect/reconnect/notification events
-    - Assertions sourced from both client-side events and broker/plugin logs
-      where needed to disambiguate denials vs disconnects
-    - Documentation:
-      - exact commands for local runs and CI-compatible runs
-      - expected timing bounds and flake-control strategy (timeouts/retries)
-  - Implementation status update (2026-02-27):
-    - Added `pytest` broker integration suite in
-      `mqtt-auth-biscuit/tests/integration/test_issue39_runtime_enforcement.py`
-      with marker `broker_integration` and Docker-backed fixtures
-      (`tests/integration/conftest.py`)
-    - Added strict token-mode integration configs for `acl_read_full_authz=true`
-      in TCP/TLS:
-      - `docker/mosquitto_integration_acl_read_full.conf`
-      - `docker/tls/mosquitto_integration_acl_read_full.conf`
-    - Added operator documentation and run commands in
-      `mqtt-auth-biscuit/benchmarks/RUNNING_BENCHMARKS.md`
-    - Current suite coverage includes expiry disconnect (JWT/Biscuit, fast/full
-      ACL_READ), negative controls (no false disconnect), reconnect lifecycle,
-      with_will log evidence, basic+enhanced auth, TCP+TLS transport, and
-      dynamic-security fan-out churn enforcement.
 
 ---
 
@@ -675,6 +611,30 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Captured three key metrics: data message latency (`publish`), control message latency (`control`), and control injection delay (`control_injection_delay`)
     - Added comprehensive documentation in RUNNING_BENCHMARKS.md with usage examples and research interpretation notes
   - **Research Alignment**: Enables measurement of broker behavior under realistic mixed data+control plane workloads, supporting H2/H3 validation by quantifying control plane overhead during active data traffic.
+
+- [x] **Issue 39: Add broker-level integration assertions for runtime enforcement semantics** — **COMPLETED 2026-02-28**
+  - **Summary**: Added deterministic broker-level `pytest` integration coverage
+    against real Mosquitto + plugin runtime semantics.
+  - **Deliverables**:
+    - New suite + fixtures:
+      - `tests/integration/test_issue39_runtime_enforcement.py`
+      - `tests/integration/conftest.py`
+      - `broker_integration` marker in `pytest.ini`
+    - Runtime assertions across JWT/Biscuit and strict/non-strict read modes:
+      expiry disconnect in `ACL_CHECK`, negative controls (no false disconnects),
+      reconnect lifecycle, and `with_will=false` kick/LWT suppression behavior.
+    - Control-plane and churn validation:
+      `$CONTROL` workflow + notification behavior, and fan-out churn enforcement
+      at subscriber scales 10/50/100.
+    - Protocol/transport coverage:
+      basic auth + MQTT v5 enhanced auth over TCP and TLS.
+    - Supporting plugin fixes and tests:
+      dynamic-security control access mapping, cache removal support, control
+      request context in authorization params, and expiry disconnect grace
+      handling for deterministic runtime enforcement.
+    - Operator documentation:
+      run commands, timing bounds, and flake-control strategy in
+      `benchmarks/RUNNING_BENCHMARKS.md`.
 
 ---
 

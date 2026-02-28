@@ -154,6 +154,9 @@ pub const MOSQ_EVT_MESSAGE: c_int = 7;
 
 /// Fallback cache TTL when tokens do not expose an expiry; meant as a sane default only.
 const FALLBACK_CACHE_TTL_SECONDS: u64 = 300;
+/// Keep expired sessions briefly in cache so ACL callbacks can enforce
+/// disconnect-on-expiry semantics deterministically at runtime.
+const EXPIRY_DISCONNECT_GRACE_SECONDS: u64 = 10;
 
 #[repr(C)]
 pub struct MosquittoOpt {
@@ -402,9 +405,12 @@ fn cache_ttl_for_token(
             if remaining <= 0 {
                 return Err(CacheTtlError::Expired);
             }
-            let remaining = Duration::from_secs(remaining as u64);
-            if remaining < configured_ttl {
-                remaining
+            // Preserve a short post-expiry grace window so ACL_CHECK can still
+            // observe expired sessions and force disconnect.
+            let remaining_with_grace =
+                Duration::from_secs((remaining as u64) + EXPIRY_DISCONNECT_GRACE_SECONDS);
+            if remaining_with_grace < configured_ttl {
+                remaining_with_grace
             } else {
                 configured_ttl
             }
@@ -1080,6 +1086,7 @@ extern "C" fn acl_check_callback(
             client_id: &client_id,
             topic: &topic,
             access: evt.access,
+            is_control_request: false,
             biscuit_root_key: &state.config.biscuit.root_public_key,
             policy_mode: state.config.policy.mode,
             sqlite_policy: state.sqlite_policy.as_ref(),
@@ -1238,6 +1245,7 @@ extern "C" fn control_callback(
             client_id: &client_id,
             topic: &topic,
             access: MOSQ_ACL_CONTROL,
+            is_control_request: true,
             biscuit_root_key: &state.config.biscuit.root_public_key,
             policy_mode: state.config.policy.mode,
             sqlite_policy: state.sqlite_policy.as_ref(),
@@ -1355,6 +1363,20 @@ mod tests {
     fn set_acl_read_full_authz(userdata: *mut c_void, enabled: bool) {
         let state = unsafe { &mut *(userdata as *mut PluginState) };
         state.config.acl_read_full_authz = enabled;
+    }
+
+    fn enable_dynamic_security_anonymous_mode(userdata: *mut c_void) {
+        let state = unsafe { &mut *(userdata as *mut PluginState) };
+        let dynsec_path = format!(
+            "{}/../../docker/dynamic-security-anon.json",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let policy = DynamicSecurityPolicy::new(dynsec_path.clone(), Duration::from_secs(1))
+            .expect("dynamic security anon policy should load for tests");
+        state.config.policy.mode = PolicyMode::DynamicSecurity;
+        state.config.policy.dynamic_security_url = Some(dynsec_path);
+        state.config.allow_anonymous_no_token = true;
+        state.dynamic_security_policy = Some(policy);
     }
 
     fn cache_test_jwt(userdata: *mut c_void, exp: i64) {
@@ -1805,6 +1827,50 @@ mod tests {
         assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
         let kick = kick_client_call_snapshot();
         assert_eq!(kick.count, 1);
+        assert_eq!(kick.last_client_id.as_deref(), Some("test_client"));
+        assert_eq!(kick.last_with_will, Some(false));
+
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn acl_read_expired_token_does_not_fall_back_to_dynamic_security_anonymous_after_kick() {
+        reset_kick_client_call();
+        let (userdata, _identifier) = setup_plugin_with_config();
+        set_acl_read_full_authz(userdata, false);
+        enable_dynamic_security_anonymous_mode(userdata);
+        cache_test_jwt(userdata, Utc::now().timestamp() - 1);
+
+        let topic = CString::new("public/announce").unwrap();
+        let mut evt = MosquittoEvtAclCheck {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr(),
+            payload: ptr::null(),
+            properties: ptr::null_mut(),
+            access: MOSQ_ACL_READ,
+            payloadlen: 0,
+            qos: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc1 = acl_check_callback(
+            MOSQ_EVT_ACL_CHECK,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
+        assert_eq!(rc1, MOSQ_ERR_ACL_DENIED);
+
+        let rc2 = acl_check_callback(
+            MOSQ_EVT_ACL_CHECK,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
+        assert_eq!(rc2, MOSQ_ERR_ACL_DENIED);
+
+        let kick = kick_client_call_snapshot();
+        assert_eq!(kick.count, 2);
         assert_eq!(kick.last_client_id.as_deref(), Some("test_client"));
         assert_eq!(kick.last_with_will, Some(false));
 

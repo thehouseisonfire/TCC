@@ -443,6 +443,21 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Documentation:
       - exact commands for local runs and CI-compatible runs
       - expected timing bounds and flake-control strategy (timeouts/retries)
+  - Implementation status update (2026-02-27):
+    - Added `pytest` broker integration suite in
+      `mqtt-auth-biscuit/tests/integration/test_issue39_runtime_enforcement.py`
+      with marker `broker_integration` and Docker-backed fixtures
+      (`tests/integration/conftest.py`)
+    - Added strict token-mode integration configs for `acl_read_full_authz=true`
+      in TCP/TLS:
+      - `docker/mosquitto_integration_acl_read_full.conf`
+      - `docker/tls/mosquitto_integration_acl_read_full.conf`
+    - Added operator documentation and run commands in
+      `mqtt-auth-biscuit/benchmarks/RUNNING_BENCHMARKS.md`
+    - Current suite coverage includes expiry disconnect (JWT/Biscuit, fast/full
+      ACL_READ), negative controls (no false disconnect), reconnect lifecycle,
+      with_will log evidence, basic+enhanced auth, TCP+TLS transport, and
+      dynamic-security fan-out churn enforcement.
 
 ---
 

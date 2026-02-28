@@ -27,6 +27,7 @@ def apply_dynsec_snapshot(
     src = _resolve_repo_path(source_path)
     dest = _resolve_repo_path(dest_path)
     os.makedirs(os.path.dirname(dest), exist_ok=True)
+    # Keep inode stable for bind-mounted single-file volumes used by Docker.
     shutil.copyfile(src, dest)
 
     out = {"source": src, "dest": dest}

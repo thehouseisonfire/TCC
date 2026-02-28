@@ -254,6 +254,61 @@ bash docker/tls/generate_certs.sh
 python3 benchmarks/smoke_test.py --tls
 ```
 
+### Issue 39 Broker Integration Assertions
+
+Issue 39 adds a dedicated `pytest` integration suite that validates runtime
+enforcement against a real Mosquitto process with the Rust plugin loaded.
+
+Test location:
+- `tests/integration/test_issue39_runtime_enforcement.py`
+
+Marker:
+- `broker_integration`
+
+Run all Issue 39 broker integration assertions:
+
+```bash
+cd mqtt-auth-biscuit
+pytest -m broker_integration tests/integration/test_issue39_runtime_enforcement.py -vv -s
+```
+
+Run only expiry/negative-control checks (faster local iteration):
+
+```bash
+cd mqtt-auth-biscuit
+pytest -m broker_integration tests/integration/test_issue39_runtime_enforcement.py \
+  -k "expiry_disconnect or negative_controls" -vv -s
+```
+
+CI-compatible invocation:
+
+```bash
+cd mqtt-auth-biscuit
+DOCKER_COMPOSE_BIN="docker compose" \
+pytest -m broker_integration tests/integration -vv -s
+```
+
+What this suite asserts:
+- Expiry enforcement in `ACL_CHECK` for JWT and Biscuit with both
+  `acl_read_full_authz=false` and `acl_read_full_authz=true`
+- No false disconnect on non-expired deny paths (`ACL_READ`, `ACL_WRITE`,
+  `ACL_SUBSCRIBE`) and connected allow paths
+- Reconnect with a fresh token after forced expiry disconnect
+- Broker log evidence for `with_will=false` kick semantics
+- Basic auth and MQTT v5 enhanced auth entrypoints
+- Plain TCP and TLS broker modes
+- Fan-out churn runtime enforcement under strict `ACL_READ` dynamic-security
+  configuration
+
+Timing bounds and flake control strategy:
+- Docker bring-up + service readiness bounded to `60s`
+- Client connect/reauth waits bounded to `10s`
+- Expiry disconnect assertion bounded to `8s`
+- Message delivery assertions bounded to `4-5s`
+- Dynamic policy churn settle window uses `1.4s` before post-churn assertions
+- If host load is high, rerun the marker suite once before classifying as a
+  regression
+
 You can also run the full scenario battery from `ARTICLE.MD` (MTU sweep, thundering herd, policy complexity, HTTP introspection latency/loss, hybrid contingency, and MQTT reauthentication):
 
 ```bash

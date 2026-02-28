@@ -8,6 +8,8 @@ use crate::sqlite_policy::SqlitePolicy;
 use biscuit_auth::PublicKey as BiscuitPublicKey;
 use chrono::Utc;
 
+const MOSQ_ACL_WRITE: i32 = 0x02;
+
 // Mosquitto ACL access bitmask mapping:
 // MOSQ_ACL_READ=0x01, MOSQ_ACL_WRITE=0x02, MOSQ_ACL_SUBSCRIBE=0x04, MOSQ_ACL_CONTROL=0x08
 fn access_to_operation(access: i32) -> &'static str {
@@ -22,6 +24,16 @@ fn access_to_operation(access: i32) -> &'static str {
     }
 }
 
+fn dynamic_security_access(access: i32, is_control_request: bool) -> i32 {
+    // Dynamic-security ACLs model $CONTROL publication as publish-send checks.
+    // Preserve raw ACL bits for data-plane checks where 0x08 may represent unsubscribe.
+    if is_control_request && access_to_operation(access) == "control" {
+        MOSQ_ACL_WRITE
+    } else {
+        access
+    }
+}
+
 #[derive(Debug, Copy, Clone)]
 pub struct AuthContext<'a> {
     pub topic: &'a str,
@@ -30,10 +42,18 @@ pub struct AuthContext<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthContext, AuthzOutcome, check_token_expiry, topic_matches};
+    use super::{
+        AuthContext, AuthzOutcome, AuthzParams, check_authorization, check_token_expiry,
+        topic_matches,
+    };
     use crate::auth::TokenType;
+    use crate::dynamic_security_policy::DynamicSecurityPolicy;
     use crate::jwt_handler::Claims;
+    use crate::policy::PolicyMode;
+    use biscuit_auth::{Algorithm, PublicKey};
     use chrono::Utc;
+    use std::fs;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
     fn topic_matches_exact() {
@@ -237,6 +257,103 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_security_access_maps_control_to_publish() {
+        assert_eq!(super::dynamic_security_access(0x08, true), 0x02);
+        assert_eq!(super::dynamic_security_access(0x08, false), 0x08);
+        assert_eq!(super::dynamic_security_access(0x02, true), 0x02);
+        assert_eq!(super::dynamic_security_access(0x04, true), 0x04);
+        assert_eq!(super::dynamic_security_access(0x01, true), 0x01);
+    }
+
+    #[test]
+    fn dynamic_security_mode_preserves_unsubscribe_outside_control_context() {
+        let now = Utc::now().timestamp();
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("dynsec-authz-{unique}.json"));
+        let config = r#"{
+  "clients": [
+    {
+      "username": "test_user",
+      "clientid": "client_1",
+      "roles": [{"rolename": "test_role", "priority": 0}],
+      "disabled": false
+    }
+  ],
+  "groups": [],
+  "roles": [
+    {
+      "rolename": "test_role",
+      "acls": [
+        {"acltype": "unsubscribeLiteral", "topic": "sensors/a", "priority": 1, "allow": true},
+        {"acltype": "publishClientSend", "topic": "sensors/a", "priority": 1, "allow": false}
+      ]
+    }
+  ],
+  "defaultACLAccess": {
+    "publishClientSend": false,
+    "publishClientReceive": false,
+    "subscribe": false,
+    "unsubscribe": false
+  }
+}"#;
+        fs::write(&path, config).expect("temporary dynsec policy should be writable");
+
+        let policy = DynamicSecurityPolicy::new(
+            path.to_string_lossy().into_owned(),
+            Duration::from_secs(60),
+        )
+        .expect("temporary dynsec policy should load");
+        let root_key =
+            PublicKey::from_bytes(&[0u8; 32], Algorithm::Ed25519).expect("test root key");
+        let token = TokenType::Jwt {
+            claims: Claims {
+                sub: "client_1".to_string(),
+                exp: now + 60,
+                iss: None,
+                aud: None,
+                client_id: None,
+                roles: None,
+                grants: None,
+                denies: None,
+            },
+            raw: "token".to_string(),
+        };
+        let params = AuthzParams {
+            username: Some("test_user"),
+            client_id: "client_1",
+            topic: "sensors/a",
+            access: 0x08,
+            is_control_request: false,
+            biscuit_root_key: &root_key,
+            policy_mode: PolicyMode::DynamicSecurity,
+            sqlite_policy: None,
+            dynamic_security_policy: Some(&policy),
+            http_url: None,
+            http_ca_file: None,
+            http_tls_insecure: false,
+            http_timeout_seconds: 1,
+            http_max_response_bytes: 1024,
+        };
+
+        assert_eq!(check_authorization(&token, params), AuthzOutcome::Allowed);
+        assert_eq!(
+            check_authorization(
+                &token,
+                AuthzParams {
+                    is_control_request: true,
+                    ..params
+                }
+            ),
+            AuthzOutcome::Denied
+        );
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn grants_allow_control_operations() {
         use crate::jwt_handler::JwtGrant;
         let grants = vec![
@@ -425,6 +542,7 @@ pub struct AuthzParams<'a> {
     pub client_id: &'a str,
     pub topic: &'a str,
     pub access: i32,
+    pub is_control_request: bool,
     pub biscuit_root_key: &'a BiscuitPublicKey,
     pub policy_mode: PolicyMode,
     pub sqlite_policy: Option<&'a SqlitePolicy>,
@@ -570,7 +688,7 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
                             params.username,
                             Some(params.client_id),
                             params.topic,
-                            params.access,
+                            dynamic_security_access(params.access, params.is_control_request),
                         )
                         .unwrap_or(false)
                     {
@@ -690,7 +808,7 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
                             params.username,
                             Some(params.client_id),
                             params.topic,
-                            params.access,
+                            dynamic_security_access(params.access, params.is_control_request),
                         )
                         .unwrap_or(false)
                     {

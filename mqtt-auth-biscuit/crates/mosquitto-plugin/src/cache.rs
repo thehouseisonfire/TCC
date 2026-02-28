@@ -98,6 +98,15 @@ where
         None
     }
 
+    pub fn remove(&self, key: &K) {
+        self.cache.remove(key);
+        let mut lru = match self.lru.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        lru.pop(key);
+    }
+
     /// Returns a snapshot of cache hit/miss counts for observability.
     pub fn stats(&self) -> CacheStats {
         CacheStats {
@@ -125,6 +134,20 @@ mod tests {
 
         assert_eq!(cache.get(&"b".to_string()), None);
         assert_eq!(cache.get(&"a".to_string()), Some(1));
+        assert_eq!(cache.get(&"c".to_string()), Some(3));
+    }
+
+    #[test]
+    fn remove_evicts_entry_from_cache_and_lru() {
+        let cache = SessionCache::new(2);
+        cache.insert("a".to_string(), 1, Duration::from_secs(60));
+        cache.insert("b".to_string(), 2, Duration::from_secs(60));
+
+        cache.remove(&"a".to_string());
+        assert_eq!(cache.get(&"a".to_string()), None);
+
+        cache.insert("c".to_string(), 3, Duration::from_secs(60));
+        assert_eq!(cache.get(&"b".to_string()), Some(2));
         assert_eq!(cache.get(&"c".to_string()), Some(3));
     }
 }

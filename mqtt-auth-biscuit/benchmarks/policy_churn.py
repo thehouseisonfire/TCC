@@ -2,10 +2,23 @@ import os
 import shutil
 import sqlite3
 from collections.abc import Iterable
+from typing import TypedDict
 
 ACL_READ = 0x01
 ACL_WRITE = 0x02
 ACL_SUBSCRIBE = 0x04
+
+
+class SqliteFanoutSeedResult(TypedDict):
+    subscriber_count: int
+    rows_seeded: int
+    topic: str
+
+
+class SqliteFanoutRevokeResult(TypedDict):
+    subscriber_count: int
+    read_rows_revoked: int
+    topic: str
 
 
 def _repo_root() -> str:
@@ -61,7 +74,7 @@ def seed_sqlite_fanout_policy(
     topic: str,
     subscriber_count: int,
     publisher_client_id: str = "fanout_publisher",
-) -> dict[str, int]:
+) -> SqliteFanoutSeedResult:
     resolved_db_path = _resolve_repo_path(db_path)
     os.makedirs(os.path.dirname(resolved_db_path), exist_ok=True)
 
@@ -94,7 +107,7 @@ def revoke_sqlite_read_fanout(
     *,
     topic: str,
     subscriber_count: int,
-) -> dict[str, int]:
+) -> SqliteFanoutRevokeResult:
     resolved_db_path = _resolve_repo_path(db_path)
 
     with sqlite3.connect(resolved_db_path) as conn:

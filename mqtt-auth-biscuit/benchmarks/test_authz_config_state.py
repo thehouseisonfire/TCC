@@ -61,7 +61,7 @@ def test_profile_rule_counts_match_authz_profiles():
 
 
 def test_expected_authz_state_counts_profile_rules_plus_custom_rules():
-    cfg = {
+    cfg: rs.AuthzConfig = {
         "policy_profile": "med",
         "rules": [{"effect": "allow", "ops": ["read"], "topics": ["#"]}],
         "client_roles": {"client_x": ["reader"]},

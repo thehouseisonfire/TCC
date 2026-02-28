@@ -5,13 +5,68 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import pytest
 from benchmarks import policy_churn
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TLS_CA_FILE = Path(__file__).resolve().parents[2] / "docker" / "tls" / "ca.pem"
+
+
+class _IssuedTokenLike(Protocol):
+    token: str
+
+
+class _TokenIssuerLike(Protocol):
+    def issue_jwt(
+        self,
+        *,
+        client_id: str,
+        ttl_seconds: int,
+        grants: list[dict[str, str]] | None = None,
+        denies: list[dict[str, str]] | None = None,
+        no_default_grants: bool = True,
+        no_default_roles: bool = True,
+    ) -> _IssuedTokenLike: ...
+
+    def issue_biscuit(
+        self,
+        *,
+        client_id: str,
+        topic: str,
+        ttl_seconds: int,
+        denies: list[dict[str, str]] | None = None,
+    ) -> _IssuedTokenLike: ...
+
+
+class _ObservedMqttClientLike(Protocol):
+    @property
+    def message_count(self) -> int: ...
+
+    def connect(self, timeout_s: float = 10.0) -> None: ...
+
+    def subscribe(self, topic: str, qos: int = 1, timeout_s: float = 5.0) -> list[int]: ...
+
+    def publish(
+        self,
+        topic: str,
+        payload: str | bytes,
+        qos: int = 1,
+        timeout_s: float = 5.0,
+    ) -> int | None: ...
+
+    def wait_for_messages(self, minimum: int, timeout_s: float = 5.0) -> bool: ...
+
+    def wait_for_topic_messages(self, topic: str, minimum: int, timeout_s: float = 5.0) -> bool: ...
+
+    def wait_disconnected(self, timeout_s: float = 5.0) -> bool: ...
+
+    def message_count_for_topic(self, topic: str) -> int: ...
+
+    def assert_connected_for(self, duration_s: float) -> None: ...
+
+    def close(self) -> None: ...
 
 
 def _resolve_conf(base_conf: str, *, tls: bool) -> str:
@@ -29,7 +84,7 @@ def _is_denied(codes: list[int]) -> bool:
 
 
 def _issue_token(
-    issuer: object,
+    issuer: _TokenIssuerLike,
     *,
     token_kind: str,
     client_id: str,
@@ -146,7 +201,7 @@ def _build_dynsec_control_notify_snapshot(
     return output_path
 
 
-def _total_messages(clients: list[object]) -> int:
+def _total_messages(clients: list[_ObservedMqttClientLike]) -> int:
     return sum(client.message_count for client in clients)
 
 
@@ -237,7 +292,7 @@ def test_issue39_acl_read_expiry_disconnect_and_reconnect(
         username=token_kind,
         password=pub_token,
     )
-    reconnect_sub: object | None = None
+    reconnect_sub: _ObservedMqttClientLike | None = None
     try:
         granted = False
         for attempt in range(1, 4):

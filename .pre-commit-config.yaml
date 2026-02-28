@@ -34,7 +34,7 @@ repos:
         stages: [commit, push]
       - id: mypy
         name: mypy
-        entry: bash -c 'mypy . || true'
+        entry: mypy mqtt-auth-biscuit
         language: system
         pass_filenames: false
         stages: [commit, push]

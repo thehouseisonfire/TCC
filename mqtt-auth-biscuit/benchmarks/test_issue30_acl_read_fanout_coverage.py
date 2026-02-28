@@ -68,7 +68,7 @@ def test_issue30_dynsec_scenarios_pass_fanout_alignment_validator() -> None:
 
 
 def test_dynsec_fanout_alignment_rejects_pinned_single_identity() -> None:
-    scenario = {
+    scenario: rs.ScenarioConfig = {
         "id": "TEST-DYNSEC-PINNED",
         "mode": "fanout",
         "subscriber_count": 10,

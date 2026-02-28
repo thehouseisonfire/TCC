@@ -92,6 +92,15 @@ AUTHZ_PROFILE_RULE_COUNT: dict[str, int] = {
 }
 
 
+def _coerce_fail_rate(value: object, *, context: str) -> float:
+    try:
+        return float(cast(float | int | str, value))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"Authz state invalid for {context}: fail_rate is not numeric ({value!r})"
+        ) from exc
+
+
 class BiscuitAttenuateConfig(TypedDict, total=False):
     denies: list[str]
     checks: list[str]
@@ -292,7 +301,10 @@ def _expected_authz_state(
     baseline_state: dict[str, object],
 ) -> dict[str, object]:
     expected = dict(baseline_state)
-    expected["fail_rate"] = float(expected["fail_rate"])
+    expected["fail_rate"] = _coerce_fail_rate(
+        expected.get("fail_rate"),
+        context="expected baseline",
+    )
     if cfg is None:
         return expected
     if "delay_ms" in cfg:
@@ -320,7 +332,19 @@ def _assert_authz_state(
         actual = observed.get(key)
         want = expected[key]
         if key == "fail_rate":
-            if float(actual) != float(want):
+            try:
+                actual_fail_rate = _coerce_fail_rate(
+                    actual,
+                    context=f"{step} in scenario {scenario_id}",
+                )
+                want_fail_rate = _coerce_fail_rate(
+                    want,
+                    context=f"expected value for {step} in scenario {scenario_id}",
+                )
+            except RuntimeError:
+                mismatches[key] = {"expected": want, "observed": actual}
+                continue
+            if actual_fail_rate != want_fail_rate:
                 mismatches[key] = {"expected": want, "observed": actual}
         elif actual != want:
             mismatches[key] = {"expected": want, "observed": actual}

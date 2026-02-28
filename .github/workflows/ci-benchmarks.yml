@@ -84,8 +84,7 @@ jobs:
 
     - name: Mypy check
       run: |
-        cd mqtt-auth-biscuit
-        mypy .
+        mypy mqtt-auth-biscuit
         
     - name: Install Docker Compose v2 plugin
       run: |

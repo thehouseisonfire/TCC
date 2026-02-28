@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -271,16 +272,20 @@ class ObservedMqttClient:
         self._lock = threading.Lock()
         self._connect_done = threading.Event()
         self._disconnected = threading.Event()
-        client_kwargs = {
-            "client_id": self.client_id,
-            "protocol": mqtt.MQTTv5,
-            "callback_api_version": mqtt.CallbackAPIVersion.VERSION2,
-        }
         try:
-            self._client = mqtt.Client(reconnect_on_failure=False, **client_kwargs)
+            self._client = mqtt.Client(
+                callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+                client_id=self.client_id,
+                protocol=mqtt.MQTTv5,
+                reconnect_on_failure=False,
+            )
         except TypeError:
             # Backward-compatible fallback for older paho versions.
-            self._client = mqtt.Client(**client_kwargs)
+            self._client = mqtt.Client(
+                callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+                client_id=self.client_id,
+                protocol=mqtt.MQTTv5,
+            )
         if self.will_topic is not None:
             self._client.will_set(
                 topic=self.will_topic,
@@ -372,11 +377,16 @@ class ObservedMqttClient:
         rc, mid = self._client.subscribe(topic, qos=qos)
         if rc != mqtt.MQTT_ERR_SUCCESS:
             raise AssertionError(f"{self.client_id}: subscribe rc={rc}")
+        if mid is None:
+            raise AssertionError(f"{self.client_id}: subscribe returned no message id")
 
         if not _wait_until(lambda: mid in self._subacks, timeout_s):
             raise AssertionError(f"{self.client_id}: no SUBACK for mid={mid}")
         with self._lock:
-            return list(self._subacks[mid])
+            suback = self._subacks.get(mid)
+        if suback is None:
+            raise AssertionError(f"{self.client_id}: missing SUBACK payload for mid={mid}")
+        return list(suback)
 
     def publish(
         self,
@@ -417,7 +427,7 @@ class ObservedMqttClient:
 
 
 @pytest.fixture(scope="session")
-def compose_harness() -> ComposeHarness:
+def compose_harness() -> Iterator[ComposeHarness]:
     if shutil.which("docker") is None:
         pytest.skip("Docker is required for broker integration tests")
 

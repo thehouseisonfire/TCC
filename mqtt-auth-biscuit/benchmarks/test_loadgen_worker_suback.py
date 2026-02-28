@@ -7,7 +7,6 @@ import os
 import queue
 import sys
 import threading
-from dataclasses import dataclass
 from types import SimpleNamespace
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
@@ -15,15 +14,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from benchmarks import loadgen
 
 
-@dataclass
-class _Barrier:
-    ready: int = 0
-
-    def mark_ready(self) -> None:
-        self.ready += 1
-
-
-def _worker_cfg(barrier: _Barrier) -> loadgen.WorkerConfig:
+def _worker_cfg(barrier: loadgen.FanoutSubscribeBarrier) -> loadgen.WorkerConfig:
     return loadgen.WorkerConfig(
         host="localhost",
         port=1883,
@@ -141,7 +132,7 @@ def _patch_fake_mqtt(monkeypatch, *, suback_behavior: str) -> None:
 
 def test_worker_marks_ready_only_after_successful_suback(monkeypatch) -> None:
     _patch_fake_mqtt(monkeypatch, suback_behavior="success")
-    barrier = _Barrier()
+    barrier = loadgen.FanoutSubscribeBarrier(expected=1)
     cfg = _worker_cfg(barrier)
     out_q: queue.Queue = queue.Queue()
     start_evt = threading.Event()
@@ -159,7 +150,7 @@ def test_worker_marks_ready_only_after_successful_suback(monkeypatch) -> None:
 
 def test_worker_aborts_receive_when_fanout_timeout_is_signaled(monkeypatch) -> None:
     _patch_fake_mqtt(monkeypatch, suback_behavior="success")
-    barrier = _Barrier()
+    barrier = loadgen.FanoutSubscribeBarrier(expected=1)
     cfg = _worker_cfg(barrier)
     cfg.expect_messages = 1000
     abort_evt = threading.Event()
@@ -169,7 +160,7 @@ def test_worker_aborts_receive_when_fanout_timeout_is_signaled(monkeypatch) -> N
     start_evt = threading.Event()
     start_evt.set()
 
-    class FailingPublishStartEvent:
+    class FailingPublishStartEvent(threading.Event):
         def is_set(self) -> bool:
             return False
 
@@ -185,7 +176,7 @@ def test_worker_aborts_receive_when_fanout_timeout_is_signaled(monkeypatch) -> N
 
 def test_worker_does_not_mark_ready_without_suback(monkeypatch) -> None:
     _patch_fake_mqtt(monkeypatch, suback_behavior="none")
-    barrier = _Barrier()
+    barrier = loadgen.FanoutSubscribeBarrier(expected=1)
     cfg = _worker_cfg(barrier)
     out_q: queue.Queue = queue.Queue()
     start_evt = threading.Event()
@@ -211,7 +202,7 @@ def test_worker_does_not_mark_ready_without_suback(monkeypatch) -> None:
 
 def test_worker_suback_timeout_is_not_scaled_by_expected_messages(monkeypatch) -> None:
     _patch_fake_mqtt(monkeypatch, suback_behavior="none")
-    barrier = _Barrier()
+    barrier = loadgen.FanoutSubscribeBarrier(expected=1)
     cfg = _worker_cfg(barrier)
     cfg.expect_messages = 1000
     out_q: queue.Queue = queue.Queue()
@@ -251,7 +242,7 @@ def test_worker_suback_timeout_is_not_scaled_by_expected_messages(monkeypatch) -
 
 def test_worker_does_not_mark_ready_on_suback_reject(monkeypatch) -> None:
     _patch_fake_mqtt(monkeypatch, suback_behavior="rejected")
-    barrier = _Barrier()
+    barrier = loadgen.FanoutSubscribeBarrier(expected=1)
     cfg = _worker_cfg(barrier)
     out_q: queue.Queue = queue.Queue()
     start_evt = threading.Event()

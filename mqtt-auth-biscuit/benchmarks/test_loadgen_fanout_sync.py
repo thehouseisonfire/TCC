@@ -7,10 +7,39 @@ import os
 import queue
 import sys
 import threading
+from typing import TypedDict
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from benchmarks import loadgen
+
+
+class _FanoutKwargs(TypedDict):
+    host: str
+    port: int
+    username: str
+    password: str
+    fanout_publisher_username: str | None
+    fanout_publisher_password: str | None
+    topic_template: str
+    clients: int
+    message_count: int
+    qos: int
+    qos_distribution: list[tuple[int, float]] | None
+    message_size: int
+    protocol: int
+    sync_connect: bool
+    token_issuer_url: str | None
+    token_issuer_kind: str | None
+    token_issuer_ttl: int | None
+    token_issuer_no_default_roles: bool
+    token_issuer_no_default_grants: bool
+    token_refresh_codes: set[int]
+    tls_enabled: bool
+    tls_ca_file: str | None
+    tls_insecure: bool
+    mode: str
+    fanout_topic: str | None
 
 
 def _empty_worker_result(client_id: str, errors: list[str] | None = None) -> loadgen.WorkerResult:
@@ -35,7 +64,7 @@ def _empty_worker_result(client_id: str, errors: list[str] | None = None) -> loa
     )
 
 
-def _fanout_kwargs() -> dict[str, object]:
+def _fanout_kwargs() -> _FanoutKwargs:
     return {
         "host": "localhost",
         "port": 1883,
@@ -219,7 +248,9 @@ def test_fanout_barrier_expected_uses_spawned_workers(monkeypatch) -> None:
         lambda **_kwargs: ([], {0: [], 1: [], 2: []}, [], False),
     )
 
-    result = loadgen.run_load(**{**_fanout_kwargs(), "clients": 2, "biscuit_delegate": True})
+    kwargs = _fanout_kwargs()
+    kwargs["clients"] = 2
+    result = loadgen.run_load(**kwargs, biscuit_delegate=True)
 
     assert barrier_instances
     assert barrier_instances[0].expected == 1

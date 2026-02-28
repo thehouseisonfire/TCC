@@ -265,6 +265,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 6. Issue 31: Control-triggered kick/re-auth
 7. Issue 32: Control-triggered ACL_READ + notify
 8. Issue 37: ACL_READ fan-out scenarios across policy profiles
+9. Issue 40: CI execution for control-plane and runtime flow suites
 ---
 
 #### A) Policy Source Parity
@@ -333,11 +334,15 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 - [ ] **Issue 23: Proactive client reauthentication before expiry**
   - Goal: Clients refresh tokens proactively and initiate MQTT v5 reauth at
     least one minute before token expiration, minimizing ACL denials.
+  - Current gap: lifecycle coverage validates a single AUTH exchange, but not
+    timer-driven proactive refresh before expiry in long-lived sessions.
   - Deliverable:
     - Client-side refresh timer logic using the token `exp` claim.
     - Request a new token from the Token Issuer and send an AUTH packet with
       fresh credentials at least 60 seconds before expiry.
     - Update benchmark clients/scenarios to exercise proactive refresh flow.
+    - Add runtime assertions proving session continuity without expiry-driven
+      disconnects during proactive-refresh runs.
 
 - [ ] **Issue 24: Decide whether multi-step `MOSQ_EVT_EXT_AUTH_CONTINUE` is in
      research scope**
@@ -347,6 +352,8 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
   - Notes:
     - Current implementation treats enhanced auth as single-step (CONTINUE
       delegates to START).
+    - Existing tests confirm delegation behavior but do not validate a
+      multi-step server-side state machine.
     - Multi-step flows add state-management complexity that may not affect
       JWT-vs-Biscuit comparison unless explicitly tested.
   - Deliverable:
@@ -355,21 +362,36 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - If in-scope:
       - Implement multi-step auth state handling (per client/session) and add at
         least one scenario measuring multi-step overhead
+    - If out-of-scope:
+      - Add explicit scope note in article/progress docs and keep regression
+        coverage that guarantees single-step semantics remain intentional.
 
 - [ ] **Issue 31: Verify control-triggered dynamic enforcement (kick/re-auth)**
   - Goal: Implement/control scenarios where `$CONTROL/.../v1` triggers
     enforcement via kicking/re-auth (no `ACL_READ` fan-out checks).
+  - Current gap: control-flow tests publish to `$CONTROL`, but enforcement
+    effects are still applied via out-of-band churn steps instead of
+    control-triggered side effects.
   - Deliverable:
     - Control message publisher used during scenario
-    - Evidence of client re-auth or reconnect behavior
+    - Dynamic-security command payload that changes permissions at runtime
+    - Evidence of client kick + re-auth or reconnect behavior caused by the
+      control operation itself (without external snapshot swap shortcuts)
+    - Assertions that denied post-change operations map to expected
+      reconnect/reauth lifecycle.
 
 - [ ] **Issue 32: Verify control-triggered dynamic enforcement (ACL_READ + notify)**
   - Goal: Implement/control scenarios where `$CONTROL/.../v1` triggers cache
     invalidation and clients are informed via a notification topic while
     `ACL_READ` denies fan-out.
+  - Current gap: notification and deny behavior are covered, but notification
+    publication and policy transitions are currently orchestrated outside the
+    control command path.
   - Deliverable:
     - Notification topic publishing (e.g., `system_notification/<client_id>`)
     - Scenario capturing denial after privilege reduction
+    - Runtime proof that notification + deny transition is caused by control
+      operation execution (not manual external policy mutation).
 
 - [ ] **Issue 37: Add `ACL_READ` fan-out authorization scenarios across policy profiles**
   - Goal: Add benchmark scenarios that explicitly exercise read/fan-out
@@ -391,9 +413,25 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
       profile per source
     - Result metadata documenting active `acl_read_full_authz` mode and policy
       profile for each run
+    - Broker-level runtime integration assertions for each source/profile slice
+      (not only scenario-shape/config tests).
 
 #### G) Broker Runtime Verification (Integration Assertions)
 
+- [ ] **Issue 40: Execute control-plane and runtime flow tests in CI**
+  - Goal: Ensure control/lifecycle/fan-out enforcement regressions are detected
+    automatically, not only in manual local runs.
+  - Current gap: CI currently validates syntax/lint/type checks and limited
+    benchmark unit tests, but does not execute broker integration suites.
+  - Deliverable:
+    - Add CI job(s) that run:
+      - benchmark flow unit tests (`test_loadgen_*`, scenario coverage tests)
+      - broker integration tests (`tests/integration/test_issue39_runtime_enforcement.py`)
+    - Introduce marker-based split (fast vs heavy) so PR CI remains bounded and
+      nightly/full pipeline runs full runtime coverage.
+    - Publish artifacts/logs for failed broker integration runs
+      (mosquitto/authz/token-issuer logs + scenario context).
+    - Update contributor docs with exact local/CI commands and expected runtime.
 
 ---
 

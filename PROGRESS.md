@@ -257,15 +257,15 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 ## 8) Open Issues (Next Steps, Grouped)
 
 ### Priority List
-1. Issue 8.2: Containerized benchmark topology
-2. Issue 21: Expand Biscuit authorizer (if current template insufficient)
-3. Issue 22: Strengthen SQLite RBAC (if policies too simple)
-4. Issue 23: Proactive client reauthentication
-5. Issue 24: Multi-step enhanced auth decision
-6. Issue 31: Control-triggered kick/re-auth
-7. Issue 32: Control-triggered ACL_READ + notify
-8. Issue 37: ACL_READ fan-out scenarios across policy profiles
-9. Issue 40: CI execution for control-plane and runtime flow suites
+1. Issue 24: Multi-step enhanced auth decision
+2. Issue 31: Control-triggered kick/re-auth
+3. Issue 32: Control-triggered ACL_READ + notify
+4. Issue 40: CI execution for control-plane and runtime flow suites
+5. Issue 37: ACL_READ fan-out scenarios across policy profiles
+6. Issue 23: Proactive client reauthentication
+7. Issue 21: Expand Biscuit authorizer (if current template insufficient)
+8. Issue 22: Strengthen SQLite RBAC (if policies too simple)
+9. Issue 8.2: Containerized benchmark topology
 ---
 
 #### A) Policy Source Parity

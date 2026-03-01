@@ -257,15 +257,14 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 ## 8) Open Issues (Next Steps, Grouped)
 
 ### Priority List
-1. Issue 24: Multi-step enhanced auth decision
-2. Issue 31: Control-triggered kick/re-auth
-3. Issue 32: Control-triggered ACL_READ + notify
-4. Issue 40: CI execution for control-plane and runtime flow suites
-5. Issue 37: ACL_READ fan-out scenarios across policy profiles
-6. Issue 23: Proactive client reauthentication
-7. Issue 21: Expand Biscuit authorizer (if current template insufficient)
-8. Issue 22: Strengthen SQLite RBAC (if policies too simple)
-9. Issue 8.2: Containerized benchmark topology
+1. Issue 31: Control-triggered kick/re-auth
+2. Issue 32: Control-triggered ACL_READ + notify
+3. Issue 40: CI execution for control-plane and runtime flow suites
+4. Issue 37: ACL_READ fan-out scenarios across policy profiles
+5. Issue 23: Proactive client reauthentication
+6. Issue 21: Expand Biscuit authorizer (if current template insufficient)
+7. Issue 22: Strengthen SQLite RBAC (if policies too simple)
+8. Issue 8.2: Containerized benchmark topology
 ---
 
 #### A) Policy Source Parity
@@ -343,28 +342,6 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Update benchmark clients/scenarios to exercise proactive refresh flow.
     - Add runtime assertions proving session continuity without expiry-driven
       disconnects during proactive-refresh runs.
-
-- [ ] **Issue 24: Decide whether multi-step `MOSQ_EVT_EXT_AUTH_CONTINUE` is in
-     research scope**
-  - Goal: Determine whether implementing true multi-step enhanced authentication
-    (state machine across multiple AUTH packets) is required for the paper's
-    hypotheses, or whether the single-step "token refresh" model is sufficient.
-  - Notes:
-    - Current implementation treats enhanced auth as single-step (CONTINUE
-      delegates to START).
-    - Existing tests confirm delegation behavior but do not validate a
-      multi-step server-side state machine.
-    - Multi-step flows add state-management complexity that may not affect
-      JWT-vs-Biscuit comparison unless explicitly tested.
-  - Deliverable:
-    - Document a decision: in-scope vs out-of-scope, with justification tied to
-      hypotheses/metrics
-    - If in-scope:
-      - Implement multi-step auth state handling (per client/session) and add at
-        least one scenario measuring multi-step overhead
-    - If out-of-scope:
-      - Add explicit scope note in article/progress docs and keep regression
-        coverage that guarantees single-step semantics remain intentional.
 
 - [ ] **Issue 31: Verify control-triggered dynamic enforcement (kick/re-auth)**
   - Goal: Implement/control scenarios where `$CONTROL/.../v1` triggers
@@ -546,6 +523,15 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 
 - [x] **Issue 20.1: Verify ACL_CHECK subtype handling across policy modes**
   - **Summary**: Added `MOSQ_ACL_CONTROL` constant (0x08) for control-plane access; fixed `control_callback` hardcoded `access: 2` → `MOSQ_ACL_CONTROL`; updated `access_to_operation()` to map 0x08 → "control"; added comprehensive unit tests for all ACL subtypes (READ/WRITE/SUBSCRIBE/CONTROL) with priority ordering (WRITE > SUBSCRIBE > CONTROL > READ), bitmask combinations, and edge cases. All 7 policy modes verified to correctly handle distinct ACL subtypes.
+
+- [x] **Issue 24: Decide whether to benchmark multi-step `MOSQ_EVT_EXT_AUTH_CONTINUE` state machine**
+  - **Decision**: Out of scope for current research.
+  - **Justification**: Current hypotheses/metrics compare JWT vs Biscuit
+    viability/performance and lifecycle token refresh cost; they do not require
+    multi-step enhanced-auth choreography.
+  - **Implementation note**: Keep intentional single-step semantics
+    (`EXT_AUTH_CONTINUE` delegates to `EXT_AUTH_START`) and preserve regression
+    tests that lock this behavior.
 
 - [x] **Issue 25: Optional full authz on ACL_READ behind a flag (default expiry-only)** — **COMPLETED 2026-02-25**
   - **Summary**: Added `acl_read_full_authz` plugin config option (default `false`) to control `MOSQ_ACL_READ` fan-out behavior. When disabled, ACL read checks use expiry-only validation for cached sessions; when enabled, the plugin executes full authorization (token/SQLite/HTTP/hybrid/dynamic-security paths) for each read. Added unit tests for config parsing/defaults, expiry helper behavior, and ACL callback fast-path semantics (`ACL_READ` allow on unexpired cached token, strict behavior when enabled, no bypass for `ACL_WRITE`, and expired-token denial). Added operator documentation to `benchmarks/RUNNING_BENCHMARKS.md`.

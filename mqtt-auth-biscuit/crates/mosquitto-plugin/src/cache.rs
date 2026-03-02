@@ -57,8 +57,13 @@ where
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if let Some((evicted_key, _)) = lru.push(key, ()) {
-            self.cache.remove(&evicted_key);
+        let existed = lru.contains(&key);
+        if let Some((evicted_key, _)) = lru.push(key.clone(), ()) {
+            // LruCache::push returns the replaced entry for same-key updates.
+            // Do not remove the freshly updated cache value in that case.
+            if !(existed && evicted_key == key) {
+                self.cache.remove(&evicted_key);
+            }
         }
         while lru.len() > self.capacity {
             if let Some((evicted_key, _)) = lru.pop_lru() {
@@ -191,5 +196,38 @@ mod tests {
 
         assert!(!cache.contains_live(&"a".to_string()));
         assert_eq!(cache.get(&"a".to_string()), None);
+    }
+
+    #[test]
+    fn reinsert_same_key_keeps_entry_live() {
+        let cache = SessionCache::new(2);
+        cache.insert("a".to_string(), 1, Duration::from_secs(60));
+        cache.insert("a".to_string(), 2, Duration::from_secs(60));
+
+        assert_eq!(cache.get(&"a".to_string()), Some(2));
+    }
+
+    #[test]
+    fn reinsert_same_key_preserves_lru_eviction_semantics() {
+        let cache = SessionCache::new(2);
+        cache.insert("a".to_string(), 1, Duration::from_secs(60));
+        cache.insert("b".to_string(), 2, Duration::from_secs(60));
+        cache.insert("a".to_string(), 3, Duration::from_secs(60));
+        cache.insert("c".to_string(), 4, Duration::from_secs(60));
+
+        assert_eq!(cache.get(&"a".to_string()), Some(3));
+        assert_eq!(cache.get(&"b".to_string()), None);
+        assert_eq!(cache.get(&"c".to_string()), Some(4));
+    }
+
+    #[test]
+    fn reinsert_same_key_refreshes_ttl() {
+        let cache = SessionCache::new(2);
+        cache.insert("a".to_string(), 1, Duration::from_millis(20));
+        thread::sleep(Duration::from_millis(10));
+        cache.insert("a".to_string(), 2, Duration::from_millis(80));
+        thread::sleep(Duration::from_millis(40));
+
+        assert_eq!(cache.get(&"a".to_string()), Some(2));
     }
 }

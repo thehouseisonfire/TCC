@@ -92,6 +92,7 @@ pub struct PluginConfig {
     pub cache_ttl_seconds: u64,
     pub allow_anonymous_no_token: bool,
     pub acl_read_full_authz: bool,
+    pub control_notify_topic_prefix: String,
     pub ext_auth_method: Option<String>,
     pub role_username_prefix: String,
     pub biscuit_role_fact: String,
@@ -128,6 +129,7 @@ pub struct PluginConfigBuilder {
     cache_ttl_seconds: Option<u64>,
     allow_anonymous_no_token: Option<bool>,
     acl_read_full_authz: Option<bool>,
+    control_notify_topic_prefix: Option<String>,
     ext_auth_method: Option<String>,
     role_username_prefix: Option<String>,
     biscuit_role_fact: Option<String>,
@@ -162,6 +164,7 @@ impl PluginConfigBuilder {
             cache_ttl_seconds: None,
             allow_anonymous_no_token: None,
             acl_read_full_authz: None,
+            control_notify_topic_prefix: None,
             ext_auth_method: None,
             role_username_prefix: None,
             biscuit_role_fact: None,
@@ -261,6 +264,11 @@ impl PluginConfigBuilder {
 
     pub fn acl_read_full_authz(mut self, enabled: bool) -> Self {
         self.acl_read_full_authz = Some(enabled);
+        self
+    }
+
+    pub fn control_notify_topic_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.control_notify_topic_prefix = Some(prefix.into());
         self
     }
 
@@ -369,6 +377,13 @@ impl PluginConfigBuilder {
         let biscuit_transport = self
             .biscuit_transport
             .unwrap_or(BiscuitTransportMode::Base64Url);
+        let control_notify_topic_prefix = self
+            .control_notify_topic_prefix
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("system_notification")
+            .to_string();
 
         Ok(PluginConfig {
             jwt: JwtConfig {
@@ -382,6 +397,7 @@ impl PluginConfigBuilder {
             cache_ttl_seconds,
             allow_anonymous_no_token: self.allow_anonymous_no_token.unwrap_or(false),
             acl_read_full_authz: self.acl_read_full_authz.unwrap_or(false),
+            control_notify_topic_prefix,
             ext_auth_method: self.ext_auth_method.or_else(|| Some("token".to_string())),
             role_username_prefix: self
                 .role_username_prefix
@@ -505,6 +521,7 @@ pub fn parse_options(
                     .map_err(|e| format!("Invalid acl_read_full_authz: {e}"))?;
                 builder.acl_read_full_authz(enabled)
             }
+            "control_notify_topic_prefix" => builder.control_notify_topic_prefix(value),
             "ext_auth_method" => builder.ext_auth_method(value),
             "role_username_prefix" => builder.role_username_prefix(value),
             "biscuit_role_fact" => builder.biscuit_role_fact(value),
@@ -692,5 +709,66 @@ mod tests {
 
         let config = parse_options(opts.as_mut_ptr(), opts.len() as i32).expect("config parse");
         assert!(config.acl_read_full_authz);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn defaults_control_notify_topic_prefix() {
+        let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
+        let biscuit_root_key_file = format!(
+            "{}/../../docker/biscuit_public.key",
+            env!("CARGO_MANIFEST_DIR")
+        );
+
+        let config = PluginConfigBuilder::new()
+            .jwt_algorithm("ES256")
+            .jwt_key_file(jwt_pub_pem)
+            .biscuit_root_key_file(biscuit_root_key_file)
+            .build()
+            .expect("config should build");
+
+        assert_eq!(config.control_notify_topic_prefix, "system_notification");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn parse_options_supports_control_notify_topic_prefix() {
+        let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
+        let biscuit_root_key_file = format!(
+            "{}/../../docker/biscuit_public.key",
+            env!("CARGO_MANIFEST_DIR")
+        );
+
+        let cstrings: Vec<CString> = vec![
+            CString::new("jwt_alg").unwrap(),
+            CString::new("ES256").unwrap(),
+            CString::new("jwt_key_file").unwrap(),
+            CString::new(jwt_pub_pem).unwrap(),
+            CString::new("biscuit_root_key_file").unwrap(),
+            CString::new(biscuit_root_key_file).unwrap(),
+            CString::new("control_notify_topic_prefix").unwrap(),
+            CString::new("system_notify").unwrap(),
+        ];
+        let mut opts = vec![
+            MosquittoOpt {
+                key: cstrings[0].as_ptr() as *mut c_char,
+                value: cstrings[1].as_ptr() as *mut c_char,
+            },
+            MosquittoOpt {
+                key: cstrings[2].as_ptr() as *mut c_char,
+                value: cstrings[3].as_ptr() as *mut c_char,
+            },
+            MosquittoOpt {
+                key: cstrings[4].as_ptr() as *mut c_char,
+                value: cstrings[5].as_ptr() as *mut c_char,
+            },
+            MosquittoOpt {
+                key: cstrings[6].as_ptr() as *mut c_char,
+                value: cstrings[7].as_ptr() as *mut c_char,
+            },
+        ];
+
+        let config = parse_options(opts.as_mut_ptr(), opts.len() as i32).expect("config parse");
+        assert_eq!(config.control_notify_topic_prefix, "system_notify");
     }
 }

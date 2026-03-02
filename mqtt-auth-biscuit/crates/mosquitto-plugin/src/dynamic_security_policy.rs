@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::{Mutex, RwLock};
@@ -12,6 +12,7 @@ pub struct DynamicSecurityPolicy {
     last_loaded: Mutex<Option<Instant>>,
     state: RwLock<DynSecState>,
     runtime_disabled_usernames: Mutex<HashSet<String>>,
+    runtime_role_acl_overrides: Mutex<HashMap<RoleAclKey, RuntimeRoleAclOverride>>,
 }
 
 impl DynamicSecurityPolicy {
@@ -22,6 +23,7 @@ impl DynamicSecurityPolicy {
             last_loaded: Mutex::new(None),
             state: RwLock::new(DynSecState::default()),
             runtime_disabled_usernames: Mutex::new(HashSet::new()),
+            runtime_role_acl_overrides: Mutex::new(HashMap::new()),
         };
         policy.reload_if_needed(true)?;
         Ok(policy)
@@ -112,53 +114,173 @@ impl DynamicSecurityPolicy {
         self.reload_if_needed(false)?;
 
         let mut kick_client_ids = HashSet::new();
+        let mut kick_usernames = HashSet::new();
         let mut disable_usernames = HashSet::new();
-        let mut enable_usernames = HashSet::new();
         let mut requested_enable_usernames = HashSet::new();
+        let mut notify_events = Vec::new();
+        let mut role_acl_mutations = Vec::new();
+        let mut role_acl_runtime_overrides = Vec::new();
+        let mut state_changed = false;
         {
             let mut state = self
                 .state
                 .write()
                 .map_err(|_| "dynsec state lock poisoned".to_string())?;
-            for cmd in parsed.commands {
+            for cmd in &parsed.commands {
                 let command = cmd.command.as_str();
-                if command != "disableClient" && command != "enableClient" {
+                if command == "disableClient" || command == "enableClient" {
+                    let Some(username) = cmd
+                        .username
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    else {
+                        continue;
+                    };
+
+                    if let Some(client) = state.clients.get_mut(username) {
+                        if command == "disableClient" {
+                            if client.disabled {
+                                continue;
+                            }
+                            client.disabled = true;
+                            disable_usernames.insert(username.to_string());
+                            requested_enable_usernames.remove(username);
+                            kick_usernames.insert(username.to_string());
+                            if let Some(client_id) = client.client_id.as_ref() {
+                                kick_client_ids.insert(client_id.clone());
+                            }
+                            state_changed = true;
+                        } else {
+                            requested_enable_usernames.insert(username.to_string());
+                            kick_usernames.remove(username);
+                            if client.disabled {
+                                disable_usernames.remove(username);
+                                if let Some(client_id) = client.client_id.as_ref() {
+                                    kick_client_ids.remove(client_id);
+                                }
+                            }
+                            client.disabled = false;
+                            state_changed = true;
+                        }
+                    } else if command == "enableClient" {
+                        requested_enable_usernames.insert(username.to_string());
+                    }
                     continue;
                 }
-                let Some(username) = cmd
-                    .username
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                else {
-                    continue;
-                };
 
-                if let Some(client) = state.clients.get_mut(username) {
-                    if command == "disableClient" {
-                        if client.disabled {
-                            continue;
-                        }
-                        client.disabled = true;
-                        disable_usernames.insert(username.to_string());
-                        enable_usernames.remove(username);
-                        if let Some(client_id) = client.client_id.as_ref() {
-                            kick_client_ids.insert(client_id.clone());
-                        }
-                    } else {
-                        requested_enable_usernames.insert(username.to_string());
-                        if client.disabled {
-                            enable_usernames.insert(username.to_string());
-                            disable_usernames.remove(username);
-                            if let Some(client_id) = client.client_id.as_ref() {
-                                kick_client_ids.remove(client_id);
+                if command == "removeRoleACL" || command == "addRoleACL" {
+                    let Some(rolename) = cmd
+                        .rolename
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    else {
+                        continue;
+                    };
+                    let Some(acltype) = cmd
+                        .acltype
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    else {
+                        continue;
+                    };
+                    let Some(topic) = cmd
+                        .topic
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    else {
+                        continue;
+                    };
+                    let Some(acl_type) = AclType::from_control_str(acltype) else {
+                        continue;
+                    };
+
+                    let Some(role) = state.roles.get_mut(rolename) else {
+                        continue;
+                    };
+
+                    if command == "removeRoleACL" {
+                        let removed_acl = role.acls.remove_acl_entry(acl_type, topic);
+                        if let Some(removed_acl) = removed_acl {
+                            state_changed = true;
+                            role_acl_mutations.push(RoleAclMutation::Remove {
+                                rolename: rolename.to_string(),
+                                acltype: acltype.to_string(),
+                                topic: topic.to_string(),
+                            });
+                            role_acl_runtime_overrides.push((
+                                RoleAclKey::new(rolename, acl_type, topic),
+                                RuntimeRoleAclOverride::Remove,
+                            ));
+                            if removed_acl.allow
+                                && removed_acl.acl_type == AclType::PublishClientReceive
+                                && !removed_acl.topic.starts_with("$CONTROL/")
+                            {
+                                let usernames = role_member_usernames(&state, rolename);
+                                if !usernames.is_empty() {
+                                    notify_events.push(ControlNotifyEvent {
+                                        command: command.to_string(),
+                                        rolename: Some(rolename.to_string()),
+                                        acltype: Some(acltype.to_string()),
+                                        topic: Some(topic.to_string()),
+                                        usernames,
+                                    });
+                                }
                             }
                         }
-                        client.disabled = false;
+                    } else {
+                        let allow = cmd.allow.unwrap_or(false);
+                        let priority = cmd.priority.unwrap_or(0);
+                        let changed = role.acls.upsert_acl_entry(AclEntry {
+                            acl_type,
+                            topic: topic.to_string(),
+                            allow,
+                            priority,
+                        });
+                        if changed {
+                            state_changed = true;
+                            role_acl_mutations.push(RoleAclMutation::Add {
+                                rolename: rolename.to_string(),
+                                acltype: acltype.to_string(),
+                                topic: topic.to_string(),
+                                priority,
+                                allow,
+                            });
+                            role_acl_runtime_overrides.push((
+                                RoleAclKey::new(rolename, acl_type, topic),
+                                RuntimeRoleAclOverride::Add { priority, allow },
+                            ));
+                            if !allow
+                                && acl_type == AclType::PublishClientReceive
+                                && !topic.starts_with("$CONTROL/")
+                            {
+                                let usernames = role_member_usernames(&state, rolename);
+                                if !usernames.is_empty() {
+                                    notify_events.push(ControlNotifyEvent {
+                                        command: command.to_string(),
+                                        rolename: Some(rolename.to_string()),
+                                        acltype: Some(acltype.to_string()),
+                                        topic: Some(topic.to_string()),
+                                        usernames,
+                                    });
+                                }
+                            }
+                        }
                     }
-                } else if command == "enableClient" {
-                    requested_enable_usernames.insert(username.to_string());
                 }
+            }
+        }
+
+        {
+            let mut overrides = self
+                .runtime_role_acl_overrides
+                .lock()
+                .map_err(|_| "dynsec runtime role-acl lock poisoned".to_string())?;
+            for (key, value) in role_acl_runtime_overrides {
+                overrides.insert(key, value);
             }
         }
 
@@ -185,15 +307,39 @@ impl DynamicSecurityPolicy {
                 eprintln!("dynsec: failed to persist enableClient for '{username}': {err}");
             }
         }
+        for mutation in role_acl_mutations {
+            let persist_result = match mutation {
+                RoleAclMutation::Add {
+                    rolename,
+                    acltype,
+                    topic,
+                    priority,
+                    allow,
+                } => self.persist_role_acl_add(&rolename, &acltype, &topic, priority, allow),
+                RoleAclMutation::Remove {
+                    rolename,
+                    acltype,
+                    topic,
+                } => self.persist_role_acl_remove(&rolename, &acltype, &topic),
+            };
+            if let Err(err) = persist_result {
+                eprintln!("dynsec: failed to persist role acl mutation: {err}");
+            }
+        }
+
+        if state_changed {
+            self.invalidate_reload_cache()?;
+        }
 
         let mut affected_client_ids: Vec<String> = kick_client_ids.into_iter().collect();
-        let mut changed_usernames: Vec<String> = disable_usernames.into_iter().collect();
+        let mut changed_usernames: Vec<String> = kick_usernames.into_iter().collect();
         affected_client_ids.sort();
         changed_usernames.sort();
 
         Ok(ControlEnforcementTargets {
-            client_ids: affected_client_ids,
-            usernames: changed_usernames,
+            kick_client_ids: affected_client_ids,
+            kick_usernames: changed_usernames,
+            notify_events,
         })
     }
 
@@ -215,7 +361,8 @@ impl DynamicSecurityPolicy {
             .map_err(|e| format!("dynsec config read failed: {e}"))?;
         let cfg: DynSecConfig =
             serde_json::from_str(&raw).map_err(|e| format!("dynsec config parse failed: {e}"))?;
-        let state = DynSecState::from_config(cfg);
+        let mut state = DynSecState::from_config(cfg);
+        self.apply_runtime_role_acl_overrides(&mut state)?;
 
         let mut guard = self
             .state
@@ -224,6 +371,36 @@ impl DynamicSecurityPolicy {
         *guard = state;
 
         *last_loaded = Some(now);
+        Ok(())
+    }
+
+    fn apply_runtime_role_acl_overrides(&self, state: &mut DynSecState) -> Result<(), String> {
+        let overrides = self
+            .runtime_role_acl_overrides
+            .lock()
+            .map_err(|_| "dynsec runtime role-acl lock poisoned".to_string())?;
+        if overrides.is_empty() {
+            return Ok(());
+        }
+
+        for (key, value) in overrides.iter() {
+            let Some(role) = state.roles.get_mut(&key.rolename) else {
+                continue;
+            };
+            match value {
+                RuntimeRoleAclOverride::Remove => {
+                    let _ = role.acls.remove_acl_entry(key.acl_type, &key.topic);
+                }
+                RuntimeRoleAclOverride::Add { priority, allow } => {
+                    let _ = role.acls.upsert_acl_entry(AclEntry {
+                        acl_type: key.acl_type,
+                        topic: key.topic.clone(),
+                        allow: *allow,
+                        priority: *priority,
+                    });
+                }
+            }
+        }
         Ok(())
     }
 
@@ -256,25 +433,193 @@ impl DynamicSecurityPolicy {
             .map_err(|e| format!("dynsec config write failed: {e}"))?;
         Ok(())
     }
+
+    fn persist_role_acl_remove(&self, rolename: &str, acltype: &str, topic: &str) -> Result<(), String> {
+        let raw = fs::read_to_string(&self.config_path)
+            .map_err(|e| format!("dynsec config read failed: {e}"))?;
+        let mut root: Value =
+            serde_json::from_str(&raw).map_err(|e| format!("dynsec config parse failed: {e}"))?;
+
+        let mut changed = false;
+        if let Some(roles) = root.get_mut("roles").and_then(Value::as_array_mut) {
+            for role in roles {
+                let Some(current_rolename) = role.get("rolename").and_then(Value::as_str) else {
+                    continue;
+                };
+                if current_rolename != rolename {
+                    continue;
+                }
+                if let Some(acls) = role.get_mut("acls").and_then(Value::as_array_mut) {
+                    let before_len = acls.len();
+                    acls.retain(|acl| {
+                        let acl_acltype = acl.get("acltype").and_then(Value::as_str);
+                        let acl_topic = acl.get("topic").and_then(Value::as_str);
+                        !(acl_acltype == Some(acltype) && acl_topic == Some(topic))
+                    });
+                    changed |= acls.len() != before_len;
+                }
+            }
+        }
+
+        if !changed {
+            return Ok(());
+        }
+
+        let serialized = serde_json::to_string_pretty(&root)
+            .map_err(|e| format!("dynsec config serialize failed: {e}"))?;
+        fs::write(&self.config_path, format!("{serialized}\n"))
+            .map_err(|e| format!("dynsec config write failed: {e}"))?;
+        Ok(())
+    }
+
+    fn persist_role_acl_add(
+        &self,
+        rolename: &str,
+        acltype: &str,
+        topic: &str,
+        priority: i32,
+        allow: bool,
+    ) -> Result<(), String> {
+        let raw = fs::read_to_string(&self.config_path)
+            .map_err(|e| format!("dynsec config read failed: {e}"))?;
+        let mut root: Value =
+            serde_json::from_str(&raw).map_err(|e| format!("dynsec config parse failed: {e}"))?;
+
+        let mut changed = false;
+        if let Some(roles) = root.get_mut("roles").and_then(Value::as_array_mut) {
+            for role in roles {
+                let Some(current_rolename) = role.get("rolename").and_then(Value::as_str) else {
+                    continue;
+                };
+                if current_rolename != rolename {
+                    continue;
+                }
+                if role.get("acls").is_none() {
+                    role["acls"] = Value::Array(Vec::new());
+                }
+                let Some(acls) = role.get_mut("acls").and_then(Value::as_array_mut) else {
+                    continue;
+                };
+                let mut updated_existing = false;
+                for acl in acls.iter_mut() {
+                    let acl_acltype = acl.get("acltype").and_then(Value::as_str);
+                    let acl_topic = acl.get("topic").and_then(Value::as_str);
+                    if acl_acltype == Some(acltype) && acl_topic == Some(topic) {
+                        acl["priority"] = Value::Number(priority.into());
+                        acl["allow"] = Value::Bool(allow);
+                        changed = true;
+                        updated_existing = true;
+                    }
+                }
+                if !updated_existing {
+                    acls.push(json!({
+                        "acltype": acltype,
+                        "topic": topic,
+                        "priority": priority,
+                        "allow": allow,
+                    }));
+                    changed = true;
+                }
+            }
+        }
+
+        if !changed {
+            return Ok(());
+        }
+
+        let serialized = serde_json::to_string_pretty(&root)
+            .map_err(|e| format!("dynsec config serialize failed: {e}"))?;
+        fs::write(&self.config_path, format!("{serialized}\n"))
+            .map_err(|e| format!("dynsec config write failed: {e}"))?;
+        Ok(())
+    }
+
+    fn invalidate_reload_cache(&self) -> Result<(), String> {
+        let mut last_loaded = self
+            .last_loaded
+            .lock()
+            .map_err(|_| "dynsec reload lock poisoned".to_string())?;
+        *last_loaded = None;
+        Ok(())
+    }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct ControlPayload {
     #[serde(default)]
     commands: Vec<ControlCommand>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct ControlCommand {
     command: String,
     #[serde(default)]
     username: Option<String>,
+    #[serde(default)]
+    rolename: Option<String>,
+    #[serde(default)]
+    acltype: Option<String>,
+    #[serde(default)]
+    topic: Option<String>,
+    #[serde(default)]
+    priority: Option<i32>,
+    #[serde(default)]
+    allow: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ControlEnforcementTargets {
-    pub client_ids: Vec<String>,
+    pub kick_client_ids: Vec<String>,
+    pub kick_usernames: Vec<String>,
+    pub notify_events: Vec<ControlNotifyEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlNotifyEvent {
+    pub command: String,
+    pub rolename: Option<String>,
+    pub acltype: Option<String>,
+    pub topic: Option<String>,
     pub usernames: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+enum RoleAclMutation {
+    Add {
+        rolename: String,
+        acltype: String,
+        topic: String,
+        priority: i32,
+        allow: bool,
+    },
+    Remove {
+        rolename: String,
+        acltype: String,
+        topic: String,
+    },
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct RoleAclKey {
+    rolename: String,
+    acl_type: AclType,
+    topic: String,
+}
+
+impl RoleAclKey {
+    fn new(rolename: &str, acl_type: AclType, topic: &str) -> Self {
+        Self {
+            rolename: rolename.to_string(),
+            acl_type,
+            topic: topic.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum RuntimeRoleAclOverride {
+    Remove,
+    Add { priority: i32, allow: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -356,6 +701,26 @@ impl DynSecState {
             anonymous_group: cfg.anonymous_group,
         }
     }
+}
+
+fn role_member_usernames(state: &DynSecState, rolename: &str) -> Vec<String> {
+    let mut usernames = HashSet::new();
+    for (username, client) in &state.clients {
+        let has_direct_role = client.roles.iter().any(|role| role.name == rolename);
+        let has_group_role = client.groups.iter().any(|group_ref| {
+            state
+                .groups
+                .get(&group_ref.name)
+                .map(|group| group.roles.iter().any(|role| role.name == rolename))
+                .unwrap_or(false)
+        });
+        if has_direct_role || has_group_role {
+            usernames.insert(username.clone());
+        }
+    }
+    let mut out: Vec<String> = usernames.into_iter().collect();
+    out.sort();
+    out
 }
 
 #[derive(Debug, Clone)]
@@ -487,6 +852,32 @@ impl DynSecAcls {
         sort_acl_list(&mut self.subscribe_pattern);
         sort_acl_list(&mut self.unsubscribe_pattern);
     }
+
+    fn remove_acl_entry(&mut self, acl_type: AclType, topic: &str) -> Option<AclEntry> {
+        match acl_type {
+            AclType::PublishClientSend => remove_acl_from_vec(&mut self.publish_c_send, topic),
+            AclType::PublishClientReceive => remove_acl_from_vec(&mut self.publish_c_recv, topic),
+            AclType::SubscribeLiteral => self.subscribe_literal.remove(topic),
+            AclType::SubscribePattern => remove_acl_from_vec(&mut self.subscribe_pattern, topic),
+            AclType::UnsubscribeLiteral => self.unsubscribe_literal.remove(topic),
+            AclType::UnsubscribePattern => remove_acl_from_vec(&mut self.unsubscribe_pattern, topic),
+            AclType::SubscribeGeneric | AclType::UnsubscribeGeneric => None,
+        }
+    }
+
+    fn upsert_acl_entry(&mut self, acl: AclEntry) -> bool {
+        match acl.acl_type {
+            AclType::PublishClientSend => upsert_acl_in_vec(&mut self.publish_c_send, acl),
+            AclType::PublishClientReceive => upsert_acl_in_vec(&mut self.publish_c_recv, acl),
+            AclType::SubscribeLiteral => upsert_acl_in_literal_map(&mut self.subscribe_literal, acl),
+            AclType::SubscribePattern => upsert_acl_in_vec(&mut self.subscribe_pattern, acl),
+            AclType::UnsubscribeLiteral => {
+                upsert_acl_in_literal_map(&mut self.unsubscribe_literal, acl)
+            }
+            AclType::UnsubscribePattern => upsert_acl_in_vec(&mut self.unsubscribe_pattern, acl),
+            AclType::SubscribeGeneric | AclType::UnsubscribeGeneric => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -509,7 +900,7 @@ impl AclEntry {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum AclType {
     PublishClientSend,
     PublishClientReceive,
@@ -536,6 +927,18 @@ impl AclType {
                 eprintln!("dynsec: unknown acltype '{value}', defaulting to subscribe");
                 AclType::SubscribeGeneric
             }
+        }
+    }
+
+    fn from_control_str(value: &str) -> Option<Self> {
+        match value {
+            "publishClientSend" => Some(AclType::PublishClientSend),
+            "publishClientReceive" => Some(AclType::PublishClientReceive),
+            "subscribeLiteral" => Some(AclType::SubscribeLiteral),
+            "subscribePattern" => Some(AclType::SubscribePattern),
+            "unsubscribeLiteral" => Some(AclType::UnsubscribeLiteral),
+            "unsubscribePattern" => Some(AclType::UnsubscribePattern),
+            _ => None,
         }
     }
 }
@@ -715,6 +1118,37 @@ fn insert_literal_acl(map: &mut HashMap<String, AclEntry>, acl: AclEntry) {
     }
 }
 
+fn upsert_acl_in_literal_map(map: &mut HashMap<String, AclEntry>, acl: AclEntry) -> bool {
+    if let Some(existing) = map.get_mut(&acl.topic) {
+        if existing.allow == acl.allow && existing.priority == acl.priority {
+            return false;
+        }
+        *existing = acl;
+        true
+    } else {
+        map.insert(acl.topic.clone(), acl);
+        true
+    }
+}
+
+fn upsert_acl_in_vec(list: &mut Vec<AclEntry>, acl: AclEntry) -> bool {
+    if let Some(existing) = list.iter_mut().find(|entry| entry.topic == acl.topic) {
+        if existing.allow == acl.allow && existing.priority == acl.priority {
+            return false;
+        }
+        *existing = acl;
+    } else {
+        list.push(acl);
+    }
+    sort_acl_list(list);
+    true
+}
+
+fn remove_acl_from_vec(list: &mut Vec<AclEntry>, topic: &str) -> Option<AclEntry> {
+    let idx = list.iter().position(|entry| entry.topic == topic)?;
+    Some(list.remove(idx))
+}
+
 fn sort_acl_list(list: &mut [AclEntry]) {
     list.sort_by(|a, b| {
         b.priority
@@ -816,6 +1250,51 @@ mod tests {
         fs::write(path, format!("{serialized}\n")).expect("test dynsec config should be writable");
     }
 
+    fn restore_fanout_reader_publish_receive_acl(path: &str) {
+        let raw = fs::read_to_string(path).expect("test dynsec config should be readable");
+        let mut root: Value = serde_json::from_str(&raw).expect("test dynsec config should parse");
+        if let Some(roles) = root.get_mut("roles").and_then(Value::as_array_mut) {
+            for role in roles {
+                let Some(current_rolename) = role.get("rolename").and_then(Value::as_str) else {
+                    continue;
+                };
+                if current_rolename != "fanout_reader" {
+                    continue;
+                }
+
+                if role.get("acls").is_none() {
+                    role["acls"] = Value::Array(Vec::new());
+                }
+                let Some(acls) = role.get_mut("acls").and_then(Value::as_array_mut) else {
+                    continue;
+                };
+
+                let mut already_present = false;
+                for acl in acls.iter() {
+                    let acltype = acl.get("acltype").and_then(Value::as_str);
+                    let topic = acl.get("topic").and_then(Value::as_str);
+                    if acltype == Some("publishClientReceive") && topic == Some("fanout/broadcast")
+                    {
+                        already_present = true;
+                        break;
+                    }
+                }
+                if !already_present {
+                    acls.push(json!({
+                        "acltype": "publishClientReceive",
+                        "topic": "fanout/broadcast",
+                        "priority": 0,
+                        "allow": true
+                    }));
+                }
+            }
+        }
+
+        let serialized =
+            serde_json::to_string_pretty(&root).expect("test dynsec config should serialize");
+        fs::write(path, format!("{serialized}\n")).expect("test dynsec config should be writable");
+    }
+
     fn write_test_dynsec_config_without_client_id() -> String {
         let unique = DYNSEC_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("dynsec-control-no-clientid-{unique}.json"));
@@ -852,6 +1331,43 @@ mod tests {
         path.to_string_lossy().into_owned()
     }
 
+    fn write_test_dynsec_notify_config() -> String {
+        let unique = DYNSEC_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("dynsec-control-notify-{unique}.json"));
+        let config = r#"{
+  "clients": [
+    {
+      "username": "test_user",
+      "clientid": "test_client",
+      "roles": [{"rolename": "fanout_reader", "priority": 0}],
+      "disabled": false
+    }
+  ],
+  "groups": [],
+  "roles": [
+    {
+      "rolename": "fanout_reader",
+      "acls": [
+        {
+          "acltype": "publishClientReceive",
+          "topic": "fanout/broadcast",
+          "priority": 0,
+          "allow": true
+        }
+      ]
+    }
+  ],
+  "defaultACLAccess": {
+    "publishClientSend": false,
+    "publishClientReceive": false,
+    "subscribe": false,
+    "unsubscribe": false
+  }
+}"#;
+        fs::write(&path, config).expect("test dynsec notify config must be writable");
+        path.to_string_lossy().into_owned()
+    }
+
     #[test]
     fn apply_control_payload_disable_client_marks_user_disabled_and_returns_client_id() {
         let path = write_test_dynsec_config();
@@ -862,8 +1378,9 @@ mod tests {
         let targets = policy
             .apply_control_payload(payload)
             .expect("control payload should apply");
-        assert_eq!(targets.client_ids, vec!["test_client".to_string()]);
-        assert_eq!(targets.usernames, vec!["test_user".to_string()]);
+        assert_eq!(targets.kick_client_ids, vec!["test_client".to_string()]);
+        assert_eq!(targets.kick_usernames, vec!["test_user".to_string()]);
+        assert!(targets.notify_events.is_empty());
         assert_eq!(
             policy
                 .check(
@@ -888,8 +1405,9 @@ mod tests {
         let targets = policy
             .apply_control_payload(payload)
             .expect("control payload should apply");
-        assert!(targets.client_ids.is_empty());
-        assert!(targets.usernames.is_empty());
+        assert!(targets.kick_client_ids.is_empty());
+        assert!(targets.kick_usernames.is_empty());
+        assert!(targets.notify_events.is_empty());
         assert_eq!(
             policy
                 .check(
@@ -927,8 +1445,9 @@ mod tests {
         let targets = policy
             .apply_control_payload(payload)
             .expect("control payload should apply");
-        assert!(targets.client_ids.is_empty());
-        assert_eq!(targets.usernames, vec!["test_user".to_string()]);
+        assert!(targets.kick_client_ids.is_empty());
+        assert_eq!(targets.kick_usernames, vec!["test_user".to_string()]);
+        assert!(targets.notify_events.is_empty());
 
         // Runtime disable overlay must continue denying even after config reloads.
         assert_eq!(
@@ -956,8 +1475,9 @@ mod tests {
         let disable_targets = policy
             .apply_control_payload(disable_payload)
             .expect("disable payload should apply");
-        assert_eq!(disable_targets.client_ids, vec!["test_client".to_string()]);
-        assert_eq!(disable_targets.usernames, vec!["test_user".to_string()]);
+        assert_eq!(disable_targets.kick_client_ids, vec!["test_client".to_string()]);
+        assert_eq!(disable_targets.kick_usernames, vec!["test_user".to_string()]);
+        assert!(disable_targets.notify_events.is_empty());
         assert_eq!(
             policy
                 .check(
@@ -974,8 +1494,9 @@ mod tests {
         let enable_targets = policy
             .apply_control_payload(enable_payload)
             .expect("enable payload should apply");
-        assert!(enable_targets.client_ids.is_empty());
-        assert!(enable_targets.usernames.is_empty());
+        assert!(enable_targets.kick_client_ids.is_empty());
+        assert!(enable_targets.kick_usernames.is_empty());
+        assert!(enable_targets.notify_events.is_empty());
         assert_eq!(
             policy
                 .check(
@@ -1005,8 +1526,9 @@ mod tests {
         let targets = policy
             .apply_control_payload(payload)
             .expect("payload should apply");
-        assert!(targets.client_ids.is_empty());
-        assert!(targets.usernames.is_empty());
+        assert!(targets.kick_client_ids.is_empty());
+        assert!(targets.kick_usernames.is_empty());
+        assert!(targets.notify_events.is_empty());
         assert_eq!(
             policy
                 .check(
@@ -1051,8 +1573,9 @@ mod tests {
         let targets = policy
             .apply_control_payload(enable_payload)
             .expect("enable payload should apply");
-        assert!(targets.client_ids.is_empty());
-        assert!(targets.usernames.is_empty());
+        assert!(targets.kick_client_ids.is_empty());
+        assert!(targets.kick_usernames.is_empty());
+        assert!(targets.notify_events.is_empty());
         assert_eq!(
             policy
                 .check(
@@ -1063,6 +1586,101 @@ mod tests {
                 )
                 .expect("policy check should succeed"),
             true
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn apply_control_payload_remove_role_acl_emits_notify_event() {
+        let path = write_test_dynsec_notify_config();
+        let policy = DynamicSecurityPolicy::new(path.clone(), Duration::from_secs(0))
+            .expect("policy must load");
+
+        let payload = br#"{"commands":[{"command":"removeRoleACL","rolename":"fanout_reader","acltype":"publishClientReceive","topic":"fanout/broadcast"}]}"#;
+        let targets = policy
+            .apply_control_payload(payload)
+            .expect("control payload should apply");
+
+        assert!(targets.kick_client_ids.is_empty());
+        assert!(targets.kick_usernames.is_empty());
+        assert_eq!(targets.notify_events.len(), 1);
+        let event = &targets.notify_events[0];
+        assert_eq!(event.command, "removeRoleACL");
+        assert_eq!(event.rolename.as_deref(), Some("fanout_reader"));
+        assert_eq!(event.acltype.as_deref(), Some("publishClientReceive"));
+        assert_eq!(event.topic.as_deref(), Some("fanout/broadcast"));
+        assert_eq!(event.usernames, vec!["test_user".to_string()]);
+
+        assert_eq!(
+            policy
+                .check(
+                    Some("test_user"),
+                    Some("test_client"),
+                    "fanout/broadcast",
+                    ACL_READ
+                )
+                .expect("policy check should succeed"),
+            false
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn apply_control_payload_add_deny_role_acl_emits_notify_event() {
+        let path = write_test_dynsec_notify_config();
+        let policy = DynamicSecurityPolicy::new(path.clone(), Duration::from_secs(0))
+            .expect("policy must load");
+
+        let payload = br#"{"commands":[{"command":"addRoleACL","rolename":"fanout_reader","acltype":"publishClientReceive","topic":"fanout/broadcast","priority":10,"allow":false}]}"#;
+        let targets = policy
+            .apply_control_payload(payload)
+            .expect("control payload should apply");
+
+        assert!(targets.kick_client_ids.is_empty());
+        assert!(targets.kick_usernames.is_empty());
+        assert_eq!(targets.notify_events.len(), 1);
+        let event = &targets.notify_events[0];
+        assert_eq!(event.command, "addRoleACL");
+        assert_eq!(event.usernames, vec!["test_user".to_string()]);
+
+        assert_eq!(
+            policy
+                .check(
+                    Some("test_user"),
+                    Some("test_client"),
+                    "fanout/broadcast",
+                    ACL_READ
+                )
+                .expect("policy check should succeed"),
+            false
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn remove_role_acl_overlay_survives_stale_file_reload() {
+        let path = write_test_dynsec_notify_config();
+        let policy = DynamicSecurityPolicy::new(path.clone(), Duration::from_secs(0))
+            .expect("policy must load");
+
+        let payload = br#"{"commands":[{"command":"removeRoleACL","rolename":"fanout_reader","acltype":"publishClientReceive","topic":"fanout/broadcast"}]}"#;
+        policy
+            .apply_control_payload(payload)
+            .expect("control payload should apply");
+
+        // Simulate stale file state that still contains the removed ACL.
+        restore_fanout_reader_publish_receive_acl(&path);
+
+        assert_eq!(
+            policy
+                .check(
+                    Some("test_user"),
+                    Some("test_client"),
+                    "fanout/broadcast",
+                    ACL_READ
+                )
+                .expect("policy check should succeed"),
+            false
         );
         let _ = fs::remove_file(path);
     }

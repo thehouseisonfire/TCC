@@ -6,9 +6,10 @@ use crate::biscuit_handler::{
 };
 use crate::cache::SessionCache;
 use crate::config::{PluginConfig, parse_options};
-use crate::dynamic_security_policy::{ControlEnforcementTargets, DynamicSecurityPolicy};
+use crate::dynamic_security_policy::{ControlEnforcementTargets, ControlNotifyEvent, DynamicSecurityPolicy};
 use crate::policy::PolicyMode;
 use crate::sqlite_policy::SqlitePolicy;
+use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
@@ -262,6 +263,15 @@ unsafe extern "C" {
     pub fn mosquitto_malloc(size: usize) -> *mut c_void;
     pub fn mosquitto_set_username(client: *mut c_void, username: *const c_char) -> c_int;
     pub fn mosquitto_kick_client_by_clientid(clientid: *const c_char, with_will: bool) -> c_int;
+    pub fn mosquitto_broker_publish_copy(
+        clientid: *const c_char,
+        topic: *const c_char,
+        payloadlen: c_int,
+        payload: *const c_void,
+        qos: c_int,
+        retain: bool,
+        properties: *mut c_void,
+    ) -> c_int;
 }
 
 #[cfg(not(any(test, miri, kani)))]
@@ -299,6 +309,22 @@ pub extern "C" fn mosquitto_kick_client_by_clientid(
 }
 
 #[cfg(any(test, miri, kani))]
+#[unsafe(no_mangle)]
+pub extern "C" fn mosquitto_broker_publish_copy(
+    clientid: *const c_char,
+    topic: *const c_char,
+    payloadlen: c_int,
+    payload: *const c_void,
+    qos: c_int,
+    retain: bool,
+    _properties: *mut c_void,
+) -> c_int {
+    #[cfg(test)]
+    record_broker_publish_call(clientid, topic, payloadlen, payload, qos, retain);
+    MOSQ_ERR_SUCCESS
+}
+
+#[cfg(any(test, miri, kani))]
 fn set_username_raw(client: *mut c_void, username: *const c_char) -> c_int {
     mosquitto_set_username(client, username)
 }
@@ -311,6 +337,34 @@ fn kick_client_by_clientid_raw(clientid: *const c_char, with_will: bool) -> c_in
 #[cfg(any(test, miri, kani))]
 fn kick_client_by_clientid_raw(clientid: *const c_char, with_will: bool) -> c_int {
     mosquitto_kick_client_by_clientid(clientid, with_will)
+}
+
+#[cfg(not(any(test, miri, kani)))]
+fn broker_publish_copy_raw(
+    clientid: *const c_char,
+    topic: *const c_char,
+    payloadlen: c_int,
+    payload: *const c_void,
+    qos: c_int,
+    retain: bool,
+    properties: *mut c_void,
+) -> c_int {
+    unsafe {
+        mosquitto_broker_publish_copy(clientid, topic, payloadlen, payload, qos, retain, properties)
+    }
+}
+
+#[cfg(any(test, miri, kani))]
+fn broker_publish_copy_raw(
+    clientid: *const c_char,
+    topic: *const c_char,
+    payloadlen: c_int,
+    payload: *const c_void,
+    qos: c_int,
+    retain: bool,
+    properties: *mut c_void,
+) -> c_int {
+    mosquitto_broker_publish_copy(clientid, topic, payloadlen, payload, qos, retain, properties)
 }
 
 #[cfg(any(test, miri, kani))]
@@ -328,8 +382,20 @@ struct KickClientCall {
 }
 
 #[cfg(test)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct BrokerPublishCall {
+    count: usize,
+    last_client_id: Option<String>,
+    last_topic: Option<String>,
+    last_payload: Option<String>,
+    last_qos: Option<c_int>,
+    last_retain: Option<bool>,
+}
+
+#[cfg(test)]
 thread_local! {
     static TEST_KICK_CLIENT_CALL: RefCell<KickClientCall> = RefCell::new(KickClientCall::default());
+    static TEST_BROKER_PUBLISH_CALL: RefCell<BrokerPublishCall> = RefCell::new(BrokerPublishCall::default());
 }
 
 #[cfg(test)]
@@ -340,8 +406,20 @@ fn reset_kick_client_call() {
 }
 
 #[cfg(test)]
+fn reset_broker_publish_call() {
+    TEST_BROKER_PUBLISH_CALL.with(|call| {
+        *call.borrow_mut() = BrokerPublishCall::default();
+    });
+}
+
+#[cfg(test)]
 fn kick_client_call_snapshot() -> KickClientCall {
     TEST_KICK_CLIENT_CALL.with(|call| call.borrow().clone())
+}
+
+#[cfg(test)]
+fn broker_publish_call_snapshot() -> BrokerPublishCall {
+    TEST_BROKER_PUBLISH_CALL.with(|call| call.borrow().clone())
 }
 
 #[cfg(test)]
@@ -351,6 +429,32 @@ fn record_kick_client_call(clientid: *const c_char, with_will: bool) {
         state.count += 1;
         state.last_client_id = cstr_to_string(clientid);
         state.last_with_will = Some(with_will);
+    });
+}
+
+#[cfg(test)]
+fn record_broker_publish_call(
+    clientid: *const c_char,
+    topic: *const c_char,
+    payloadlen: c_int,
+    payload: *const c_void,
+    qos: c_int,
+    retain: bool,
+) {
+    let payload_text = if payload.is_null() || payloadlen <= 0 {
+        Some(String::new())
+    } else {
+        let bytes = unsafe { slice::from_raw_parts(payload as *const u8, payloadlen as usize) };
+        Some(String::from_utf8_lossy(bytes).into_owned())
+    };
+    TEST_BROKER_PUBLISH_CALL.with(|call| {
+        let mut state = call.borrow_mut();
+        state.count += 1;
+        state.last_client_id = cstr_to_string(clientid);
+        state.last_topic = cstr_to_string(topic);
+        state.last_payload = payload_text;
+        state.last_qos = Some(qos);
+        state.last_retain = Some(retain);
     });
 }
 
@@ -740,11 +844,12 @@ fn apply_dynamic_security_control_enforcement(
     };
     match policy.apply_control_payload(payload) {
         Ok(ControlEnforcementTargets {
-            client_ids,
-            usernames,
+            kick_client_ids,
+            kick_usernames,
+            notify_events,
         }) => {
-            let mut kick_targets: HashSet<String> = client_ids.into_iter().collect();
-            for username in usernames {
+            let mut kick_targets: HashSet<String> = kick_client_ids.into_iter().collect();
+            for username in kick_usernames {
                 for session_client_id in session_client_ids_for_username(state, &username) {
                     kick_targets.insert(session_client_id);
                 }
@@ -765,6 +870,10 @@ fn apply_dynamic_security_control_enforcement(
                         affected_client
                     ));
                 }
+            }
+
+            for notify_event in notify_events {
+                publish_control_notify_event(state, &notify_event);
             }
         }
         Err(err) => {
@@ -824,6 +933,80 @@ fn disconnect_control_enforcement_client(client_id: &str) {
         log_debug(&format!(
             "Control enforcement kick failed: client={} with_will=false rc={}",
             client_id, rc
+        ));
+    }
+}
+
+fn publish_control_notify_event(state: &PluginState, event: &ControlNotifyEvent) {
+    let prefix = state.config.control_notify_topic_prefix.trim_end_matches('/');
+    if prefix.is_empty() {
+        log_debug("Control notify skipped: empty topic prefix");
+        return;
+    }
+    for username in &event.usernames {
+        let session_client_ids = session_client_ids_for_username(state, username);
+        if session_client_ids.is_empty() {
+            log_debug(&format!(
+                "Control notify skipped: no live sessions for username={}",
+                username
+            ));
+            continue;
+        }
+        for session_client_id in session_client_ids {
+            let notification_topic = format!("{prefix}/{session_client_id}");
+            let payload = json!({
+                "event": "acl_read_policy_changed",
+                "source": "$CONTROL/dynamic-security/v1",
+                "command": event.command,
+                "role": event.rolename,
+                "acltype": event.acltype,
+                "topic": event.topic,
+                "username": username,
+                "client_id": session_client_id,
+            })
+            .to_string();
+            publish_control_notification(&session_client_id, &notification_topic, &payload);
+        }
+    }
+}
+
+fn publish_control_notification(client_id: &str, topic: &str, payload: &str) {
+    let client_id_cstr = match CString::new(client_id) {
+        Ok(value) => value,
+        Err(_) => {
+            log_debug(&format!(
+                "Control notify skipped: invalid client id '{}'",
+                client_id
+            ));
+            return;
+        }
+    };
+    let topic_cstr = match CString::new(topic) {
+        Ok(value) => value,
+        Err(_) => {
+            log_debug(&format!("Control notify skipped: invalid topic '{}'", topic));
+            return;
+        }
+    };
+    let payload_bytes = payload.as_bytes();
+    let rc = broker_publish_copy_raw(
+        client_id_cstr.as_ptr(),
+        topic_cstr.as_ptr(),
+        payload_bytes.len() as c_int,
+        payload_bytes.as_ptr() as *const c_void,
+        0,
+        false,
+        ptr::null_mut(),
+    );
+    if rc == MOSQ_ERR_SUCCESS {
+        log_debug(&format!(
+            "Control notify published: client={} topic={}",
+            client_id, topic
+        ));
+    } else {
+        log_debug(&format!(
+            "Control notify publish failed: client={} topic={} rc={}",
+            client_id, topic, rc
         ));
     }
 }
@@ -1741,6 +1924,79 @@ mod tests {
 
     fn enable_dynamic_security_control_mode(userdata: *mut c_void) -> String {
         enable_dynamic_security_control_mode_with_client_id(userdata, true)
+    }
+
+    fn enable_dynamic_security_control_notify_mode(userdata: *mut c_void) -> String {
+        let unique = TEST_DYNSEC_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dynsec_path = std::env::temp_dir().join(format!("dynsec-control-notify-lib-{unique}.json"));
+        let dynsec_cfg = r#"{
+  "clients": [
+    {
+      "username": "test_user",
+      "clientid": "test_client",
+      "roles": [
+        {"rolename": "controller", "priority": 0},
+        {"rolename": "fanout_reader", "priority": 0}
+      ],
+      "disabled": false
+    }
+  ],
+  "groups": [],
+  "roles": [
+    {
+      "rolename": "controller",
+      "acls": [
+        {
+          "acltype": "publishClientSend",
+          "topic": "$CONTROL/dynamic-security/v1",
+          "priority": 0,
+          "allow": true
+        },
+        {
+          "acltype": "publishClientSend",
+          "topic": "fanout/broadcast",
+          "priority": 0,
+          "allow": true
+        }
+      ]
+    },
+    {
+      "rolename": "fanout_reader",
+      "acls": [
+        {
+          "acltype": "subscribeLiteral",
+          "topic": "fanout/broadcast",
+          "priority": 0,
+          "allow": true
+        },
+        {
+          "acltype": "publishClientReceive",
+          "topic": "fanout/broadcast",
+          "priority": 0,
+          "allow": true
+        }
+      ]
+    }
+  ],
+  "defaultACLAccess": {
+    "publishClientSend": false,
+    "publishClientReceive": false,
+    "subscribe": false,
+    "unsubscribe": false
+  }
+}"#;
+        fs::write(&dynsec_path, dynsec_cfg).expect("dynsec notify config must be writable");
+        let state = unsafe { &mut *(userdata as *mut PluginState) };
+        let policy = DynamicSecurityPolicy::new(
+            dynsec_path.to_string_lossy().into_owned(),
+            Duration::from_secs(60),
+        )
+        .expect("dynamic security notify policy should load for tests");
+        state.config.policy.mode = PolicyMode::DynamicSecurity;
+        state.config.policy.dynamic_security_url = Some(dynsec_path.to_string_lossy().into_owned());
+        state.config.control_notify_topic_prefix = "system_notification".to_string();
+        state.dynamic_security_policy = Some(policy);
+        dynsec_path.to_string_lossy().into_owned()
     }
 
     fn cache_test_jwt_for_client(userdata: *mut c_void, client_id: &str, exp: i64) {
@@ -2733,6 +2989,61 @@ mod tests {
     }
 
     #[test]
+    fn control_callback_remove_role_acl_publishes_notification_without_kick() {
+        reset_kick_client_call();
+        reset_broker_publish_call();
+        let (userdata, _identifier) = setup_plugin_with_config();
+        let dynsec_path = enable_dynamic_security_control_notify_mode(userdata);
+        cache_test_jwt(userdata, time::unix_timestamp_now() + 60);
+
+        let state = unsafe { &*(userdata as *mut PluginState) };
+        bind_session_username(state, "test_client", Some("test_user"));
+
+        let topic = CString::new("$CONTROL/dynamic-security/v1").unwrap();
+        let payload = br#"{"commands":[{"command":"removeRoleACL","rolename":"fanout_reader","acltype":"publishClientReceive","topic":"fanout/broadcast"}]}"#;
+        let mut evt = MosquittoEvtControl {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr() as *const c_char,
+            payload: payload.as_ptr() as *const c_void,
+            properties: ptr::null(),
+            reason_string: ptr::null_mut(),
+            payloadlen: payload.len() as u32,
+            qos: 1,
+            reason_code: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = control_callback(
+            MOSQ_EVT_CONTROL,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
+        assert_eq!(rc, MOSQ_ERR_SUCCESS);
+
+        let kick = kick_client_call_snapshot();
+        assert_eq!(kick.count, 0);
+
+        let publish = broker_publish_call_snapshot();
+        assert_eq!(publish.count, 1);
+        assert_eq!(publish.last_client_id.as_deref(), Some("test_client"));
+        assert_eq!(
+            publish.last_topic.as_deref(),
+            Some("system_notification/test_client")
+        );
+        let payload_text = publish.last_payload.unwrap_or_default();
+        assert!(payload_text.contains("\"command\":\"removeRoleACL\""));
+        assert!(payload_text.contains("\"topic\":\"fanout/broadcast\""));
+
+        let state = unsafe { &*(userdata as *mut PluginState) };
+        assert!(state.cache.get(&"test_client".to_string()).is_some());
+
+        let _ = fs::remove_file(dynsec_path);
+        teardown_plugin(userdata);
+    }
+
+    #[test]
     fn control_callback_invalid_payload_does_not_kick_or_evict_cache() {
         reset_kick_client_call();
         let (userdata, _identifier) = setup_plugin_with_config();
@@ -2821,6 +3132,7 @@ mod verification {
             cache_ttl_seconds: 3600,
             allow_anonymous_no_token: false,
             acl_read_full_authz: false,
+            control_notify_topic_prefix: "system_notification".to_string(),
             ext_auth_method: Some("token".to_string()),
             role_username_prefix: "role:".to_string(),
             biscuit_role_fact: "role".to_string(),

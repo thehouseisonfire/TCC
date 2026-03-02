@@ -12,6 +12,8 @@ from benchmarks import policy_churn
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TLS_CA_FILE = Path(__file__).resolve().parents[2] / "docker" / "tls" / "ca.pem"
+EXPIRED_TOKEN_TTL_S = 3
+EXPIRY_TRIGGER_DELAY_S = 4.2
 
 
 class _IssuedTokenLike(Protocol):
@@ -233,7 +235,7 @@ def test_issue39_acl_read_expiry_disconnect_and_reconnect(
         token_kind=token_kind,
         client_id=sub_client_id,
         topic=topic,
-        ttl_seconds=1,
+        ttl_seconds=EXPIRED_TOKEN_TTL_S,
         grants=subscribe_grants,
     )
     fresh_sub_token = _issue_token(
@@ -274,7 +276,7 @@ def test_issue39_acl_read_expiry_disconnect_and_reconnect(
         pub.connect()
 
         # Ensure cached session is expired before we trigger ACL_READ.
-        time.sleep(2.2)
+        time.sleep(EXPIRY_TRIGGER_DELAY_S)
         pub.publish(topic, "trigger-expiry", qos=0)
         assert sub.wait_disconnected(timeout_s=8.0), "expired ACL_READ should disconnect client"
 
@@ -345,7 +347,7 @@ def test_issue39_expiry_disconnect_does_not_emit_lwt(
         token_kind=token_kind,
         client_id=sub_client_id,
         topic=data_topic,
-        ttl_seconds=1,
+        ttl_seconds=EXPIRED_TOKEN_TTL_S,
         grants=[{"op": "subscribe", "res": data_topic}],
     )
     pub_token = _issue_token(
@@ -397,7 +399,7 @@ def test_issue39_expiry_disconnect_does_not_emit_lwt(
         assert _is_granted(sub.subscribe(data_topic, qos=1))
         pub.connect()
 
-        time.sleep(2.2)
+        time.sleep(EXPIRY_TRIGGER_DELAY_S)
         pub.publish(data_topic, "trigger-expiry-with-lwt", qos=0)
         assert sub.wait_disconnected(timeout_s=8.0), "expired ACL_READ should disconnect client"
         assert not observer.wait_for_topic_messages(will_topic, 1, timeout_s=2.5)
@@ -421,18 +423,13 @@ def test_issue39_control_acl_read_notify_workflow(
     tmp_path,
 ) -> None:
     topic = "fanout/broadcast"
-    notification_topic = f"fanout/notifications/acl-change/{unique_suffix}"
+    subscriber_client_id = f"issue39-control-sub-{unique_suffix}"
+    notification_topic = f"system_notification/{subscriber_client_id}"
     allow_snapshot = _build_dynsec_control_notify_snapshot(
         source_path="docker/dynamic-security-fanout-read-allow-unpinned.json",
         output_path=tmp_path / "dynsec-allow.json",
         notification_topic=notification_topic,
         allow_data_read=True,
-    )
-    deny_snapshot = _build_dynsec_control_notify_snapshot(
-        source_path="docker/dynamic-security-fanout-read-deny-unpinned.json",
-        output_path=tmp_path / "dynsec-deny.json",
-        notification_topic=notification_topic,
-        allow_data_read=False,
     )
 
     policy_churn.apply_dynsec_snapshot(str(allow_snapshot))
@@ -442,7 +439,7 @@ def test_issue39_control_acl_read_notify_workflow(
     subscriber_token = _issue_token(
         issuer,
         token_kind=token_kind,
-        client_id=f"issue39-control-sub-{unique_suffix}",
+        client_id=subscriber_client_id,
         topic=topic,
         ttl_seconds=180,
         grants=[],
@@ -459,7 +456,7 @@ def test_issue39_control_acl_read_notify_workflow(
     subscriber = mqtt_client_factory(
         host="localhost",
         port=1883,
-        client_id=f"issue39-control-sub-{unique_suffix}",
+        client_id=subscriber_client_id,
         username="dynsec_client_1",
         password=subscriber_token,
     )
@@ -481,17 +478,21 @@ def test_issue39_control_acl_read_notify_workflow(
         assert subscriber.wait_for_topic_messages(topic, 1, timeout_s=5.0)
         pre_data_count = subscriber.message_count_for_topic(topic)
 
-        control_payload = json.dumps({"commands": [{"command": "listRoles"}]})
+        control_payload = json.dumps(
+            {
+                "commands": [
+                    {
+                        "command": "removeRoleACL",
+                        "rolename": "fanout_reader",
+                        "acltype": "publishClientReceive",
+                        "topic": topic,
+                    }
+                ]
+            }
+        )
         publisher.publish("$CONTROL/dynamic-security/v1", control_payload, qos=1)
-        time.sleep(0.4)
-        logs = compose_harness.logs("mosquitto")
-        assert "$CONTROL/dynamic-security/v1/response" in logs
-
-        policy_churn.apply_dynsec_snapshot(str(deny_snapshot))
-        time.sleep(2.2)
-
-        publisher.publish(notification_topic, f"notify|{unique_suffix}", qos=0)
         assert subscriber.wait_for_topic_messages(notification_topic, 1, timeout_s=5.0)
+        time.sleep(1.2)
 
         for idx in range(5):
             publisher.publish(topic, f"post|{idx}|{unique_suffix}", qos=0)
@@ -499,6 +500,8 @@ def test_issue39_control_acl_read_notify_workflow(
 
         assert subscriber.message_count_for_topic(topic) == pre_data_count
         subscriber.assert_connected_for(1.0)
+        logs = compose_harness.logs("mosquitto")
+        assert f"Control notify published: client={subscriber_client_id}" in logs
     finally:
         subscriber.close()
         publisher.close()

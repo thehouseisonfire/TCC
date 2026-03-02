@@ -257,14 +257,13 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 ## 8) Open Issues (Next Steps, Grouped)
 
 ### Priority List
-1. Issue 31: Control-triggered kick/re-auth
-2. Issue 32: Control-triggered ACL_READ + notify
-3. Issue 40: CI execution for control-plane and runtime flow suites
-4. Issue 37: ACL_READ fan-out scenarios across policy profiles
-5. Issue 23: Proactive client reauthentication
-6. Issue 21: Expand Biscuit authorizer (if current template insufficient)
-7. Issue 22: Strengthen SQLite RBAC (if policies too simple)
-8. Issue 8.2: Containerized benchmark topology
+1. Issue 32: Control-triggered ACL_READ + notify
+2. Issue 40: CI execution for control-plane and runtime flow suites
+3. Issue 37: ACL_READ fan-out scenarios across policy profiles
+4. Issue 23: Proactive client reauthentication
+5. Issue 21: Expand Biscuit authorizer (if current template insufficient)
+6. Issue 22: Strengthen SQLite RBAC (if policies too simple)
+7. Issue 8.2: Containerized benchmark topology
 ---
 
 #### A) Policy Source Parity
@@ -342,20 +341,6 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Update benchmark clients/scenarios to exercise proactive refresh flow.
     - Add runtime assertions proving session continuity without expiry-driven
       disconnects during proactive-refresh runs.
-
-- [x] **Issue 31: Verify control-triggered dynamic enforcement (kick/re-auth)** — **COMPLETED 2026-03-01**
-  - Goal: Implement/control scenarios where `$CONTROL/.../v1` triggers
-    enforcement via kicking/re-auth (no `ACL_READ` fan-out checks).
-  - Current gap: control-flow tests publish to `$CONTROL`, but enforcement
-    effects are still applied via out-of-band churn steps instead of
-    control-triggered side effects.
-  - Deliverable:
-    - Control message publisher used during scenario
-    - Dynamic-security command payload that changes permissions at runtime
-    - Evidence of client kick + re-auth or reconnect behavior caused by the
-      control operation itself (without external snapshot swap shortcuts)
-    - Assertions that denied post-change operations map to expected
-      reconnect/reauth lifecycle.
 
 - [ ] **Issue 32: Verify control-triggered dynamic enforcement (ACL_READ + notify)**
   - Goal: Implement/control scenarios where `$CONTROL/.../v1` triggers cache
@@ -577,17 +562,26 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
       - `benchmarks/test_issue30_acl_read_fanout_coverage.py`
       - `benchmarks/test_policy_churn.py`
 
-- [x] **Issue 38: Expiry enforcement in ACL_CHECK with disconnect (no reason codes)** — **COMPLETED 2026-02-27**
-  - **Summary**: `MOSQ_EVT_ACL_CHECK` now enforces immediate disconnect on
-    `AuthzOutcome::Expired` by calling `mosquitto_kick_client_by_clientid`
-    (`with_will=false`) and returning `MOSQ_ERR_ACL_DENIED`.
-  - **Rationale/Constraints Preserved**:
-    - No MQTT reason codes/strings are used in ACL callbacks.
-    - `ACL_CHECK` remains expiry/authz-only; cryptographic token verification
-      stays in basic/enhanced auth entrypoints.
-  - **Validation**: Added unit coverage for JWT and Biscuit expired-token
-    branches, including both ACL read fast path and full-authz path, plus
-    assertions that non-expired deny paths do not trigger disconnect.
+- [x] **Issue 31: Verify control-triggered dynamic enforcement (kick/re-auth)** — **COMPLETED 2026-03-01**
+  - **Summary**: Implemented plugin-side handling of Dynamic Security control
+    `disableClient` commands in `MOSQ_EVT_CONTROL`, with immediate runtime
+    enforcement via cache eviction + forced client kick (`with_will=false`).
+  - **Deliverables**:
+    - Control payload processing in `control_callback` for
+      `$CONTROL/dynamic-security/v1` after successful control authorization.
+    - Dynamic-security runtime mutation path in
+      `dynamic_security_policy.rs` (`disableClient`) with best-effort file
+      persistence to keep behavior stable across reload windows.
+    - Session cache explicit removal API (`SessionCache::remove`) used by
+      control-triggered enforcement before kicking affected clients.
+    - Session-index stale pruning against live cache state to prevent unbounded
+      username/client-id accumulation under normal churn and avoid stale target
+      kick attempts during `disableClient` enforcement.
+    - New broker integration assertions:
+      control-triggered kick, reconnect with fresh token, and denied
+      post-change subscribe lifecycle for both JWT and Biscuit.
+    - Updated operator documentation in
+      `benchmarks/RUNNING_BENCHMARKS.md` with Issue 31 focused invocation.
 
 - [x] **Issue 33: Enhance HTTP policy expressiveness for parity with token-based
     authorization**
@@ -636,6 +630,18 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Added comprehensive documentation in RUNNING_BENCHMARKS.md with usage examples and research interpretation notes
   - **Research Alignment**: Enables measurement of broker behavior under realistic mixed data+control plane workloads, supporting H2/H3 validation by quantifying control plane overhead during active data traffic.
 
+- [x] **Issue 38: Expiry enforcement in ACL_CHECK with disconnect (no reason codes)** — **COMPLETED 2026-02-27**
+  - **Summary**: `MOSQ_EVT_ACL_CHECK` now enforces immediate disconnect on
+    `AuthzOutcome::Expired` by calling `mosquitto_kick_client_by_clientid`
+    (`with_will=false`) and returning `MOSQ_ERR_ACL_DENIED`.
+  - **Rationale/Constraints Preserved**:
+    - No MQTT reason codes/strings are used in ACL callbacks.
+    - `ACL_CHECK` remains expiry/authz-only; cryptographic token verification
+      stays in basic/enhanced auth entrypoints.
+  - **Validation**: Added unit coverage for JWT and Biscuit expired-token
+    branches, including both ACL read fast path and full-authz path, plus
+    assertions that non-expired deny paths do not trigger disconnect.
+
 - [x] **Issue 39: Add broker-level integration assertions for runtime enforcement semantics** — **COMPLETED 2026-02-28**
   - **Summary**: Added deterministic broker-level `pytest` integration coverage
     against real Mosquitto + plugin runtime semantics.
@@ -659,27 +665,6 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Operator documentation:
       run commands, timing bounds, and flake-control strategy in
       `benchmarks/RUNNING_BENCHMARKS.md`.
-
-- [x] **Issue 31: Verify control-triggered dynamic enforcement (kick/re-auth)** — **COMPLETED 2026-03-01**
-  - **Summary**: Implemented plugin-side handling of Dynamic Security control
-    `disableClient` commands in `MOSQ_EVT_CONTROL`, with immediate runtime
-    enforcement via cache eviction + forced client kick (`with_will=false`).
-  - **Deliverables**:
-    - Control payload processing in `control_callback` for
-      `$CONTROL/dynamic-security/v1` after successful control authorization.
-    - Dynamic-security runtime mutation path in
-      `dynamic_security_policy.rs` (`disableClient`) with best-effort file
-      persistence to keep behavior stable across reload windows.
-    - Session cache explicit removal API (`SessionCache::remove`) used by
-      control-triggered enforcement before kicking affected clients.
-    - Session-index stale pruning against live cache state to prevent unbounded
-      username/client-id accumulation under normal churn and avoid stale target
-      kick attempts during `disableClient` enforcement.
-    - New broker integration assertions:
-      control-triggered kick, reconnect with fresh token, and denied
-      post-change subscribe lifecycle for both JWT and Biscuit.
-    - Updated operator documentation in
-      `benchmarks/RUNNING_BENCHMARKS.md` with Issue 31 focused invocation.
 
 ---
 

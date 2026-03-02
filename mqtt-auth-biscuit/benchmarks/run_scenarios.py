@@ -625,6 +625,23 @@ def _apply_dynsec_config(source_path: str):
     policy_churn.apply_dynsec_snapshot(source_path)
 
 
+def _capture_dynsec_baseline() -> bytes | None:
+    path = _resolve_repo_path("docker/dynamic-security.json")
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except FileNotFoundError:
+        return None
+
+
+def _restore_dynsec_baseline(snapshot: bytes | None) -> None:
+    if snapshot is None:
+        return
+    path = _resolve_repo_path("docker/dynamic-security.json")
+    with open(path, "wb") as f:
+        f.write(snapshot)
+
+
 def _resolve_repo_path(path: str) -> str:
     if os.path.isabs(path):
         return path
@@ -2292,225 +2309,230 @@ def main(
             time.sleep(1)
 
         _validate_dynsec_fanout_alignment(s["id"], s)
-
-        for idx in range(repeats):
-            if s.get("dynsec_config"):
-                _apply_dynsec_config(s["dynsec_config"])
-            elif s.get("dynsec_churn"):
-                churn_list = s["dynsec_churn"]
-                _apply_dynsec_config(churn_list[idx % len(churn_list)])
-            if s.get("sqlite_seed_fanout"):
-                policy_churn.seed_sqlite_fanout_policy(
-                    s.get("sqlite_seed_db", "docker/sqlite/policy.db"),
-                    topic=s.get("sqlite_seed_topic", s.get("fanout_topic", "fanout/broadcast")),
-                    subscriber_count=int(
-                        s.get("sqlite_seed_subscribers", s.get("subscriber_count", clients))
-                    ),
-                )
-            mqtt5_cfg = s.get("mqtt5_auth")
-            if mqtt5_cfg is not None:
-                binary_mode: bool = mqtt5_cfg.get("binary_mode", False)
-                res = _run_mqtt5_auth(
-                    mqtt_host,
-                    mqtt_port,
-                    mqtt5_cfg["token1"],
-                    mqtt5_cfg["token2"],
-                    scenario_tls,
-                    tls_ca,
-                    tls_insecure,
-                    binary_mode,
-                )
-            else:
-                token_refresh = s.get("token_refresh")
-                scenario_qos = int(s.get("qos", qos))
-                scenario_qos_distribution = s.get("qos_distribution", qos_distribution)
-                scenario_clients = int(s.get("subscriber_count", clients))
-                res = _run_loadgen(
-                    tokens=tokens,
-                    host=mqtt_host,
-                    port=mqtt_port,
-                    username=s.get("username", ""),
-                    password=s.get("password", ""),
-                    fanout_publisher_username=s.get("fanout_publisher_username"),
-                    fanout_publisher_password=s.get("fanout_publisher_password"),
-                    clients=scenario_clients,
-                    messages=messages,
-                    topic=s.get("topic", "sensors/{client_id}/temp"),
-                    mode=s.get("mode"),
-                    fanout_topic=s.get("fanout_topic"),
-                    qos=scenario_qos,
-                    qos_distribution=scenario_qos_distribution,
-                    message_size=int(s.get("message_size", 0)),
-                    sync_connect=bool(s.get("sync_connect", False)),
-                    token_issuer_url=token_issuer_base if token_refresh else None,
-                    token_issuer_kind=(token_refresh.get("kind") if token_refresh else None),
-                    token_issuer_ttl=(token_refresh.get("ttl_seconds") if token_refresh else None),
-                    token_issuer_no_default_roles=token_issuer_no_default_roles,
-                    token_issuer_no_default_grants=token_issuer_no_default_grants,
-                    token_refresh_codes=token_refresh_codes,
-                    tls_enabled=scenario_tls,
-                    tls_ca_file=tls_ca,
-                    tls_insecure=tls_insecure,
-                    biscuit_attenuate=bool(s.get("biscuit_attenuate")),
-                    biscuit_attenuate_denies=(
-                        s.get("biscuit_attenuate", {}).get("denies")
-                        if s.get("biscuit_attenuate")
-                        else None
-                    ),
-                    biscuit_attenuate_checks=(
-                        s.get("biscuit_attenuate", {}).get("checks")
-                        if s.get("biscuit_attenuate")
-                        else None
-                    ),
-                    biscuit_attenuate_topic=(
-                        s.get("biscuit_attenuate", {}).get("topic")
-                        if s.get("biscuit_attenuate")
-                        else None
-                    ),
-                    biscuit_attenuate_op=(
-                        s.get("biscuit_attenuate", {}).get("op")
-                        if s.get("biscuit_attenuate")
-                        else None
-                    ),
-                    biscuit_attenuate_ttl=(
-                        s.get("biscuit_attenuate", {}).get("ttl_seconds")
-                        if s.get("biscuit_attenuate")
-                        else None
-                    ),
-                    biscuit_public_key_hex=s.get("biscuit_public_key_hex"),
-                    biscuit_public_key_file=s.get(
-                        "biscuit_public_key_file", "docker/biscuit_public.key"
-                    ),
-                    biscuit_attenuate_bin=s.get("biscuit_attenuate_bin"),
-                    biscuit_delegate=bool(s.get("biscuit_delegate")),
-                    biscuit_delegate_denies=(
-                        s.get("biscuit_delegate", {}).get("denies")
-                        if s.get("biscuit_delegate")
-                        else None
-                    ),
-                    biscuit_delegate_checks=(
-                        s.get("biscuit_delegate", {}).get("checks")
-                        if s.get("biscuit_delegate")
-                        else None
-                    ),
-                    biscuit_delegate_topic=(
-                        s.get("biscuit_delegate", {}).get("topic")
-                        if s.get("biscuit_delegate")
-                        else None
-                    ),
-                    biscuit_delegate_op=(
-                        s.get("biscuit_delegate", {}).get("op")
-                        if s.get("biscuit_delegate")
-                        else None
-                    ),
-                    biscuit_delegate_ttl=(
-                        s.get("biscuit_delegate", {}).get("ttl_seconds")
-                        if s.get("biscuit_delegate")
-                        else None
-                    ),
-                    biscuit_delegate_public_key_hex=s.get("biscuit_delegate_public_key_hex"),
-                    biscuit_delegate_public_key_file=s.get(
-                        "biscuit_delegate_public_key_file", "docker/biscuit_public.key"
-                    ),
-                    biscuit_delegate_bin=s.get("biscuit_delegate_bin"),
-                    biscuit_delegate_handoff=bool(
-                        s.get("biscuit_delegate", {}).get("handoff")
-                        if s.get("biscuit_delegate")
-                        else False
-                    ),
-                    biscuit_delegate_handoff_topic=(
-                        s.get("biscuit_delegate", {}).get("handoff", {}).get("topic")
-                        if s.get("biscuit_delegate")
-                        else None
-                    ),
-                    biscuit_delegate_handoff_token=(
-                        s.get("biscuit_delegate", {}).get("handoff", {}).get("token")
-                        if s.get("biscuit_delegate")
-                        else None
-                    ),
-                    biscuit_delegate_handoff_qos=(
-                        s.get("biscuit_delegate", {}).get("handoff", {}).get("qos")
-                        if s.get("biscuit_delegate")
-                        else None
-                    ),
-                    biscuit_delegate_handoff_retain=(
-                        s.get("biscuit_delegate", {}).get("handoff", {}).get("retain")
-                        if s.get("biscuit_delegate")
-                        else None
-                    ),
-                    # Issue 35: CONTROL message parameters
-                    control_topic=s.get("control_topic"),
-                    control_payload=s.get("control_payload")
-                    or _generate_control_churn_payload(s["id"], "admin"),
-                    control_mode=bool(s.get("control_mode", False)),
-                    control_repeat=s.get("control_repeat", 1),
-                    # Issue 36: Interleaved control message parameter
-                    control_after_messages=s.get("control_after_messages", 0),
-                    fanout_churn_kind=s.get("fanout_churn_kind"),
-                    fanout_churn_after_messages=s.get("fanout_churn_after_messages", 0),
-                    fanout_churn_settle_ms=s.get("fanout_churn_settle_ms", 0),
-                    fanout_churn_dynsec_source=s.get("fanout_churn_dynsec_source"),
-                    fanout_churn_sqlite_db=s.get("fanout_churn_sqlite_db"),
-                    fanout_churn_sqlite_topic=s.get("fanout_churn_sqlite_topic"),
-                    fanout_churn_sqlite_subscribers=s.get("fanout_churn_sqlite_subscribers"),
-                )
-            # Small delay to ensure container metrics are available after loadgen
-            time.sleep(2)
-            try:
-                snap = _resource_snapshot(prom_base, tls_ca, tls_insecure)
-            except Exception as e:
-                snap = {"error": str(e)}
-
-            # Run perf profiling if enabled and scenario matches filter
-            perf_result: dict[str, Any] = {"enabled": False}
-            if perf_enabled and perf_status.get("installed", False):
-                # Check if this scenario should be profiled
-                profile_this_scenario = True
-                if perf_scenarios:
-                    allowed = [p.strip() for p in perf_scenarios.split(",")]
-                    profile_this_scenario = s["id"] in allowed
-                else:
-                    # Default: profile key scenarios for CPU analysis
-                    default_perf_scenarios = get_default_perf_scenarios()
-                    profile_this_scenario = s["id"] in default_perf_scenarios
-
-                if profile_this_scenario:
-                    logger.info("Running perf profiling for scenario %s", s["id"])
-                    events = perf_events.split(",")
-                    perf_config = PerfConfig(
-                        events=events,
-                        sample_rate=perf_sample_rate,
-                        duration=perf_duration,
-                        output_dir=perf_output_dir,
-                        record_callgraph=perf_callgraph,
+        dynsec_baseline = _capture_dynsec_baseline()
+        try:
+            for idx in range(repeats):
+                if s.get("dynsec_config"):
+                    _apply_dynsec_config(s["dynsec_config"])
+                elif s.get("dynsec_churn"):
+                    churn_list = s["dynsec_churn"]
+                    _apply_dynsec_config(churn_list[idx % len(churn_list)])
+                if s.get("sqlite_seed_fanout"):
+                    policy_churn.seed_sqlite_fanout_policy(
+                        s.get("sqlite_seed_db", "docker/sqlite/policy.db"),
+                        topic=s.get("sqlite_seed_topic", s.get("fanout_topic", "fanout/broadcast")),
+                        subscriber_count=int(
+                            s.get("sqlite_seed_subscribers", s.get("subscriber_count", clients))
+                        ),
                     )
-                    try:
-                        perf_result = profile_mosquitto_container(
-                            container_name="docker-mosquitto-1",
-                            config=perf_config,
-                        )
-                        if perf_result.get("success"):
-                            logger.info("Perf profiling complete for %s", s["id"])
-                            logger.debug(format_perf_summary(perf_result))
-                        else:
-                            logger.warning(
-                                "Perf profiling failed for %s: %s",
-                                s["id"],
-                                perf_result.get("error", "unknown error"),
-                            )
-                    except Exception as e:
-                        logger.error("Error during perf profiling: %s", e)
-                        perf_result = {"enabled": True, "error": str(e)}
+                mqtt5_cfg = s.get("mqtt5_auth")
+                if mqtt5_cfg is not None:
+                    binary_mode: bool = mqtt5_cfg.get("binary_mode", False)
+                    res = _run_mqtt5_auth(
+                        mqtt_host,
+                        mqtt_port,
+                        mqtt5_cfg["token1"],
+                        mqtt5_cfg["token2"],
+                        scenario_tls,
+                        tls_ca,
+                        tls_insecure,
+                        binary_mode,
+                    )
                 else:
-                    perf_result = {
-                        "enabled": True,
-                        "skipped": True,
-                        "reason": "not in profile list",
-                    }
+                    token_refresh = s.get("token_refresh")
+                    scenario_qos = int(s.get("qos", qos))
+                    scenario_qos_distribution = s.get("qos_distribution", qos_distribution)
+                    scenario_clients = int(s.get("subscriber_count", clients))
+                    res = _run_loadgen(
+                        tokens=tokens,
+                        host=mqtt_host,
+                        port=mqtt_port,
+                        username=s.get("username", ""),
+                        password=s.get("password", ""),
+                        fanout_publisher_username=s.get("fanout_publisher_username"),
+                        fanout_publisher_password=s.get("fanout_publisher_password"),
+                        clients=scenario_clients,
+                        messages=messages,
+                        topic=s.get("topic", "sensors/{client_id}/temp"),
+                        mode=s.get("mode"),
+                        fanout_topic=s.get("fanout_topic"),
+                        qos=scenario_qos,
+                        qos_distribution=scenario_qos_distribution,
+                        message_size=int(s.get("message_size", 0)),
+                        sync_connect=bool(s.get("sync_connect", False)),
+                        token_issuer_url=token_issuer_base if token_refresh else None,
+                        token_issuer_kind=(token_refresh.get("kind") if token_refresh else None),
+                        token_issuer_ttl=(
+                            token_refresh.get("ttl_seconds") if token_refresh else None
+                        ),
+                        token_issuer_no_default_roles=token_issuer_no_default_roles,
+                        token_issuer_no_default_grants=token_issuer_no_default_grants,
+                        token_refresh_codes=token_refresh_codes,
+                        tls_enabled=scenario_tls,
+                        tls_ca_file=tls_ca,
+                        tls_insecure=tls_insecure,
+                        biscuit_attenuate=bool(s.get("biscuit_attenuate")),
+                        biscuit_attenuate_denies=(
+                            s.get("biscuit_attenuate", {}).get("denies")
+                            if s.get("biscuit_attenuate")
+                            else None
+                        ),
+                        biscuit_attenuate_checks=(
+                            s.get("biscuit_attenuate", {}).get("checks")
+                            if s.get("biscuit_attenuate")
+                            else None
+                        ),
+                        biscuit_attenuate_topic=(
+                            s.get("biscuit_attenuate", {}).get("topic")
+                            if s.get("biscuit_attenuate")
+                            else None
+                        ),
+                        biscuit_attenuate_op=(
+                            s.get("biscuit_attenuate", {}).get("op")
+                            if s.get("biscuit_attenuate")
+                            else None
+                        ),
+                        biscuit_attenuate_ttl=(
+                            s.get("biscuit_attenuate", {}).get("ttl_seconds")
+                            if s.get("biscuit_attenuate")
+                            else None
+                        ),
+                        biscuit_public_key_hex=s.get("biscuit_public_key_hex"),
+                        biscuit_public_key_file=s.get(
+                            "biscuit_public_key_file", "docker/biscuit_public.key"
+                        ),
+                        biscuit_attenuate_bin=s.get("biscuit_attenuate_bin"),
+                        biscuit_delegate=bool(s.get("biscuit_delegate")),
+                        biscuit_delegate_denies=(
+                            s.get("biscuit_delegate", {}).get("denies")
+                            if s.get("biscuit_delegate")
+                            else None
+                        ),
+                        biscuit_delegate_checks=(
+                            s.get("biscuit_delegate", {}).get("checks")
+                            if s.get("biscuit_delegate")
+                            else None
+                        ),
+                        biscuit_delegate_topic=(
+                            s.get("biscuit_delegate", {}).get("topic")
+                            if s.get("biscuit_delegate")
+                            else None
+                        ),
+                        biscuit_delegate_op=(
+                            s.get("biscuit_delegate", {}).get("op")
+                            if s.get("biscuit_delegate")
+                            else None
+                        ),
+                        biscuit_delegate_ttl=(
+                            s.get("biscuit_delegate", {}).get("ttl_seconds")
+                            if s.get("biscuit_delegate")
+                            else None
+                        ),
+                        biscuit_delegate_public_key_hex=s.get("biscuit_delegate_public_key_hex"),
+                        biscuit_delegate_public_key_file=s.get(
+                            "biscuit_delegate_public_key_file", "docker/biscuit_public.key"
+                        ),
+                        biscuit_delegate_bin=s.get("biscuit_delegate_bin"),
+                        biscuit_delegate_handoff=bool(
+                            s.get("biscuit_delegate", {}).get("handoff")
+                            if s.get("biscuit_delegate")
+                            else False
+                        ),
+                        biscuit_delegate_handoff_topic=(
+                            s.get("biscuit_delegate", {}).get("handoff", {}).get("topic")
+                            if s.get("biscuit_delegate")
+                            else None
+                        ),
+                        biscuit_delegate_handoff_token=(
+                            s.get("biscuit_delegate", {}).get("handoff", {}).get("token")
+                            if s.get("biscuit_delegate")
+                            else None
+                        ),
+                        biscuit_delegate_handoff_qos=(
+                            s.get("biscuit_delegate", {}).get("handoff", {}).get("qos")
+                            if s.get("biscuit_delegate")
+                            else None
+                        ),
+                        biscuit_delegate_handoff_retain=(
+                            s.get("biscuit_delegate", {}).get("handoff", {}).get("retain")
+                            if s.get("biscuit_delegate")
+                            else None
+                        ),
+                        # Issue 35: CONTROL message parameters
+                        control_topic=s.get("control_topic"),
+                        control_payload=s.get("control_payload")
+                        or _generate_control_churn_payload(s["id"], "admin"),
+                        control_mode=bool(s.get("control_mode", False)),
+                        control_repeat=s.get("control_repeat", 1),
+                        # Issue 36: Interleaved control message parameter
+                        control_after_messages=s.get("control_after_messages", 0),
+                        fanout_churn_kind=s.get("fanout_churn_kind"),
+                        fanout_churn_after_messages=s.get("fanout_churn_after_messages", 0),
+                        fanout_churn_settle_ms=s.get("fanout_churn_settle_ms", 0),
+                        fanout_churn_dynsec_source=s.get("fanout_churn_dynsec_source"),
+                        fanout_churn_sqlite_db=s.get("fanout_churn_sqlite_db"),
+                        fanout_churn_sqlite_topic=s.get("fanout_churn_sqlite_topic"),
+                        fanout_churn_sqlite_subscribers=s.get("fanout_churn_sqlite_subscribers"),
+                    )
+                # Small delay to ensure container metrics are available after loadgen
+                time.sleep(2)
+                try:
+                    snap = _resource_snapshot(prom_base, tls_ca, tls_insecure)
+                except Exception as e:
+                    snap = {"error": str(e)}
 
-            out_payload["runs"].append({"loadgen": res, "resources": snap, "perf": perf_result})
-            if s.get("sleep_between"):
-                time.sleep(float(s["sleep_between"]))
+                # Run perf profiling if enabled and scenario matches filter
+                perf_result: dict[str, Any] = {"enabled": False}
+                if perf_enabled and perf_status.get("installed", False):
+                    # Check if this scenario should be profiled
+                    profile_this_scenario = True
+                    if perf_scenarios:
+                        allowed = [p.strip() for p in perf_scenarios.split(",")]
+                        profile_this_scenario = s["id"] in allowed
+                    else:
+                        # Default: profile key scenarios for CPU analysis
+                        default_perf_scenarios = get_default_perf_scenarios()
+                        profile_this_scenario = s["id"] in default_perf_scenarios
+
+                    if profile_this_scenario:
+                        logger.info("Running perf profiling for scenario %s", s["id"])
+                        events = perf_events.split(",")
+                        perf_config = PerfConfig(
+                            events=events,
+                            sample_rate=perf_sample_rate,
+                            duration=perf_duration,
+                            output_dir=perf_output_dir,
+                            record_callgraph=perf_callgraph,
+                        )
+                        try:
+                            perf_result = profile_mosquitto_container(
+                                container_name="docker-mosquitto-1",
+                                config=perf_config,
+                            )
+                            if perf_result.get("success"):
+                                logger.info("Perf profiling complete for %s", s["id"])
+                                logger.debug(format_perf_summary(perf_result))
+                            else:
+                                logger.warning(
+                                    "Perf profiling failed for %s: %s",
+                                    s["id"],
+                                    perf_result.get("error", "unknown error"),
+                                )
+                        except Exception as e:
+                            logger.error("Error during perf profiling: %s", e)
+                            perf_result = {"enabled": True, "error": str(e)}
+                    else:
+                        perf_result = {
+                            "enabled": True,
+                            "skipped": True,
+                            "reason": "not in profile list",
+                        }
+
+                out_payload["runs"].append({"loadgen": res, "resources": snap, "perf": perf_result})
+                if s.get("sleep_between"):
+                    time.sleep(float(s["sleep_between"]))
+        finally:
+            _restore_dynsec_baseline(dynsec_baseline)
 
         # Issue 15: Run packet analysis if tcpdump was enabled for this scenario
         packet_analysis_result: dict[str, Any] = {"enabled": False}

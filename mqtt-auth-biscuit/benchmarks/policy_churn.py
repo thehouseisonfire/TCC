@@ -35,7 +35,7 @@ def apply_dynsec_snapshot(
     source_path: str,
     dest_path: str = "docker/dynamic-security.json",
     *,
-    copy_tls: bool = True,
+    copy_tls: bool = False,
 ) -> dict[str, str]:
     src = _resolve_repo_path(source_path)
     dest = _resolve_repo_path(dest_path)

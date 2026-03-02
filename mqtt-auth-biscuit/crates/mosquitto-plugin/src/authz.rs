@@ -573,7 +573,9 @@ pub fn check_token_expiry(token_type: &TokenType) -> AuthzOutcome {
             }
         }
         TokenType::Biscuit { expires_at, .. } => {
-            if let Some(expires_at) = expires_at && now >= *expires_at {
+            if let Some(expires_at) = expires_at
+                && now >= *expires_at
+            {
                 AuthzOutcome::Expired
             } else {
                 AuthzOutcome::Allowed

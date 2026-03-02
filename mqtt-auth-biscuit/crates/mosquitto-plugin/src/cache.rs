@@ -82,20 +82,51 @@ where
                 };
                 lru.get(key);
                 return Some(entry.value.clone());
-            } else {
-                self.metrics.misses.fetch_add(1, Ordering::Relaxed);
-                // Expired
-                self.cache.remove(key);
-                let mut lru = match self.lru.lock() {
-                    Ok(guard) => guard,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                lru.pop(key);
             }
+            self.metrics.misses.fetch_add(1, Ordering::Relaxed);
+            drop(entry);
+            // Expired
+            self.cache.remove(key);
+            let mut lru = match self.lru.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            lru.pop(key);
         } else {
             self.metrics.misses.fetch_add(1, Ordering::Relaxed);
         }
         None
+    }
+
+    pub fn contains_live(&self, key: &K) -> bool {
+        if let Some(entry) = self.cache.get(key) {
+            if entry.expiry > Instant::now() {
+                let mut lru = match self.lru.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                lru.get(key);
+                return true;
+            }
+            drop(entry);
+            self.cache.remove(key);
+            let mut lru = match self.lru.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            lru.pop(key);
+        }
+        false
+    }
+
+    pub fn remove(&self, key: &K) -> bool {
+        let removed = self.cache.remove(key).is_some();
+        let mut lru = match self.lru.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        lru.pop(key);
+        removed
     }
 
     /// Returns a snapshot of cache hit/miss counts for observability.
@@ -110,6 +141,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::SessionCache;
+    use std::thread;
     use std::time::Duration;
 
     #[test]
@@ -128,4 +160,36 @@ mod tests {
         assert_eq!(cache.get(&"c".to_string()), Some(3));
     }
 
+    #[test]
+    fn remove_deletes_existing_key() {
+        let cache = SessionCache::new(2);
+        cache.insert("a".to_string(), 1, Duration::from_secs(60));
+
+        assert!(cache.remove(&"a".to_string()));
+        assert_eq!(cache.get(&"a".to_string()), None);
+    }
+
+    #[test]
+    fn remove_returns_false_for_missing_key() {
+        let cache: SessionCache<String, i32> = SessionCache::new(2);
+        assert!(!cache.remove(&"missing".to_string()));
+    }
+
+    #[test]
+    fn contains_live_returns_true_for_unexpired_entry() {
+        let cache = SessionCache::new(2);
+        cache.insert("a".to_string(), 1, Duration::from_secs(60));
+
+        assert!(cache.contains_live(&"a".to_string()));
+    }
+
+    #[test]
+    fn contains_live_purges_expired_entry() {
+        let cache = SessionCache::new(2);
+        cache.insert("a".to_string(), 1, Duration::from_millis(1));
+        thread::sleep(Duration::from_millis(10));
+
+        assert!(!cache.contains_live(&"a".to_string()));
+        assert_eq!(cache.get(&"a".to_string()), None);
+    }
 }

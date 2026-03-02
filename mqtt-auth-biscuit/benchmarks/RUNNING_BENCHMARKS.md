@@ -280,6 +280,14 @@ pytest -m broker_integration tests/integration/test_issue39_runtime_enforcement.
   -k "expiry_disconnect or negative_controls" -vv -s
 ```
 
+Run only the Issue 31 control-triggered kick/reconnect assertions:
+
+```bash
+cd mqtt-auth-biscuit
+pytest -m broker_integration tests/integration/test_issue39_runtime_enforcement.py \
+  -k "issue31_control_" -vv -s
+```
+
 CI-compatible invocation:
 
 ```bash
@@ -297,6 +305,8 @@ What this suite asserts:
 - Broker log evidence for `with_will=false` kick semantics
 - Basic auth and MQTT v5 enhanced auth entrypoints
 - Plain TCP and TLS broker modes
+- Control-triggered `disableClient` kick enforcement with reconnect + denied
+  post-change subscribe lifecycle (Issue 31)
 - Fan-out churn runtime enforcement under strict `ACL_READ` dynamic-security
   configuration
 

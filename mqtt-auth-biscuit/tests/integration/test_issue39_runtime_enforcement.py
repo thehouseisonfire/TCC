@@ -675,6 +675,201 @@ def test_issue39_negative_controls_no_false_disconnects(
 @pytest.mark.broker_integration
 @pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
 @pytest.mark.parametrize("tls", [False, True])
+def test_issue31_control_disable_client_kick_and_reconnect_denied(
+    compose_harness,
+    mqtt_client_factory,
+    unique_suffix: str,
+    token_kind: str,
+    tls: bool,
+    tmp_path,
+) -> None:
+    topic = "fanout/broadcast"
+    snapshot = _build_dynsec_control_notify_snapshot(
+        source_path="docker/dynamic-security.json",
+        output_path=tmp_path / "dynsec-issue31-control.json",
+        notification_topic=f"fanout/notifications/issue31/{unique_suffix}",
+        allow_data_read=True,
+    )
+    policy_churn.apply_dynsec_snapshot(str(snapshot))
+
+    compose_harness.up(mosquitto_conf=_resolve_conf("./mosquitto_dynsec.conf", tls=tls), tls=tls)
+    issuer = compose_harness.token_issuer(tls=tls)
+    port = 8883 if tls else 1883
+    tls_client_kwargs = (
+        {"tls": True, "tls_ca_file": str(TLS_CA_FILE), "tls_insecure": True} if tls else {}
+    )
+
+    sub_token = _issue_token(
+        issuer,
+        token_kind=token_kind,
+        client_id="client_1",
+        topic=topic,
+        ttl_seconds=180,
+        grants=[],
+    )
+    control_token = _issue_token(
+        issuer,
+        token_kind=token_kind,
+        client_id="fanout_publisher",
+        topic=topic,
+        ttl_seconds=180,
+        grants=[],
+    )
+
+    sub = mqtt_client_factory(
+        host="localhost",
+        port=port,
+        client_id="client_1",
+        username="dynsec_client_1",
+        password=sub_token,
+        **tls_client_kwargs,
+    )
+    controller = mqtt_client_factory(
+        host="localhost",
+        port=port,
+        client_id="fanout_publisher",
+        username="dynsec_publisher",
+        password=control_token,
+        **tls_client_kwargs,
+    )
+
+    try:
+        sub.connect()
+        assert _is_granted(sub.subscribe(topic, qos=1))
+        controller.connect()
+
+        controller.publish(topic, f"pre|{unique_suffix}", qos=0)
+        assert sub.wait_for_topic_messages(topic, 1, timeout_s=5.0)
+
+        control_payload = json.dumps(
+            {"commands": [{"command": "disableClient", "username": "dynsec_client_1"}]}
+        )
+        controller.publish("$CONTROL/dynamic-security/v1", control_payload, qos=1)
+        assert sub.wait_disconnected(timeout_s=8.0), "control disableClient should kick target"
+
+        logs = compose_harness.logs("mosquitto")
+        expected_log = "Control enforcement kick applied: client=client_1 with_will=false"
+        assert expected_log in logs
+    finally:
+        sub.close()
+        controller.close()
+
+    refreshed_token = _issue_token(
+        issuer,
+        token_kind=token_kind,
+        client_id="client_1",
+        topic=topic,
+        ttl_seconds=180,
+        grants=[],
+    )
+    reconnect = mqtt_client_factory(
+        host="localhost",
+        port=port,
+        client_id="client_1",
+        username="dynsec_client_1",
+        password=refreshed_token,
+        **tls_client_kwargs,
+    )
+    try:
+        reconnect.connect()
+        assert _is_denied(reconnect.subscribe(topic, qos=1))
+        reconnect.assert_connected_for(1.0)
+    finally:
+        reconnect.close()
+
+
+@pytest.mark.broker_integration
+@pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
+@pytest.mark.parametrize("tls", [False, True])
+def test_issue31_control_disable_client_skips_offline_stale_session_kick(
+    compose_harness,
+    mqtt_client_factory,
+    unique_suffix: str,
+    token_kind: str,
+    tls: bool,
+    tmp_path,
+) -> None:
+    topic = "fanout/broadcast"
+    stale_client_id = f"issue31-stale-{unique_suffix}"
+    snapshot = _build_dynsec_control_notify_snapshot(
+        source_path="docker/dynamic-security.json",
+        output_path=tmp_path / "dynsec-issue31-stale.json",
+        notification_topic=f"fanout/notifications/issue31/stale/{unique_suffix}",
+        allow_data_read=True,
+    )
+    policy_churn.apply_dynsec_snapshot(str(snapshot))
+
+    compose_harness.up(mosquitto_conf=_resolve_conf("./mosquitto_dynsec.conf", tls=tls), tls=tls)
+    issuer = compose_harness.token_issuer(tls=tls)
+    port = 8883 if tls else 1883
+    tls_client_kwargs = (
+        {"tls": True, "tls_ca_file": str(TLS_CA_FILE), "tls_insecure": True} if tls else {}
+    )
+
+    stale_token = _issue_token(
+        issuer,
+        token_kind=token_kind,
+        client_id=stale_client_id,
+        topic=topic,
+        ttl_seconds=2,
+        grants=[],
+    )
+    control_token = _issue_token(
+        issuer,
+        token_kind=token_kind,
+        client_id="fanout_publisher",
+        topic=topic,
+        ttl_seconds=180,
+        grants=[],
+    )
+
+    stale_client = mqtt_client_factory(
+        host="localhost",
+        port=port,
+        client_id=stale_client_id,
+        username="dynsec_client_1",
+        password=stale_token,
+        **tls_client_kwargs,
+    )
+    controller = mqtt_client_factory(
+        host="localhost",
+        port=port,
+        client_id="fanout_publisher",
+        username="dynsec_publisher",
+        password=control_token,
+        **tls_client_kwargs,
+    )
+
+    try:
+        stale_client.connect()
+        stale_client.assert_connected_for(0.5)
+        stale_client.close()
+        # Allow the cached auth session to expire so stale index cleanup can prune it.
+        time.sleep(13.0)
+
+        controller.connect()
+        control_payload = json.dumps(
+            {"commands": [{"command": "disableClient", "username": "dynsec_client_1"}]}
+        )
+        controller.publish("$CONTROL/dynamic-security/v1", control_payload, qos=1)
+        controller.assert_connected_for(0.8)
+
+        logs = compose_harness.logs("mosquitto")
+        assert (
+            f"Control enforcement kick applied: client={stale_client_id} with_will=false"
+            not in logs
+        )
+        assert (
+            f"Control enforcement kick failed: client={stale_client_id} with_will=false" not in logs
+        )
+    finally:
+        stale_client.close()
+        controller.close()
+
+
+@pytest.mark.broker_integration
+@pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
+@pytest.mark.parametrize("tls", [False, True])
 def test_issue39_enhanced_auth_entrypoint_over_tcp_and_tls(
     compose_harness,
     unique_suffix: str,

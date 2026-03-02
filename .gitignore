@@ -19,3 +19,4 @@ __pycache__/
 /mqtt-auth-biscuit/docker/tls/*.pem
 /mqtt-auth-biscuit/docker/tls/*.key
 /mqtt-auth-biscuit/docker/tls/*.srl
+/mqtt-auth-biscuit/docker/tls/dynamic-security.json

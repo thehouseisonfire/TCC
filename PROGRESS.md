@@ -343,7 +343,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Add runtime assertions proving session continuity without expiry-driven
       disconnects during proactive-refresh runs.
 
-- [ ] **Issue 31: Verify control-triggered dynamic enforcement (kick/re-auth)**
+- [x] **Issue 31: Verify control-triggered dynamic enforcement (kick/re-auth)** — **COMPLETED 2026-03-01**
   - Goal: Implement/control scenarios where `$CONTROL/.../v1` triggers
     enforcement via kicking/re-auth (no `ACL_READ` fan-out checks).
   - Current gap: control-flow tests publish to `$CONTROL`, but enforcement
@@ -659,6 +659,27 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Operator documentation:
       run commands, timing bounds, and flake-control strategy in
       `benchmarks/RUNNING_BENCHMARKS.md`.
+
+- [x] **Issue 31: Verify control-triggered dynamic enforcement (kick/re-auth)** — **COMPLETED 2026-03-01**
+  - **Summary**: Implemented plugin-side handling of Dynamic Security control
+    `disableClient` commands in `MOSQ_EVT_CONTROL`, with immediate runtime
+    enforcement via cache eviction + forced client kick (`with_will=false`).
+  - **Deliverables**:
+    - Control payload processing in `control_callback` for
+      `$CONTROL/dynamic-security/v1` after successful control authorization.
+    - Dynamic-security runtime mutation path in
+      `dynamic_security_policy.rs` (`disableClient`) with best-effort file
+      persistence to keep behavior stable across reload windows.
+    - Session cache explicit removal API (`SessionCache::remove`) used by
+      control-triggered enforcement before kicking affected clients.
+    - Session-index stale pruning against live cache state to prevent unbounded
+      username/client-id accumulation under normal churn and avoid stale target
+      kick attempts during `disableClient` enforcement.
+    - New broker integration assertions:
+      control-triggered kick, reconnect with fresh token, and denied
+      post-change subscribe lifecycle for both JWT and Biscuit.
+    - Updated operator documentation in
+      `benchmarks/RUNNING_BENCHMARKS.md` with Issue 31 focused invocation.
 
 ---
 

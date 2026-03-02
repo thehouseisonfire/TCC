@@ -23,6 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 TLS_CA_FILE = REPO_ROOT / "docker" / "tls" / "ca.pem"
 TLS_SERVER_CERT_FILE = REPO_ROOT / "docker" / "tls" / "server.pem"
 TLS_SERVER_KEY_FILE = REPO_ROOT / "docker" / "tls" / "server.key"
+DYNSEC_CONFIG_FILE = REPO_ROOT / "docker" / "dynamic-security.json"
 DOCKER_COMPOSE_PROJECT = "issue39_integration"
 
 if str(REPO_ROOT) not in sys.path:
@@ -448,6 +449,14 @@ def compose_harness() -> Iterator[ComposeHarness]:
     harness.down()
     yield harness
     harness.down()
+
+
+@pytest.fixture(autouse=True)
+def restore_dynsec_snapshot() -> Iterator[None]:
+    baseline = DYNSEC_CONFIG_FILE.read_bytes() if DYNSEC_CONFIG_FILE.exists() else None
+    yield
+    if baseline is not None:
+        DYNSEC_CONFIG_FILE.write_bytes(baseline)
 
 
 @pytest.fixture

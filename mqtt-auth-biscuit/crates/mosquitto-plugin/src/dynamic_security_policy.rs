@@ -1,5 +1,6 @@
 use serde::Deserialize;
-use std::collections::HashMap;
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -10,6 +11,7 @@ pub struct DynamicSecurityPolicy {
     reload_interval: Duration,
     last_loaded: Mutex<Option<Instant>>,
     state: RwLock<DynSecState>,
+    runtime_disabled_usernames: Mutex<HashSet<String>>,
 }
 
 impl DynamicSecurityPolicy {
@@ -19,6 +21,7 @@ impl DynamicSecurityPolicy {
             reload_interval,
             last_loaded: Mutex::new(None),
             state: RwLock::new(DynSecState::default()),
+            runtime_disabled_usernames: Mutex::new(HashSet::new()),
         };
         policy.reload_if_needed(true)?;
         Ok(policy)
@@ -41,6 +44,15 @@ impl DynamicSecurityPolicy {
         let default_allow = state.default_access.allow_for(access_kind);
 
         let client = username.and_then(|name| state.clients.get(name));
+        if let Some(name) = username
+            && self
+                .runtime_disabled_usernames
+                .lock()
+                .map_err(|_| "dynsec runtime disable lock poisoned".to_string())?
+                .contains(name)
+        {
+            return Ok(false);
+        }
         if let Some(client) = client {
             if client.disabled {
                 return Ok(false);
@@ -83,6 +95,108 @@ impl DynamicSecurityPolicy {
         Ok(default_allow)
     }
 
+    pub fn apply_control_payload(
+        &self,
+        payload: &[u8],
+    ) -> Result<ControlEnforcementTargets, String> {
+        if payload.is_empty() {
+            return Ok(ControlEnforcementTargets::default());
+        }
+
+        let parsed: ControlPayload =
+            serde_json::from_slice(payload).map_err(|e| format!("invalid control payload: {e}"))?;
+        if parsed.commands.is_empty() {
+            return Ok(ControlEnforcementTargets::default());
+        }
+
+        self.reload_if_needed(false)?;
+
+        let mut kick_client_ids = HashSet::new();
+        let mut disable_usernames = HashSet::new();
+        let mut enable_usernames = HashSet::new();
+        let mut requested_enable_usernames = HashSet::new();
+        {
+            let mut state = self
+                .state
+                .write()
+                .map_err(|_| "dynsec state lock poisoned".to_string())?;
+            for cmd in parsed.commands {
+                let command = cmd.command.as_str();
+                if command != "disableClient" && command != "enableClient" {
+                    continue;
+                }
+                let Some(username) = cmd
+                    .username
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                else {
+                    continue;
+                };
+
+                if let Some(client) = state.clients.get_mut(username) {
+                    if command == "disableClient" {
+                        if client.disabled {
+                            continue;
+                        }
+                        client.disabled = true;
+                        disable_usernames.insert(username.to_string());
+                        enable_usernames.remove(username);
+                        if let Some(client_id) = client.client_id.as_ref() {
+                            kick_client_ids.insert(client_id.clone());
+                        }
+                    } else {
+                        requested_enable_usernames.insert(username.to_string());
+                        if client.disabled {
+                            enable_usernames.insert(username.to_string());
+                            disable_usernames.remove(username);
+                            if let Some(client_id) = client.client_id.as_ref() {
+                                kick_client_ids.remove(client_id);
+                            }
+                        }
+                        client.disabled = false;
+                    }
+                } else if command == "enableClient" {
+                    requested_enable_usernames.insert(username.to_string());
+                }
+            }
+        }
+
+        {
+            let mut runtime_disabled = self
+                .runtime_disabled_usernames
+                .lock()
+                .map_err(|_| "dynsec runtime disable lock poisoned".to_string())?;
+            for username in &disable_usernames {
+                runtime_disabled.insert(username.clone());
+            }
+            for username in &requested_enable_usernames {
+                runtime_disabled.remove(username);
+            }
+        }
+
+        for username in &disable_usernames {
+            if let Err(err) = self.persist_client_disabled(username, true) {
+                eprintln!("dynsec: failed to persist disableClient for '{username}': {err}");
+            }
+        }
+        for username in &requested_enable_usernames {
+            if let Err(err) = self.persist_client_disabled(username, false) {
+                eprintln!("dynsec: failed to persist enableClient for '{username}': {err}");
+            }
+        }
+
+        let mut affected_client_ids: Vec<String> = kick_client_ids.into_iter().collect();
+        let mut changed_usernames: Vec<String> = disable_usernames.into_iter().collect();
+        affected_client_ids.sort();
+        changed_usernames.sort();
+
+        Ok(ControlEnforcementTargets {
+            client_ids: affected_client_ids,
+            usernames: changed_usernames,
+        })
+    }
+
     fn reload_if_needed(&self, force: bool) -> Result<(), String> {
         let now = Instant::now();
         let mut last_loaded = self
@@ -112,6 +226,55 @@ impl DynamicSecurityPolicy {
         *last_loaded = Some(now);
         Ok(())
     }
+
+    fn persist_client_disabled(&self, username: &str, disabled: bool) -> Result<(), String> {
+        let raw = fs::read_to_string(&self.config_path)
+            .map_err(|e| format!("dynsec config read failed: {e}"))?;
+        let mut root: Value =
+            serde_json::from_str(&raw).map_err(|e| format!("dynsec config parse failed: {e}"))?;
+
+        let mut changed = false;
+        if let Some(clients) = root.get_mut("clients").and_then(Value::as_array_mut) {
+            for client in clients {
+                let Some(current_username) = client.get("username").and_then(Value::as_str) else {
+                    continue;
+                };
+                if current_username == username {
+                    client["disabled"] = Value::Bool(disabled);
+                    changed = true;
+                }
+            }
+        }
+
+        if !changed {
+            return Ok(());
+        }
+
+        let serialized = serde_json::to_string_pretty(&root)
+            .map_err(|e| format!("dynsec config serialize failed: {e}"))?;
+        fs::write(&self.config_path, format!("{serialized}\n"))
+            .map_err(|e| format!("dynsec config write failed: {e}"))?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ControlPayload {
+    #[serde(default)]
+    commands: Vec<ControlCommand>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ControlCommand {
+    command: String,
+    #[serde(default)]
+    username: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ControlEnforcementTargets {
+    pub client_ids: Vec<String>,
+    pub usernames: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -588,4 +751,319 @@ fn sub_match_sub(filter: &str, topic: &str) -> bool {
     }
 
     i == topic_parts.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static DYNSEC_TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn write_test_dynsec_config() -> String {
+        let unique = DYNSEC_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("dynsec-control-{unique}.json"));
+        let config = r#"{
+  "clients": [
+    {
+      "username": "test_user",
+      "clientid": "test_client",
+      "roles": [{"rolename": "ctrl", "priority": 0}],
+      "disabled": false
+    }
+  ],
+  "groups": [],
+  "roles": [
+    {
+      "rolename": "ctrl",
+      "acls": [
+        {
+          "acltype": "publishClientSend",
+          "topic": "$CONTROL/dynamic-security/v1",
+          "priority": 0,
+          "allow": true
+        }
+      ]
+    }
+  ],
+  "defaultACLAccess": {
+    "publishClientSend": false,
+    "publishClientReceive": false,
+    "subscribe": false,
+    "unsubscribe": false
+  }
+}"#;
+        fs::write(&path, config).expect("test dynsec config must be writable");
+        path.to_string_lossy().into_owned()
+    }
+
+    fn set_client_disabled(path: &str, username: &str, disabled: bool) {
+        let raw = fs::read_to_string(path).expect("test dynsec config should be readable");
+        let mut root: Value = serde_json::from_str(&raw).expect("test dynsec config should parse");
+        if let Some(clients) = root.get_mut("clients").and_then(Value::as_array_mut) {
+            for client in clients {
+                let Some(current_username) = client.get("username").and_then(Value::as_str) else {
+                    continue;
+                };
+                if current_username == username {
+                    client["disabled"] = Value::Bool(disabled);
+                }
+            }
+        }
+        let serialized =
+            serde_json::to_string_pretty(&root).expect("test dynsec config should serialize");
+        fs::write(path, format!("{serialized}\n")).expect("test dynsec config should be writable");
+    }
+
+    fn write_test_dynsec_config_without_client_id() -> String {
+        let unique = DYNSEC_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("dynsec-control-no-clientid-{unique}.json"));
+        let config = r#"{
+  "clients": [
+    {
+      "username": "test_user",
+      "roles": [{"rolename": "ctrl", "priority": 0}],
+      "disabled": false
+    }
+  ],
+  "groups": [],
+  "roles": [
+    {
+      "rolename": "ctrl",
+      "acls": [
+        {
+          "acltype": "publishClientSend",
+          "topic": "$CONTROL/dynamic-security/v1",
+          "priority": 0,
+          "allow": true
+        }
+      ]
+    }
+  ],
+  "defaultACLAccess": {
+    "publishClientSend": false,
+    "publishClientReceive": false,
+    "subscribe": false,
+    "unsubscribe": false
+  }
+}"#;
+        fs::write(&path, config).expect("test dynsec config must be writable");
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn apply_control_payload_disable_client_marks_user_disabled_and_returns_client_id() {
+        let path = write_test_dynsec_config();
+        let policy = DynamicSecurityPolicy::new(path.clone(), Duration::from_secs(60))
+            .expect("policy must load");
+
+        let payload = br#"{"commands":[{"command":"disableClient","username":"test_user"}]}"#;
+        let targets = policy
+            .apply_control_payload(payload)
+            .expect("control payload should apply");
+        assert_eq!(targets.client_ids, vec!["test_client".to_string()]);
+        assert_eq!(targets.usernames, vec!["test_user".to_string()]);
+        assert_eq!(
+            policy
+                .check(
+                    Some("test_user"),
+                    Some("test_client"),
+                    "$CONTROL/dynamic-security/v1",
+                    ACL_WRITE
+                )
+                .expect("policy check should succeed"),
+            false
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn apply_control_payload_ignores_non_disable_commands() {
+        let path = write_test_dynsec_config();
+        let policy = DynamicSecurityPolicy::new(path.clone(), Duration::from_secs(60))
+            .expect("policy must load");
+
+        let payload = br#"{"commands":[{"command":"listRoles"}]}"#;
+        let targets = policy
+            .apply_control_payload(payload)
+            .expect("control payload should apply");
+        assert!(targets.client_ids.is_empty());
+        assert!(targets.usernames.is_empty());
+        assert_eq!(
+            policy
+                .check(
+                    Some("test_user"),
+                    Some("test_client"),
+                    "$CONTROL/dynamic-security/v1",
+                    ACL_WRITE
+                )
+                .expect("policy check should succeed"),
+            true
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn apply_control_payload_rejects_invalid_json() {
+        let path = write_test_dynsec_config();
+        let policy = DynamicSecurityPolicy::new(path.clone(), Duration::from_secs(60))
+            .expect("policy must load");
+
+        let err = policy
+            .apply_control_payload(br#"{"commands":[{"command":"disableClient"}"#)
+            .expect_err("invalid payload should fail");
+        assert!(err.contains("invalid control payload"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn apply_control_payload_returns_username_when_client_id_missing() {
+        let path = write_test_dynsec_config_without_client_id();
+        let policy = DynamicSecurityPolicy::new(path.clone(), Duration::from_secs(0))
+            .expect("policy must load");
+
+        let payload = br#"{"commands":[{"command":"disableClient","username":"test_user"}]}"#;
+        let targets = policy
+            .apply_control_payload(payload)
+            .expect("control payload should apply");
+        assert!(targets.client_ids.is_empty());
+        assert_eq!(targets.usernames, vec!["test_user".to_string()]);
+
+        // Runtime disable overlay must continue denying even after config reloads.
+        assert_eq!(
+            policy
+                .check(
+                    Some("test_user"),
+                    Some("another_client"),
+                    "$CONTROL/dynamic-security/v1",
+                    ACL_WRITE
+                )
+                .expect("policy check should succeed"),
+            false
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn apply_control_payload_enable_client_clears_runtime_disable_overlay() {
+        let path = write_test_dynsec_config();
+        let policy = DynamicSecurityPolicy::new(path.clone(), Duration::from_secs(60))
+            .expect("policy must load");
+
+        let disable_payload =
+            br#"{"commands":[{"command":"disableClient","username":"test_user"}]}"#;
+        let disable_targets = policy
+            .apply_control_payload(disable_payload)
+            .expect("disable payload should apply");
+        assert_eq!(disable_targets.client_ids, vec!["test_client".to_string()]);
+        assert_eq!(disable_targets.usernames, vec!["test_user".to_string()]);
+        assert_eq!(
+            policy
+                .check(
+                    Some("test_user"),
+                    Some("test_client"),
+                    "$CONTROL/dynamic-security/v1",
+                    ACL_WRITE
+                )
+                .expect("policy check should succeed"),
+            false
+        );
+
+        let enable_payload = br#"{"commands":[{"command":"enableClient","username":"test_user"}]}"#;
+        let enable_targets = policy
+            .apply_control_payload(enable_payload)
+            .expect("enable payload should apply");
+        assert!(enable_targets.client_ids.is_empty());
+        assert!(enable_targets.usernames.is_empty());
+        assert_eq!(
+            policy
+                .check(
+                    Some("test_user"),
+                    Some("test_client"),
+                    "$CONTROL/dynamic-security/v1",
+                    ACL_WRITE
+                )
+                .expect("policy check should succeed"),
+            true
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn apply_control_payload_disable_then_enable_same_payload_has_no_kick_targets() {
+        let path = write_test_dynsec_config();
+        let policy = DynamicSecurityPolicy::new(path.clone(), Duration::from_secs(60))
+            .expect("policy must load");
+
+        let payload = br#"{
+            "commands":[
+                {"command":"disableClient","username":"test_user"},
+                {"command":"enableClient","username":"test_user"}
+            ]
+        }"#;
+        let targets = policy
+            .apply_control_payload(payload)
+            .expect("payload should apply");
+        assert!(targets.client_ids.is_empty());
+        assert!(targets.usernames.is_empty());
+        assert_eq!(
+            policy
+                .check(
+                    Some("test_user"),
+                    Some("test_client"),
+                    "$CONTROL/dynamic-security/v1",
+                    ACL_WRITE
+                )
+                .expect("policy check should succeed"),
+            true
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn apply_control_payload_enable_client_clears_overlay_even_if_state_already_enabled() {
+        let path = write_test_dynsec_config();
+        let policy = DynamicSecurityPolicy::new(path.clone(), Duration::from_secs(0))
+            .expect("policy must load");
+
+        let disable_payload =
+            br#"{"commands":[{"command":"disableClient","username":"test_user"}]}"#;
+        policy
+            .apply_control_payload(disable_payload)
+            .expect("disable payload should apply");
+
+        // Simulate a state overlay mismatch by externally setting the file back to enabled.
+        set_client_disabled(&path, "test_user", false);
+        assert_eq!(
+            policy
+                .check(
+                    Some("test_user"),
+                    Some("test_client"),
+                    "$CONTROL/dynamic-security/v1",
+                    ACL_WRITE
+                )
+                .expect("policy check should succeed"),
+            false
+        );
+
+        let enable_payload = br#"{"commands":[{"command":"enableClient","username":"test_user"}]}"#;
+        let targets = policy
+            .apply_control_payload(enable_payload)
+            .expect("enable payload should apply");
+        assert!(targets.client_ids.is_empty());
+        assert!(targets.usernames.is_empty());
+        assert_eq!(
+            policy
+                .check(
+                    Some("test_user"),
+                    Some("test_client"),
+                    "$CONTROL/dynamic-security/v1",
+                    ACL_WRITE
+                )
+                .expect("policy check should succeed"),
+            true
+        );
+        let _ = fs::remove_file(path);
+    }
 }

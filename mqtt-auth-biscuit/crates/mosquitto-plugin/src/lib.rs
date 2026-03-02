@@ -6,12 +6,14 @@ use crate::biscuit_handler::{
 };
 use crate::cache::SessionCache;
 use crate::config::{PluginConfig, parse_options};
-use crate::dynamic_security_policy::DynamicSecurityPolicy;
+use crate::dynamic_security_policy::{ControlEnforcementTargets, DynamicSecurityPolicy};
 use crate::policy::PolicyMode;
 use crate::sqlite_policy::SqlitePolicy;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
-use std::sync::{Arc, Once};
+use std::slice;
+use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 #[cfg(test)]
 use std::{cell::RefCell, thread_local};
@@ -56,6 +58,14 @@ mod cache {
             V: Clone,
         {
             None
+        }
+
+        pub fn remove(&self, _key: &K) -> bool {
+            false
+        }
+
+        pub fn contains_live(&self, _key: &K) -> bool {
+            false
         }
 
         pub fn stats(&self) -> CacheStats {
@@ -507,9 +517,55 @@ fn mosquitto_client_username_ptr(client: *const c_void) -> *const c_char {
 pub struct PluginState {
     auth_engine: Arc<AuthEngine>,
     cache: Arc<SessionCache<String, TokenType>>,
+    session_index: Mutex<SessionIndex>,
     config: PluginConfig,
     sqlite_policy: Option<SqlitePolicy>,
     dynamic_security_policy: Option<DynamicSecurityPolicy>,
+}
+
+#[derive(Debug, Default)]
+struct SessionIndex {
+    usernames_by_client_id: HashMap<String, String>,
+    client_ids_by_username: HashMap<String, HashSet<String>>,
+}
+
+impl SessionIndex {
+    fn bind(&mut self, client_id: &str, username: Option<&str>) {
+        self.remove_client_id(client_id);
+        let Some(username) = username.map(str::trim).filter(|value| !value.is_empty()) else {
+            return;
+        };
+        self.usernames_by_client_id
+            .insert(client_id.to_string(), username.to_string());
+        self.client_ids_by_username
+            .entry(username.to_string())
+            .or_default()
+            .insert(client_id.to_string());
+    }
+
+    fn remove_client_id(&mut self, client_id: &str) -> bool {
+        let Some(username) = self.usernames_by_client_id.remove(client_id) else {
+            return false;
+        };
+        if let Some(client_ids) = self.client_ids_by_username.get_mut(&username) {
+            client_ids.remove(client_id);
+            if client_ids.is_empty() {
+                self.client_ids_by_username.remove(&username);
+            }
+        }
+        true
+    }
+
+    fn client_ids_for_username(&self, username: &str) -> Vec<String> {
+        self.client_ids_by_username
+            .get(username)
+            .map(|ids| ids.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn all_client_ids(&self) -> Vec<String> {
+        self.usernames_by_client_id.keys().cloned().collect()
+    }
 }
 
 fn set_reason_string(target: *mut *mut c_char, message: &str) {
@@ -535,6 +591,191 @@ fn set_control_reauth_signal(evt: &mut MosquittoEvtControl, message: &str) {
     set_reason_string(&mut evt.reason_string, message);
 }
 
+fn control_payload_bytes(evt: &MosquittoEvtControl) -> &[u8] {
+    if evt.payload.is_null() || evt.payloadlen == 0 {
+        return &[];
+    }
+    unsafe { slice::from_raw_parts(evt.payload as *const u8, evt.payloadlen as usize) }
+}
+
+fn message_payload_bytes(evt: &MosquittoEvtMessage) -> &[u8] {
+    if evt.payload.is_null() || evt.payloadlen == 0 {
+        return &[];
+    }
+    unsafe { slice::from_raw_parts(evt.payload as *const u8, evt.payloadlen as usize) }
+}
+
+fn acl_payload_bytes(evt: &MosquittoEvtAclCheck) -> &[u8] {
+    if evt.payload.is_null() || evt.payloadlen == 0 {
+        return &[];
+    }
+    unsafe { slice::from_raw_parts(evt.payload as *const u8, evt.payloadlen as usize) }
+}
+
+fn bind_session_username(state: &PluginState, client_id: &str, username: Option<&str>) {
+    if let Ok(mut session_index) = state.session_index.lock() {
+        session_index.bind(client_id, username);
+    } else {
+        log_debug("Session index bind skipped: lock poisoned");
+    }
+}
+
+fn remove_session_username(state: &PluginState, client_id: &str) -> bool {
+    if let Ok(mut session_index) = state.session_index.lock() {
+        session_index.remove_client_id(client_id)
+    } else {
+        log_debug("Session index removal skipped: lock poisoned");
+        false
+    }
+}
+
+fn prune_session_index_against_cache(state: &PluginState) {
+    let indexed_client_ids = if let Ok(session_index) = state.session_index.lock() {
+        session_index.all_client_ids()
+    } else {
+        log_debug("Session index prune skipped: lock poisoned");
+        return;
+    };
+
+    let mut stale_client_ids = Vec::new();
+    for client_id in indexed_client_ids {
+        if !state.cache.contains_live(&client_id) {
+            stale_client_ids.push(client_id);
+        }
+    }
+
+    if stale_client_ids.is_empty() {
+        return;
+    }
+
+    if let Ok(mut session_index) = state.session_index.lock() {
+        for client_id in stale_client_ids {
+            session_index.remove_client_id(&client_id);
+        }
+    } else {
+        log_debug("Session index stale cleanup skipped: lock poisoned");
+    }
+}
+
+fn session_client_ids_for_username(state: &PluginState, username: &str) -> Vec<String> {
+    let candidate_ids = if let Ok(session_index) = state.session_index.lock() {
+        session_index.client_ids_for_username(username)
+    } else {
+        log_debug("Session index lookup skipped: lock poisoned");
+        return Vec::new();
+    };
+
+    let mut live_ids = Vec::new();
+    let mut stale_ids = Vec::new();
+    for client_id in candidate_ids {
+        if state.cache.contains_live(&client_id) {
+            live_ids.push(client_id);
+        } else {
+            stale_ids.push(client_id);
+        }
+    }
+
+    if !stale_ids.is_empty() {
+        if let Ok(mut session_index) = state.session_index.lock() {
+            for stale_id in stale_ids {
+                session_index.remove_client_id(&stale_id);
+            }
+        } else {
+            log_debug("Session index stale cleanup skipped: lock poisoned");
+        }
+    }
+
+    live_ids
+}
+
+fn apply_dynamic_security_control_enforcement(
+    state: &PluginState,
+    client_id: &str,
+    username: Option<&str>,
+    topic: &str,
+    payload: &[u8],
+) {
+    if state.config.policy.mode != PolicyMode::DynamicSecurity
+        || topic != "$CONTROL/dynamic-security/v1"
+        || payload.is_empty()
+    {
+        return;
+    }
+
+    let client_id_key = client_id.to_string();
+    let Some(token_type) = state.cache.get(&client_id_key) else {
+        log_debug(&format!(
+            "Control command skipped: missing cached session for client={}",
+            client_id
+        ));
+        return;
+    };
+
+    let params = AuthzParams {
+        username,
+        client_id,
+        topic,
+        access: MOSQ_ACL_CONTROL,
+        is_control_request: true,
+        biscuit_root_key: &state.config.biscuit.root_public_key,
+        policy_mode: state.config.policy.mode,
+        sqlite_policy: state.sqlite_policy.as_ref(),
+        dynamic_security_policy: state.dynamic_security_policy.as_ref(),
+        http_url: state.config.policy.http_url.as_deref(),
+        http_ca_file: state.config.policy.http_ca_file.as_deref(),
+        http_tls_insecure: state.config.policy.http_tls_insecure,
+        http_timeout_seconds: state.config.policy.http_timeout_seconds,
+        http_max_response_bytes: state.config.policy.http_max_response_bytes,
+    };
+    if check_authorization(&token_type, params) != AuthzOutcome::Allowed {
+        log_debug(&format!(
+            "Control command skipped: authorization denied for client={} topic={}",
+            client_id, topic
+        ));
+        return;
+    }
+
+    let Some(policy) = state.dynamic_security_policy.as_ref() else {
+        return;
+    };
+    match policy.apply_control_payload(payload) {
+        Ok(ControlEnforcementTargets {
+            client_ids,
+            usernames,
+        }) => {
+            let mut kick_targets: HashSet<String> = client_ids.into_iter().collect();
+            for username in usernames {
+                for session_client_id in session_client_ids_for_username(state, &username) {
+                    kick_targets.insert(session_client_id);
+                }
+            }
+
+            for affected_client in kick_targets {
+                let evicted = state.cache.remove(&affected_client);
+                let session_binding_removed = remove_session_username(state, &affected_client);
+                log_debug(&format!(
+                    "Control enforcement target: client={} cache_evicted={} session_binding_removed={}",
+                    affected_client, evicted, session_binding_removed
+                ));
+                if evicted {
+                    disconnect_control_enforcement_client(&affected_client);
+                } else {
+                    log_debug(&format!(
+                        "Control enforcement kick skipped: client={} not present in live session cache",
+                        affected_client
+                    ));
+                }
+            }
+        }
+        Err(err) => {
+            log_debug(&format!(
+                "Control command processing failed: client={} topic={} error={}",
+                client_id, topic, err
+            ));
+        }
+    }
+}
+
 fn disconnect_expired_acl_client(client_id: &str) {
     let client_id_cstr = match CString::new(client_id) {
         Ok(value) => value,
@@ -557,6 +798,31 @@ fn disconnect_expired_acl_client(client_id: &str) {
     } else {
         log_debug(&format!(
             "ACL expiry disconnect failed: client={} with_will=false rc={}",
+            client_id, rc
+        ));
+    }
+}
+
+fn disconnect_control_enforcement_client(client_id: &str) {
+    let client_id_cstr = match CString::new(client_id) {
+        Ok(value) => value,
+        Err(_) => {
+            log_debug(&format!(
+                "Control enforcement kick skipped: invalid client id '{}'",
+                client_id
+            ));
+            return;
+        }
+    };
+    let rc = kick_client_by_clientid_raw(client_id_cstr.as_ptr(), false);
+    if rc == MOSQ_ERR_SUCCESS {
+        log_debug(&format!(
+            "Control enforcement kick applied: client={} with_will=false",
+            client_id
+        ));
+    } else {
+        log_debug(&format!(
+            "Control enforcement kick failed: client={} with_will=false rc={}",
             client_id, rc
         ));
     }
@@ -792,6 +1058,7 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
                 config.jwt.validation.clone(),
             )),
             cache: Arc::new(SessionCache::new(1000)),
+            session_index: Mutex::new(SessionIndex::default()),
             config,
             sqlite_policy,
             dynamic_security_policy,
@@ -943,7 +1210,10 @@ extern "C" fn basic_auth_callback(
             let Some(client_id) = mosq_client_id_string(evt.client) else {
                 return MOSQ_ERR_AUTH;
             };
-            state.cache.insert(client_id, token_type, cache_ttl);
+            state.cache.insert(client_id.clone(), token_type, cache_ttl);
+            prune_session_index_against_cache(state);
+            let session_username = mosq_client_username_string(evt.client);
+            bind_session_username(state, &client_id, session_username.as_deref());
             MOSQ_ERR_SUCCESS
         }
         Err(AuthError::Expired) => {
@@ -1022,7 +1292,10 @@ extern "C" fn ext_auth_start_callback(
             let Some(client_id) = mosq_client_id_string(evt.client) else {
                 return MOSQ_ERR_AUTH;
             };
-            state.cache.insert(client_id, token_type, cache_ttl);
+            state.cache.insert(client_id.clone(), token_type, cache_ttl);
+            prune_session_index_against_cache(state);
+            let session_username = mosq_client_username_string(evt.client);
+            bind_session_username(state, &client_id, session_username.as_deref());
             MOSQ_ERR_SUCCESS
         }
         Err(AuthError::Expired) => {
@@ -1100,6 +1373,15 @@ extern "C" fn acl_check_callback(
 
         match check_authorization(&token_type, params) {
             AuthzOutcome::Allowed => {
+                if topic.starts_with("$CONTROL/") && (evt.access & MOSQ_ACL_WRITE) != 0 {
+                    apply_dynamic_security_control_enforcement(
+                        state,
+                        &client_id,
+                        username.as_deref(),
+                        topic.as_ref(),
+                        acl_payload_bytes(evt),
+                    );
+                }
                 if state.config.policy.mode == PolicyMode::StaticAclStrict {
                     return MOSQ_ERR_PLUGIN_DEFER;
                 }
@@ -1149,8 +1431,20 @@ extern "C" fn message_callback(
         return MOSQ_ERR_INVAL;
     }
     let evt = unsafe { &mut *(event_data as *mut MosquittoEvtMessage) };
+    let state = unsafe { &*(userdata as *mut PluginState) };
     if evt.topic.is_null() {
         return MOSQ_ERR_INVAL;
+    }
+    let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
+    if let Some(client_id) = mosq_client_id_string(evt.client) {
+        let username = mosq_client_username_string(evt.client);
+        apply_dynamic_security_control_enforcement(
+            state,
+            &client_id,
+            username.as_deref(),
+            topic.as_ref(),
+            message_payload_bytes(evt),
+        );
     }
     MOSQ_ERR_SUCCESS
 }
@@ -1199,7 +1493,7 @@ extern "C" fn message_callback(
 /// - Clients learn of privilege changes via notification topic
 ///
 /// The plugin supports both variants through policy configuration:
-/// - DynamicSecurity mode: Uses Variant B with cache invalidation
+/// - DynamicSecurity mode: Supports control-triggered kick for `disableClient`
 /// - SQLite/HTTP modes: Configurable per deployment
 ///
 /// ## Research Alignment
@@ -1263,6 +1557,13 @@ extern "C" fn control_callback(
                     "Control authorized: client={} topic={}",
                     client_id, topic
                 ));
+                apply_dynamic_security_control_enforcement(
+                    state,
+                    &client_id,
+                    username.as_deref(),
+                    topic.as_ref(),
+                    control_payload_bytes(evt),
+                );
                 if state.config.policy.mode == PolicyMode::StaticAclStrict {
                     return MOSQ_ERR_PLUGIN_DEFER;
                 }
@@ -1303,7 +1604,11 @@ mod tests {
     use super::*;
     use crate::jwt_handler::Claims;
     use std::ffi::CString;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
+
+    static TEST_DYNSEC_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn setup_plugin_with_config() -> (*mut c_void, MosquittoPluginId) {
         let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
@@ -1378,11 +1683,71 @@ mod tests {
         state.dynamic_security_policy = Some(policy);
     }
 
-    fn cache_test_jwt(userdata: *mut c_void, exp: i64) {
+    fn enable_dynamic_security_control_mode_with_client_id(
+        userdata: *mut c_void,
+        include_client_id: bool,
+    ) -> String {
+        let unique = TEST_DYNSEC_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dynsec_path = std::env::temp_dir().join(format!("dynsec-control-lib-{unique}.json"));
+        let client_id_line = if include_client_id {
+            "\"clientid\": \"test_client\","
+        } else {
+            ""
+        };
+        let dynsec_cfg = format!(
+            r#"{{
+  "clients": [
+    {{
+      "username": "test_user",
+      {client_id_line}
+      "roles": [{{"rolename": "controller", "priority": 0}}],
+      "disabled": false
+    }}
+  ],
+  "groups": [],
+  "roles": [
+    {{
+      "rolename": "controller",
+      "acls": [
+        {{
+          "acltype": "publishClientSend",
+          "topic": "$CONTROL/dynamic-security/v1",
+          "priority": 0,
+          "allow": true
+        }}
+      ]
+    }}
+  ],
+  "defaultACLAccess": {{
+    "publishClientSend": false,
+    "publishClientReceive": false,
+    "subscribe": false,
+    "unsubscribe": false
+  }}
+}}"#
+        );
+        fs::write(&dynsec_path, dynsec_cfg).expect("dynsec test control config must be writable");
+        let state = unsafe { &mut *(userdata as *mut PluginState) };
+        let policy = DynamicSecurityPolicy::new(
+            dynsec_path.to_string_lossy().into_owned(),
+            Duration::from_secs(60),
+        )
+        .expect("dynamic security control policy should load for tests");
+        state.config.policy.mode = PolicyMode::DynamicSecurity;
+        state.config.policy.dynamic_security_url = Some(dynsec_path.to_string_lossy().into_owned());
+        state.dynamic_security_policy = Some(policy);
+        dynsec_path.to_string_lossy().into_owned()
+    }
+
+    fn enable_dynamic_security_control_mode(userdata: *mut c_void) -> String {
+        enable_dynamic_security_control_mode_with_client_id(userdata, true)
+    }
+
+    fn cache_test_jwt_for_client(userdata: *mut c_void, client_id: &str, exp: i64) {
         let state = unsafe { &mut *(userdata as *mut PluginState) };
         let token = TokenType::Jwt {
             claims: Claims {
-                sub: "test_client".to_string(),
+                sub: client_id.to_string(),
                 exp,
                 iss: None,
                 aud: None,
@@ -1395,7 +1760,11 @@ mod tests {
         };
         state
             .cache
-            .insert("test_client".to_string(), token, Duration::from_secs(60));
+            .insert(client_id.to_string(), token, Duration::from_secs(60));
+    }
+
+    fn cache_test_jwt(userdata: *mut c_void, exp: i64) {
+        cache_test_jwt_for_client(userdata, "test_client", exp);
     }
 
     fn cache_test_biscuit(userdata: *mut c_void, expires_at: Option<i64>) {
@@ -2067,6 +2436,64 @@ mod tests {
     }
 
     #[test]
+    fn message_callback_applies_dynamic_security_disable_client_control_payload() {
+        reset_kick_client_call();
+        let (userdata, _identifier) = setup_plugin_with_config();
+        let dynsec_path = enable_dynamic_security_control_mode(userdata);
+        cache_test_jwt(userdata, time::unix_timestamp_now() + 60);
+
+        let topic = CString::new("$CONTROL/dynamic-security/v1").unwrap();
+        let payload = br#"{"commands":[{"command":"disableClient","username":"test_user"}]}"#;
+        let mut evt = MosquittoEvtMessage {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr() as *mut c_char,
+            payload: payload.as_ptr() as *mut c_void,
+            properties: ptr::null_mut(),
+            reason_string: ptr::null_mut(),
+            payloadlen: payload.len() as u32,
+            qos: 1,
+            reason_code: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = message_callback(
+            MOSQ_EVT_MESSAGE,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
+        assert_eq!(rc, MOSQ_ERR_SUCCESS);
+        let kick = kick_client_call_snapshot();
+        assert_eq!(kick.count, 1);
+        assert_eq!(kick.last_client_id.as_deref(), Some("test_client"));
+
+        let state = unsafe { &*(userdata as *mut PluginState) };
+        assert!(state.cache.get(&"test_client".to_string()).is_none());
+        let _ = fs::remove_file(dynsec_path);
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn session_client_lookup_prunes_stale_bindings() {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        let state = unsafe { &*(userdata as *mut PluginState) };
+        bind_session_username(state, "stale_client", Some("test_user"));
+
+        let resolved = session_client_ids_for_username(state, "test_user");
+        assert!(resolved.is_empty());
+
+        let remaining = state
+            .session_index
+            .lock()
+            .expect("session index lock should succeed")
+            .client_ids_for_username("test_user");
+        assert!(remaining.is_empty());
+
+        teardown_plugin(userdata);
+    }
+
+    #[test]
     fn control_callback_handles_null_pointers() {
         let rc = control_callback(MOSQ_EVT_CONTROL, ptr::null_mut(), ptr::null_mut());
         assert_eq!(rc, MOSQ_ERR_INVAL);
@@ -2155,6 +2582,194 @@ mod tests {
 
         teardown_plugin(userdata);
     }
+
+    #[test]
+    fn control_callback_disable_client_kicks_target_and_evicts_cache() {
+        reset_kick_client_call();
+        let (userdata, _identifier) = setup_plugin_with_config();
+        let dynsec_path = enable_dynamic_security_control_mode(userdata);
+        cache_test_jwt(userdata, time::unix_timestamp_now() + 60);
+
+        let topic = CString::new("$CONTROL/dynamic-security/v1").unwrap();
+        let payload = br#"{"commands":[{"command":"disableClient","username":"test_user"}]}"#;
+        let mut evt = MosquittoEvtControl {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr() as *const c_char,
+            payload: payload.as_ptr() as *const c_void,
+            properties: ptr::null(),
+            reason_string: ptr::null_mut(),
+            payloadlen: payload.len() as u32,
+            qos: 1,
+            reason_code: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = control_callback(
+            MOSQ_EVT_CONTROL,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
+        assert_eq!(rc, MOSQ_ERR_SUCCESS);
+
+        let kick = kick_client_call_snapshot();
+        assert_eq!(kick.count, 1);
+        assert_eq!(kick.last_client_id.as_deref(), Some("test_client"));
+        assert_eq!(kick.last_with_will, Some(false));
+
+        let state = unsafe { &*(userdata as *mut PluginState) };
+        assert!(state.cache.get(&"test_client".to_string()).is_none());
+        let policy = state
+            .dynamic_security_policy
+            .as_ref()
+            .expect("dynamic security policy should be configured");
+        assert!(
+            !policy
+                .check(
+                    Some("test_user"),
+                    Some("test_client"),
+                    "$CONTROL/dynamic-security/v1",
+                    MOSQ_ACL_WRITE
+                )
+                .expect("policy check should succeed")
+        );
+
+        let _ = fs::remove_file(dynsec_path);
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn control_callback_disable_client_kicks_session_index_target_without_client_id() {
+        reset_kick_client_call();
+        let (userdata, _identifier) = setup_plugin_with_config();
+        let dynsec_path = enable_dynamic_security_control_mode_with_client_id(userdata, false);
+        cache_test_jwt(userdata, time::unix_timestamp_now() + 60);
+        cache_test_jwt_for_client(userdata, "target_client", time::unix_timestamp_now() + 60);
+
+        let state = unsafe { &*(userdata as *mut PluginState) };
+        bind_session_username(state, "target_client", Some("test_user"));
+
+        let topic = CString::new("$CONTROL/dynamic-security/v1").unwrap();
+        let payload = br#"{"commands":[{"command":"disableClient","username":"test_user"}]}"#;
+        let mut evt = MosquittoEvtControl {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr() as *const c_char,
+            payload: payload.as_ptr() as *const c_void,
+            properties: ptr::null(),
+            reason_string: ptr::null_mut(),
+            payloadlen: payload.len() as u32,
+            qos: 1,
+            reason_code: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = control_callback(
+            MOSQ_EVT_CONTROL,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
+        assert_eq!(rc, MOSQ_ERR_SUCCESS);
+
+        let kick = kick_client_call_snapshot();
+        assert_eq!(kick.count, 1);
+        assert_eq!(kick.last_client_id.as_deref(), Some("target_client"));
+        assert_eq!(kick.last_with_will, Some(false));
+
+        let state = unsafe { &*(userdata as *mut PluginState) };
+        assert!(state.cache.get(&"target_client".to_string()).is_none());
+
+        let _ = fs::remove_file(dynsec_path);
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn control_callback_disable_client_stale_session_index_target_skips_kick() {
+        reset_kick_client_call();
+        let (userdata, _identifier) = setup_plugin_with_config();
+        let dynsec_path = enable_dynamic_security_control_mode_with_client_id(userdata, false);
+        cache_test_jwt(userdata, time::unix_timestamp_now() + 60);
+
+        let state = unsafe { &*(userdata as *mut PluginState) };
+        bind_session_username(state, "stale_client", Some("test_user"));
+
+        let topic = CString::new("$CONTROL/dynamic-security/v1").unwrap();
+        let payload = br#"{"commands":[{"command":"disableClient","username":"test_user"}]}"#;
+        let mut evt = MosquittoEvtControl {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr() as *const c_char,
+            payload: payload.as_ptr() as *const c_void,
+            properties: ptr::null(),
+            reason_string: ptr::null_mut(),
+            payloadlen: payload.len() as u32,
+            qos: 1,
+            reason_code: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = control_callback(
+            MOSQ_EVT_CONTROL,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
+        assert_eq!(rc, MOSQ_ERR_SUCCESS);
+
+        let kick = kick_client_call_snapshot();
+        assert_eq!(kick.count, 0);
+
+        let remaining = state
+            .session_index
+            .lock()
+            .expect("session index lock should succeed")
+            .client_ids_for_username("test_user");
+        assert!(remaining.is_empty());
+
+        let _ = fs::remove_file(dynsec_path);
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn control_callback_invalid_payload_does_not_kick_or_evict_cache() {
+        reset_kick_client_call();
+        let (userdata, _identifier) = setup_plugin_with_config();
+        let dynsec_path = enable_dynamic_security_control_mode(userdata);
+        cache_test_jwt(userdata, time::unix_timestamp_now() + 60);
+
+        let topic = CString::new("$CONTROL/dynamic-security/v1").unwrap();
+        let payload = br#"{"commands":[{"command":"disableClient","username":"test_user""#;
+        let mut evt = MosquittoEvtControl {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr() as *const c_char,
+            payload: payload.as_ptr() as *const c_void,
+            properties: ptr::null(),
+            reason_string: ptr::null_mut(),
+            payloadlen: payload.len() as u32,
+            qos: 1,
+            reason_code: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = control_callback(
+            MOSQ_EVT_CONTROL,
+            &mut evt as *mut _ as *mut c_void,
+            userdata,
+        );
+        assert_eq!(rc, MOSQ_ERR_SUCCESS);
+
+        let kick = kick_client_call_snapshot();
+        assert_eq!(kick.count, 0);
+        let state = unsafe { &*(userdata as *mut PluginState) };
+        assert!(state.cache.get(&"test_client".to_string()).is_some());
+
+        let _ = fs::remove_file(dynsec_path);
+        teardown_plugin(userdata);
+    }
 }
 
 #[cfg(kani)]
@@ -2218,6 +2833,7 @@ mod verification {
                 config.jwt.validation.clone(),
             )),
             cache: Arc::new(SessionCache::new(10)),
+            session_index: Mutex::new(SessionIndex::default()),
             config,
             sqlite_policy: None,
             dynamic_security_policy: None,

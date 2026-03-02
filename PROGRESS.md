@@ -257,10 +257,10 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 ## 8) Open Issues (Next Steps, Grouped)
 
 ### Priority List
-1. Issue 37: ACL_READ fan-out scenarios across policy profiles
-2. Issue 23: Proactive client reauthentication
-3. Issue 21: Expand Biscuit authorizer (if current template insufficient)
-4. Issue 22: Strengthen SQLite RBAC (if policies too simple)
+1. Issue 22: Strengthen SQLite RBAC (if policies too simple)
+2. Issue 37: ACL_READ fan-out scenarios across policy profiles
+3. Issue 23: Proactive client reauthentication
+4. Issue 21: Expand Biscuit authorizer (if current template insufficient)
 5. Issue 8.2: Containerized benchmark topology
 ---
 

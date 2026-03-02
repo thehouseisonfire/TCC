@@ -325,7 +325,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Ensure scenarios document when policy churn is enabled and how it affects
       cache validity
 
-#### F) Matrix Coverage (Benchmark Verification)
+#### B) Matrix Coverage (Benchmark Verification)
 
 - [ ] **Issue 23: Proactive client reauthentication before expiry**
   - Goal: Clients refresh tokens proactively and initiate MQTT v5 reauth at
@@ -362,10 +362,6 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
       profile for each run
     - Broker-level runtime integration assertions for each source/profile slice
       (not only scenario-shape/config tests).
-
-#### G) Broker Runtime Verification (Integration Assertions)
-
-_No open items currently in this group._
 
 ---
 

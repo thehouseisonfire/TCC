@@ -632,7 +632,7 @@ _No open items currently in this group._
     against real Mosquitto + plugin runtime semantics.
   - **Deliverables**:
     - New suite + fixtures:
-      - `tests/integration/test_issue39_runtime_enforcement.py`
+      - `tests/integration/test_runtime_enforcement.py`
       - `tests/integration/conftest.py`
       - `broker_integration` marker in `pytest.ini`
     - Runtime assertions across JWT/Biscuit and strict/non-strict read modes:
@@ -665,7 +665,7 @@ _No open items currently in this group._
     - Marker split for runtime suite:
       - New `ci_heavy` marker in `mqtt-auth-biscuit/pytest.ini`
       - Heavy slices marked in
-        `tests/integration/test_issue39_runtime_enforcement.py` (TLS-heavy and
+        `tests/integration/test_runtime_enforcement.py` (TLS-heavy and
         high fan-out variants)
     - Failure artifact capture:
       - `tests/integration/conftest.py` now supports

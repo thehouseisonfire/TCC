@@ -210,7 +210,7 @@ def _total_messages(clients: list[_ObservedMqttClientLike]) -> int:
 @pytest.mark.broker_integration
 @pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
 @pytest.mark.parametrize("acl_read_full_authz", [False, True])
-def test_issue39_acl_read_expiry_disconnect_and_reconnect(
+def test_runtime_acl_read_expiry_disconnect_and_reconnect(
     compose_harness,
     mqtt_client_factory,
     unique_suffix: str,
@@ -326,7 +326,7 @@ def test_issue39_acl_read_expiry_disconnect_and_reconnect(
 
 @pytest.mark.broker_integration
 @pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
-def test_issue39_expiry_disconnect_does_not_emit_lwt(
+def test_runtime_expiry_disconnect_does_not_emit_lwt(
     compose_harness,
     mqtt_client_factory,
     unique_suffix: str,
@@ -415,7 +415,7 @@ def test_issue39_expiry_disconnect_does_not_emit_lwt(
 
 @pytest.mark.broker_integration
 @pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
-def test_issue39_control_acl_read_notify_workflow(
+def test_runtime_control_acl_read_notify_workflow(
     compose_harness,
     mqtt_client_factory,
     unique_suffix: str,
@@ -509,7 +509,7 @@ def test_issue39_control_acl_read_notify_workflow(
 
 @pytest.mark.broker_integration
 @pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
-def test_issue39_negative_controls_no_false_disconnects(
+def test_runtime_negative_controls_no_false_disconnects(
     compose_harness,
     mqtt_client_factory,
     unique_suffix: str,
@@ -681,7 +681,7 @@ def test_issue39_negative_controls_no_false_disconnects(
     "tls",
     [False, pytest.param(True, marks=pytest.mark.ci_heavy)],
 )
-def test_issue31_control_disable_client_kick_and_reconnect_denied(
+def test_runtime_control_disable_client_kick_and_reconnect_denied(
     compose_harness,
     mqtt_client_factory,
     unique_suffix: str,
@@ -788,7 +788,7 @@ def test_issue31_control_disable_client_kick_and_reconnect_denied(
 @pytest.mark.ci_heavy
 @pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
 @pytest.mark.parametrize("tls", [False, True])
-def test_issue31_control_disable_client_skips_offline_stale_session_kick(
+def test_runtime_control_disable_client_skips_offline_stale_session_kick(
     compose_harness,
     mqtt_client_factory,
     unique_suffix: str,
@@ -880,7 +880,7 @@ def test_issue31_control_disable_client_skips_offline_stale_session_kick(
     "tls",
     [False, pytest.param(True, marks=pytest.mark.ci_heavy)],
 )
-def test_issue39_enhanced_auth_entrypoint_over_tcp_and_tls(
+def test_runtime_enhanced_auth_entrypoint_over_tcp_and_tls(
     compose_harness,
     unique_suffix: str,
     token_kind: str,
@@ -948,7 +948,7 @@ def test_issue39_enhanced_auth_entrypoint_over_tcp_and_tls(
 
 @pytest.mark.broker_integration
 @pytest.mark.ci_heavy
-def test_issue39_basic_auth_over_tls_stays_functional(
+def test_runtime_basic_auth_over_tls_stays_functional(
     compose_harness,
     mqtt_client_factory,
     unique_suffix: str,
@@ -1020,7 +1020,7 @@ def test_issue39_basic_auth_over_tls_stays_functional(
         pytest.param(100, marks=pytest.mark.ci_heavy),
     ],
 )
-def test_issue39_fanout_churn_runtime_enforcement(
+def test_runtime_fanout_churn_enforcement(
     compose_harness,
     mqtt_client_factory,
     unique_suffix: str,

@@ -202,7 +202,7 @@ jobs:
           mkdir -p "$ISSUE39_ARTIFACT_DIR"
           cd mqtt-auth-biscuit
           pytest -m "broker_integration and not ci_heavy" \
-            tests/integration/test_issue39_runtime_enforcement.py \
+            tests/integration/test_runtime_enforcement.py \
             -vv -s \
             --maxfail=1 \
             --durations=20 \
@@ -256,7 +256,7 @@ jobs:
           mkdir -p "$ISSUE39_ARTIFACT_DIR"
           cd mqtt-auth-biscuit
           pytest -m broker_integration \
-            tests/integration/test_issue39_runtime_enforcement.py \
+            tests/integration/test_runtime_enforcement.py \
             -vv -s \
             --durations=30 \
             --junitxml="$ISSUE39_ARTIFACT_DIR/junit-full.xml"

@@ -260,7 +260,7 @@ Issue 39 adds a dedicated `pytest` integration suite that validates runtime
 enforcement against a real Mosquitto process with the Rust plugin loaded.
 
 Test location:
-- `tests/integration/test_issue39_runtime_enforcement.py`
+- `tests/integration/test_runtime_enforcement.py`
 
 Marker:
 - `broker_integration`
@@ -271,14 +271,14 @@ Run the fast local suite (matches PR/push CI runtime coverage):
 ```bash
 cd mqtt-auth-biscuit
 pytest -m "broker_integration and not ci_heavy" \
-  tests/integration/test_issue39_runtime_enforcement.py -vv -s
+  tests/integration/test_runtime_enforcement.py -vv -s
 ```
 
 Run all Issue 39 broker integration assertions:
 
 ```bash
 cd mqtt-auth-biscuit
-pytest -m broker_integration tests/integration/test_issue39_runtime_enforcement.py -vv -s
+pytest -m broker_integration tests/integration/test_runtime_enforcement.py -vv -s
 ```
 
 Run only the benchmark flow unit tests used by CI:

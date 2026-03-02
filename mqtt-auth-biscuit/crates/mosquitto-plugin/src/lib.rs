@@ -6,7 +6,9 @@ use crate::biscuit_handler::{
 };
 use crate::cache::SessionCache;
 use crate::config::{PluginConfig, parse_options};
-use crate::dynamic_security_policy::{ControlEnforcementTargets, ControlNotifyEvent, DynamicSecurityPolicy};
+use crate::dynamic_security_policy::{
+    ControlEnforcementTargets, ControlNotifyEvent, DynamicSecurityPolicy,
+};
 use crate::policy::PolicyMode;
 use crate::sqlite_policy::SqlitePolicy;
 use serde_json::json;
@@ -350,7 +352,9 @@ fn broker_publish_copy_raw(
     properties: *mut c_void,
 ) -> c_int {
     unsafe {
-        mosquitto_broker_publish_copy(clientid, topic, payloadlen, payload, qos, retain, properties)
+        mosquitto_broker_publish_copy(
+            clientid, topic, payloadlen, payload, qos, retain, properties,
+        )
     }
 }
 
@@ -364,7 +368,9 @@ fn broker_publish_copy_raw(
     retain: bool,
     properties: *mut c_void,
 ) -> c_int {
-    mosquitto_broker_publish_copy(clientid, topic, payloadlen, payload, qos, retain, properties)
+    mosquitto_broker_publish_copy(
+        clientid, topic, payloadlen, payload, qos, retain, properties,
+    )
 }
 
 #[cfg(any(test, miri, kani))]
@@ -938,7 +944,10 @@ fn disconnect_control_enforcement_client(client_id: &str) {
 }
 
 fn publish_control_notify_event(state: &PluginState, event: &ControlNotifyEvent) {
-    let prefix = state.config.control_notify_topic_prefix.trim_end_matches('/');
+    let prefix = state
+        .config
+        .control_notify_topic_prefix
+        .trim_end_matches('/');
     if prefix.is_empty() {
         log_debug("Control notify skipped: empty topic prefix");
         return;
@@ -984,7 +993,10 @@ fn publish_control_notification(client_id: &str, topic: &str, payload: &str) {
     let topic_cstr = match CString::new(topic) {
         Ok(value) => value,
         Err(_) => {
-            log_debug(&format!("Control notify skipped: invalid topic '{}'", topic));
+            log_debug(&format!(
+                "Control notify skipped: invalid topic '{}'",
+                topic
+            ));
             return;
         }
     };
@@ -1928,7 +1940,8 @@ mod tests {
 
     fn enable_dynamic_security_control_notify_mode(userdata: *mut c_void) -> String {
         let unique = TEST_DYNSEC_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dynsec_path = std::env::temp_dir().join(format!("dynsec-control-notify-lib-{unique}.json"));
+        let dynsec_path =
+            std::env::temp_dir().join(format!("dynsec-control-notify-lib-{unique}.json"));
         let dynsec_cfg = r#"{
   "clients": [
     {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import shlex
 import shutil
@@ -25,6 +26,8 @@ TLS_SERVER_CERT_FILE = REPO_ROOT / "docker" / "tls" / "server.pem"
 TLS_SERVER_KEY_FILE = REPO_ROOT / "docker" / "tls" / "server.key"
 DYNSEC_CONFIG_FILE = REPO_ROOT / "docker" / "dynamic-security.json"
 DOCKER_COMPOSE_PROJECT = "issue39_integration"
+ISSUE39_ARTIFACT_DIR_ENV = "ISSUE39_ARTIFACT_DIR"
+_FAILED_NODEIDS: set[str] = set()
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -78,6 +81,13 @@ def _wait_for_http2_health(url: str, verify: bool | str, timeout_s: float = 30.0
 
     if not _wait_until(_probe, timeout_s):
         raise RuntimeError(f"Timed out waiting for health endpoint: {url}")
+
+
+def _artifact_dir_from_env() -> Path | None:
+    raw = os.environ.get(ISSUE39_ARTIFACT_DIR_ENV, "").strip()
+    if not raw:
+        return None
+    return Path(raw)
 
 
 @dataclass
@@ -247,6 +257,56 @@ class ComposeHarness:
             capture_output=True,
         )
         return out.stdout or ""
+
+    def _compose_output(self, args: list[str], *, tls: bool) -> str:
+        out = self._run_compose(
+            args,
+            tls=tls,
+            check=False,
+            capture_output=True,
+        )
+        chunks: list[str] = []
+        if out.stdout:
+            chunks.append(out.stdout)
+        if out.stderr:
+            chunks.append("\n--- STDERR ---\n")
+            chunks.append(out.stderr)
+        return "".join(chunks)
+
+    def write_runtime_artifacts(self, artifact_dir: Path, *, failed_nodeids: list[str]) -> None:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        context = {
+            "compose_project": DOCKER_COMPOSE_PROJECT,
+            "compose_bin": self.compose_bin,
+            "current_tls": self.current_tls,
+            "repo_root": str(self.repo_root),
+            "failed_nodeids": failed_nodeids,
+        }
+        (artifact_dir / "context.json").write_text(
+            json.dumps(context, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        (artifact_dir / "failed-nodeids.txt").write_text(
+            ("\n".join(failed_nodeids) + "\n") if failed_nodeids else "",
+            encoding="utf-8",
+        )
+
+        for name, args in (
+            ("docker-compose-ps.txt", ["ps", "-a"]),
+            ("docker-compose-config.txt", ["config"]),
+        ):
+            with contextlib.suppress(Exception):
+                (artifact_dir / name).write_text(
+                    self._compose_output(args, tls=self.current_tls),
+                    encoding="utf-8",
+                )
+
+        for service in ("mosquitto", "authz", "token-issuer"):
+            with contextlib.suppress(Exception):
+                (artifact_dir / f"{service}.log").write_text(
+                    self.logs(service=service),
+                    encoding="utf-8",
+                )
 
 
 @dataclass
@@ -427,6 +487,14 @@ class ObservedMqttClient:
             self._client.loop_stop()
 
 
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]):
+    outcome = yield
+    report = outcome.get_result()
+    if report.failed and report.when in {"setup", "call", "teardown"}:
+        _FAILED_NODEIDS.add(item.nodeid)
+
+
 @pytest.fixture(scope="session")
 def compose_harness() -> Iterator[ComposeHarness]:
     if shutil.which("docker") is None:
@@ -446,9 +514,15 @@ def compose_harness() -> Iterator[ComposeHarness]:
         pytest.skip(f"Docker Compose is required for broker integration tests: {exc}")
 
     harness = ComposeHarness(repo_root=REPO_ROOT, compose_bin=compose_bin)
+    _FAILED_NODEIDS.clear()
     harness.down()
     yield harness
-    harness.down()
+    artifact_dir = _artifact_dir_from_env()
+    try:
+        if artifact_dir is not None:
+            harness.write_runtime_artifacts(artifact_dir, failed_nodeids=sorted(_FAILED_NODEIDS))
+    finally:
+        harness.down()
 
 
 @pytest.fixture(autouse=True)

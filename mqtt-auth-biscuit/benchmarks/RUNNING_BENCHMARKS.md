@@ -264,6 +264,15 @@ Test location:
 
 Marker:
 - `broker_integration`
+- `ci_heavy`
+
+Run the fast local suite (matches PR/push CI runtime coverage):
+
+```bash
+cd mqtt-auth-biscuit
+pytest -m "broker_integration and not ci_heavy" \
+  tests/integration/test_issue39_runtime_enforcement.py -vv -s
+```
 
 Run all Issue 39 broker integration assertions:
 
@@ -272,26 +281,26 @@ cd mqtt-auth-biscuit
 pytest -m broker_integration tests/integration/test_issue39_runtime_enforcement.py -vv -s
 ```
 
-Run only expiry/negative-control checks (faster local iteration):
+Run only the benchmark flow unit tests used by CI:
 
 ```bash
 cd mqtt-auth-biscuit
-pytest -m broker_integration tests/integration/test_issue39_runtime_enforcement.py \
-  -k "expiry_disconnect or negative_controls" -vv -s
+pytest \
+  benchmarks/test_loadgen_worker_suback.py \
+  benchmarks/test_loadgen_fanout_sync.py \
+  benchmarks/test_issue30_acl_read_fanout_coverage.py \
+  benchmarks/test_static_acl_coverage.py \
+  benchmarks/test_authz_config_state.py \
+  benchmarks/test_policy_churn.py -q
 ```
 
-Run only the Issue 31 control-triggered kick/reconnect assertions:
+CI-compatible invocations:
 
 ```bash
 cd mqtt-auth-biscuit
-pytest -m broker_integration tests/integration/test_issue39_runtime_enforcement.py \
-  -k "issue31_control_" -vv -s
-```
+DOCKER_COMPOSE_BIN="docker compose" \
+pytest -m "broker_integration and not ci_heavy" tests/integration -vv -s
 
-CI-compatible invocation:
-
-```bash
-cd mqtt-auth-biscuit
 DOCKER_COMPOSE_BIN="docker compose" \
 pytest -m broker_integration tests/integration -vv -s
 ```
@@ -310,7 +319,25 @@ What this suite asserts:
 - Fan-out churn runtime enforcement under strict `ACL_READ` dynamic-security
   configuration
 
-Timing bounds and flake control strategy:
+CI split and expected runtime:
+- `pull_request`/`push` runs:
+  - benchmark flow unit tests above
+  - `pytest -m "broker_integration and not ci_heavy" ...`
+- Nightly (`schedule`) and manual (`workflow_dispatch`) runs:
+  - `pytest -m broker_integration ...` (full suite including heavy cases)
+- Typical timing on GitHub-hosted runners:
+  - Benchmark flow unit tests: usually < 1 minute
+  - Fast runtime suite: usually single-digit to low-teens minutes (cache-sensitive)
+  - Full runtime suite: often higher teens to 30+ minutes (cache/load-sensitive)
+
+Failure artifact capture:
+- Set `ISSUE39_ARTIFACT_DIR=/path/to/out` when running locally to persist:
+  - `mosquitto.log`, `authz.log`, `token-issuer.log`
+  - `docker-compose-ps.txt`, `docker-compose-config.txt`
+  - `context.json` and failed test node IDs
+- CI uploads this artifact directory on broker-integration failures.
+
+Timing bounds and flake-control strategy:
 - Docker bring-up + service readiness bounded to `60s`
 - Client connect/reauth waits bounded to `10s`
 - Expiry disconnect assertion bounded to `8s`

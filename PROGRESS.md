@@ -2,7 +2,7 @@
 
 **Project**: Eclipse Mosquitto Auth Biscuit Plugin (Rust)\
 **Started**: 2026-01-04\
-**Last Updated**: 2026-02-25\
+**Last Updated**: 2026-03-02\
 **Current Focus**: Reproducible benchmark/scenario harness aligned with
 `ARTICLE.MD`
 
@@ -257,12 +257,11 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 ## 8) Open Issues (Next Steps, Grouped)
 
 ### Priority List
-1. Issue 40: CI execution for control-plane and runtime flow suites
-2. Issue 37: ACL_READ fan-out scenarios across policy profiles
-3. Issue 23: Proactive client reauthentication
-4. Issue 21: Expand Biscuit authorizer (if current template insufficient)
-5. Issue 22: Strengthen SQLite RBAC (if policies too simple)
-6. Issue 8.2: Containerized benchmark topology
+1. Issue 37: ACL_READ fan-out scenarios across policy profiles
+2. Issue 23: Proactive client reauthentication
+3. Issue 21: Expand Biscuit authorizer (if current template insufficient)
+4. Issue 22: Strengthen SQLite RBAC (if policies too simple)
+5. Issue 8.2: Containerized benchmark topology
 ---
 
 #### A) Policy Source Parity
@@ -366,20 +365,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 
 #### G) Broker Runtime Verification (Integration Assertions)
 
-- [ ] **Issue 40: Execute control-plane and runtime flow tests in CI**
-  - Goal: Ensure control/lifecycle/fan-out enforcement regressions are detected
-    automatically, not only in manual local runs.
-  - Current gap: CI currently validates syntax/lint/type checks and limited
-    benchmark unit tests, but does not execute broker integration suites.
-  - Deliverable:
-    - Add CI job(s) that run:
-      - benchmark flow unit tests (`test_loadgen_*`, scenario coverage tests)
-      - broker integration tests (`tests/integration/test_issue39_runtime_enforcement.py`)
-    - Introduce marker-based split (fast vs heavy) so PR CI remains bounded and
-      nightly/full pipeline runs full runtime coverage.
-    - Publish artifacts/logs for failed broker integration runs
-      (mosquitto/authz/token-issuer logs + scenario context).
-    - Update contributor docs with exact local/CI commands and expected runtime.
+_No open items currently in this group._
 
 ---
 
@@ -664,6 +650,30 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Operator documentation:
       run commands, timing bounds, and flake-control strategy in
       `benchmarks/RUNNING_BENCHMARKS.md`.
+
+- [x] **Issue 40: Execute control-plane and runtime flow tests in CI** — **COMPLETED 2026-03-02**
+  - **Summary**: CI now executes benchmark flow unit tests and broker runtime
+    enforcement suites with a bounded PR path and a full nightly/manual path.
+  - **Deliverables**:
+    - CI workflow updates in `.github/workflows/ci-benchmarks.yml`:
+      - `benchmark-flow-tests` runs benchmark flow/runtime-shape tests
+        (`test_loadgen_*`, scenario coverage tests, and policy churn checks)
+      - `broker-runtime-fast` runs
+        `pytest -m "broker_integration and not ci_heavy"` on PR/push
+      - `broker-runtime-full` runs
+        `pytest -m broker_integration` on nightly schedule and manual dispatch
+    - Marker split for runtime suite:
+      - New `ci_heavy` marker in `mqtt-auth-biscuit/pytest.ini`
+      - Heavy slices marked in
+        `tests/integration/test_issue39_runtime_enforcement.py` (TLS-heavy and
+        high fan-out variants)
+    - Failure artifact capture:
+      - `tests/integration/conftest.py` now supports
+        `ISSUE39_ARTIFACT_DIR=/path` to persist Mosquitto/Authz/Token-Issuer
+        logs and compose context for failed CI runs
+    - Documentation update:
+      - `benchmarks/RUNNING_BENCHMARKS.md` now documents fast/full marker
+        commands, CI mapping, artifact capture, and expected runtime bounds.
 
 ---
 

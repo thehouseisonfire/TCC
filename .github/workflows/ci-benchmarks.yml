@@ -2,144 +2,269 @@ name: CI Benchmark Infrastructure
 
 on:
   push:
-    branches: [ master, main ]
+    branches: [master, main]
     paths:
       - 'mqtt-auth-biscuit/benchmarks/**'
       - 'mqtt-auth-biscuit/docker/**'
       - 'mqtt-auth-biscuit/crates/**'
+      - 'mqtt-auth-biscuit/tests/**'
+      - 'mqtt-auth-biscuit/pytest.ini'
+      - '.github/workflows/ci-benchmarks.yml'
   pull_request:
-    branches: [ master, main ]
+    branches: [master, main]
     paths:
       - 'mqtt-auth-biscuit/benchmarks/**'
       - 'mqtt-auth-biscuit/docker/**'
       - 'mqtt-auth-biscuit/crates/**'
+      - 'mqtt-auth-biscuit/tests/**'
+      - 'mqtt-auth-biscuit/pytest.ini'
+      - '.github/workflows/ci-benchmarks.yml'
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
 
 jobs:
   test-benchmark-infrastructure:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 40
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Set up Python 3.14
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.14"
-      
-    - name: Install Python dependencies
-      run: |
-        python3 -m pip install --upgrade pip
-        pip install black mypy ruff paho-mqtt requests
-        
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        toolchain: stable
-        
-    - name: Build plugin in debug mode
-      run: |
-        cd mqtt-auth-biscuit
-        cargo build
-        
-    - name: Generate test tokens
-      run: |
-        cd mqtt-auth-biscuit
-        cargo run --bin gen-tokens
-        
-    - name: Test debug queries script syntax
-      run: |
-        cd mqtt-auth-biscuit
-        python3 -m py_compile benchmarks/debug_queries.py
-        
-    - name: Test resource snapshot script syntax
-      run: |
-        cd mqtt-auth-biscuit
-        python3 -m py_compile benchmarks/test_resource_snapshot.py
-        
-    - name: Test prometheus verification script syntax
-      run: |
-        cd mqtt-auth-biscuit
-        python3 -m py_compile benchmarks/verify_prometheus.py
-        
-    - name: Test scenario runner syntax
-      run: |
-        cd mqtt-auth-biscuit
-        python3 -m py_compile benchmarks/run_scenarios.py
-        
-    - name: Test load generator syntax
-      run: |
-        cd mqtt-auth-biscuit
-        python3 -m py_compile benchmarks/loadgen.py
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
 
-    - name: Ruff check
-      run: |
-        cd mqtt-auth-biscuit
-        ruff check .
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install -r requirements.txt black mypy ruff pytest
 
-    - name: Black check
-      run: |
-        cd mqtt-auth-biscuit
-        black --check .
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
 
-    - name: Mypy check
-      run: |
-        mypy mqtt-auth-biscuit
-        
-    - name: Install Docker Compose v2 plugin
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y ca-certificates curl gnupg
-        sudo install -m 0755 -d /etc/apt/keyrings
-        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-        sudo chmod a+r /etc/apt/keyrings/docker.gpg
-        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo \"$VERSION_CODENAME\") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-        sudo apt-get update
-        sudo apt-get install -y docker-ce-cli docker-compose-plugin
-        docker --version
-        docker compose version
-        
-    - name: Validate Docker Compose configuration
-      run: |
-        cd mqtt-auth-biscuit/docker
-        docker compose -f docker-compose.yml config
-        
-    - name: Build Docker images (dry run)
-      run: |
-        cd mqtt-auth-biscuit/docker
-        docker compose -f docker-compose.yml build --dry-run 2>/dev/null || echo "Dry-run completed"
-        
-    - name: Check token generation output
-      run: |
-        cd mqtt-auth-biscuit
-        if [ -f benchmarks/tokens.json ]; then
-          echo "✅ tokens.json generated successfully"
-          python3 -c "import json; data=json.load(open('benchmarks/tokens.json')); print(f'✅ Contains {len(data)} token entries')"
-        else
-          echo "❌ tokens.json not found"
-          exit 1
-        fi
-        
-    - name: Validate token JSON structure
-      run: |
-        cd mqtt-auth-biscuit
-        python3 -c "
-        import json
-        with open('benchmarks/tokens.json') as f:
-            data = json.load(f)
-        
-        required_tokens = ['jwt', 'jwt_short', 'biscuit', 'biscuit_short', 'biscuit_5', 'biscuit_25', 'biscuit_delegated']
-        missing = [t for t in required_tokens if t not in data]
-        if missing:
-            print(f'❌ Missing tokens: {missing}')
-            exit(1)
-        print('✅ All required token types present')
-        
-        # Check token formats
-        import re
-        jwt_pattern = r'^eyJ[a-zA-Z0-9_-]*\.eyJ[a-zA-Z0-9_-]*\.[a-zA-Z0-9_-]*$'
-        if not re.match(jwt_pattern, data['jwt']):
-            print('❌ JWT token format invalid')
-            exit(1)
-        print('✅ JWT token format valid')
-        "
+      - name: Build plugin in debug mode
+        working-directory: mqtt-auth-biscuit
+        run: cargo build
+
+      - name: Generate test tokens
+        working-directory: mqtt-auth-biscuit
+        run: cargo run --bin gen-tokens
+
+      - name: Test benchmark script syntax
+        working-directory: mqtt-auth-biscuit
+        run: |
+          python3 -m py_compile benchmarks/debug_queries.py
+          python3 -m py_compile benchmarks/test_resource_snapshot.py
+          python3 -m py_compile benchmarks/verify_prometheus.py
+          python3 -m py_compile benchmarks/run_scenarios.py
+          python3 -m py_compile benchmarks/loadgen.py
+
+      - name: Ruff check
+        working-directory: mqtt-auth-biscuit
+        run: ruff check .
+
+      - name: Black check
+        working-directory: mqtt-auth-biscuit
+        run: black --check .
+
+      - name: Mypy check
+        run: mypy mqtt-auth-biscuit
+
+      - name: Install Docker Compose v2 plugin
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl gnupg
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+          sudo chmod a+r /etc/apt/keyrings/docker.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo \"$VERSION_CODENAME\") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y docker-ce-cli docker-compose-plugin
+          docker --version
+          docker compose version
+
+      - name: Validate Docker Compose configuration
+        working-directory: mqtt-auth-biscuit/docker
+        run: docker compose -f docker-compose.yml config
+
+      - name: Build Docker images (dry run)
+        working-directory: mqtt-auth-biscuit/docker
+        run: docker compose -f docker-compose.yml build --dry-run 2>/dev/null || echo 'Dry-run completed'
+
+      - name: Check token generation output
+        working-directory: mqtt-auth-biscuit
+        run: |
+          if [ -f benchmarks/tokens.json ]; then
+            python3 -c "import json; data=json.load(open('benchmarks/tokens.json')); print(f'Contains {len(data)} token entries')"
+          else
+            echo 'tokens.json not found'
+            exit 1
+          fi
+
+      - name: Validate token JSON structure
+        working-directory: mqtt-auth-biscuit
+        run: |
+          python3 -c "
+          import json
+          import re
+          with open('benchmarks/tokens.json') as f:
+              data = json.load(f)
+
+          required_tokens = ['jwt', 'jwt_short', 'biscuit', 'biscuit_short', 'biscuit_5', 'biscuit_25', 'biscuit_delegated']
+          missing = [t for t in required_tokens if t not in data]
+          if missing:
+              print(f'Missing tokens: {missing}')
+              exit(1)
+
+          jwt_pattern = r'^eyJ[a-zA-Z0-9_-]*\\.eyJ[a-zA-Z0-9_-]*\\.[a-zA-Z0-9_-]*$'
+          if not re.match(jwt_pattern, data['jwt']):
+              print('JWT token format invalid')
+              exit(1)
+          print('Token structure valid')
+          "
+
+  benchmark-flow-tests:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      - name: Run benchmark flow tests
+        working-directory: mqtt-auth-biscuit
+        env:
+          PYTHONPATH: .
+        run: |
+          pytest \
+            benchmarks/test_loadgen_worker_suback.py \
+            benchmarks/test_loadgen_fanout_sync.py \
+            benchmarks/test_issue30_acl_read_fanout_coverage.py \
+            benchmarks/test_static_acl_coverage.py \
+            benchmarks/test_authz_config_state.py \
+            benchmarks/test_policy_churn.py \
+            -q
+
+  broker-runtime-fast:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      - name: Install Docker Compose v2 plugin
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl gnupg
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+          sudo chmod a+r /etc/apt/keyrings/docker.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo \"$VERSION_CODENAME\") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y docker-ce-cli docker-compose-plugin
+          docker --version
+          docker compose version
+
+      - name: Run broker integration tests (fast suite)
+        env:
+          PYTHONPATH: .
+          ISSUE39_ARTIFACT_DIR: ${{ runner.temp }}/issue39-runtime-fast
+        run: |
+          mkdir -p "$ISSUE39_ARTIFACT_DIR"
+          cd mqtt-auth-biscuit
+          pytest -m "broker_integration and not ci_heavy" \
+            tests/integration/test_issue39_runtime_enforcement.py \
+            -vv -s \
+            --maxfail=1 \
+            --durations=20 \
+            --junitxml="$ISSUE39_ARTIFACT_DIR/junit-fast.xml"
+
+      - name: Upload broker artifacts (fast suite)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue39-runtime-fast-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue39-runtime-fast
+          if-no-files-found: warn
+
+  broker-runtime-full:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install Python dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+
+      - name: Install Docker Compose v2 plugin
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl gnupg
+          sudo install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+          sudo chmod a+r /etc/apt/keyrings/docker.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo \"$VERSION_CODENAME\") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y docker-ce-cli docker-compose-plugin
+          docker --version
+          docker compose version
+
+      - name: Run broker integration tests (full suite)
+        env:
+          PYTHONPATH: .
+          ISSUE39_ARTIFACT_DIR: ${{ runner.temp }}/issue39-runtime-full
+        run: |
+          mkdir -p "$ISSUE39_ARTIFACT_DIR"
+          cd mqtt-auth-biscuit
+          pytest -m broker_integration \
+            tests/integration/test_issue39_runtime_enforcement.py \
+            -vv -s \
+            --durations=30 \
+            --junitxml="$ISSUE39_ARTIFACT_DIR/junit-full.xml"
+
+      - name: Upload broker artifacts (full suite)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue39-runtime-full-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/issue39-runtime-full
+          if-no-files-found: warn

@@ -677,7 +677,10 @@ def test_issue39_negative_controls_no_false_disconnects(
 
 @pytest.mark.broker_integration
 @pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
-@pytest.mark.parametrize("tls", [False, True])
+@pytest.mark.parametrize(
+    "tls",
+    [False, pytest.param(True, marks=pytest.mark.ci_heavy)],
+)
 def test_issue31_control_disable_client_kick_and_reconnect_denied(
     compose_harness,
     mqtt_client_factory,
@@ -782,6 +785,7 @@ def test_issue31_control_disable_client_kick_and_reconnect_denied(
 
 
 @pytest.mark.broker_integration
+@pytest.mark.ci_heavy
 @pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
 @pytest.mark.parametrize("tls", [False, True])
 def test_issue31_control_disable_client_skips_offline_stale_session_kick(
@@ -872,7 +876,10 @@ def test_issue31_control_disable_client_skips_offline_stale_session_kick(
 
 @pytest.mark.broker_integration
 @pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
-@pytest.mark.parametrize("tls", [False, True])
+@pytest.mark.parametrize(
+    "tls",
+    [False, pytest.param(True, marks=pytest.mark.ci_heavy)],
+)
 def test_issue39_enhanced_auth_entrypoint_over_tcp_and_tls(
     compose_harness,
     unique_suffix: str,
@@ -940,6 +947,7 @@ def test_issue39_enhanced_auth_entrypoint_over_tcp_and_tls(
 
 
 @pytest.mark.broker_integration
+@pytest.mark.ci_heavy
 def test_issue39_basic_auth_over_tls_stays_functional(
     compose_harness,
     mqtt_client_factory,
@@ -1004,7 +1012,14 @@ def test_issue39_basic_auth_over_tls_stays_functional(
 
 @pytest.mark.broker_integration
 @pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
-@pytest.mark.parametrize("subscriber_count", [10, 50, 100])
+@pytest.mark.parametrize(
+    "subscriber_count",
+    [
+        10,
+        pytest.param(50, marks=pytest.mark.ci_heavy),
+        pytest.param(100, marks=pytest.mark.ci_heavy),
+    ],
+)
 def test_issue39_fanout_churn_runtime_enforcement(
     compose_harness,
     mqtt_client_factory,

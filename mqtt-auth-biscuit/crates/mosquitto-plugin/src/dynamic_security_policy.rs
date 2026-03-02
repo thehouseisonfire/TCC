@@ -434,7 +434,12 @@ impl DynamicSecurityPolicy {
         Ok(())
     }
 
-    fn persist_role_acl_remove(&self, rolename: &str, acltype: &str, topic: &str) -> Result<(), String> {
+    fn persist_role_acl_remove(
+        &self,
+        rolename: &str,
+        acltype: &str,
+        topic: &str,
+    ) -> Result<(), String> {
         let raw = fs::read_to_string(&self.config_path)
             .map_err(|e| format!("dynsec config read failed: {e}"))?;
         let mut root: Value =
@@ -860,7 +865,9 @@ impl DynSecAcls {
             AclType::SubscribeLiteral => self.subscribe_literal.remove(topic),
             AclType::SubscribePattern => remove_acl_from_vec(&mut self.subscribe_pattern, topic),
             AclType::UnsubscribeLiteral => self.unsubscribe_literal.remove(topic),
-            AclType::UnsubscribePattern => remove_acl_from_vec(&mut self.unsubscribe_pattern, topic),
+            AclType::UnsubscribePattern => {
+                remove_acl_from_vec(&mut self.unsubscribe_pattern, topic)
+            }
             AclType::SubscribeGeneric | AclType::UnsubscribeGeneric => None,
         }
     }
@@ -869,7 +876,9 @@ impl DynSecAcls {
         match acl.acl_type {
             AclType::PublishClientSend => upsert_acl_in_vec(&mut self.publish_c_send, acl),
             AclType::PublishClientReceive => upsert_acl_in_vec(&mut self.publish_c_recv, acl),
-            AclType::SubscribeLiteral => upsert_acl_in_literal_map(&mut self.subscribe_literal, acl),
+            AclType::SubscribeLiteral => {
+                upsert_acl_in_literal_map(&mut self.subscribe_literal, acl)
+            }
             AclType::SubscribePattern => upsert_acl_in_vec(&mut self.subscribe_pattern, acl),
             AclType::UnsubscribeLiteral => {
                 upsert_acl_in_literal_map(&mut self.unsubscribe_literal, acl)
@@ -1475,8 +1484,14 @@ mod tests {
         let disable_targets = policy
             .apply_control_payload(disable_payload)
             .expect("disable payload should apply");
-        assert_eq!(disable_targets.kick_client_ids, vec!["test_client".to_string()]);
-        assert_eq!(disable_targets.kick_usernames, vec!["test_user".to_string()]);
+        assert_eq!(
+            disable_targets.kick_client_ids,
+            vec!["test_client".to_string()]
+        );
+        assert_eq!(
+            disable_targets.kick_usernames,
+            vec!["test_user".to_string()]
+        );
         assert!(disable_targets.notify_events.is_empty());
         assert_eq!(
             policy

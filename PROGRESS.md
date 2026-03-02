@@ -257,13 +257,12 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 ## 8) Open Issues (Next Steps, Grouped)
 
 ### Priority List
-1. Issue 32: Control-triggered ACL_READ + notify
-2. Issue 40: CI execution for control-plane and runtime flow suites
-3. Issue 37: ACL_READ fan-out scenarios across policy profiles
-4. Issue 23: Proactive client reauthentication
-5. Issue 21: Expand Biscuit authorizer (if current template insufficient)
-6. Issue 22: Strengthen SQLite RBAC (if policies too simple)
-7. Issue 8.2: Containerized benchmark topology
+1. Issue 40: CI execution for control-plane and runtime flow suites
+2. Issue 37: ACL_READ fan-out scenarios across policy profiles
+3. Issue 23: Proactive client reauthentication
+4. Issue 21: Expand Biscuit authorizer (if current template insufficient)
+5. Issue 22: Strengthen SQLite RBAC (if policies too simple)
+6. Issue 8.2: Containerized benchmark topology
 ---
 
 #### A) Policy Source Parity
@@ -341,19 +340,6 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Update benchmark clients/scenarios to exercise proactive refresh flow.
     - Add runtime assertions proving session continuity without expiry-driven
       disconnects during proactive-refresh runs.
-
-- [ ] **Issue 32: Verify control-triggered dynamic enforcement (ACL_READ + notify)**
-  - Goal: Implement/control scenarios where `$CONTROL/.../v1` triggers cache
-    invalidation and clients are informed via a notification topic while
-    `ACL_READ` denies fan-out.
-  - Current gap: notification and deny behavior are covered, but notification
-    publication and policy transitions are currently orchestrated outside the
-    control command path.
-  - Deliverable:
-    - Notification topic publishing (e.g., `system_notification/<client_id>`)
-    - Scenario capturing denial after privilege reduction
-    - Runtime proof that notification + deny transition is caused by control
-      operation execution (not manual external policy mutation).
 
 - [ ] **Issue 37: Add `ACL_READ` fan-out authorization scenarios across policy profiles**
   - Goal: Add benchmark scenarios that explicitly exercise read/fan-out
@@ -583,9 +569,22 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Updated operator documentation in
       `benchmarks/RUNNING_BENCHMARKS.md` with Issue 31 focused invocation.
 
+- [x] **Issue 32: Verify control-triggered dynamic enforcement (ACL_READ + notify)**
+  - Summary: Implemented control scenarios where `$CONTROL/.../v1` triggers cache
+    invalidation and clients are informed via a notification topic while
+    `ACL_READ` denies fan-out.
+  - Gap: notification and deny behavior were covered, but notification
+    publication and policy transitions are currently orchestrated outside the
+    control command path.
+  - Deliverable:
+    - Notification topic publishing (e.g., `system_notification/<client_id>`)
+    - Scenario capturing denial after privilege reduction
+    - Runtime proof that notification + deny transition is caused by control
+      operation execution (not manual external policy mutation).
+
 - [x] **Issue 33: Enhance HTTP policy expressiveness for parity with token-based
     authorization**
-  - Goal: Improve HTTP policy backend to support complex authorization rules
+  - Summary: Improved HTTP policy backend to support complex authorization rules
     comparable to JWT/Biscuit token policies, enabling fair policy complexity
     comparisons.
   - Implemented:

@@ -217,10 +217,10 @@ Artifacts produced:
 
 - Per-scenario results in `mqtt-auth-biscuit/benchmarks/results/*.json`
 - Comparison summaries:
-  - `mqtt-auth-biscuit/benchmarks/results/issue33_http_policy_comparison.csv`
-  - `mqtt-auth-biscuit/benchmarks/results/issue33_http_policy_comparison.json`
-  - `mqtt-auth-biscuit/benchmarks/results/issue33_policy_complexity_comparison.csv`
-  - `mqtt-auth-biscuit/benchmarks/results/issue33_policy_complexity_comparison.json`
+  - `mqtt-auth-biscuit/benchmarks/results/http_policy_comparison_issue33.csv`
+  - `mqtt-auth-biscuit/benchmarks/results/http_policy_comparison_issue33.json`
+  - `mqtt-auth-biscuit/benchmarks/results/policy_complexity_comparison_issue33.csv`
+  - `mqtt-auth-biscuit/benchmarks/results/policy_complexity_comparison_issue33.json`
 
 Runner reliability fixes applied during this execution pass:
 
@@ -505,7 +505,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - SQLite churn helpers in `benchmarks/policy_churn.py`:
       deterministic fan-out seed + `ACL_READ` revoke during active runs.
     - Coverage tests:
-      - `benchmarks/test_issue30_acl_read_fanout_coverage.py`
+      - `benchmarks/test_acl_read_fanout_issue30_coverage.py`
       - `benchmarks/test_policy_churn.py`
 
 - [x] **Issue 31: Verify control-triggered dynamic enforcement (kick/re-auth)** — **COMPLETED 2026-03-01**
@@ -611,14 +611,14 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
       `policy_source`, `policy_profile`, `acl_read_full_authz`, and
       `acl_read_mode` per scenario run.
     - Broker integration coverage in
-      `tests/integration/test_issue37_acl_read_profiles.py`:
+      `tests/integration/test_acl_read_profiles_issue37.py`:
       strict token fan-out allow/deny semantics, full HTTP/hybrid tier matrix
       (`simple|med|complex`) for JWT and Biscuit, runtime fan-out scaling
       assertions (`ci_heavy` on 50/100) with JWT at 10/50/100 and Biscuit at
       10/50 (100 marked `xfail` due CI CONNACK saturation), and strict SQLite
       read-revoke enforcement.
     - Scenario-shape coverage in
-      `benchmarks/test_issue37_acl_read_profile_coverage.py`.
+      `benchmarks/test_acl_read_profile_issue37_coverage.py`.
 
 - [x] **Issue 38: Expiry enforcement in ACL_CHECK with disconnect (no reason codes)** — **COMPLETED 2026-02-27**
   - **Summary**: `MOSQ_EVT_ACL_CHECK` now enforces immediate disconnect on

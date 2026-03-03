@@ -25,7 +25,7 @@ TLS_CA_FILE = REPO_ROOT / "docker" / "tls" / "ca.pem"
 TLS_SERVER_CERT_FILE = REPO_ROOT / "docker" / "tls" / "server.pem"
 TLS_SERVER_KEY_FILE = REPO_ROOT / "docker" / "tls" / "server.key"
 DYNSEC_CONFIG_FILE = REPO_ROOT / "docker" / "dynamic-security.json"
-DOCKER_COMPOSE_PROJECT = "issue39_integration"
+DOCKER_COMPOSE_PROJECT = "runtime_enforcement_issue39_integration"
 ISSUE39_ARTIFACT_DIR_ENV = "ISSUE39_ARTIFACT_DIR"
 _FAILED_NODEIDS: set[str] = set()
 

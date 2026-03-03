@@ -874,7 +874,7 @@ def _http_policy_authz_config(tier: Literal["simple", "med", "complex"]) -> Auth
     }
 
 
-def _issue37_http_hybrid_authz_config(
+def _http_hybrid_fanout_authz_config_issue37(
     tier: Literal["simple", "med", "complex"],
     *,
     topic: str,
@@ -882,14 +882,14 @@ def _issue37_http_hybrid_authz_config(
 ) -> AuthzConfig:
     rules: list[dict[str, Any]] = [
         {
-            "id": "issue37_allow_fanout_publish",
+            "id": "acl_read_profile_allow_fanout_publish_issue37",
             "effect": "allow",
             "ops": ["publish"],
             "topics": [topic],
             "client_ids": ["fanout_publisher"],
         },
         {
-            "id": "issue37_allow_fanout_subscribe",
+            "id": "acl_read_profile_allow_fanout_subscribe_issue37",
             "effect": "allow",
             "ops": ["subscribe"],
             "topics": [topic],
@@ -898,7 +898,7 @@ def _issue37_http_hybrid_authz_config(
     if deny_read:
         rules.append(
             {
-                "id": "issue37_deny_fanout_read",
+                "id": "acl_read_profile_deny_fanout_read_issue37",
                 "effect": "deny",
                 "ops": ["read"],
                 "topics": [topic],
@@ -907,7 +907,7 @@ def _issue37_http_hybrid_authz_config(
     else:
         rules.append(
             {
-                "id": "issue37_allow_fanout_read",
+                "id": "acl_read_profile_allow_fanout_read_issue37",
                 "effect": "allow",
                 "ops": ["read"],
                 "topics": [topic],
@@ -978,7 +978,7 @@ def _static_acl_scenarios(tokens: dict[str, Any]) -> dict[str, ScenarioConfig]:
     }
 
 
-def _issue30_acl_read_fanout_scenarios(tokens: dict[str, Any]) -> dict[str, ScenarioConfig]:
+def _acl_read_fanout_scenarios_issue30(tokens: dict[str, Any]) -> dict[str, ScenarioConfig]:
     scenarios: dict[str, ScenarioConfig] = {}
     subscriber_slices = [10, 50, 100]
     base_topic = "fanout/broadcast"
@@ -1079,7 +1079,7 @@ def _issue30_acl_read_fanout_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
     return scenarios
 
 
-def _issue37_acl_read_profile_scenarios(tokens: dict[str, Any]) -> dict[str, ScenarioConfig]:
+def _acl_read_profile_scenarios_issue37(tokens: dict[str, Any]) -> dict[str, ScenarioConfig]:
     scenarios: dict[str, ScenarioConfig] = {}
     subscriber_slices = [10, 50, 100]
     base_topic = "fanout/broadcast"
@@ -1158,7 +1158,7 @@ def _issue37_acl_read_profile_scenarios(tokens: dict[str, Any]) -> dict[str, Sce
                     "mode": "fanout",
                     "subscriber_count": 10,
                     "fanout_topic": base_topic,
-                    "authz": _issue37_http_hybrid_authz_config(
+                    "authz": _http_hybrid_fanout_authz_config_issue37(
                         cast(Literal["simple", "med", "complex"], tier),
                         topic=base_topic,
                         deny_read=False,
@@ -1181,7 +1181,7 @@ def _issue37_acl_read_profile_scenarios(tokens: dict[str, Any]) -> dict[str, Sce
                     "mode": "fanout",
                     "subscriber_count": 10,
                     "fanout_topic": base_topic,
-                    "authz": _issue37_http_hybrid_authz_config(
+                    "authz": _http_hybrid_fanout_authz_config_issue37(
                         cast(Literal["simple", "med", "complex"], tier),
                         topic=base_topic,
                         deny_read=True,
@@ -1211,7 +1211,7 @@ def _issue37_acl_read_profile_scenarios(tokens: dict[str, Any]) -> dict[str, Sce
                         "mode": "fanout",
                         "subscriber_count": subscribers,
                         "fanout_topic": base_topic,
-                        "authz": _issue37_http_hybrid_authz_config(
+                        "authz": _http_hybrid_fanout_authz_config_issue37(
                             cast(Literal["simple", "med", "complex"], tier),
                             topic=base_topic,
                             deny_read=False,
@@ -1261,7 +1261,7 @@ def _infer_acl_read_full_authz(scenario: ScenarioConfig) -> bool:
     return conf.endswith(strict_conf_suffixes)
 
 
-def _issue22_sqlite_rbac_churn_scenarios(tokens: dict[str, Any]) -> dict[str, ScenarioConfig]:
+def _sqlite_rbac_churn_scenarios_issue22(tokens: dict[str, Any]) -> dict[str, ScenarioConfig]:
     base_topic = "fanout/broadcast"
     return {
         "SQLITE-RBAC-CHURN-JWT": {
@@ -1323,7 +1323,7 @@ def _issue22_sqlite_rbac_churn_scenarios(tokens: dict[str, Any]) -> dict[str, Sc
     }
 
 
-def _issue22_sqlite_rbac_deep_scenarios(tokens: dict[str, Any]) -> dict[str, ScenarioConfig]:
+def _sqlite_rbac_deep_scenarios_issue22(tokens: dict[str, Any]) -> dict[str, ScenarioConfig]:
     return {
         "SQLITE-RBAC-DEEP-CONFLICT-JWT": {
             "mosquitto_conf": "./mosquitto_sqlite_acl_read.conf",
@@ -1736,10 +1736,10 @@ def main(
                 "policy_complexity_kind": "datalog",
             },
             **_static_acl_scenarios(tokens),
-            **_issue30_acl_read_fanout_scenarios(tokens),
-            **_issue37_acl_read_profile_scenarios(tokens),
-            **_issue22_sqlite_rbac_churn_scenarios(tokens),
-            **_issue22_sqlite_rbac_deep_scenarios(tokens),
+            **_acl_read_fanout_scenarios_issue30(tokens),
+            **_acl_read_profile_scenarios_issue37(tokens),
+            **_sqlite_rbac_churn_scenarios_issue22(tokens),
+            **_sqlite_rbac_deep_scenarios_issue22(tokens),
             "JWT-HTTP-200MS": {
                 "mosquitto_conf": "./mosquitto_http.conf",
                 "username": "jwt",

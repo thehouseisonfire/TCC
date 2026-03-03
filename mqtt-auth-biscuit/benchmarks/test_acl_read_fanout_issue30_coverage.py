@@ -21,13 +21,13 @@ def _expected_ids() -> set[str]:
     return out
 
 
-def test_issue30_scenario_ids_are_preserved() -> None:
-    scenarios = rs._issue30_acl_read_fanout_scenarios(_tokens())
+def test_acl_read_fanout_issue30_scenario_ids_are_preserved() -> None:
+    scenarios = rs._acl_read_fanout_scenarios_issue30(_tokens())
     assert set(scenarios.keys()) == _expected_ids()
 
 
-def test_issue30_scenarios_use_fanout_and_subscriber_scaling() -> None:
-    scenarios = rs._issue30_acl_read_fanout_scenarios(_tokens())
+def test_acl_read_fanout_issue30_scenarios_use_fanout_and_subscriber_scaling() -> None:
+    scenarios = rs._acl_read_fanout_scenarios_issue30(_tokens())
 
     for scenario_id, scenario in scenarios.items():
         assert scenario["mode"] == "fanout"
@@ -60,8 +60,8 @@ def test_issue30_scenarios_use_fanout_and_subscriber_scaling() -> None:
             raise AssertionError(f"unexpected scenario id: {scenario_id}")
 
 
-def test_issue30_dynsec_scenarios_pass_fanout_alignment_validator() -> None:
-    scenarios = rs._issue30_acl_read_fanout_scenarios(_tokens())
+def test_acl_read_fanout_issue30_dynsec_scenarios_pass_fanout_alignment_validator() -> None:
+    scenarios = rs._acl_read_fanout_scenarios_issue30(_tokens())
     for scenario_id, scenario in scenarios.items():
         if scenario_id.startswith("DYNSEC-"):
             rs._validate_dynsec_fanout_alignment(scenario_id, scenario)

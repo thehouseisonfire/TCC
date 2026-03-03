@@ -8,8 +8,8 @@ def _tokens() -> dict[str, str]:
     }
 
 
-def test_issue22_deep_scenario_ids_are_present() -> None:
-    scenarios = rs._issue22_sqlite_rbac_deep_scenarios(_tokens())
+def test_sqlite_rbac_deep_issue22_scenario_ids_are_present() -> None:
+    scenarios = rs._sqlite_rbac_deep_scenarios_issue22(_tokens())
     assert set(scenarios.keys()) == {
         "SQLITE-RBAC-DEEP-CONFLICT-JWT",
         "SQLITE-RBAC-DEEP-CONFLICT-BIS",
@@ -18,8 +18,8 @@ def test_issue22_deep_scenario_ids_are_present() -> None:
     }
 
 
-def test_issue22_deep_conflict_scenarios_use_private_deny_toggle() -> None:
-    scenarios = rs._issue22_sqlite_rbac_deep_scenarios(_tokens())
+def test_sqlite_rbac_deep_issue22_conflict_scenarios_use_private_deny_toggle() -> None:
+    scenarios = rs._sqlite_rbac_deep_scenarios_issue22(_tokens())
     for scenario_id in ["SQLITE-RBAC-DEEP-CONFLICT-JWT", "SQLITE-RBAC-DEEP-CONFLICT-BIS"]:
         scenario = scenarios[scenario_id]
         assert scenario["mode"] == "fanout"
@@ -32,8 +32,8 @@ def test_issue22_deep_conflict_scenarios_use_private_deny_toggle() -> None:
         assert scenario["fanout_churn_max_events"] == 4
 
 
-def test_issue22_deep_control_scenarios_enable_control_mode() -> None:
-    scenarios = rs._issue22_sqlite_rbac_deep_scenarios(_tokens())
+def test_sqlite_rbac_deep_issue22_control_scenarios_enable_control_mode() -> None:
+    scenarios = rs._sqlite_rbac_deep_scenarios_issue22(_tokens())
     for scenario_id in ["SQLITE-RBAC-DEEP-CONTROL-JWT", "SQLITE-RBAC-DEEP-CONTROL-BIS"]:
         scenario = scenarios[scenario_id]
         assert scenario["control_mode"] is True

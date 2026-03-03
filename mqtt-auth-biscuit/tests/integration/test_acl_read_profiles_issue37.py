@@ -175,7 +175,7 @@ def _prepare_sqlite_policy_db_for_container_write() -> None:
 
 @pytest.mark.broker_integration
 @pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
-def test_runtime_issue37_token_strict_acl_read_allow_and_deny(
+def test_runtime_token_strict_acl_read_allow_and_deny_issue37(
     compose_harness,
     mqtt_client_factory,
     unique_suffix: str,
@@ -184,9 +184,9 @@ def test_runtime_issue37_token_strict_acl_read_allow_and_deny(
     compose_harness.up(mosquitto_conf="./mosquitto_integration_acl_read_full.conf", tls=False)
     issuer = compose_harness.token_issuer(tls=False)
 
-    topic = f"fanout/issue37/token/{token_kind}/{unique_suffix}"
-    allow_sub_id = f"issue37-token-allow-{unique_suffix}"
-    deny_sub_id = f"issue37-token-deny-{unique_suffix}"
+    topic = f"fanout/acl-read-profile/token/issue37/{token_kind}/{unique_suffix}"
+    allow_sub_id = f"acl-read-profile-token-allow-issue37-{unique_suffix}"
+    deny_sub_id = f"acl-read-profile-token-deny-issue37-{unique_suffix}"
     pub_id = "fanout_publisher"
 
     allow_sub_token = _issue_token(
@@ -245,7 +245,7 @@ def test_runtime_issue37_token_strict_acl_read_allow_and_deny(
         publisher.connect()
 
         for idx in range(3):
-            publisher.publish(topic, f"issue37-token|{idx}|{unique_suffix}", qos=0)
+            publisher.publish(topic, f"acl-read-profile-token-issue37|{idx}|{unique_suffix}", qos=0)
 
         assert allow_sub.wait_for_messages(1, timeout_s=5.0)
         time.sleep(1.0)
@@ -268,7 +268,7 @@ def test_runtime_issue37_token_strict_acl_read_allow_and_deny(
         pytest.param(100, marks=pytest.mark.ci_heavy),
     ],
 )
-def test_runtime_issue37_token_strict_acl_read_allow_scaling(
+def test_runtime_token_strict_acl_read_allow_scaling_issue37(
     compose_harness,
     mqtt_client_factory,
     unique_suffix: str,
@@ -278,11 +278,14 @@ def test_runtime_issue37_token_strict_acl_read_allow_scaling(
     compose_harness.up(mosquitto_conf="./mosquitto_integration_acl_read_full.conf", tls=False)
     issuer = compose_harness.token_issuer(tls=False)
 
-    topic = f"fanout/issue37/token/scale/{token_kind}/{subscriber_count}/{unique_suffix}"
+    topic = (
+        f"fanout/acl-read-profile/token/issue37/scale/{token_kind}/"
+        f"{subscriber_count}/{unique_suffix}"
+    )
     sub_token = _issue_token(
         issuer,
         token_kind=token_kind,
-        client_id=f"issue37-token-scale-sub-{unique_suffix}",
+        client_id=f"acl-read-profile-token-scale-sub-issue37-{unique_suffix}",
         topic=topic,
         ttl_seconds=180,
         grants=[{"op": "subscribe", "res": topic}],
@@ -300,7 +303,7 @@ def test_runtime_issue37_token_strict_acl_read_allow_scaling(
         mqtt_client_factory(
             host="localhost",
             port=1883,
-            client_id=f"issue37-token-scale-{idx}-{unique_suffix}",
+            client_id=f"acl-read-profile-token-scale-issue37-{idx}-{unique_suffix}",
             username=token_kind,
             password=sub_token,
         )
@@ -322,7 +325,9 @@ def test_runtime_issue37_token_strict_acl_read_allow_scaling(
         publisher.connect()
 
         for idx in range(message_count):
-            publisher.publish(topic, f"issue37-token-scale|{idx}|{unique_suffix}", qos=0)
+            publisher.publish(
+                topic, f"acl-read-profile-token-scale-issue37|{idx}|{unique_suffix}", qos=0
+            )
 
         expected = _fanout_minimum_expected(subscriber_count, message_count)
         assert _wait_for_total_messages(subscribers, expected)
@@ -351,7 +356,7 @@ def test_runtime_issue37_token_strict_acl_read_allow_scaling(
         pytest.param("complex", marks=pytest.mark.ci_heavy),
     ],
 )
-def test_runtime_issue37_http_hybrid_profile_fanout_enforcement(
+def test_runtime_http_hybrid_profile_fanout_enforcement_issue37(
     compose_harness,
     mqtt_client_factory,
     unique_suffix: str,
@@ -366,8 +371,8 @@ def test_runtime_issue37_http_hybrid_profile_fanout_enforcement(
     compose_harness.up(mosquitto_conf=conf_by_source[policy_source], tls=False)
     issuer = compose_harness.token_issuer(tls=False)
     authz_base = "http://localhost:8081"
-    topic = f"fanout/issue37/{policy_source}/{tier}/{token_kind}/{unique_suffix}"
-    sub_id = f"issue37-{policy_source}-{tier}-{token_kind}-sub-{unique_suffix}"
+    topic = f"fanout/acl-read-profile/issue37/{policy_source}/{tier}/{token_kind}/{unique_suffix}"
+    sub_id = f"acl-read-profile-{policy_source}-{tier}-{token_kind}-sub-issue37-{unique_suffix}"
     pub_id = "fanout_publisher"
 
     sub_token = _issue_token(
@@ -387,8 +392,8 @@ def test_runtime_issue37_http_hybrid_profile_fanout_enforcement(
         grants=[],
     )
 
-    allow_authz = rs._issue37_http_hybrid_authz_config(tier, topic=topic, deny_read=False)
-    deny_authz = rs._issue37_http_hybrid_authz_config(tier, topic=topic, deny_read=True)
+    allow_authz = rs._http_hybrid_fanout_authz_config_issue37(tier, topic=topic, deny_read=False)
+    deny_authz = rs._http_hybrid_fanout_authz_config_issue37(tier, topic=topic, deny_read=True)
 
     _authz_reset(authz_base)
     _authz_apply(authz_base, allow_authz)
@@ -415,7 +420,9 @@ def test_runtime_issue37_http_hybrid_profile_fanout_enforcement(
         assert _is_granted(subscriber.subscribe(topic, qos=1))
         publisher.connect()
 
-        publisher.publish(topic, f"issue37-pre|{policy_source}|{tier}|{unique_suffix}", qos=0)
+        publisher.publish(
+            topic, f"acl-read-profile-pre-issue37|{policy_source}|{tier}|{unique_suffix}", qos=0
+        )
         assert subscriber.wait_for_messages(1, timeout_s=5.0)
         pre_count = subscriber.message_count
 
@@ -423,7 +430,7 @@ def test_runtime_issue37_http_hybrid_profile_fanout_enforcement(
         time.sleep(0.8)
 
         for idx in range(4):
-            publisher.publish(topic, f"issue37-post|{idx}|{unique_suffix}", qos=0)
+            publisher.publish(topic, f"acl-read-profile-post-issue37|{idx}|{unique_suffix}", qos=0)
         time.sleep(1.0)
 
         assert subscriber.message_count == pre_count
@@ -446,7 +453,7 @@ def test_runtime_issue37_http_hybrid_profile_fanout_enforcement(
         pytest.param(100, marks=pytest.mark.ci_heavy),
     ],
 )
-def test_runtime_issue37_http_hybrid_med_allow_scaling(
+def test_runtime_http_hybrid_med_allow_scaling_issue37(
     compose_harness,
     mqtt_client_factory,
     unique_suffix: str,
@@ -470,14 +477,14 @@ def test_runtime_issue37_http_hybrid_med_allow_scaling(
 
     tier: Literal["simple", "med", "complex"] = "med"
     topic = (
-        f"fanout/issue37/{policy_source}/{tier}/scale/"
+        f"fanout/acl-read-profile/issue37/{policy_source}/{tier}/scale/"
         f"{token_kind}/{subscriber_count}/{unique_suffix}"
     )
     pub_id = "fanout_publisher"
     sub_token = _issue_token(
         issuer,
         token_kind=token_kind,
-        client_id=f"issue37-{policy_source}-scale-sub-{unique_suffix}",
+        client_id=f"acl-read-profile-{policy_source}-scale-sub-issue37-{unique_suffix}",
         topic=topic,
         ttl_seconds=180,
         grants=[],
@@ -493,14 +500,14 @@ def test_runtime_issue37_http_hybrid_med_allow_scaling(
 
     _authz_reset(authz_base)
     _authz_apply(
-        authz_base, rs._issue37_http_hybrid_authz_config(tier, topic=topic, deny_read=False)
+        authz_base, rs._http_hybrid_fanout_authz_config_issue37(tier, topic=topic, deny_read=False)
     )
 
     subscribers = [
         mqtt_client_factory(
             host="localhost",
             port=1883,
-            client_id=f"issue37-{policy_source}-{token_kind}-scale-{idx}-{unique_suffix}",
+            client_id=f"acl-read-profile-{policy_source}-{token_kind}-scale-issue37-{idx}-{unique_suffix}",
             username=token_kind,
             password=sub_token,
         )
@@ -529,7 +536,9 @@ def test_runtime_issue37_http_hybrid_med_allow_scaling(
 
         for idx in range(message_count):
             publisher.publish(
-                topic, f"issue37-{policy_source}-med-scale|{idx}|{unique_suffix}", qos=0
+                topic,
+                f"acl-read-profile-{policy_source}-med-scale-issue37|{idx}|{unique_suffix}",
+                qos=0,
             )
             time.sleep(0.08)
 
@@ -544,7 +553,7 @@ def test_runtime_issue37_http_hybrid_med_allow_scaling(
 
 @pytest.mark.broker_integration
 @pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
-def test_runtime_issue37_sqlite_strict_acl_read_revoke(
+def test_runtime_sqlite_strict_acl_read_revoke_issue37(
     compose_harness,
     mqtt_client_factory,
     unique_suffix: str,
@@ -554,7 +563,7 @@ def test_runtime_issue37_sqlite_strict_acl_read_revoke(
     compose_harness.up(mosquitto_conf="./mosquitto_sqlite_acl_read.conf", tls=False)
     issuer = compose_harness.token_issuer(tls=False)
 
-    topic = f"fanout/issue37/sqlite/{token_kind}/{unique_suffix}"
+    topic = f"fanout/acl-read-profile/issue37/sqlite/{token_kind}/{unique_suffix}"
     db_path = "docker/sqlite/policy.db"
     policy_churn.seed_sqlite_fanout_policy(
         db_path,
@@ -604,7 +613,7 @@ def test_runtime_issue37_sqlite_strict_acl_read_revoke(
         assert _is_granted(subscriber.subscribe(topic, qos=1))
         publisher.connect()
 
-        publisher.publish(topic, f"issue37-sqlite-pre|{unique_suffix}", qos=0)
+        publisher.publish(topic, f"acl-read-profile-sqlite-pre-issue37|{unique_suffix}", qos=0)
         assert subscriber.wait_for_messages(1, timeout_s=5.0)
         pre_count = subscriber.message_count
 
@@ -612,7 +621,9 @@ def test_runtime_issue37_sqlite_strict_acl_read_revoke(
         time.sleep(1.2)
 
         for idx in range(3):
-            publisher.publish(topic, f"issue37-sqlite-post|{idx}|{unique_suffix}", qos=0)
+            publisher.publish(
+                topic, f"acl-read-profile-sqlite-post-issue37|{idx}|{unique_suffix}", qos=0
+            )
         time.sleep(1.0)
 
         assert subscriber.message_count == pre_count

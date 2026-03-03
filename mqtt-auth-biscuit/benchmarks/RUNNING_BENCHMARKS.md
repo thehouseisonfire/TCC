@@ -216,6 +216,35 @@ Deterministic cadence details:
 - With strict `ACL_READ`, post-churn delivery drops are used as cache-validity
   signal that runtime policy changes are not masked by session cache state.
 
+### Issue 37: Strict `ACL_READ` Fan-Out Across Policy Profiles
+
+Issue 37 extends strict fan-out coverage beyond dynamic-policy churn scenarios so
+`ACL_READ` comparisons include token-only, HTTP profile tiers, and hybrid profile
+tiers.
+
+Strict config files:
+- `mosquitto_integration_acl_read_full.conf` (token mode)
+- `mosquitto_http_acl_read.conf` (`policy_mode=http`)
+- `mosquitto_hybrid_acl_read.conf` (`policy_mode=hybrid`)
+- TLS variants under `docker/tls/` are available via `-TLS` scenario suffixes.
+
+Scenario families:
+- Token strict fan-out:
+  - `TOKEN-ACLREAD-FANOUT-ALLOW-{JWT|BIS}-{10,50,100}`
+  - `TOKEN-ACLREAD-FANOUT-DENY-{JWT|BIS}-10`
+- HTTP strict fan-out:
+  - `HTTP-ACLREAD-FANOUT-{SIMPLE|MED|COMPLEX}-{ALLOW|DENY}-{JWT|BIS}-10`
+  - `HTTP-ACLREAD-FANOUT-MED-ALLOW-{JWT|BIS}-{50,100}`
+- Hybrid strict fan-out:
+  - `HYBRID-ACLREAD-FANOUT-{SIMPLE|MED|COMPLEX}-{ALLOW|DENY}-{JWT|BIS}-10`
+  - `HYBRID-ACLREAD-FANOUT-MED-ALLOW-{JWT|BIS}-{50,100}`
+
+Result metadata now records strict fan-out context per run:
+- `scenario_config.policy_source`
+- `scenario_config.policy_profile`
+- `scenario_config.acl_read_full_authz`
+- `scenario_config.acl_read_mode`
+
 ### Issue 22: Periodic SQLite RBAC Churn Scenarios
 
 - `SQLITE-RBAC-CHURN-JWT`

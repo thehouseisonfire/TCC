@@ -122,6 +122,31 @@ It now evaluates rules in this order: `deny` first, then `allow`, then default d
 Rule selectors include operation, MQTT filter topic, client ID, and roles
 (roles can come from static `client_roles` mapping and JWT claims when present).
 
+### 2.3.1 Issue 37: Strict `ACL_READ` Fan-Out Across Policy Profiles
+
+Issue 37 adds strict fan-out (`plugin_opt_acl_read_full_authz=true`) scenarios for
+token-only, HTTP profiles (`simple|med|complex`), and hybrid profiles
+(`simple|med|complex`) so read-path comparisons are not limited to
+`ACL_SUBSCRIBE`.
+
+| Scenario Family | Token | Policy Source | Policy Detail | Expected Outcome |
+| --- | --- | --- | --- | --- |
+| `TOKEN-ACLREAD-FANOUT-ALLOW-{JWT\|BIS}-{10,50,100}` | JWT/Biscuit | Token-only | Strict token mode (`mosquitto_integration_acl_read_full.conf`), fan-out allow token on `fanout/broadcast` | Delivery allowed under strict `ACL_READ` |
+| `TOKEN-ACLREAD-FANOUT-DENY-{JWT\|BIS}-10` | JWT/Biscuit | Token-only | Subscriber token keeps subscribe grant but denies read on `fanout/broadcast`; publisher uses allow token | Subscribe accepted; fan-out delivery denied |
+| `HTTP-ACLREAD-FANOUT-{SIMPLE\|MED\|COMPLEX}-ALLOW-{JWT\|BIS}-10` | JWT/Biscuit | HTTP | Strict HTTP mode + profile-specific baseline + custom allow rules for publish/subscribe/read on fan-out topic | Delivery allowed |
+| `HTTP-ACLREAD-FANOUT-{SIMPLE\|MED\|COMPLEX}-DENY-{JWT\|BIS}-10` | JWT/Biscuit | HTTP | Same as above with explicit deny(`read`) on fan-out topic | Delivery denied while subscribers stay connected |
+| `HTTP-ACLREAD-FANOUT-MED-ALLOW-{JWT\|BIS}-{50,100}` | JWT/Biscuit | HTTP | Balanced scaling slices for representative `med` profile | Read-path scaling under strict mode |
+| `HYBRID-ACLREAD-FANOUT-{SIMPLE\|MED\|COMPLEX}-ALLOW-{JWT\|BIS}-10` | JWT/Biscuit | Hybrid | Strict hybrid mode with same profile+rule approach | Delivery allowed |
+| `HYBRID-ACLREAD-FANOUT-{SIMPLE\|MED\|COMPLEX}-DENY-{JWT\|BIS}-10` | JWT/Biscuit | Hybrid | Same as above with explicit deny(`read`) on fan-out topic | Delivery denied while subscribers stay connected |
+| `HYBRID-ACLREAD-FANOUT-MED-ALLOW-{JWT\|BIS}-{50,100}` | JWT/Biscuit | Hybrid | Balanced scaling slices for representative `med` profile | Read-path scaling under strict mode |
+
+Issue 37 metadata in benchmark outputs now includes:
+
+- `scenario_config.policy_source`
+- `scenario_config.policy_profile`
+- `scenario_config.acl_read_full_authz`
+- `scenario_config.acl_read_mode`
+
 ### 2.4 Static ACL (Compound Gate)
 
 | Scenario | Token | Policy Source | Policy Detail | Expected Outcome |

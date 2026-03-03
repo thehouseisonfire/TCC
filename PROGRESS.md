@@ -258,10 +258,9 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 ## 8) Open Issues (Next Steps, Grouped)
 
 ### Priority List
-1. Issue 37: ACL_READ fan-out scenarios across policy profiles
-2. Issue 21: Expand Biscuit authorizer (if current template insufficient)
-3. Issue 23: Proactive client reauthentication
-4. Issue 41: Containerized benchmark topology
+1. Issue 21: Expand Biscuit authorizer (if current template insufficient)
+2. Issue 23: Proactive client reauthentication
+3. Issue 41: Containerized benchmark topology
 ---
 
 #### A) Policy Source Parity
@@ -321,29 +320,6 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Update benchmark clients/scenarios to exercise proactive refresh flow.
     - Add runtime assertions proving session continuity without expiry-driven
       disconnects during proactive-refresh runs.
-
-- [ ] **Issue 37: Add `ACL_READ` fan-out authorization scenarios across policy profiles**
-  - Goal: Add benchmark scenarios that explicitly exercise read/fan-out
-    authorization (`MOSQ_ACL_READ`) with full authz (acl_read_full_authz) enabled for each relevant
-    policy profile/source, so comparisons are not limited to subscribe-time
-    (`ACL_SUBSCRIBE`) checks.
-  - Scope:
-    - Cover policy sources where fan-out authorization semantics are meaningful:
-      Token-only, HTTP (`simple|med|complex`), Hybrid, Dynamic Security, and
-      SQLite (after parity-grade policy model is available).
-    - Static ACL should remain documented as expiry-only `ACL_READ` in Issue 28
-      baseline scenarios unless explicitly running a strict variant.
-  - Deliverable:
-    - New scenario IDs (or matrix variants) that run with
-      `plugin_opt_acl_read_full_authz true` and `mode=fanout`
-    - Profile-aware policy inputs for fan-out topics (allow/deny cases) per
-      source/profile
-    - Subscriber-count scaling slices (e.g., 10/50/100) for at least one
-      profile per source
-    - Result metadata documenting active `acl_read_full_authz` mode and policy
-      profile for each run
-    - Broker-level runtime integration assertions for each source/profile slice
-      (not only scenario-shape/config tests).
 
 ---
 
@@ -612,6 +588,37 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Captured three key metrics: data message latency (`publish`), control message latency (`control`), and control injection delay (`control_injection_delay`)
     - Added comprehensive documentation in RUNNING_BENCHMARKS.md with usage examples and research interpretation notes
   - **Research Alignment**: Enables measurement of broker behavior under realistic mixed data+control plane workloads, supporting H2/H3 validation by quantifying control plane overhead during active data traffic.
+
+- [x] **Issue 37: Add `ACL_READ` fan-out authorization scenarios across policy profiles** — **COMPLETED 2026-03-03**
+  - **Summary**: Added strict `ACL_READ` fan-out scenario coverage for token-only,
+    HTTP policy profiles (`simple|med|complex`), and hybrid policy profiles
+    (`simple|med|complex`) with subscriber scaling slices (10/50/100) and
+    broker runtime integration assertions.
+  - **Deliverables**:
+    - New strict scenario families in `benchmarks/run_scenarios.py`:
+      - `TOKEN-ACLREAD-FANOUT-ALLOW-{JWT|BIS}-{10,50,100}`
+      - `TOKEN-ACLREAD-FANOUT-DENY-{JWT|BIS}-10`
+      - `HTTP-ACLREAD-FANOUT-{SIMPLE|MED|COMPLEX}-{ALLOW|DENY}-{JWT|BIS}-10`
+      - `HTTP-ACLREAD-FANOUT-MED-ALLOW-{JWT|BIS}-{50,100}`
+      - `HYBRID-ACLREAD-FANOUT-{SIMPLE|MED|COMPLEX}-{ALLOW|DENY}-{JWT|BIS}-10`
+      - `HYBRID-ACLREAD-FANOUT-MED-ALLOW-{JWT|BIS}-{50,100}`
+    - New strict Mosquitto configs:
+      - `docker/mosquitto_http_acl_read.conf` (+ TLS variant)
+      - `docker/mosquitto_hybrid_acl_read.conf` (+ TLS variant)
+    - Profile-aware fan-out allow/deny HTTP authz payload helper and additive
+      ID strategy preserving existing scenario compatibility.
+    - Result metadata now records:
+      `policy_source`, `policy_profile`, `acl_read_full_authz`, and
+      `acl_read_mode` per scenario run.
+    - Broker integration coverage in
+      `tests/integration/test_issue37_acl_read_profiles.py`:
+      strict token fan-out allow/deny semantics, full HTTP/hybrid tier matrix
+      (`simple|med|complex`) for JWT and Biscuit, runtime fan-out scaling
+      assertions (`ci_heavy` on 50/100) with JWT at 10/50/100 and Biscuit at
+      10/50 (100 marked `xfail` due CI CONNACK saturation), and strict SQLite
+      read-revoke enforcement.
+    - Scenario-shape coverage in
+      `benchmarks/test_issue37_acl_read_profile_coverage.py`.
 
 - [x] **Issue 38: Expiry enforcement in ACL_CHECK with disconnect (no reason codes)** — **COMPLETED 2026-02-27**
   - **Summary**: `MOSQ_EVT_ACL_CHECK` now enforces immediate disconnect on

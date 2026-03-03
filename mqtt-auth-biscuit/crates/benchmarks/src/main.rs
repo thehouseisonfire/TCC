@@ -15,6 +15,7 @@ const SHORT_TTL_SECS: i64 = 5;
 const BISCUIT_BLOCKS_MEDIUM: usize = 5;
 const BISCUIT_BLOCKS_LARGE: usize = 25;
 const BASE_TOPIC: &str = "sensors/client_1/temp";
+const FANOUT_TOPIC: &str = "fanout/broadcast";
 const TEST_JWT_SK_BYTES: [u8; 32] = [1u8; 32];
 const TEST_BISCUIT_ROOT_BYTES: [u8; 32] = [0u8; 32];
 
@@ -129,6 +130,51 @@ fn main() {
         encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
     };
 
+    let jwt_fanout_allow = {
+        let topic = FANOUT_TOPIC.to_string();
+        let claims = Claims {
+            sub: "client_1".to_string(),
+            exp: LONG_EXP,
+            roles: Some(vec!["reader".to_string(), "writer".to_string()]),
+            grants: Some(vec![
+                JwtGrant {
+                    op: "publish".to_string(),
+                    res: topic.clone(),
+                },
+                JwtGrant {
+                    op: "subscribe".to_string(),
+                    res: topic,
+                },
+            ]),
+            denies: None,
+        };
+        encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
+    };
+
+    let jwt_fanout_read_deny = {
+        let topic = FANOUT_TOPIC.to_string();
+        let claims = Claims {
+            sub: "client_1".to_string(),
+            exp: LONG_EXP,
+            roles: Some(vec!["reader".to_string()]),
+            grants: Some(vec![
+                JwtGrant {
+                    op: "publish".to_string(),
+                    res: topic.clone(),
+                },
+                JwtGrant {
+                    op: "subscribe".to_string(),
+                    res: topic.clone(),
+                },
+            ]),
+            denies: Some(vec![JwtGrant {
+                op: "read".to_string(),
+                res: topic,
+            }]),
+        };
+        encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
+    };
+
     // Static ACL isolation fixtures: role identity only (no token grants/denies).
     let jwt_static_admin = {
         let claims = Claims {
@@ -234,6 +280,23 @@ fn main() {
             .fact("deny(\"read\", \"sensors/client_1/temp\")")
             .unwrap();
         biscuit_base.append(deny_block).unwrap()
+    };
+
+    let biscuit_fanout_allow = Biscuit::builder()
+        .fact("right(\"publish\", \"fanout/broadcast\")")
+        .unwrap()
+        .fact("right(\"subscribe\", \"fanout/broadcast\")")
+        .unwrap()
+        .fact("expires_at(2000000000)")
+        .unwrap()
+        .build(&root_keypair)
+        .unwrap();
+
+    let biscuit_fanout_read_deny = {
+        let deny_block = BlockBuilder::new()
+            .fact("deny(\"read\", \"fanout/broadcast\")")
+            .unwrap();
+        biscuit_fanout_allow.append(deny_block).unwrap()
     };
 
     // Static ACL isolation fixtures: role identity only (no right/deny facts).
@@ -380,6 +443,10 @@ fn main() {
     let biscuit_deny_b64 = general_purpose::URL_SAFE_NO_PAD.encode(biscuit_deny.to_vec().unwrap());
     let biscuit_short_b64 =
         general_purpose::URL_SAFE_NO_PAD.encode(biscuit_short.to_vec().unwrap());
+    let biscuit_fanout_allow_b64 =
+        general_purpose::URL_SAFE_NO_PAD.encode(biscuit_fanout_allow.to_vec().unwrap());
+    let biscuit_fanout_read_deny_b64 =
+        general_purpose::URL_SAFE_NO_PAD.encode(biscuit_fanout_read_deny.to_vec().unwrap());
     let biscuit_static_admin_b64 =
         general_purpose::URL_SAFE_NO_PAD.encode(biscuit_static_admin.to_vec().unwrap());
     let biscuit_static_writer_b64 =
@@ -415,6 +482,8 @@ fn main() {
         "jwt": jwt_long,
         "jwt_short": jwt_short,
         "jwt_deny": jwt_deny,
+        "jwt_fanout_allow": jwt_fanout_allow,
+        "jwt_fanout_read_deny": jwt_fanout_read_deny,
         "jwt_static_admin": jwt_static_admin,
         "jwt_static_writer": jwt_static_writer,
         "jwt_static_reader": jwt_static_reader,
@@ -426,6 +495,8 @@ fn main() {
         "biscuit_25": biscuit_25_b64,
         "biscuit_delegated": biscuit_delegated_b64,
         "biscuit_deny": biscuit_deny_b64,
+        "biscuit_fanout_allow": biscuit_fanout_allow_b64,
+        "biscuit_fanout_read_deny": biscuit_fanout_read_deny_b64,
         "biscuit_short": biscuit_short_b64,
         "biscuit_static_admin": biscuit_static_admin_b64,
         "biscuit_static_writer": biscuit_static_writer_b64,

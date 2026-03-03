@@ -195,6 +195,11 @@ class ScenarioConfig(TypedDict, total=False):
     control_after_messages: int
     # Issue 19: ACL_READ fan-out subscriber count
     subscriber_count: int
+    # Issue 37: ACL_READ fan-out source/profile metadata
+    policy_source: str
+    policy_profile: str
+    acl_read_full_authz: bool
+    acl_read_mode: str
 
 
 def _compose_bin():
@@ -869,6 +874,60 @@ def _http_policy_authz_config(tier: Literal["simple", "med", "complex"]) -> Auth
     }
 
 
+def _issue37_http_hybrid_authz_config(
+    tier: Literal["simple", "med", "complex"],
+    *,
+    topic: str,
+    deny_read: bool,
+) -> AuthzConfig:
+    rules: list[dict[str, Any]] = [
+        {
+            "id": "issue37_allow_fanout_publish",
+            "effect": "allow",
+            "ops": ["publish"],
+            "topics": [topic],
+            "client_ids": ["fanout_publisher"],
+        },
+        {
+            "id": "issue37_allow_fanout_subscribe",
+            "effect": "allow",
+            "ops": ["subscribe"],
+            "topics": [topic],
+        },
+    ]
+    if deny_read:
+        rules.append(
+            {
+                "id": "issue37_deny_fanout_read",
+                "effect": "deny",
+                "ops": ["read"],
+                "topics": [topic],
+            }
+        )
+    else:
+        rules.append(
+            {
+                "id": "issue37_allow_fanout_read",
+                "effect": "allow",
+                "ops": ["read"],
+                "topics": [topic],
+            }
+        )
+    return {
+        "delay_ms": 0,
+        "fail_mode": "none",
+        "policy_profile": tier,
+        "rules": rules,
+        # Deterministic local role source for role-aware paths in med/complex profiles.
+        "client_roles": {
+            "client_1": ["admin", "writer"],
+            "client_2": ["reader"],
+            "client_3": ["observer"],
+            "fanout_publisher": ["writer", "admin"],
+        },
+    }
+
+
 def _static_acl_scenarios(tokens: dict[str, Any]) -> dict[str, ScenarioConfig]:
     """Static ACL scenarios with role-only tokens to isolate ACL-file enforcement."""
     return {
@@ -1018,6 +1077,188 @@ def _issue30_acl_read_fanout_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
         }
 
     return scenarios
+
+
+def _issue37_acl_read_profile_scenarios(tokens: dict[str, Any]) -> dict[str, ScenarioConfig]:
+    scenarios: dict[str, ScenarioConfig] = {}
+    subscriber_slices = [10, 50, 100]
+    base_topic = "fanout/broadcast"
+
+    for token_label, token_key in (("JWT", "jwt"), ("BIS", "biscuit")):
+        allow_token = tokens.get(f"{token_key}_fanout_allow", tokens[token_key])
+        deny_token = tokens.get(
+            f"{token_key}_fanout_read_deny",
+            tokens.get(f"{token_key}_deny", allow_token),
+        )
+        username = "jwt" if token_key == "jwt" else "biscuit"
+
+        for subscribers in subscriber_slices:
+            scenarios[f"TOKEN-ACLREAD-FANOUT-ALLOW-{token_label}-{subscribers}"] = {
+                "mosquitto_conf": "./mosquitto_integration_acl_read_full.conf",
+                "username": username,
+                "password": allow_token,
+                "fanout_publisher_username": username,
+                "fanout_publisher_password": allow_token,
+                "topic": base_topic,
+                "mode": "fanout",
+                "subscriber_count": subscribers,
+                "fanout_topic": base_topic,
+                "authz": None,
+                "netem": {"clear": True},
+                "message_size": 256,
+                "qos": 1,
+                "policy_source": "token",
+                "policy_profile": "default",
+                "acl_read_full_authz": True,
+                "acl_read_mode": "strict",
+            }
+
+        scenarios[f"TOKEN-ACLREAD-FANOUT-DENY-{token_label}-10"] = {
+            "mosquitto_conf": "./mosquitto_integration_acl_read_full.conf",
+            "username": username,
+            "password": deny_token,
+            "fanout_publisher_username": username,
+            "fanout_publisher_password": allow_token,
+            "topic": base_topic,
+            "mode": "fanout",
+            "subscriber_count": 10,
+            "fanout_topic": base_topic,
+            "authz": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "policy_source": "token",
+            "policy_profile": "default",
+            "acl_read_full_authz": True,
+            "acl_read_mode": "strict",
+        }
+
+    for source_label, source_key, mosquitto_conf in (
+        ("HTTP", "http", "./mosquitto_http_acl_read.conf"),
+        ("HYBRID", "hybrid", "./mosquitto_hybrid_acl_read.conf"),
+    ):
+        for tier in ("simple", "med", "complex"):
+            for token_label, token_key in (("JWT", "jwt"), ("BIS", "biscuit")):
+                username = "jwt" if token_key == "jwt" else "biscuit"
+                allow_token = tokens.get(f"{token_key}_fanout_allow", tokens[token_key])
+                deny_token = tokens.get(
+                    f"{token_key}_fanout_read_deny",
+                    tokens.get(f"{token_key}_deny", allow_token),
+                )
+
+                scenarios[
+                    f"{source_label}-ACLREAD-FANOUT-{tier.upper()}-ALLOW-{token_label}-10"
+                ] = {
+                    "mosquitto_conf": mosquitto_conf,
+                    "username": username,
+                    "password": allow_token,
+                    "fanout_publisher_username": username,
+                    "fanout_publisher_password": allow_token,
+                    "topic": base_topic,
+                    "mode": "fanout",
+                    "subscriber_count": 10,
+                    "fanout_topic": base_topic,
+                    "authz": _issue37_http_hybrid_authz_config(
+                        cast(Literal["simple", "med", "complex"], tier),
+                        topic=base_topic,
+                        deny_read=False,
+                    ),
+                    "netem": {"clear": True},
+                    "message_size": 256,
+                    "qos": 1,
+                    "policy_source": source_key,
+                    "policy_profile": tier,
+                    "acl_read_full_authz": True,
+                    "acl_read_mode": "strict",
+                }
+                scenarios[f"{source_label}-ACLREAD-FANOUT-{tier.upper()}-DENY-{token_label}-10"] = {
+                    "mosquitto_conf": mosquitto_conf,
+                    "username": username,
+                    "password": deny_token,
+                    "fanout_publisher_username": username,
+                    "fanout_publisher_password": allow_token,
+                    "topic": base_topic,
+                    "mode": "fanout",
+                    "subscriber_count": 10,
+                    "fanout_topic": base_topic,
+                    "authz": _issue37_http_hybrid_authz_config(
+                        cast(Literal["simple", "med", "complex"], tier),
+                        topic=base_topic,
+                        deny_read=True,
+                    ),
+                    "netem": {"clear": True},
+                    "message_size": 256,
+                    "qos": 1,
+                    "policy_source": source_key,
+                    "policy_profile": tier,
+                    "acl_read_full_authz": True,
+                    "acl_read_mode": "strict",
+                }
+
+                if tier != "med":
+                    continue
+
+                for subscribers in (50, 100):
+                    scenarios[
+                        f"{source_label}-ACLREAD-FANOUT-{tier.upper()}-ALLOW-{token_label}-{subscribers}"
+                    ] = {
+                        "mosquitto_conf": mosquitto_conf,
+                        "username": username,
+                        "password": allow_token,
+                        "fanout_publisher_username": username,
+                        "fanout_publisher_password": allow_token,
+                        "topic": base_topic,
+                        "mode": "fanout",
+                        "subscriber_count": subscribers,
+                        "fanout_topic": base_topic,
+                        "authz": _issue37_http_hybrid_authz_config(
+                            cast(Literal["simple", "med", "complex"], tier),
+                            topic=base_topic,
+                            deny_read=False,
+                        ),
+                        "netem": {"clear": True},
+                        "message_size": 256,
+                        "qos": 1,
+                        "policy_source": source_key,
+                        "policy_profile": tier,
+                        "acl_read_full_authz": True,
+                        "acl_read_mode": "strict",
+                    }
+
+    return scenarios
+
+
+def _infer_policy_source(scenario: ScenarioConfig) -> str | None:
+    conf = str(scenario.get("mosquitto_conf", ""))
+    if "mosquitto_http" in conf:
+        return "http"
+    if "mosquitto_hybrid" in conf:
+        return "hybrid"
+    if "mosquitto_dynsec" in conf or "mosquitto_anon" in conf:
+        return "dynamic_security"
+    if "mosquitto_sqlite" in conf:
+        return "sqlite"
+    if "mosquitto_static" in conf:
+        return "static_acl"
+    if "mosquitto_base" in conf:
+        return "none"
+    if "mosquitto" in conf:
+        return "token"
+    return None
+
+
+def _infer_acl_read_full_authz(scenario: ScenarioConfig) -> bool:
+    if "acl_read_full_authz" in scenario:
+        return bool(scenario["acl_read_full_authz"])
+    conf = str(scenario.get("mosquitto_conf", ""))
+    strict_conf_suffixes = (
+        "mosquitto_integration_acl_read_full.conf",
+        "mosquitto_dynsec_acl_read.conf",
+        "mosquitto_sqlite_acl_read.conf",
+        "mosquitto_http_acl_read.conf",
+        "mosquitto_hybrid_acl_read.conf",
+    )
+    return conf.endswith(strict_conf_suffixes)
 
 
 def _issue22_sqlite_rbac_churn_scenarios(tokens: dict[str, Any]) -> dict[str, ScenarioConfig]:
@@ -1496,6 +1737,7 @@ def main(
             },
             **_static_acl_scenarios(tokens),
             **_issue30_acl_read_fanout_scenarios(tokens),
+            **_issue37_acl_read_profile_scenarios(tokens),
             **_issue22_sqlite_rbac_churn_scenarios(tokens),
             **_issue22_sqlite_rbac_deep_scenarios(tokens),
             "JWT-HTTP-200MS": {
@@ -2172,6 +2414,18 @@ def main(
             "SQLITE-ACLREAD-FANOUT-CHURN-JWT-10/50/100, "
             "SQLITE-ACLREAD-FANOUT-CHURN-BIS-10/50/100",
         )
+        logger.info(
+            "TOKEN-ACLREAD-FANOUT-ALLOW-{JWT|BIS}-{10|50|100}, "
+            "TOKEN-ACLREAD-FANOUT-DENY-{JWT|BIS}-10",
+        )
+        logger.info(
+            "HTTP-ACLREAD-FANOUT-{SIMPLE|MED|COMPLEX}-{ALLOW|DENY}-{JWT|BIS}-10, "
+            "HTTP-ACLREAD-FANOUT-MED-ALLOW-{JWT|BIS}-{50|100}",
+        )
+        logger.info(
+            "HYBRID-ACLREAD-FANOUT-{SIMPLE|MED|COMPLEX}-{ALLOW|DENY}-{JWT|BIS}-10, "
+            "HYBRID-ACLREAD-FANOUT-MED-ALLOW-{JWT|BIS}-{50|100}",
+        )
         logger.info("SQLITE-RBAC-CHURN-JWT, SQLITE-RBAC-CHURN-BIS")
         logger.info(
             "SQLITE-RBAC-DEEP-CONFLICT-JWT, SQLITE-RBAC-DEEP-CONFLICT-BIS, "
@@ -2398,6 +2652,14 @@ def main(
         biscuit_only = bool(s.get("biscuit_attenuate") or s.get("biscuit_delegate"))
         policy_complexity_kind = s.get("policy_complexity_kind")
         policy_complexity_tier = s.get("policy_complexity_tier")
+        policy_source = s.get("policy_source") or _infer_policy_source(s)
+        policy_profile = s.get("policy_profile")
+        if policy_profile is None and isinstance(s.get("authz"), dict):
+            policy_profile = cast(dict[str, Any], s["authz"]).get("policy_profile")
+        acl_read_full_authz = _infer_acl_read_full_authz(s)
+        acl_read_mode = s.get("acl_read_mode")
+        if acl_read_mode is None:
+            acl_read_mode = "strict" if acl_read_full_authz else "expiry_only"
         out_payload: dict[str, Any] = {
             "scenario": s["id"],
             "token_len": token_len,
@@ -2436,6 +2698,10 @@ def main(
                 "mode": s.get("mode"),
                 "fanout_topic": s.get("fanout_topic"),
                 "subscriber_count": s.get("subscriber_count"),
+                "policy_source": policy_source,
+                "policy_profile": policy_profile,
+                "acl_read_full_authz": acl_read_full_authz,
+                "acl_read_mode": acl_read_mode,
                 "fanout_churn_kind": s.get("fanout_churn_kind"),
                 "fanout_churn_after_messages": s.get("fanout_churn_after_messages"),
                 "fanout_churn_interval_messages": s.get("fanout_churn_interval_messages"),
@@ -2450,13 +2716,11 @@ def main(
                 "fanout_churn_sqlite_topic": s.get("fanout_churn_sqlite_topic"),
                 "fanout_churn_sqlite_subscribers": s.get("fanout_churn_sqlite_subscribers"),
                 "cache_context": {
-                    "acl_read_full_authz_expected": bool(
-                        str(s.get("mosquitto_conf", "")).endswith("mosquitto_sqlite_acl_read.conf")
-                    ),
+                    "acl_read_full_authz_expected": acl_read_full_authz,
                     "cache_ttl_seconds": 3600,
                     "note": (
-                        "strict ACL_READ SQLite scenarios should enforce post-churn policy "
-                        "changes on fan-out delivery; cache must not mask revocations"
+                        "strict ACL_READ scenarios should enforce policy changes on fan-out "
+                        "delivery; cache must not mask runtime authorization changes"
                     ),
                 },
             },

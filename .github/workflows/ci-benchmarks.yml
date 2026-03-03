@@ -157,6 +157,7 @@ jobs:
             benchmarks/test_loadgen_worker_suback.py \
             benchmarks/test_loadgen_fanout_sync.py \
             benchmarks/test_issue30_acl_read_fanout_coverage.py \
+            benchmarks/test_issue37_acl_read_profile_coverage.py \
             benchmarks/test_static_acl_coverage.py \
             benchmarks/test_authz_config_state.py \
             benchmarks/test_policy_churn.py \
@@ -203,6 +204,7 @@ jobs:
           cd mqtt-auth-biscuit
           pytest -m "broker_integration and not ci_heavy" \
             tests/integration/test_runtime_enforcement.py \
+            tests/integration/test_issue37_acl_read_profiles.py \
             -vv -s \
             --maxfail=1 \
             --durations=20 \
@@ -257,6 +259,7 @@ jobs:
           cd mqtt-auth-biscuit
           pytest -m broker_integration \
             tests/integration/test_runtime_enforcement.py \
+            tests/integration/test_issue37_acl_read_profiles.py \
             -vv -s \
             --durations=30 \
             --junitxml="$ISSUE39_ARTIFACT_DIR/junit-full.xml"

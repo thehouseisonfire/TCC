@@ -203,15 +203,51 @@ SQLite (strict `ACL_READ`):
 - `SQLITE-ACLREAD-FANOUT-CHURN-JWT-10/50/100`
 - `SQLITE-ACLREAD-FANOUT-CHURN-BIS-10/50/100`
 - Uses `mosquitto_sqlite_acl_read.conf` (`policy_mode=sqlite`,
-  `plugin_opt_acl_read_full_authz true`)
-- Seeds fan-out ACL rows before each run and revokes subscriber `ACL_READ` rows
-  mid-run after message 5
+  `plugin_opt_acl_read_full_authz true`,
+  `plugin_opt_sqlite_seed_demo_rules false`)
+- Seeds fan-out SQLite RBAC rows before each run and revokes reader-role
+  `ACL_READ` grant mid-run after message 5
+
+Deterministic cadence details:
+- SQLite fan-out scenarios reseed policy state at the start of each repeat.
+- Churn triggers exactly when publisher `sequence_id == fanout_churn_after_messages`.
+- Delivery accounting uses pre/post buckets: pre is `< after_messages`, post is
+  `>= after_messages`.
+- With strict `ACL_READ`, post-churn delivery drops are used as cache-validity
+  signal that runtime policy changes are not masked by session cache state.
+
+### Issue 22: Periodic SQLite RBAC Churn Scenarios
+
+- `SQLITE-RBAC-CHURN-JWT`
+- `SQLITE-RBAC-CHURN-BIS`
+
+These scenarios run strict `ACL_READ` fan-out with deterministic periodic SQLite
+policy updates (`sqlite_toggle_read`) to simulate runtime RBAC churn during an
+active data-plane stream. Default cadence: first churn at message 4, then every
+4 messages, up to 4 churn events.
+
+### Issue 22: Deep SQLite RBAC Profiles
+
+- `SQLITE-RBAC-DEEP-CONFLICT-JWT`
+- `SQLITE-RBAC-DEEP-CONFLICT-BIS`
+- `SQLITE-RBAC-DEEP-CONTROL-JWT`
+- `SQLITE-RBAC-DEEP-CONTROL-BIS`
+
+Deep profiles add:
+- Explicit deny-over-allow conflicts at the same priority tier.
+- Multi-role assignments with priority-tier precedence.
+- Control/admin topic family coverage (`$CONTROL/#`, `system/notifications/#`)
+  with mixed allow/deny grants.
+
+Deep conflict scenarios use `sqlite_toggle_private_deny` to periodically toggle
+private-topic deny rows and observe deterministic authorization transitions under
+strict `ACL_READ`.
 
 Example run:
 
 ```bash
 python3 benchmarks/run_scenarios.py \
-  --scenarios DYNSEC-ACLREAD-FANOUT-CHURN-JWT-10,SQLITE-ACLREAD-FANOUT-CHURN-BIS-10
+  --scenarios SQLITE-RBAC-DEEP-CONFLICT-JWT,SQLITE-RBAC-DEEP-CONTROL-BIS
 ```
 
 Validation signal in scenario result JSON (`runs[].loadgen.fanout_churn`):

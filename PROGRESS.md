@@ -243,8 +243,9 @@ The actionable parity gaps are tracked here as backlog items:
 1. Token-only wildcard/filter parity is implemented; preserve this in new scenarios.
 2. Static ACL scenarios now use roles-only tokens to isolate ACL cost
    (implemented in Issue 28; preserve this invariant in new scenarios).
-3. SQLite policy model remains too simple for parity-grade comparisons
-   (tracked by Issue 22).
+3. SQLite policy now uses RBAC tables (`users/roles/user_roles/role_acls`) with
+   deterministic churn helpers; preserve this parity-grade model in new scenarios
+   (implemented in Issue 22).
 4. `POLICY-COMPLEX-*` naming must stay explicit about what is being stressed
    (`block_chain` vs Datalog complexity; tracked by Issue 21 and Issue 33).
 5. Dynamic-security parity should continue to prefer policy-source isolation
@@ -257,11 +258,10 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 ## 8) Open Issues (Next Steps, Grouped)
 
 ### Priority List
-1. Issue 22: Strengthen SQLite RBAC (if policies too simple)
-2. Issue 37: ACL_READ fan-out scenarios across policy profiles
+1. Issue 37: ACL_READ fan-out scenarios across policy profiles
+2. Issue 21: Expand Biscuit authorizer (if current template insufficient)
 3. Issue 23: Proactive client reauthentication
-4. Issue 21: Expand Biscuit authorizer (if current template insufficient)
-5. Issue 8.2: Containerized benchmark topology
+4. Issue 8.2: Containerized benchmark topology
 ---
 
 #### A) Policy Source Parity
@@ -306,24 +306,6 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
       - time-based constraints using authorizer-provided `time(...)`
     - Add at least one scenario that measures increasing authorizer complexity
       at constant token size
-
-- [ ] **Issue 22: Strengthen `seed_demo_rules` (RBAC), make it optional, and add
-    runtime policy churn scenarios**
-  - Goal: Turn SQLite demo seeding into a realistic RBAC policy set, allow it to
-    be turned off, and add scenarios where policies change periodically at
-    runtime.
-  - Current issue: seeding is unconditional when `PolicyMode::Sqlite` is used,
-    and policies are too simple for RBAC fairness studies (see
-    `sqlite_policy.rs`).
-  - Deliverable:
-    - Add a configuration flag to enable/disable demo seeding (e.g.,
-      `sqlite_seed_demo_rules=true|false`)
-    - Extend SQLite schema and seeding to include RBAC-like structure
-      (users/roles/role_acls), plus more realistic topic/action grants
-    - Add a benchmark scenario where SQLite rules are updated deterministically
-      during the run (e.g., every N seconds), to simulate dynamic policy updates
-    - Ensure scenarios document when policy churn is enabled and how it affects
-      cache validity
 
 #### B) Matrix Coverage (Benchmark Verification)
 
@@ -476,6 +458,26 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 
 - [x] **Issue 20.1: Verify ACL_CHECK subtype handling across policy modes**
   - **Summary**: Added `MOSQ_ACL_CONTROL` constant (0x08) for control-plane access; fixed `control_callback` hardcoded `access: 2` → `MOSQ_ACL_CONTROL`; updated `access_to_operation()` to map 0x08 → "control"; added comprehensive unit tests for all ACL subtypes (READ/WRITE/SUBSCRIBE/CONTROL) with priority ordering (WRITE > SUBSCRIBE > CONTROL > READ), bitmask combinations, and edge cases. All 7 policy modes verified to correctly handle distinct ACL subtypes.
+
+- [x] **Issue 22: Strengthen `seed_demo_rules` (RBAC), make it optional, and add
+    runtime policy churn scenarios** — **COMPLETED 2026-03-02**
+  - Summary:
+    - Added plugin option `sqlite_seed_demo_rules=true|false` (default `false`);
+      SQLite seeding is now explicit/opt-in.
+    - Upgraded SQLite policy backend to RBAC schema
+      (`users/roles/user_roles/role_acls/role_deny_acls`) with role priorities
+      and deny-over-allow precedence; legacy `acl` fallback remains only when no
+      RBAC identity exists for the client.
+    - Strengthened demo seeding with realistic role/topic/action grants
+      (publish/subscribe/read/control).
+    - Added deterministic periodic SQLite churn scenarios
+      (`SQLITE-RBAC-CHURN-JWT`, `SQLITE-RBAC-CHURN-BIS`) using
+      `sqlite_toggle_read`.
+    - Added deep representative SQLite scenarios for conflict and control
+      families (`SQLITE-RBAC-DEEP-CONFLICT-*`, `SQLITE-RBAC-DEEP-CONTROL-*`)
+      using profile-aware seeding and `sqlite_toggle_private_deny`.
+    - Extended scenario/loadgen metadata and docs with churn cadence and
+      cache-validity interpretation for strict `ACL_READ` runs.
 
 - [x] **Issue 24: Decide whether to benchmark multi-step `MOSQ_EVT_EXT_AUTH_CONTINUE` state machine**
   - **Decision**: Out of scope for current research.

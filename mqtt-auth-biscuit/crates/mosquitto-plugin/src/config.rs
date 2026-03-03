@@ -89,6 +89,7 @@ pub struct PluginConfig {
     pub jwt: JwtConfig,
     pub biscuit: BiscuitConfig,
     pub policy: PolicyBackendConfig,
+    pub sqlite_seed_demo_rules: bool,
     pub cache_ttl_seconds: u64,
     pub allow_anonymous_no_token: bool,
     pub acl_read_full_authz: bool,
@@ -117,6 +118,7 @@ pub struct PluginConfigBuilder {
     biscuit_root_key_file: Option<String>,
     policy_mode: Option<PolicyMode>,
     sqlite_path: Option<String>,
+    sqlite_seed_demo_rules: Option<bool>,
     http_url: Option<String>,
     http_ca_file: Option<String>,
     http_tls_insecure: Option<bool>,
@@ -152,6 +154,7 @@ impl PluginConfigBuilder {
             biscuit_root_key_file: None,
             policy_mode: None,
             sqlite_path: None,
+            sqlite_seed_demo_rules: None,
             http_url: None,
             http_ca_file: None,
             http_tls_insecure: None,
@@ -204,6 +207,11 @@ impl PluginConfigBuilder {
 
     pub fn sqlite_path(mut self, path: impl Into<String>) -> Self {
         self.sqlite_path = Some(path.into());
+        self
+    }
+
+    pub fn sqlite_seed_demo_rules(mut self, enabled: bool) -> Self {
+        self.sqlite_seed_demo_rules = Some(enabled);
         self
     }
 
@@ -394,6 +402,7 @@ impl PluginConfigBuilder {
                 root_public_key: biscuit_root_public_key,
             },
             policy,
+            sqlite_seed_demo_rules: self.sqlite_seed_demo_rules.unwrap_or(false),
             cache_ttl_seconds,
             allow_anonymous_no_token: self.allow_anonymous_no_token.unwrap_or(false),
             acl_read_full_authz: self.acl_read_full_authz.unwrap_or(false),
@@ -463,6 +472,12 @@ pub fn parse_options(
                 builder.policy_mode(mode)
             }
             "sqlite_path" => builder.sqlite_path(value),
+            "sqlite_seed_demo_rules" => {
+                let enabled = value
+                    .parse::<bool>()
+                    .map_err(|e| format!("Invalid sqlite_seed_demo_rules: {e}"))?;
+                builder.sqlite_seed_demo_rules(enabled)
+            }
             "http_url" => builder.http_url(value),
             "http_ca_file" => builder.http_ca_file(value),
             "http_tls_insecure" => {
@@ -667,6 +682,87 @@ mod tests {
             .expect("config should build");
 
         assert!(config.acl_read_full_authz);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn defaults_sqlite_seed_demo_rules_to_false() {
+        let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
+        let biscuit_root_key_file = format!(
+            "{}/../../docker/biscuit_public.key",
+            env!("CARGO_MANIFEST_DIR")
+        );
+
+        let config = PluginConfigBuilder::new()
+            .jwt_algorithm("ES256")
+            .jwt_key_file(jwt_pub_pem)
+            .biscuit_root_key_file(biscuit_root_key_file)
+            .build()
+            .expect("config should build");
+
+        assert!(!config.sqlite_seed_demo_rules);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn accepts_sqlite_seed_demo_rules_true() {
+        let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
+        let biscuit_root_key_file = format!(
+            "{}/../../docker/biscuit_public.key",
+            env!("CARGO_MANIFEST_DIR")
+        );
+
+        let config = PluginConfigBuilder::new()
+            .jwt_algorithm("ES256")
+            .jwt_key_file(jwt_pub_pem)
+            .biscuit_root_key_file(biscuit_root_key_file)
+            .sqlite_seed_demo_rules(true)
+            .build()
+            .expect("config should build");
+
+        assert!(config.sqlite_seed_demo_rules);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn parse_options_supports_sqlite_seed_demo_rules() {
+        let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
+        let biscuit_root_key_file = format!(
+            "{}/../../docker/biscuit_public.key",
+            env!("CARGO_MANIFEST_DIR")
+        );
+
+        let cstrings: Vec<CString> = vec![
+            CString::new("jwt_alg").unwrap(),
+            CString::new("ES256").unwrap(),
+            CString::new("jwt_key_file").unwrap(),
+            CString::new(jwt_pub_pem).unwrap(),
+            CString::new("biscuit_root_key_file").unwrap(),
+            CString::new(biscuit_root_key_file).unwrap(),
+            CString::new("sqlite_seed_demo_rules").unwrap(),
+            CString::new("true").unwrap(),
+        ];
+        let mut opts = vec![
+            MosquittoOpt {
+                key: cstrings[0].as_ptr() as *mut c_char,
+                value: cstrings[1].as_ptr() as *mut c_char,
+            },
+            MosquittoOpt {
+                key: cstrings[2].as_ptr() as *mut c_char,
+                value: cstrings[3].as_ptr() as *mut c_char,
+            },
+            MosquittoOpt {
+                key: cstrings[4].as_ptr() as *mut c_char,
+                value: cstrings[5].as_ptr() as *mut c_char,
+            },
+            MosquittoOpt {
+                key: cstrings[6].as_ptr() as *mut c_char,
+                value: cstrings[7].as_ptr() as *mut c_char,
+            },
+        ];
+
+        let config = parse_options(opts.as_mut_ptr(), opts.len() as i32).expect("config parse");
+        assert!(config.sqlite_seed_demo_rules);
     }
 
     #[test]

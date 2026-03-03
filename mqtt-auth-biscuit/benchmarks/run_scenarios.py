@@ -171,12 +171,15 @@ class ScenarioConfig(TypedDict, total=False):
     dynsec_churn: list[str]
     fanout_churn_kind: str
     fanout_churn_after_messages: int
+    fanout_churn_interval_messages: int
+    fanout_churn_max_events: int
     fanout_churn_settle_ms: int
     fanout_churn_dynsec_source: str
     fanout_churn_sqlite_db: str
     fanout_churn_sqlite_topic: str
     fanout_churn_sqlite_subscribers: int
     sqlite_seed_fanout: bool
+    sqlite_seed_profile: str
     sqlite_seed_db: str
     sqlite_seed_topic: str
     sqlite_seed_subscribers: int
@@ -486,6 +489,8 @@ def _run_loadgen(
     control_repeat: int = 1,
     fanout_churn_kind: str | None = None,
     fanout_churn_after_messages: int = 0,
+    fanout_churn_interval_messages: int = 0,
+    fanout_churn_max_events: int = 1,
     fanout_churn_settle_ms: int = 0,
     fanout_churn_dynsec_source: str | None = None,
     fanout_churn_sqlite_db: str | None = None,
@@ -606,6 +611,10 @@ def _run_loadgen(
         cmd.extend(["--fanout-churn-kind", fanout_churn_kind])
     if fanout_churn_after_messages > 0:
         cmd.extend(["--fanout-churn-after-messages", str(fanout_churn_after_messages)])
+    if fanout_churn_interval_messages > 0:
+        cmd.extend(["--fanout-churn-interval-messages", str(fanout_churn_interval_messages)])
+    if fanout_churn_max_events > 0:
+        cmd.extend(["--fanout-churn-max-events", str(fanout_churn_max_events)])
     if fanout_churn_settle_ms > 0:
         cmd.extend(["--fanout-churn-settle-ms", str(fanout_churn_settle_ms)])
     if fanout_churn_dynsec_source:
@@ -1011,6 +1020,169 @@ def _issue30_acl_read_fanout_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
     return scenarios
 
 
+def _issue22_sqlite_rbac_churn_scenarios(tokens: dict[str, Any]) -> dict[str, ScenarioConfig]:
+    base_topic = "fanout/broadcast"
+    return {
+        "SQLITE-RBAC-CHURN-JWT": {
+            "mosquitto_conf": "./mosquitto_sqlite_acl_read.conf",
+            "username": "jwt",
+            "password": tokens["jwt"],
+            "fanout_publisher_username": "jwt",
+            "fanout_publisher_password": tokens["jwt"],
+            "topic": base_topic,
+            "mode": "fanout",
+            "subscriber_count": 50,
+            "fanout_topic": base_topic,
+            "authz": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "sqlite_seed_fanout": True,
+            "sqlite_seed_profile": "fanout_basic",
+            "sqlite_seed_db": "docker/sqlite/policy.db",
+            "sqlite_seed_topic": base_topic,
+            "sqlite_seed_subscribers": 50,
+            "fanout_churn_kind": "sqlite_toggle_read",
+            "fanout_churn_after_messages": 4,
+            "fanout_churn_interval_messages": 4,
+            "fanout_churn_max_events": 4,
+            "fanout_churn_settle_ms": 800,
+            "fanout_churn_sqlite_db": "docker/sqlite/policy.db",
+            "fanout_churn_sqlite_topic": base_topic,
+            "fanout_churn_sqlite_subscribers": 50,
+        },
+        "SQLITE-RBAC-CHURN-BIS": {
+            "mosquitto_conf": "./mosquitto_sqlite_acl_read.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "fanout_publisher_username": "biscuit",
+            "fanout_publisher_password": tokens["biscuit"],
+            "topic": base_topic,
+            "mode": "fanout",
+            "subscriber_count": 50,
+            "fanout_topic": base_topic,
+            "authz": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "sqlite_seed_fanout": True,
+            "sqlite_seed_profile": "fanout_basic",
+            "sqlite_seed_db": "docker/sqlite/policy.db",
+            "sqlite_seed_topic": base_topic,
+            "sqlite_seed_subscribers": 50,
+            "fanout_churn_kind": "sqlite_toggle_read",
+            "fanout_churn_after_messages": 4,
+            "fanout_churn_interval_messages": 4,
+            "fanout_churn_max_events": 4,
+            "fanout_churn_settle_ms": 800,
+            "fanout_churn_sqlite_db": "docker/sqlite/policy.db",
+            "fanout_churn_sqlite_topic": base_topic,
+            "fanout_churn_sqlite_subscribers": 50,
+        },
+    }
+
+
+def _issue22_sqlite_rbac_deep_scenarios(tokens: dict[str, Any]) -> dict[str, ScenarioConfig]:
+    return {
+        "SQLITE-RBAC-DEEP-CONFLICT-JWT": {
+            "mosquitto_conf": "./mosquitto_sqlite_acl_read.conf",
+            "username": "jwt",
+            "password": tokens["jwt"],
+            "fanout_publisher_username": "jwt",
+            "fanout_publisher_password": tokens["jwt"],
+            "topic": "sensors/private/broadcast",
+            "mode": "fanout",
+            "subscriber_count": 50,
+            "fanout_topic": "sensors/private/broadcast",
+            "authz": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "sqlite_seed_fanout": True,
+            "sqlite_seed_profile": "rbac_deep",
+            "sqlite_seed_db": "docker/sqlite/policy.db",
+            "sqlite_seed_topic": "sensors/private/broadcast",
+            "sqlite_seed_subscribers": 50,
+            "fanout_churn_kind": "sqlite_toggle_private_deny",
+            "fanout_churn_after_messages": 4,
+            "fanout_churn_interval_messages": 4,
+            "fanout_churn_max_events": 4,
+            "fanout_churn_settle_ms": 800,
+            "fanout_churn_sqlite_db": "docker/sqlite/policy.db",
+            "fanout_churn_sqlite_topic": "sensors/private/broadcast",
+            "fanout_churn_sqlite_subscribers": 50,
+        },
+        "SQLITE-RBAC-DEEP-CONFLICT-BIS": {
+            "mosquitto_conf": "./mosquitto_sqlite_acl_read.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "fanout_publisher_username": "biscuit",
+            "fanout_publisher_password": tokens["biscuit"],
+            "topic": "sensors/private/broadcast",
+            "mode": "fanout",
+            "subscriber_count": 50,
+            "fanout_topic": "sensors/private/broadcast",
+            "authz": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "sqlite_seed_fanout": True,
+            "sqlite_seed_profile": "rbac_deep",
+            "sqlite_seed_db": "docker/sqlite/policy.db",
+            "sqlite_seed_topic": "sensors/private/broadcast",
+            "sqlite_seed_subscribers": 50,
+            "fanout_churn_kind": "sqlite_toggle_private_deny",
+            "fanout_churn_after_messages": 4,
+            "fanout_churn_interval_messages": 4,
+            "fanout_churn_max_events": 4,
+            "fanout_churn_settle_ms": 800,
+            "fanout_churn_sqlite_db": "docker/sqlite/policy.db",
+            "fanout_churn_sqlite_topic": "sensors/private/broadcast",
+            "fanout_churn_sqlite_subscribers": 50,
+        },
+        "SQLITE-RBAC-DEEP-CONTROL-JWT": {
+            "mosquitto_conf": "./mosquitto_sqlite_acl_read.conf",
+            "username": "jwt",
+            "password": tokens["jwt"],
+            "topic": "system/notifications/acl-change",
+            "authz": None,
+            "netem": {"clear": True},
+            "message_size": 128,
+            "qos": 1,
+            "subscriber_count": 1,
+            "sqlite_seed_fanout": True,
+            "sqlite_seed_profile": "rbac_deep_control_allow",
+            "sqlite_seed_db": "docker/sqlite/policy.db",
+            "sqlite_seed_topic": "sensors/private/broadcast",
+            "sqlite_seed_subscribers": 1,
+            "control_mode": True,
+            "control_repeat": 5,
+            "control_topic": "$CONTROL/dynamic-security/v1",
+            "control_payload": {"commands": [{"command": "listClients"}]},
+        },
+        "SQLITE-RBAC-DEEP-CONTROL-BIS": {
+            "mosquitto_conf": "./mosquitto_sqlite_acl_read.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "topic": "system/notifications/acl-change",
+            "authz": None,
+            "netem": {"clear": True},
+            "message_size": 128,
+            "qos": 1,
+            "subscriber_count": 1,
+            "sqlite_seed_fanout": True,
+            "sqlite_seed_profile": "rbac_deep_control_allow",
+            "sqlite_seed_db": "docker/sqlite/policy.db",
+            "sqlite_seed_topic": "sensors/private/broadcast",
+            "sqlite_seed_subscribers": 1,
+            "control_mode": True,
+            "control_repeat": 5,
+            "control_topic": "$CONTROL/dynamic-security/v1",
+            "control_payload": {"commands": [{"command": "listClients"}]},
+        },
+    }
+
+
 @app.command()
 def main(
     tokens_path: str = "benchmarks/tokens.json",
@@ -1324,6 +1496,8 @@ def main(
             },
             **_static_acl_scenarios(tokens),
             **_issue30_acl_read_fanout_scenarios(tokens),
+            **_issue22_sqlite_rbac_churn_scenarios(tokens),
+            **_issue22_sqlite_rbac_deep_scenarios(tokens),
             "JWT-HTTP-200MS": {
                 "mosquitto_conf": "./mosquitto_http.conf",
                 "username": "jwt",
@@ -1998,6 +2172,11 @@ def main(
             "SQLITE-ACLREAD-FANOUT-CHURN-JWT-10/50/100, "
             "SQLITE-ACLREAD-FANOUT-CHURN-BIS-10/50/100",
         )
+        logger.info("SQLITE-RBAC-CHURN-JWT, SQLITE-RBAC-CHURN-BIS")
+        logger.info(
+            "SQLITE-RBAC-DEEP-CONFLICT-JWT, SQLITE-RBAC-DEEP-CONFLICT-BIS, "
+            "SQLITE-RBAC-DEEP-CONTROL-JWT, SQLITE-RBAC-DEEP-CONTROL-BIS",
+        )
         logger.info(
             "STATIC-ACL-JWT, STATIC-ACL-BIS, STATIC-ACL-FANOUT, STATIC-ACL-FANOUT-BIS",
         )
@@ -2259,7 +2438,27 @@ def main(
                 "subscriber_count": s.get("subscriber_count"),
                 "fanout_churn_kind": s.get("fanout_churn_kind"),
                 "fanout_churn_after_messages": s.get("fanout_churn_after_messages"),
+                "fanout_churn_interval_messages": s.get("fanout_churn_interval_messages"),
+                "fanout_churn_max_events": s.get("fanout_churn_max_events"),
                 "fanout_churn_settle_ms": s.get("fanout_churn_settle_ms"),
+                "sqlite_seed_fanout": s.get("sqlite_seed_fanout"),
+                "sqlite_seed_profile": s.get("sqlite_seed_profile"),
+                "sqlite_seed_db": s.get("sqlite_seed_db"),
+                "sqlite_seed_topic": s.get("sqlite_seed_topic"),
+                "sqlite_seed_subscribers": s.get("sqlite_seed_subscribers"),
+                "fanout_churn_sqlite_db": s.get("fanout_churn_sqlite_db"),
+                "fanout_churn_sqlite_topic": s.get("fanout_churn_sqlite_topic"),
+                "fanout_churn_sqlite_subscribers": s.get("fanout_churn_sqlite_subscribers"),
+                "cache_context": {
+                    "acl_read_full_authz_expected": bool(
+                        str(s.get("mosquitto_conf", "")).endswith("mosquitto_sqlite_acl_read.conf")
+                    ),
+                    "cache_ttl_seconds": 3600,
+                    "note": (
+                        "strict ACL_READ SQLite scenarios should enforce post-churn policy "
+                        "changes on fan-out delivery; cache must not mask revocations"
+                    ),
+                },
             },
             "fanout_metrics": {
                 "subscriber_count": s.get(
@@ -2324,6 +2523,7 @@ def main(
                         subscriber_count=int(
                             s.get("sqlite_seed_subscribers", s.get("subscriber_count", clients))
                         ),
+                        profile=str(s.get("sqlite_seed_profile", "fanout_basic")),
                     )
                 mqtt5_cfg = s.get("mqtt5_auth")
                 if mqtt5_cfg is not None:
@@ -2468,6 +2668,8 @@ def main(
                         control_after_messages=s.get("control_after_messages", 0),
                         fanout_churn_kind=s.get("fanout_churn_kind"),
                         fanout_churn_after_messages=s.get("fanout_churn_after_messages", 0),
+                        fanout_churn_interval_messages=s.get("fanout_churn_interval_messages", 0),
+                        fanout_churn_max_events=s.get("fanout_churn_max_events", 1),
                         fanout_churn_settle_ms=s.get("fanout_churn_settle_ms", 0),
                         fanout_churn_dynsec_source=s.get("fanout_churn_dynsec_source"),
                         fanout_churn_sqlite_db=s.get("fanout_churn_sqlite_db"),

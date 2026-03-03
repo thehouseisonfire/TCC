@@ -16,7 +16,7 @@ Execution commands and run workflow are documented in
 | HTTP policy (introspection) | `crates/authz-server/src/main.rs` | `policy_mode=http` or `hybrid` | Rule engine with deny-over-allow semantics, operation/client/role/topic matching, MQTT wildcards, and optional legacy prefix mode. |
 | Static ACL file | `docker/static-acl.conf` | `policy_mode=static_acl` | Compound gate with token + Mosquitto native ACLs. Token allow short-circuits; token deny defers to ACL. |
 | Dynamic Security snapshot | `docker/dynamic-security*.json` | `policy_mode=dynamic_security` | Local snapshot of Mosquitto dynsec-like RBAC, reloaded on interval. |
-| SQLite policy | `sqlite_policy.rs` + `benchmarks/policy_churn.py` | `policy_mode=sqlite` | Simple `acl` table with deterministic fan-out seed/churn helpers for Issue 30. **Not parity-grade RBAC** yet. |
+| SQLite policy | `sqlite_policy.rs` + `benchmarks/policy_churn.py` | `policy_mode=sqlite` | RBAC-aware SQLite backend (`users`, `roles`, `user_roles`, `role_acls`, `role_deny_acls`) with role priorities, deny-over-allow precedence, legacy `acl` fallback for compatibility, and deterministic fan-out seed/churn helpers. |
 
 ### Token-Only Authorization Semantics
 
@@ -169,13 +169,26 @@ Issue 30 dynamic-security notes:
 
 | Scenario | Token | Policy Source | Policy Detail | Expected Outcome |
 | --- | --- | --- | --- | --- |
-| SQLITE-ACLREAD-FANOUT-CHURN-JWT-{10,50,100} | JWT | SQLite | `acl_read_full_authz=true`; seeded fan-out ACL rows (subscribe+read) then mid-run revoke of subscriber `ACL_READ` rows after message 5 | Existing subscribers denied on post-churn fan-out |
+| SQLITE-ACLREAD-FANOUT-CHURN-JWT-{10,50,100} | JWT | SQLite | `acl_read_full_authz=true`; seeded fan-out RBAC grants (reader subscribe/read + publisher write) then mid-run revoke of reader-role `ACL_READ` grant after message 5 | Existing subscribers denied on post-churn fan-out |
 | SQLITE-ACLREAD-FANOUT-CHURN-BIS-{10,50,100} | Biscuit | SQLite | Same as JWT variant with Biscuit token path | Existing subscribers denied on post-churn fan-out |
+| SQLITE-RBAC-CHURN-JWT | JWT | SQLite | Strict `ACL_READ` with periodic `sqlite_toggle_read` churn (message 4, every 4, max 4 events) | Alternating delivery drop/recovery windows |
+| SQLITE-RBAC-CHURN-BIS | Biscuit | SQLite | Same as JWT periodic churn variant with Biscuit token path | Alternating delivery drop/recovery windows |
+| SQLITE-RBAC-DEEP-CONFLICT-JWT | JWT | SQLite | Deep RBAC profile with explicit deny-over-allow conflicts and priority tiers; periodic `sqlite_toggle_private_deny` churn on `sensors/private/broadcast` | Deterministic partial fan-out + alternating deny/allow windows |
+| SQLITE-RBAC-DEEP-CONFLICT-BIS | Biscuit | SQLite | Same deep conflict profile/churn as JWT variant | Deterministic partial fan-out + alternating deny/allow windows |
+| SQLITE-RBAC-DEEP-CONTROL-JWT | JWT | SQLite | Deep control-family profile with `CONTROL` + `system/notifications` grants; control-mode publishes on `$CONTROL/...` | Control-plane allow path validated under SQLite RBAC |
+| SQLITE-RBAC-DEEP-CONTROL-BIS | Biscuit | SQLite | Same deep control profile as JWT variant | Control-plane allow path validated under SQLite RBAC |
 
-Issue 30 sqlite notes:
+Issue 30/22 sqlite notes:
 - Uses `mosquitto_sqlite_acl_read.conf` with `policy_mode=sqlite` and `plugin_opt_acl_read_full_authz true`.
-- `benchmarks/policy_churn.py` seeds deterministic rows for `client_1..N` and `fanout_publisher`.
-- Mid-run churn removes only subscriber `ACL_READ` rows for `fanout/broadcast` (subscribe rows remain).
+- `plugin_opt_sqlite_seed_demo_rules false` keeps benchmark policy source deterministic and externalized to scenario helpers.
+- `benchmarks/policy_churn.py` supports deterministic seed profiles:
+  - `fanout_basic`: reader/publisher RBAC baseline.
+  - `rbac_deep`: explicit deny-over-allow conflicts + multi-role priority tiers.
+  - `rbac_deep_control_allow`: deep profile plus control-admin assignment for `client_1`.
+- Issue 30 one-shot churn removes reader-role `ACL_READ` grant for `fanout/broadcast` (subscribe/read split preserved).
+- Issue 22 periodic churn toggles reader-role `ACL_READ` grant at deterministic message intervals during the same run.
+- Deep conflict churn toggles private-topic deny rows (`sqlite_toggle_private_deny`) to
+  expose cache-sensitive authorization transitions under strict `ACL_READ`.
 
 
 ### 2.6 Lifecycle And Reauthentication

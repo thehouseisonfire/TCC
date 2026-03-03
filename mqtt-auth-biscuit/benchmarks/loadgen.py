@@ -256,15 +256,32 @@ class FanoutSubscribeBarrier:
 class FanoutChurnConfig:
     kind: str | None = None
     after_messages: int = 0
+    interval_messages: int = 0
+    max_events: int = 1
     settle_ms: int = 0
     dynsec_source: str | None = None
     sqlite_db: str | None = None
     sqlite_topic: str | None = None
     sqlite_subscribers: int | None = None
+    applied_count: int = 0
 
     @property
     def enabled(self) -> bool:
         return bool(self.kind) and self.after_messages > 0
+
+
+def _should_apply_fanout_churn(sequence_id: int, cfg: FanoutChurnConfig) -> bool:
+    if not cfg.enabled:
+        return False
+    if sequence_id < cfg.after_messages:
+        return False
+    if cfg.max_events > 0 and cfg.applied_count >= cfg.max_events:
+        return False
+    if sequence_id == cfg.after_messages:
+        return True
+    if cfg.interval_messages <= 0:
+        return False
+    return (sequence_id - cfg.after_messages) % cfg.interval_messages == 0
 
 
 def _mk_payload(size: int) -> bytes:
@@ -572,6 +589,30 @@ def _apply_fanout_churn(cfg: FanoutChurnConfig) -> str | None:
             if not cfg.sqlite_subscribers:
                 return "fanout_churn_missing_sqlite_subscribers"
             policy_churn.revoke_sqlite_read_fanout(
+                cfg.sqlite_db,
+                topic=cfg.sqlite_topic,
+                subscriber_count=cfg.sqlite_subscribers,
+            )
+        elif cfg.kind == "sqlite_toggle_read":
+            if not cfg.sqlite_db:
+                return "fanout_churn_missing_sqlite_db"
+            if not cfg.sqlite_topic:
+                return "fanout_churn_missing_sqlite_topic"
+            if not cfg.sqlite_subscribers:
+                return "fanout_churn_missing_sqlite_subscribers"
+            policy_churn.toggle_sqlite_read_fanout(
+                cfg.sqlite_db,
+                topic=cfg.sqlite_topic,
+                subscriber_count=cfg.sqlite_subscribers,
+            )
+        elif cfg.kind == "sqlite_toggle_private_deny":
+            if not cfg.sqlite_db:
+                return "fanout_churn_missing_sqlite_db"
+            if not cfg.sqlite_topic:
+                return "fanout_churn_missing_sqlite_topic"
+            if not cfg.sqlite_subscribers:
+                return "fanout_churn_missing_sqlite_subscribers"
+            policy_churn.toggle_sqlite_private_deny_fanout(
                 cfg.sqlite_db,
                 topic=cfg.sqlite_topic,
                 subscriber_count=cfg.sqlite_subscribers,
@@ -1023,17 +1064,13 @@ def _run_fanout_publisher(
     time.sleep(0.2)
 
     for sequence_id in range(message_count):
-        if (
-            fanout_churn is not None
-            and fanout_churn.enabled
-            and not churn_triggered
-            and sequence_id == fanout_churn.after_messages
-        ):
+        if fanout_churn is not None and _should_apply_fanout_churn(sequence_id, fanout_churn):
             churn_error = _apply_fanout_churn(fanout_churn)
             if churn_error:
                 errors.append(churn_error)
             else:
                 churn_triggered = True
+                fanout_churn.applied_count += 1
         try:
             sent_ts = time.perf_counter()
             payload = f"{sent_ts:.9f}|{sequence_id}|".encode()
@@ -1123,6 +1160,8 @@ def run_load(
     # Issue 30: Fan-out churn controls
     fanout_churn_kind: str | None = None,
     fanout_churn_after_messages: int = 0,
+    fanout_churn_interval_messages: int = 0,
+    fanout_churn_max_events: int = 1,
     fanout_churn_settle_ms: int = 0,
     fanout_churn_dynsec_source: str | None = None,
     fanout_churn_sqlite_db: str | None = None,
@@ -1157,6 +1196,8 @@ def run_load(
     fanout_churn_cfg = FanoutChurnConfig(
         kind=fanout_churn_kind,
         after_messages=fanout_churn_after_messages,
+        interval_messages=fanout_churn_interval_messages,
+        max_events=fanout_churn_max_events,
         settle_ms=fanout_churn_settle_ms,
         dynsec_source=fanout_churn_dynsec_source,
         sqlite_db=fanout_churn_sqlite_db,
@@ -1419,11 +1460,18 @@ def run_load(
         ]
     fanout_churn_expected_pre = None
     fanout_churn_expected_post = None
+    fanout_churn_post_ratio = None
+    fanout_cache_validity_signal = None
     if fanout_churn_cfg.enabled and mode == "fanout":
         pre_messages = min(max(fanout_churn_cfg.after_messages, 0), message_count)
         post_messages = max(message_count - pre_messages, 0)
         fanout_churn_expected_pre = pre_messages * clients
         fanout_churn_expected_post = post_messages * clients
+        if fanout_churn_expected_post > 0:
+            fanout_churn_post_ratio = received_post_churn / fanout_churn_expected_post
+        fanout_cache_validity_signal = bool(
+            fanout_churn_triggered and received_post_churn < fanout_churn_expected_post
+        )
 
     return {
         "inputs": {
@@ -1476,6 +1524,8 @@ def run_load(
             "fanout_churn": {
                 "kind": fanout_churn_cfg.kind,
                 "after_messages": fanout_churn_cfg.after_messages,
+                "interval_messages": fanout_churn_cfg.interval_messages,
+                "max_events": fanout_churn_cfg.max_events,
                 "settle_ms": fanout_churn_cfg.settle_ms,
                 "dynsec_source": fanout_churn_cfg.dynsec_source,
                 "sqlite_db": fanout_churn_cfg.sqlite_db,
@@ -1515,12 +1565,17 @@ def run_load(
             "enabled": fanout_churn_cfg.enabled and mode == "fanout",
             "kind": fanout_churn_cfg.kind if mode == "fanout" else None,
             "after_messages": fanout_churn_cfg.after_messages if mode == "fanout" else None,
+            "interval_messages": fanout_churn_cfg.interval_messages if mode == "fanout" else None,
+            "max_events": fanout_churn_cfg.max_events if mode == "fanout" else None,
             "settle_ms": fanout_churn_cfg.settle_ms if mode == "fanout" else None,
             "triggered": fanout_churn_triggered if mode == "fanout" else None,
+            "applied_events": fanout_churn_cfg.applied_count if mode == "fanout" else None,
             "received_pre_churn": received_pre_churn if mode == "fanout" else None,
             "received_post_churn": received_post_churn if mode == "fanout" else None,
             "expected_pre_churn": fanout_churn_expected_pre if mode == "fanout" else None,
             "expected_post_churn": fanout_churn_expected_post if mode == "fanout" else None,
+            "post_churn_delivery_ratio": fanout_churn_post_ratio if mode == "fanout" else None,
+            "cache_validity_signal": fanout_cache_validity_signal if mode == "fanout" else None,
         },
         "errors": errors,
     }
@@ -1632,13 +1687,28 @@ def main(
         None,
         "--fanout-churn-kind",
         envvar="MQTT_FANOUT_CHURN_KIND",
-        help="Fan-out churn mode: dynsec_swap or sqlite_revoke_read.",
+        help=(
+            "Fan-out churn mode: dynsec_swap, sqlite_revoke_read, "
+            "sqlite_toggle_read, or sqlite_toggle_private_deny."
+        ),
     ),
     fanout_churn_after_messages: int = typer.Option(
         0,
         "--fanout-churn-after-messages",
         envvar="MQTT_FANOUT_CHURN_AFTER_MESSAGES",
         help="Apply churn after N publisher fan-out messages.",
+    ),
+    fanout_churn_interval_messages: int = typer.Option(
+        0,
+        "--fanout-churn-interval-messages",
+        envvar="MQTT_FANOUT_CHURN_INTERVAL_MESSAGES",
+        help="Re-apply churn every N messages after initial trigger (0 = one-shot).",
+    ),
+    fanout_churn_max_events: int = typer.Option(
+        1,
+        "--fanout-churn-max-events",
+        envvar="MQTT_FANOUT_CHURN_MAX_EVENTS",
+        help="Maximum number of churn events to apply per run.",
     ),
     fanout_churn_settle_ms: int = typer.Option(
         0,
@@ -1723,13 +1793,21 @@ def main(
         raise typer.BadParameter("fanout churn options require --mode fanout")
     if fanout_churn_kind == "dynsec_swap" and not fanout_churn_dynsec_source:
         raise typer.BadParameter("--fanout-churn-dynsec-source is required for dynsec_swap")
-    if fanout_churn_kind == "sqlite_revoke_read":
+    if fanout_churn_kind in {
+        "sqlite_revoke_read",
+        "sqlite_toggle_read",
+        "sqlite_toggle_private_deny",
+    }:
         if not fanout_churn_sqlite_db:
-            raise typer.BadParameter("--fanout-churn-sqlite-db is required for sqlite_revoke_read")
+            raise typer.BadParameter("--fanout-churn-sqlite-db is required for SQLite churn modes")
         if not fanout_churn_sqlite_topic:
             fanout_churn_sqlite_topic = fanout_topic
         if fanout_churn_sqlite_subscribers is None:
             fanout_churn_sqlite_subscribers = clients
+    if fanout_churn_interval_messages < 0:
+        raise typer.BadParameter("--fanout-churn-interval-messages must be >= 0")
+    if fanout_churn_max_events <= 0:
+        raise typer.BadParameter("--fanout-churn-max-events must be > 0")
 
     res = run_load(
         host=host,
@@ -1789,6 +1867,8 @@ def main(
         control_after_messages=control_after_messages,
         fanout_churn_kind=fanout_churn_kind,
         fanout_churn_after_messages=fanout_churn_after_messages,
+        fanout_churn_interval_messages=fanout_churn_interval_messages,
+        fanout_churn_max_events=fanout_churn_max_events,
         fanout_churn_settle_ms=fanout_churn_settle_ms,
         fanout_churn_dynsec_source=fanout_churn_dynsec_source,
         fanout_churn_sqlite_db=fanout_churn_sqlite_db,

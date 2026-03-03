@@ -1206,11 +1206,22 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
                 let Some(path) = config.policy.sqlite_path.as_deref() else {
                     return MOSQ_ERR_INVAL;
                 };
-                let policy = SqlitePolicy::open(path).ok();
-                if let Some(p) = policy.as_ref() {
-                    let _ = p.seed_demo_rules();
+                let policy = match SqlitePolicy::open(path) {
+                    Ok(policy) => policy,
+                    Err(err) => {
+                        log_info(&format!("SQLite policy open failed ({path}): {err}"));
+                        return MOSQ_ERR_INVAL;
+                    }
+                };
+
+                if config.sqlite_seed_demo_rules
+                    && let Err(err) = policy.seed_demo_rules()
+                {
+                    log_info(&format!("SQLite demo seed failed ({path}): {err}"));
+                    return MOSQ_ERR_INVAL;
                 }
-                policy
+
+                Some(policy)
             }
             _ => None,
         };
@@ -3142,6 +3153,7 @@ mod verification {
                 http_ca_file: None,
                 http_tls_insecure: false,
             },
+            sqlite_seed_demo_rules: false,
             cache_ttl_seconds: 3600,
             allow_anonymous_no_token: false,
             acl_read_full_authz: false,

@@ -256,3 +256,56 @@ def test_fanout_barrier_expected_uses_spawned_workers(monkeypatch) -> None:
     assert barrier_instances[0].expected == 1
     assert "fanout_subscribe_ready_timeout" not in result["errors"]
     assert any(err.startswith("delegation_failed:") for err in result["errors"])
+
+
+def test_fanout_churn_output_includes_periodic_cache_signals(monkeypatch) -> None:
+    class FakeFanoutSubscribeBarrier:
+        def __init__(self, expected: int):
+            self.expected = expected
+            self.event = self
+
+        def set_expected(self, expected: int) -> None:
+            self.expected = expected
+
+        def mark_ready(self) -> None:
+            return
+
+        def wait(self, timeout: float | None = None) -> bool:
+            return True
+
+    def fake_run_worker(
+        cfg: loadgen.WorkerConfig,
+        _start_evt: threading.Event,
+        _publish_start_evt: threading.Event,
+        out_q: queue.Queue,
+    ):
+        out_q.put(_empty_worker_result(cfg.client_id))
+
+    def fake_run_fanout_publisher(**kwargs):
+        churn_cfg = kwargs.get("fanout_churn")
+        assert churn_cfg is not None
+        churn_cfg.applied_count = 2
+        return [], {0: [], 1: [], 2: []}, [], True
+
+    monkeypatch.setattr(loadgen, "FanoutSubscribeBarrier", FakeFanoutSubscribeBarrier)
+    monkeypatch.setattr(loadgen, "_run_worker", fake_run_worker)
+    monkeypatch.setattr(loadgen, "_run_fanout_publisher", fake_run_fanout_publisher)
+    monkeypatch.setattr(loadgen.time, "sleep", lambda _seconds: None)
+
+    kwargs = _fanout_kwargs()
+    kwargs["clients"] = 2
+    kwargs["message_count"] = 10
+    result = loadgen.run_load(
+        **kwargs,
+        fanout_churn_kind="sqlite_toggle_read",
+        fanout_churn_after_messages=2,
+        fanout_churn_interval_messages=3,
+        fanout_churn_max_events=4,
+    )
+
+    churn = result["fanout_churn"]
+    assert churn["interval_messages"] == 3
+    assert churn["max_events"] == 4
+    assert churn["applied_events"] == 2
+    assert churn["post_churn_delivery_ratio"] == 0.0
+    assert churn["cache_validity_signal"] is True

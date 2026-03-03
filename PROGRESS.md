@@ -261,12 +261,12 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 1. Issue 37: ACL_READ fan-out scenarios across policy profiles
 2. Issue 21: Expand Biscuit authorizer (if current template insufficient)
 3. Issue 23: Proactive client reauthentication
-4. Issue 8.2: Containerized benchmark topology
+4. Issue 41: Containerized benchmark topology
 ---
 
 #### A) Policy Source Parity
 
-- [ ] **Issue 8.2: Containerized benchmark topology (client-per-container +
+- [ ] **Issue 41: Containerized benchmark topology (client-per-container +
      service separation)**
   - Goal: strengthen experimental isolation and fidelity by running benchmark
     clients in containers (optionally one container per client) and ensuring

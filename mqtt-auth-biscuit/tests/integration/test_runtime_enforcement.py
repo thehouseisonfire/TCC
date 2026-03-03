@@ -224,11 +224,11 @@ def test_runtime_acl_read_expiry_disconnect_and_reconnect(
     issuer = compose_harness.token_issuer(tls=False)
 
     topic = (
-        f"fanout/runtime-enforcement/expiry/issue39/{token_kind}/"
+        f"fanout/runtime-enforcement/expiry/runtime-semantics/{token_kind}/"
         f"{acl_read_full_authz}/{unique_suffix}"
     )
-    sub_client_id = f"runtime-enforcement-sub-issue39-{unique_suffix}"
-    pub_client_id = f"runtime-enforcement-pub-issue39-{unique_suffix}"
+    sub_client_id = f"runtime-enforcement-sub-runtime-semantics-{unique_suffix}"
+    pub_client_id = f"runtime-enforcement-pub-runtime-semantics-{unique_suffix}"
 
     subscribe_grants = [{"op": "subscribe", "res": topic}]
     publish_grants = [{"op": "publish", "res": topic}]
@@ -338,11 +338,11 @@ def test_runtime_expiry_disconnect_does_not_emit_lwt(
     compose_harness.up(mosquitto_conf="./mosquitto_integration_acl_read_full.conf", tls=False)
     issuer = compose_harness.token_issuer(tls=False)
 
-    data_topic = f"fanout/runtime-enforcement/lwt/data/issue39/{unique_suffix}"
-    will_topic = f"fanout/runtime-enforcement/lwt/will/issue39/{unique_suffix}"
-    sub_client_id = f"runtime-enforcement-lwt-sub-issue39-{unique_suffix}"
-    pub_client_id = f"runtime-enforcement-lwt-pub-issue39-{unique_suffix}"
-    observer_client_id = f"runtime-enforcement-lwt-observer-issue39-{unique_suffix}"
+    data_topic = f"fanout/runtime-enforcement/lwt/data/runtime-semantics/{unique_suffix}"
+    will_topic = f"fanout/runtime-enforcement/lwt/will/runtime-semantics/{unique_suffix}"
+    sub_client_id = f"runtime-enforcement-lwt-sub-runtime-semantics-{unique_suffix}"
+    pub_client_id = f"runtime-enforcement-lwt-pub-runtime-semantics-{unique_suffix}"
+    observer_client_id = f"runtime-enforcement-lwt-observer-runtime-semantics-{unique_suffix}"
     will_payload = f"unexpected-will-{unique_suffix}"
 
     expired_sub_token = _issue_token(
@@ -426,7 +426,7 @@ def test_runtime_control_acl_read_notify_workflow(
     tmp_path,
 ) -> None:
     topic = "fanout/broadcast"
-    subscriber_client_id = f"runtime-enforcement-control-sub-issue39-{unique_suffix}"
+    subscriber_client_id = f"runtime-enforcement-control-sub-runtime-semantics-{unique_suffix}"
     notification_topic = f"system_notification/{subscriber_client_id}"
     allow_snapshot = _build_dynsec_control_notify_snapshot(
         source_path="docker/dynamic-security-fanout-read-allow-unpinned.json",
@@ -521,10 +521,10 @@ def test_runtime_negative_controls_no_false_disconnects(
     compose_harness.up(mosquitto_conf="./mosquitto_integration_acl_read_full.conf", tls=False)
     issuer = compose_harness.token_issuer(tls=False)
 
-    topic_subscribe = f"sensors/runtime-enforcement/sub/issue39/{unique_suffix}"
-    topic_write = f"sensors/runtime-enforcement/write/issue39/{unique_suffix}"
-    topic_read = f"sensors/runtime-enforcement/read/issue39/{unique_suffix}"
-    topic_allow = f"sensors/runtime-enforcement/allow/issue39/{unique_suffix}"
+    topic_subscribe = f"sensors/runtime-enforcement/sub/runtime-semantics/{unique_suffix}"
+    topic_write = f"sensors/runtime-enforcement/write/runtime-semantics/{unique_suffix}"
+    topic_read = f"sensors/runtime-enforcement/read/runtime-semantics/{unique_suffix}"
+    topic_allow = f"sensors/runtime-enforcement/allow/runtime-semantics/{unique_suffix}"
 
     deny_sub_token = _issue_token(
         issuer,
@@ -695,8 +695,8 @@ def test_runtime_control_disable_client_kick_and_reconnect_denied(
     topic = "fanout/broadcast"
     snapshot = _build_dynsec_control_notify_snapshot(
         source_path="docker/dynamic-security.json",
-        output_path=tmp_path / "dynsec-control-enforcement-issue31.json",
-        notification_topic=f"fanout/notifications/control-enforcement/issue31/{unique_suffix}",
+        output_path=tmp_path / "dynsec-control-disable-client.json",
+        notification_topic=f"fanout/notifications/control-disable-client/{unique_suffix}",
         allow_data_read=True,
     )
     policy_churn.apply_dynsec_snapshot(str(snapshot))
@@ -800,11 +800,11 @@ def test_runtime_control_disable_client_skips_offline_stale_session_kick(
     tmp_path,
 ) -> None:
     topic = "fanout/broadcast"
-    stale_client_id = f"control-enforcement-stale-issue31-{unique_suffix}"
+    stale_client_id = f"control-disable-client-stale-{unique_suffix}"
     snapshot = _build_dynsec_control_notify_snapshot(
         source_path="docker/dynamic-security.json",
-        output_path=tmp_path / "dynsec-control-stale-session-issue31.json",
-        notification_topic=f"fanout/notifications/control-enforcement/stale/issue31/{unique_suffix}",
+        output_path=tmp_path / "dynsec-control-disable-client-stale-session.json",
+        notification_topic=f"fanout/notifications/control-disable-client/stale/{unique_suffix}",
         allow_data_read=True,
     )
     policy_churn.apply_dynsec_snapshot(str(snapshot))
@@ -893,8 +893,8 @@ def test_runtime_enhanced_auth_entrypoint_over_tcp_and_tls(
     compose_harness.up(mosquitto_conf=_resolve_conf(base_conf, tls=tls), tls=tls)
     issuer = compose_harness.token_issuer(tls=tls)
 
-    topic = f"sensors/runtime-enforcement/enhanced/issue39/{unique_suffix}"
-    client_id = f"runtime-enforcement-enhanced-issue39-{token_kind}-{unique_suffix}"
+    topic = f"sensors/runtime-enforcement/enhanced/runtime-semantics/{unique_suffix}"
+    client_id = f"runtime-enforcement-enhanced-runtime-semantics-{token_kind}-{unique_suffix}"
     grants = [{"op": "publish", "res": topic}, {"op": "subscribe", "res": topic}]
 
     token1 = _issue_token(
@@ -962,7 +962,7 @@ def test_runtime_basic_auth_over_tls_stays_functional(
     )
     issuer = compose_harness.token_issuer(tls=True)
 
-    topic = f"sensors/runtime-enforcement/tls/basic/issue39/{unique_suffix}"
+    topic = f"sensors/runtime-enforcement/tls/basic/runtime-semantics/{unique_suffix}"
     sub_client_id = f"tls-sub-{unique_suffix}"
     pub_client_id = f"tls-pub-{unique_suffix}"
 
@@ -1059,7 +1059,7 @@ def test_runtime_fanout_churn_enforcement(
         mqtt_client_factory(
             host="localhost",
             port=1883,
-            client_id=f"runtime-enforcement-fanout-sub-issue39-{idx}-{unique_suffix}",
+            client_id=f"runtime-enforcement-fanout-sub-runtime-semantics-{idx}-{unique_suffix}",
             username="dynsec_client_1",
             password=subscriber_token,
         )

@@ -353,7 +353,7 @@ cd mqtt-auth-biscuit
 pytest \
   benchmarks/test_loadgen_worker_suback.py \
   benchmarks/test_loadgen_fanout_sync.py \
-  benchmarks/test_acl_read_fanout_issue30_coverage.py \
+  benchmarks/test_acl_read_fanout_churn_coverage.py \
   benchmarks/test_static_acl_coverage.py \
   benchmarks/test_authz_config_state.py \
   benchmarks/test_policy_churn.py -q
@@ -396,7 +396,7 @@ CI split and expected runtime:
   - Full runtime suite: often higher teens to 30+ minutes (cache/load-sensitive)
 
 Failure artifact capture:
-- Set `ISSUE39_ARTIFACT_DIR=/path/to/out` when running locally to persist:
+- Set `RUNTIME_ENFORCEMENT_ARTIFACT_DIR=/path/to/out` when running locally to persist:
   - `mosquitto.log`, `authz.log`, `token-issuer.log`
   - `docker-compose-ps.txt`, `docker-compose-config.txt`
   - `context.json` and failed test node IDs

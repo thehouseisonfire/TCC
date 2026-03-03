@@ -30,13 +30,13 @@ def _expected_ids() -> set[str]:
     return expected
 
 
-def test_acl_read_profile_issue37_scenario_ids_are_preserved() -> None:
-    scenarios = rs._acl_read_profile_scenarios_issue37(TOKENS)
+def test_acl_read_profile_matrix_scenario_ids_are_preserved() -> None:
+    scenarios = rs._acl_read_profile_matrix_scenarios(TOKENS)
     assert set(scenarios.keys()) == _expected_ids()
 
 
-def test_acl_read_profile_issue37_scenarios_are_strict_fanout_with_profile_metadata() -> None:
-    scenarios = rs._acl_read_profile_scenarios_issue37(TOKENS)
+def test_acl_read_profile_matrix_scenarios_are_strict_fanout_with_profile_metadata() -> None:
+    scenarios = rs._acl_read_profile_matrix_scenarios(TOKENS)
 
     for scenario_id, scenario in scenarios.items():
         assert scenario["mode"] == "fanout"
@@ -62,8 +62,8 @@ def test_acl_read_profile_issue37_scenarios_are_strict_fanout_with_profile_metad
             raise AssertionError(f"Unexpected scenario id: {scenario_id}")
 
 
-def test_acl_read_profile_issue37_http_hybrid_profile_slices_follow_balanced_scaling() -> None:
-    scenarios = rs._acl_read_profile_scenarios_issue37(TOKENS)
+def test_acl_read_profile_matrix_http_hybrid_profile_slices_follow_balanced_scaling() -> None:
+    scenarios = rs._acl_read_profile_matrix_scenarios(TOKENS)
 
     for source in ("HTTP", "HYBRID"):
         for tier in ("SIMPLE", "MED", "COMPLEX"):
@@ -86,8 +86,8 @@ def test_acl_read_profile_issue37_http_hybrid_profile_slices_follow_balanced_sca
                 assert deny_subscribers == [10]
 
 
-def test_acl_read_profile_issue37_deny_variants_include_explicit_read_deny_rule() -> None:
-    scenarios = rs._acl_read_profile_scenarios_issue37(TOKENS)
+def test_acl_read_profile_matrix_deny_variants_include_explicit_read_deny_rule() -> None:
+    scenarios = rs._acl_read_profile_matrix_scenarios(TOKENS)
     for scenario_id, scenario in scenarios.items():
         if "-DENY-" not in scenario_id:
             continue

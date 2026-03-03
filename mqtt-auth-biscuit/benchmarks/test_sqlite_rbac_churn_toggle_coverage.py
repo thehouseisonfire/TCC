@@ -8,13 +8,13 @@ def _tokens() -> dict[str, str]:
     }
 
 
-def test_sqlite_rbac_churn_issue22_scenario_ids_are_present() -> None:
-    scenarios = rs._sqlite_rbac_churn_scenarios_issue22(_tokens())
+def test_sqlite_rbac_churn_toggle_scenario_ids_are_present() -> None:
+    scenarios = rs._sqlite_rbac_churn_toggle_scenarios(_tokens())
     assert set(scenarios.keys()) == {"SQLITE-RBAC-CHURN-JWT", "SQLITE-RBAC-CHURN-BIS"}
 
 
-def test_sqlite_rbac_churn_issue22_uses_periodic_sqlite_toggle_churn() -> None:
-    scenarios = rs._sqlite_rbac_churn_scenarios_issue22(_tokens())
+def test_sqlite_rbac_churn_toggle_uses_periodic_sqlite_toggle_churn() -> None:
+    scenarios = rs._sqlite_rbac_churn_toggle_scenarios(_tokens())
     for scenario in scenarios.values():
         assert scenario["mosquitto_conf"] == "./mosquitto_sqlite_acl_read.conf"
         assert scenario["mode"] == "fanout"

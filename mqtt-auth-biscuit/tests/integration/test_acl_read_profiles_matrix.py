@@ -175,7 +175,7 @@ def _prepare_sqlite_policy_db_for_container_write() -> None:
 
 @pytest.mark.broker_integration
 @pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
-def test_runtime_token_strict_acl_read_allow_and_deny_issue37(
+def test_runtime_token_strict_acl_read_allow_and_deny_profile_matrix(
     compose_harness,
     mqtt_client_factory,
     unique_suffix: str,
@@ -184,9 +184,9 @@ def test_runtime_token_strict_acl_read_allow_and_deny_issue37(
     compose_harness.up(mosquitto_conf="./mosquitto_integration_acl_read_full.conf", tls=False)
     issuer = compose_harness.token_issuer(tls=False)
 
-    topic = f"fanout/acl-read-profile/token/issue37/{token_kind}/{unique_suffix}"
-    allow_sub_id = f"acl-read-profile-token-allow-issue37-{unique_suffix}"
-    deny_sub_id = f"acl-read-profile-token-deny-issue37-{unique_suffix}"
+    topic = f"fanout/acl-read-profile/token/profile-matrix/{token_kind}/{unique_suffix}"
+    allow_sub_id = f"acl-read-profile-token-allow-profile-matrix-{unique_suffix}"
+    deny_sub_id = f"acl-read-profile-token-deny-profile-matrix-{unique_suffix}"
     pub_id = "fanout_publisher"
 
     allow_sub_token = _issue_token(
@@ -245,7 +245,9 @@ def test_runtime_token_strict_acl_read_allow_and_deny_issue37(
         publisher.connect()
 
         for idx in range(3):
-            publisher.publish(topic, f"acl-read-profile-token-issue37|{idx}|{unique_suffix}", qos=0)
+            publisher.publish(
+                topic, f"acl-read-profile-token-profile-matrix|{idx}|{unique_suffix}", qos=0
+            )
 
         assert allow_sub.wait_for_messages(1, timeout_s=5.0)
         time.sleep(1.0)
@@ -268,7 +270,7 @@ def test_runtime_token_strict_acl_read_allow_and_deny_issue37(
         pytest.param(100, marks=pytest.mark.ci_heavy),
     ],
 )
-def test_runtime_token_strict_acl_read_allow_scaling_issue37(
+def test_runtime_token_strict_acl_read_allow_scaling_profile_matrix(
     compose_harness,
     mqtt_client_factory,
     unique_suffix: str,
@@ -279,13 +281,13 @@ def test_runtime_token_strict_acl_read_allow_scaling_issue37(
     issuer = compose_harness.token_issuer(tls=False)
 
     topic = (
-        f"fanout/acl-read-profile/token/issue37/scale/{token_kind}/"
+        f"fanout/acl-read-profile/token/profile-matrix/scale/{token_kind}/"
         f"{subscriber_count}/{unique_suffix}"
     )
     sub_token = _issue_token(
         issuer,
         token_kind=token_kind,
-        client_id=f"acl-read-profile-token-scale-sub-issue37-{unique_suffix}",
+        client_id=f"acl-read-profile-token-scale-sub-profile-matrix-{unique_suffix}",
         topic=topic,
         ttl_seconds=180,
         grants=[{"op": "subscribe", "res": topic}],
@@ -303,7 +305,7 @@ def test_runtime_token_strict_acl_read_allow_scaling_issue37(
         mqtt_client_factory(
             host="localhost",
             port=1883,
-            client_id=f"acl-read-profile-token-scale-issue37-{idx}-{unique_suffix}",
+            client_id=f"acl-read-profile-token-scale-profile-matrix-{idx}-{unique_suffix}",
             username=token_kind,
             password=sub_token,
         )
@@ -326,7 +328,7 @@ def test_runtime_token_strict_acl_read_allow_scaling_issue37(
 
         for idx in range(message_count):
             publisher.publish(
-                topic, f"acl-read-profile-token-scale-issue37|{idx}|{unique_suffix}", qos=0
+                topic, f"acl-read-profile-token-scale-profile-matrix|{idx}|{unique_suffix}", qos=0
             )
 
         expected = _fanout_minimum_expected(subscriber_count, message_count)
@@ -356,7 +358,7 @@ def test_runtime_token_strict_acl_read_allow_scaling_issue37(
         pytest.param("complex", marks=pytest.mark.ci_heavy),
     ],
 )
-def test_runtime_http_hybrid_profile_fanout_enforcement_issue37(
+def test_runtime_http_hybrid_profile_fanout_enforcement_profile_matrix(
     compose_harness,
     mqtt_client_factory,
     unique_suffix: str,
@@ -371,8 +373,13 @@ def test_runtime_http_hybrid_profile_fanout_enforcement_issue37(
     compose_harness.up(mosquitto_conf=conf_by_source[policy_source], tls=False)
     issuer = compose_harness.token_issuer(tls=False)
     authz_base = "http://localhost:8081"
-    topic = f"fanout/acl-read-profile/issue37/{policy_source}/{tier}/{token_kind}/{unique_suffix}"
-    sub_id = f"acl-read-profile-{policy_source}-{tier}-{token_kind}-sub-issue37-{unique_suffix}"
+    topic = (
+        f"fanout/acl-read-profile/profile-matrix/"
+        f"{policy_source}/{tier}/{token_kind}/{unique_suffix}"
+    )
+    sub_id = (
+        f"acl-read-profile-{policy_source}-{tier}-{token_kind}-sub-profile-matrix-{unique_suffix}"
+    )
     pub_id = "fanout_publisher"
 
     sub_token = _issue_token(
@@ -392,8 +399,12 @@ def test_runtime_http_hybrid_profile_fanout_enforcement_issue37(
         grants=[],
     )
 
-    allow_authz = rs._http_hybrid_fanout_authz_config_issue37(tier, topic=topic, deny_read=False)
-    deny_authz = rs._http_hybrid_fanout_authz_config_issue37(tier, topic=topic, deny_read=True)
+    allow_authz = rs._http_hybrid_fanout_authz_config_profile_matrix(
+        tier, topic=topic, deny_read=False
+    )
+    deny_authz = rs._http_hybrid_fanout_authz_config_profile_matrix(
+        tier, topic=topic, deny_read=True
+    )
 
     _authz_reset(authz_base)
     _authz_apply(authz_base, allow_authz)
@@ -421,7 +432,9 @@ def test_runtime_http_hybrid_profile_fanout_enforcement_issue37(
         publisher.connect()
 
         publisher.publish(
-            topic, f"acl-read-profile-pre-issue37|{policy_source}|{tier}|{unique_suffix}", qos=0
+            topic,
+            f"acl-read-profile-pre-profile-matrix|{policy_source}|{tier}|{unique_suffix}",
+            qos=0,
         )
         assert subscriber.wait_for_messages(1, timeout_s=5.0)
         pre_count = subscriber.message_count
@@ -430,7 +443,9 @@ def test_runtime_http_hybrid_profile_fanout_enforcement_issue37(
         time.sleep(0.8)
 
         for idx in range(4):
-            publisher.publish(topic, f"acl-read-profile-post-issue37|{idx}|{unique_suffix}", qos=0)
+            publisher.publish(
+                topic, f"acl-read-profile-post-profile-matrix|{idx}|{unique_suffix}", qos=0
+            )
         time.sleep(1.0)
 
         assert subscriber.message_count == pre_count
@@ -453,7 +468,7 @@ def test_runtime_http_hybrid_profile_fanout_enforcement_issue37(
         pytest.param(100, marks=pytest.mark.ci_heavy),
     ],
 )
-def test_runtime_http_hybrid_med_allow_scaling_issue37(
+def test_runtime_http_hybrid_med_allow_scaling_profile_matrix(
     compose_harness,
     mqtt_client_factory,
     unique_suffix: str,
@@ -477,14 +492,14 @@ def test_runtime_http_hybrid_med_allow_scaling_issue37(
 
     tier: Literal["simple", "med", "complex"] = "med"
     topic = (
-        f"fanout/acl-read-profile/issue37/{policy_source}/{tier}/scale/"
+        f"fanout/acl-read-profile/profile-matrix/{policy_source}/{tier}/scale/"
         f"{token_kind}/{subscriber_count}/{unique_suffix}"
     )
     pub_id = "fanout_publisher"
     sub_token = _issue_token(
         issuer,
         token_kind=token_kind,
-        client_id=f"acl-read-profile-{policy_source}-scale-sub-issue37-{unique_suffix}",
+        client_id=f"acl-read-profile-{policy_source}-scale-sub-profile-matrix-{unique_suffix}",
         topic=topic,
         ttl_seconds=180,
         grants=[],
@@ -500,14 +515,15 @@ def test_runtime_http_hybrid_med_allow_scaling_issue37(
 
     _authz_reset(authz_base)
     _authz_apply(
-        authz_base, rs._http_hybrid_fanout_authz_config_issue37(tier, topic=topic, deny_read=False)
+        authz_base,
+        rs._http_hybrid_fanout_authz_config_profile_matrix(tier, topic=topic, deny_read=False),
     )
 
     subscribers = [
         mqtt_client_factory(
             host="localhost",
             port=1883,
-            client_id=f"acl-read-profile-{policy_source}-{token_kind}-scale-issue37-{idx}-{unique_suffix}",
+            client_id=f"acl-read-profile-{policy_source}-{token_kind}-scale-profile-matrix-{idx}-{unique_suffix}",
             username=token_kind,
             password=sub_token,
         )
@@ -537,7 +553,7 @@ def test_runtime_http_hybrid_med_allow_scaling_issue37(
         for idx in range(message_count):
             publisher.publish(
                 topic,
-                f"acl-read-profile-{policy_source}-med-scale-issue37|{idx}|{unique_suffix}",
+                f"acl-read-profile-{policy_source}-med-scale-profile-matrix|{idx}|{unique_suffix}",
                 qos=0,
             )
             time.sleep(0.08)
@@ -553,7 +569,7 @@ def test_runtime_http_hybrid_med_allow_scaling_issue37(
 
 @pytest.mark.broker_integration
 @pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
-def test_runtime_sqlite_strict_acl_read_revoke_issue37(
+def test_runtime_sqlite_strict_acl_read_revoke_profile_matrix(
     compose_harness,
     mqtt_client_factory,
     unique_suffix: str,
@@ -563,7 +579,7 @@ def test_runtime_sqlite_strict_acl_read_revoke_issue37(
     compose_harness.up(mosquitto_conf="./mosquitto_sqlite_acl_read.conf", tls=False)
     issuer = compose_harness.token_issuer(tls=False)
 
-    topic = f"fanout/acl-read-profile/issue37/sqlite/{token_kind}/{unique_suffix}"
+    topic = f"fanout/acl-read-profile/profile-matrix/sqlite/{token_kind}/{unique_suffix}"
     db_path = "docker/sqlite/policy.db"
     policy_churn.seed_sqlite_fanout_policy(
         db_path,
@@ -613,7 +629,9 @@ def test_runtime_sqlite_strict_acl_read_revoke_issue37(
         assert _is_granted(subscriber.subscribe(topic, qos=1))
         publisher.connect()
 
-        publisher.publish(topic, f"acl-read-profile-sqlite-pre-issue37|{unique_suffix}", qos=0)
+        publisher.publish(
+            topic, f"acl-read-profile-sqlite-pre-profile-matrix|{unique_suffix}", qos=0
+        )
         assert subscriber.wait_for_messages(1, timeout_s=5.0)
         pre_count = subscriber.message_count
 
@@ -622,7 +640,7 @@ def test_runtime_sqlite_strict_acl_read_revoke_issue37(
 
         for idx in range(3):
             publisher.publish(
-                topic, f"acl-read-profile-sqlite-post-issue37|{idx}|{unique_suffix}", qos=0
+                topic, f"acl-read-profile-sqlite-post-profile-matrix|{idx}|{unique_suffix}", qos=0
             )
         time.sleep(1.0)
 

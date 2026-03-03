@@ -25,8 +25,8 @@ TLS_CA_FILE = REPO_ROOT / "docker" / "tls" / "ca.pem"
 TLS_SERVER_CERT_FILE = REPO_ROOT / "docker" / "tls" / "server.pem"
 TLS_SERVER_KEY_FILE = REPO_ROOT / "docker" / "tls" / "server.key"
 DYNSEC_CONFIG_FILE = REPO_ROOT / "docker" / "dynamic-security.json"
-DOCKER_COMPOSE_PROJECT = "runtime_enforcement_issue39_integration"
-ISSUE39_ARTIFACT_DIR_ENV = "ISSUE39_ARTIFACT_DIR"
+DOCKER_COMPOSE_PROJECT = "runtime_enforcement_semantics_integration"
+RUNTIME_ENFORCEMENT_ARTIFACT_DIR_ENV = "RUNTIME_ENFORCEMENT_ARTIFACT_DIR"
 _FAILED_NODEIDS: set[str] = set()
 
 if str(REPO_ROOT) not in sys.path:
@@ -84,7 +84,7 @@ def _wait_for_http2_health(url: str, verify: bool | str, timeout_s: float = 30.0
 
 
 def _artifact_dir_from_env() -> Path | None:
-    raw = os.environ.get(ISSUE39_ARTIFACT_DIR_ENV, "").strip()
+    raw = os.environ.get(RUNTIME_ENFORCEMENT_ARTIFACT_DIR_ENV, "").strip()
     if not raw:
         return None
     return Path(raw)

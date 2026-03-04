@@ -137,7 +137,7 @@ fn env_default(name: &str, default: &str) -> String {
 }
 
 fn env_flag(name: &str) -> bool {
-    matches!(env::var(name).as_deref(), Ok("1") | Ok("true") | Ok("TRUE"))
+    matches!(env::var(name).as_deref(), Ok("1" | "true" | "TRUE"))
 }
 
 fn parse_hex_key(hex_key: &str, expected_len: usize) -> Result<Vec<u8>, String> {

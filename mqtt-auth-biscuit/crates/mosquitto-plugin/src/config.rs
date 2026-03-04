@@ -618,7 +618,7 @@ pub fn parse_options(
 mod tests {
     use super::{BiscuitAuthorizerProfile, ConfigError, PluginConfigBuilder, parse_options};
     use crate::MosquittoOpt;
-    use std::ffi::{CString, c_char};
+    use std::ffi::CString;
 
     #[test]
     #[cfg_attr(miri, ignore)]
@@ -723,24 +723,28 @@ mod tests {
         ];
         let mut opts = vec![
             MosquittoOpt {
-                key: cstrings[0].as_ptr() as *mut c_char,
-                value: cstrings[1].as_ptr() as *mut c_char,
+                key: cstrings[0].as_ptr().cast_mut(),
+                value: cstrings[1].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[2].as_ptr() as *mut c_char,
-                value: cstrings[3].as_ptr() as *mut c_char,
+                key: cstrings[2].as_ptr().cast_mut(),
+                value: cstrings[3].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[4].as_ptr() as *mut c_char,
-                value: cstrings[5].as_ptr() as *mut c_char,
+                key: cstrings[4].as_ptr().cast_mut(),
+                value: cstrings[5].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[6].as_ptr() as *mut c_char,
-                value: cstrings[7].as_ptr() as *mut c_char,
+                key: cstrings[6].as_ptr().cast_mut(),
+                value: cstrings[7].as_ptr().cast_mut(),
             },
         ];
 
-        let config = parse_options(opts.as_mut_ptr(), opts.len() as i32).expect("config parse");
+        let config = parse_options(
+            opts.as_mut_ptr(),
+            i32::try_from(opts.len()).expect("opts len fits i32"),
+        )
+        .expect("config parse");
         assert_eq!(
             config.biscuit_authorizer_profile,
             BiscuitAuthorizerProfile::Contextual
@@ -768,24 +772,27 @@ mod tests {
         ];
         let mut opts = vec![
             MosquittoOpt {
-                key: cstrings[0].as_ptr() as *mut c_char,
-                value: cstrings[1].as_ptr() as *mut c_char,
+                key: cstrings[0].as_ptr().cast_mut(),
+                value: cstrings[1].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[2].as_ptr() as *mut c_char,
-                value: cstrings[3].as_ptr() as *mut c_char,
+                key: cstrings[2].as_ptr().cast_mut(),
+                value: cstrings[3].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[4].as_ptr() as *mut c_char,
-                value: cstrings[5].as_ptr() as *mut c_char,
+                key: cstrings[4].as_ptr().cast_mut(),
+                value: cstrings[5].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[6].as_ptr() as *mut c_char,
-                value: cstrings[7].as_ptr() as *mut c_char,
+                key: cstrings[6].as_ptr().cast_mut(),
+                value: cstrings[7].as_ptr().cast_mut(),
             },
         ];
 
-        match parse_options(opts.as_mut_ptr(), opts.len() as i32) {
+        match parse_options(
+            opts.as_mut_ptr(),
+            i32::try_from(opts.len()).expect("opts len fits i32"),
+        ) {
             Ok(_) => panic!("must fail"),
             Err(err) => assert!(err.contains("Invalid biscuit_authorizer_profile")),
         }
@@ -812,24 +819,28 @@ mod tests {
         ];
         let mut opts = vec![
             MosquittoOpt {
-                key: cstrings[0].as_ptr() as *mut c_char,
-                value: cstrings[1].as_ptr() as *mut c_char,
+                key: cstrings[0].as_ptr().cast_mut(),
+                value: cstrings[1].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[2].as_ptr() as *mut c_char,
-                value: cstrings[3].as_ptr() as *mut c_char,
+                key: cstrings[2].as_ptr().cast_mut(),
+                value: cstrings[3].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[4].as_ptr() as *mut c_char,
-                value: cstrings[5].as_ptr() as *mut c_char,
+                key: cstrings[4].as_ptr().cast_mut(),
+                value: cstrings[5].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[6].as_ptr() as *mut c_char,
-                value: cstrings[7].as_ptr() as *mut c_char,
+                key: cstrings[6].as_ptr().cast_mut(),
+                value: cstrings[7].as_ptr().cast_mut(),
             },
         ];
 
-        let config = parse_options(opts.as_mut_ptr(), opts.len() as i32).expect("config parse");
+        let config = parse_options(
+            opts.as_mut_ptr(),
+            i32::try_from(opts.len()).expect("opts len fits i32"),
+        )
+        .expect("config parse");
         assert_eq!(config.biscuit_authorizer_max_time_ms, 50);
     }
 
@@ -854,24 +865,27 @@ mod tests {
         ];
         let mut opts = vec![
             MosquittoOpt {
-                key: cstrings[0].as_ptr() as *mut c_char,
-                value: cstrings[1].as_ptr() as *mut c_char,
+                key: cstrings[0].as_ptr().cast_mut(),
+                value: cstrings[1].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[2].as_ptr() as *mut c_char,
-                value: cstrings[3].as_ptr() as *mut c_char,
+                key: cstrings[2].as_ptr().cast_mut(),
+                value: cstrings[3].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[4].as_ptr() as *mut c_char,
-                value: cstrings[5].as_ptr() as *mut c_char,
+                key: cstrings[4].as_ptr().cast_mut(),
+                value: cstrings[5].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[6].as_ptr() as *mut c_char,
-                value: cstrings[7].as_ptr() as *mut c_char,
+                key: cstrings[6].as_ptr().cast_mut(),
+                value: cstrings[7].as_ptr().cast_mut(),
             },
         ];
 
-        match parse_options(opts.as_mut_ptr(), opts.len() as i32) {
+        match parse_options(
+            opts.as_mut_ptr(),
+            i32::try_from(opts.len()).expect("opts len fits i32"),
+        ) {
             Ok(_) => panic!("must fail"),
             Err(err) => assert!(err.contains("biscuit_authorizer_max_time_ms must be >= 1")),
         }
@@ -1015,24 +1029,28 @@ mod tests {
         ];
         let mut opts = vec![
             MosquittoOpt {
-                key: cstrings[0].as_ptr() as *mut c_char,
-                value: cstrings[1].as_ptr() as *mut c_char,
+                key: cstrings[0].as_ptr().cast_mut(),
+                value: cstrings[1].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[2].as_ptr() as *mut c_char,
-                value: cstrings[3].as_ptr() as *mut c_char,
+                key: cstrings[2].as_ptr().cast_mut(),
+                value: cstrings[3].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[4].as_ptr() as *mut c_char,
-                value: cstrings[5].as_ptr() as *mut c_char,
+                key: cstrings[4].as_ptr().cast_mut(),
+                value: cstrings[5].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[6].as_ptr() as *mut c_char,
-                value: cstrings[7].as_ptr() as *mut c_char,
+                key: cstrings[6].as_ptr().cast_mut(),
+                value: cstrings[7].as_ptr().cast_mut(),
             },
         ];
 
-        let config = parse_options(opts.as_mut_ptr(), opts.len() as i32).expect("config parse");
+        let config = parse_options(
+            opts.as_mut_ptr(),
+            i32::try_from(opts.len()).expect("opts len fits i32"),
+        )
+        .expect("config parse");
         assert!(config.sqlite_seed_demo_rules);
     }
 
@@ -1057,24 +1075,28 @@ mod tests {
         ];
         let mut opts = vec![
             MosquittoOpt {
-                key: cstrings[0].as_ptr() as *mut c_char,
-                value: cstrings[1].as_ptr() as *mut c_char,
+                key: cstrings[0].as_ptr().cast_mut(),
+                value: cstrings[1].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[2].as_ptr() as *mut c_char,
-                value: cstrings[3].as_ptr() as *mut c_char,
+                key: cstrings[2].as_ptr().cast_mut(),
+                value: cstrings[3].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[4].as_ptr() as *mut c_char,
-                value: cstrings[5].as_ptr() as *mut c_char,
+                key: cstrings[4].as_ptr().cast_mut(),
+                value: cstrings[5].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[6].as_ptr() as *mut c_char,
-                value: cstrings[7].as_ptr() as *mut c_char,
+                key: cstrings[6].as_ptr().cast_mut(),
+                value: cstrings[7].as_ptr().cast_mut(),
             },
         ];
 
-        let config = parse_options(opts.as_mut_ptr(), opts.len() as i32).expect("config parse");
+        let config = parse_options(
+            opts.as_mut_ptr(),
+            i32::try_from(opts.len()).expect("opts len fits i32"),
+        )
+        .expect("config parse");
         assert!(config.acl_read_full_authz);
     }
 
@@ -1118,24 +1140,28 @@ mod tests {
         ];
         let mut opts = vec![
             MosquittoOpt {
-                key: cstrings[0].as_ptr() as *mut c_char,
-                value: cstrings[1].as_ptr() as *mut c_char,
+                key: cstrings[0].as_ptr().cast_mut(),
+                value: cstrings[1].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[2].as_ptr() as *mut c_char,
-                value: cstrings[3].as_ptr() as *mut c_char,
+                key: cstrings[2].as_ptr().cast_mut(),
+                value: cstrings[3].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[4].as_ptr() as *mut c_char,
-                value: cstrings[5].as_ptr() as *mut c_char,
+                key: cstrings[4].as_ptr().cast_mut(),
+                value: cstrings[5].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[6].as_ptr() as *mut c_char,
-                value: cstrings[7].as_ptr() as *mut c_char,
+                key: cstrings[6].as_ptr().cast_mut(),
+                value: cstrings[7].as_ptr().cast_mut(),
             },
         ];
 
-        let config = parse_options(opts.as_mut_ptr(), opts.len() as i32).expect("config parse");
+        let config = parse_options(
+            opts.as_mut_ptr(),
+            i32::try_from(opts.len()).expect("opts len fits i32"),
+        )
+        .expect("config parse");
         assert_eq!(config.control_notify_topic_prefix, "system_notify");
     }
 }

@@ -6,14 +6,15 @@ import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import typer
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-WORKDIR = os.path.join(SCRIPT_DIR, "mqtt-auth-biscuit")
-BENCHMARKS_DIR = os.path.join(WORKDIR, "benchmarks")
-if WORKDIR not in sys.path:
-    sys.path.append(WORKDIR)
+SCRIPT_DIR = Path(__file__).resolve().parent
+WORKDIR = SCRIPT_DIR / "mqtt-auth-biscuit"
+workdir_str = str(WORKDIR)
+if workdir_str not in sys.path:
+    sys.path.append(workdir_str)
 
 from benchmarks.logging_utils import get_logger, setup_logging  # noqa: E402
 
@@ -29,7 +30,7 @@ def require_cmd(cmd: str) -> None:
 def check_paho() -> None:
     try:
         import paho.mqtt.client  # noqa: F401
-    except Exception as exc:
+    except ModuleNotFoundError as exc:
         raise SystemExit(
             "Missing dependency 'paho-mqtt'. Install it with: pip install paho-mqtt"
         ) from exc
@@ -61,7 +62,7 @@ def compose_args(compose_files: list[str]) -> list[str]:
     return args
 
 
-def run(cmd: list[str], cwd: str | None = None, env: dict | None = None) -> None:
+def run(cmd: list[str], cwd: str | Path | None = None, env: dict[str, str] | None = None) -> None:
     subprocess.run(cmd, cwd=cwd, env=env, check=True)
 
 
@@ -85,7 +86,7 @@ def main(
 ) -> None:
     setup_logging(log_level)
 
-    if not os.path.isdir(WORKDIR):
+    if not WORKDIR.is_dir():
         raise SystemExit(f"Expected mqtt-auth-biscuit directory at {WORKDIR}")
 
     require_cmd("cargo")
@@ -150,7 +151,7 @@ def main(
     logger.info("Running scenarios...")
     env = os.environ.copy()
     env["DOCKER_COMPOSE_BIN"] = " ".join(compose_cmd)
-    run(["python3", "benchmarks/run_scenarios.py", *run_args], cwd=WORKDIR, env=env)
+    run([sys.executable, "benchmarks/run_scenarios.py", *run_args], cwd=WORKDIR, env=env)
 
 
 if __name__ == "__main__":

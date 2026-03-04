@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 import math
-import os
 import sys
+from pathlib import Path
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from benchmarks.loadgen import _parse_qos_distribution
 

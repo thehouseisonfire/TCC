@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, cast
 
 import httpx
@@ -25,6 +26,7 @@ from benchmarks.logging_utils import get_logger, setup_logging
 
 logger = get_logger(__name__)
 app = typer.Typer(add_completion=False)
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Backward-compatible export used by packet analysis tests/importers.
 EMPTY_QOS_METRICS: dict[int, list[float]] = {0: [], 1: [], 2: []}
@@ -340,13 +342,12 @@ def _resolve_attenuate_cmd(custom_bin: str | None) -> list[str]:
     env_bin = os.environ.get("BISCUIT_ATTENUATE_BIN")
     if env_bin:
         return [env_bin]
-    repo_root = os.path.dirname(os.path.dirname(__file__))
     for candidate in [
-        os.path.join(repo_root, "target", "release", "biscuit-attenuate"),
-        os.path.join(repo_root, "target", "debug", "biscuit-attenuate"),
+        REPO_ROOT / "target" / "release" / "biscuit-attenuate",
+        REPO_ROOT / "target" / "debug" / "biscuit-attenuate",
     ]:
-        if os.path.exists(candidate):
-            return [candidate]
+        if candidate.exists():
+            return [str(candidate)]
     raise FileNotFoundError(
         "biscuit-attenuate binary not found; build it first "
         "(cargo build -p gen-tokens --bin biscuit-attenuate)"
@@ -400,8 +401,9 @@ def _attenuate_biscuit_token(token: str, cfg: WorkerConfig) -> tuple[str, float,
     t0 = time.perf_counter()
     output = subprocess.check_output(
         cmd,
-        cwd=os.path.dirname(os.path.dirname(__file__)),
-    ).decode("utf-8")
+        cwd=REPO_ROOT,
+        text=True,
+    )
     t1 = time.perf_counter()
     token_out = output.strip()
     if not token_out:
@@ -436,8 +438,9 @@ def _delegate_biscuit_token(
     t0 = time.perf_counter()
     output = subprocess.check_output(
         cmd,
-        cwd=os.path.dirname(os.path.dirname(__file__)),
-    ).decode("utf-8")
+        cwd=REPO_ROOT,
+        text=True,
+    )
     t1 = time.perf_counter()
     token_out = output.strip()
     if not token_out:

@@ -1,7 +1,7 @@
-import os
 import shutil
 import sqlite3
 from collections.abc import Iterable
+from pathlib import Path
 from typing import TypedDict
 
 ACL_READ = 0x01
@@ -36,14 +36,15 @@ class SqliteFanoutGrantResult(TypedDict):
     topic: str
 
 
-def _repo_root() -> str:
-    return os.path.dirname(os.path.dirname(__file__))
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
 
 
-def _resolve_repo_path(path: str) -> str:
-    if os.path.isabs(path):
-        return path
-    return os.path.join(_repo_root(), path)
+def _resolve_repo_path(path: str | Path) -> Path:
+    resolved_path = Path(path)
+    if resolved_path.is_absolute():
+        return resolved_path
+    return _repo_root() / resolved_path
 
 
 def apply_dynsec_snapshot(
@@ -54,16 +55,16 @@ def apply_dynsec_snapshot(
 ) -> dict[str, str]:
     src = _resolve_repo_path(source_path)
     dest = _resolve_repo_path(dest_path)
-    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    dest.parent.mkdir(parents=True, exist_ok=True)
     # Keep inode stable for bind-mounted single-file volumes used by Docker.
     shutil.copyfile(src, dest)
 
-    out = {"source": src, "dest": dest}
+    out = {"source": str(src), "dest": str(dest)}
     if copy_tls:
         tls_dest = _resolve_repo_path("docker/tls/dynamic-security.json")
-        os.makedirs(os.path.dirname(tls_dest), exist_ok=True)
+        tls_dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, tls_dest)
-        out["tls_dest"] = tls_dest
+        out["tls_dest"] = str(tls_dest)
     return out
 
 
@@ -147,7 +148,7 @@ def seed_sqlite_fanout_policy(
         raise ValueError(f"unknown sqlite seed profile: {profile}")
 
     resolved_db_path = _resolve_repo_path(db_path)
-    os.makedirs(os.path.dirname(resolved_db_path), exist_ok=True)
+    resolved_db_path.parent.mkdir(parents=True, exist_ok=True)
 
     with sqlite3.connect(resolved_db_path) as conn:
         _ensure_policy_tables(conn)
@@ -205,7 +206,7 @@ def seed_sqlite_deep_policy(
     profile_name: str = "rbac_deep",
 ) -> SqliteFanoutSeedResult:
     resolved_db_path = _resolve_repo_path(db_path)
-    os.makedirs(os.path.dirname(resolved_db_path), exist_ok=True)
+    resolved_db_path.parent.mkdir(parents=True, exist_ok=True)
 
     with sqlite3.connect(resolved_db_path) as conn:
         _ensure_policy_tables(conn)

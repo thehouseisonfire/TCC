@@ -1,7 +1,9 @@
 import json
 import os
 import subprocess
+import sys
 import time
+from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
 import httpx
@@ -42,6 +44,7 @@ def _read_tokens(path: str) -> dict[str, Any]:
 
 logger = get_logger(__name__)
 app = typer.Typer(add_completion=False)
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 class NetemConfig(TypedDict, total=False):
@@ -221,7 +224,7 @@ def _compose(
     for path in files:
         file_args.extend(["-f", path])
     cmd = _compose_bin().split(" ") + file_args + args
-    subprocess.check_call(cmd, cwd=os.path.dirname(os.path.dirname(__file__)), env=env)
+    subprocess.check_call(cmd, cwd=REPO_ROOT, env=env)
 
 
 def _compose_service_container_id(
@@ -242,7 +245,7 @@ def _compose_service_container_id(
     try:
         result = subprocess.run(
             cmd,
-            cwd=os.path.dirname(os.path.dirname(__file__)),
+            cwd=REPO_ROOT,
             env=os.environ.copy(),
             capture_output=True,
             text=True,
@@ -587,7 +590,7 @@ def _run_loadgen(
     fanout_churn_sqlite_subscribers: int | None = None,
 ):
     cmd = [
-        "python3",
+        sys.executable,
         "benchmarks/loadgen.py",
         "--host",
         host,
@@ -715,8 +718,8 @@ def _run_loadgen(
     if fanout_churn_sqlite_subscribers is not None:
         cmd.extend(["--fanout-churn-sqlite-subscribers", str(fanout_churn_sqlite_subscribers)])
 
-    out = subprocess.check_output(cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
-    return json.loads(out.decode("utf-8"))
+    out = subprocess.check_output(cmd, cwd=REPO_ROOT, text=True)
+    return json.loads(out)
 
 
 def _apply_dynsec_config(source_path: str):
@@ -726,7 +729,7 @@ def _apply_dynsec_config(source_path: str):
 def _capture_dynsec_baseline() -> bytes | None:
     path = _resolve_repo_path("docker/dynamic-security.json")
     try:
-        with open(path, "rb") as f:
+        with path.open("rb") as f:
             return f.read()
     except FileNotFoundError:
         return None
@@ -736,20 +739,21 @@ def _restore_dynsec_baseline(snapshot: bytes | None) -> None:
     if snapshot is None:
         return
     path = _resolve_repo_path("docker/dynamic-security.json")
-    with open(path, "wb") as f:
+    with path.open("wb") as f:
         f.write(snapshot)
 
 
-def _resolve_repo_path(path: str) -> str:
-    if os.path.isabs(path):
-        return path
-    return os.path.join(os.path.dirname(os.path.dirname(__file__)), path)
+def _resolve_repo_path(path: str | Path) -> Path:
+    resolved_path = Path(path)
+    if resolved_path.is_absolute():
+        return resolved_path
+    return REPO_ROOT / resolved_path
 
 
 def _load_dynsec_snapshot(path: str) -> dict[str, Any]:
     resolved = _resolve_repo_path(path)
     try:
-        with open(resolved, encoding="utf-8") as f:
+        with resolved.open(encoding="utf-8") as f:
             payload = json.load(f)
     except FileNotFoundError as exc:
         raise ValueError(f"dynsec snapshot file not found: {path}") from exc
@@ -845,11 +849,12 @@ def _expand_tls_matrix(
 
 
 def _write_result(out_dir: str, name: str, payload: dict):
-    os.makedirs(out_dir, exist_ok=True)
-    path = os.path.join(out_dir, f"{name}.json")
-    with open(path, "w", encoding="utf-8") as f:
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    path = out_path / f"{name}.json"
+    with path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
-    return path
+    return str(path)
 
 
 def _ensure_paho_mqtt():
@@ -910,7 +915,7 @@ def _run_mqtt5_auth(
     binary_mode: bool = False,
 ):
     cmd = [
-        "python3",
+        sys.executable,
         "benchmarks/mqtt_auth_client.py",
         "--host",
         host,
@@ -931,8 +936,8 @@ def _run_mqtt5_auth(
         cmd.append("--tls-insecure")
     if binary_mode:
         cmd.append("--binary")
-    out = subprocess.check_output(cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
-    return json.loads(out.decode("utf-8"))
+    out = subprocess.check_output(cmd, cwd=REPO_ROOT, text=True)
+    return json.loads(out)
 
 
 class ScenarioModel(BaseModel):
@@ -1639,9 +1644,7 @@ def main(
             )
             logger.info("Filter: %s, Duration: %ds", tcpdump_filter, tcpdump_duration)
 
-    tokens: dict[str, Any] = _read_tokens(
-        os.path.join(os.path.dirname(os.path.dirname(__file__)), tokens_path)
-    )
+    tokens: dict[str, Any] = _read_tokens(str(_resolve_repo_path(tokens_path)))
 
     scenarios: list[ScenarioConfig] = []
     tls_enabled = tls
@@ -1649,7 +1652,7 @@ def main(
     if (
         tls_enabled
         and tls_ca
-        and not os.path.exists(os.path.join(os.path.dirname(os.path.dirname(__file__)), tls_ca))
+        and not _resolve_repo_path(tls_ca).exists()
     ):
         raise SystemExit(
             f"TLS enabled but CA file not found at {tls_ca}. Run docker/tls/generate_certs.sh"
@@ -2701,7 +2704,7 @@ def main(
                     "TCPDUMP_KEEP_ALIVE": "0",
                 }
             )
-            os.makedirs(tcpdump_output_dir, exist_ok=True)
+            Path(tcpdump_output_dir).mkdir(parents=True, exist_ok=True)
 
         _compose(
             services_to_deploy,
@@ -3162,8 +3165,8 @@ def main(
         # Issue 15: Run packet analysis if tcpdump was enabled for this scenario
         packet_analysis_result: dict[str, Any] = {"enabled": False}
         if capture_this_scenario and tcpdump_analyze:
-            pcap_file = os.path.join(tcpdump_output_dir, f"{s['id']}.pcap")
-            if os.path.exists(pcap_file):
+            pcap_file = Path(tcpdump_output_dir) / f"{s['id']}.pcap"
+            if pcap_file.exists():
                 logger.info("Running packet analysis for scenario %s", s["id"])
                 try:
                     # Get MTU and token length for correlation
@@ -3171,9 +3174,9 @@ def main(
                     mtu = netem_config.get("mtu", 1500) if netem_config else 1500
                     token_length = len(s.get("password", "")) if s.get("password") else 0
 
-                    packet_analysis_result = analyze_pcap(pcap_file, mtu, token_length)
+                    packet_analysis_result = analyze_pcap(str(pcap_file), mtu, token_length)
                     packet_analysis_result["enabled"] = True
-                    packet_analysis_result["pcap_file"] = pcap_file
+                    packet_analysis_result["pcap_file"] = str(pcap_file)
 
                     # Log summary
                     summary = format_packet_summary(packet_analysis_result)
@@ -3183,7 +3186,7 @@ def main(
                     packet_analysis_result = {
                         "enabled": True,
                         "error": str(e),
-                        "pcap_file": pcap_file,
+                        "pcap_file": str(pcap_file),
                     }
             else:
                 logger.warning("Pcap file not found: %s", pcap_file)
@@ -3221,29 +3224,29 @@ def main(
         path = _write_result(out, s["id"], out_payload)
         logger.info("Wrote %s", path)
 
-    summary_json_path = summary_json
-    if not os.path.isabs(summary_json_path):
-        summary_json_path = os.path.join(out, summary_json_path)
-    summary_json_path = os.path.abspath(summary_json_path)
-    summary_csv_path = summary_csv
-    if not os.path.isabs(summary_csv_path):
-        summary_csv_path = os.path.join(out, summary_csv_path)
-    summary_csv_path = os.path.abspath(summary_csv_path)
+    summary_json_path = Path(summary_json)
+    if not summary_json_path.is_absolute():
+        summary_json_path = Path(out) / summary_json_path
+    summary_json_path = summary_json_path.resolve()
+    summary_csv_path = Path(summary_csv)
+    if not summary_csv_path.is_absolute():
+        summary_csv_path = Path(out) / summary_csv_path
+    summary_csv_path = summary_csv_path.resolve()
 
     agg_cmd = [
-        "python3",
+        sys.executable,
         "benchmarks/aggregate_results.py",
         "--input",
         out,
         "--out-json",
-        summary_json_path,
+        str(summary_json_path),
     ]
     if no_summary_csv:
         agg_cmd.append("--no-csv")
     else:
-        agg_cmd.extend(["--out-csv", summary_csv_path])
+        agg_cmd.extend(["--out-csv", str(summary_csv_path)])
     try:
-        subprocess.check_call(agg_cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
+        subprocess.check_call(agg_cmd, cwd=REPO_ROOT)
     except subprocess.CalledProcessError as exc:
         logger.warning(
             "Aggregation failed (%s); scenario results preserved",

@@ -1120,7 +1120,6 @@ dependencies = [
  "libc",
  "log",
  "lru",
- "once_cell",
  "rand 0.10.0",
  "rusqlite",
  "rustls",

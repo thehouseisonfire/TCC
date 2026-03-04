@@ -198,10 +198,13 @@ fn main() -> Result<(), String> {
     }
 
     if let Some(ttl_seconds) = args.ttl_seconds {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| format!("time error: {e}"))?
-            .as_secs() as i64;
+        let now = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| format!("time error: {e}"))?
+                .as_secs(),
+        )
+        .map_err(|_| "time error: timestamp exceeds i64 range".to_string())?;
         let exp = now + ttl_seconds.max(1);
         let check_src = format!("check if time($t), $t < {exp}");
         let expires_fact = format!("expires_at({exp})");

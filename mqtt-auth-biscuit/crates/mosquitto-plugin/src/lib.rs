@@ -475,7 +475,7 @@ fn record_broker_publish_call(
     let payload_text = if payload.is_null() || payloadlen <= 0 {
         Some(String::new())
     } else {
-        let bytes = unsafe { slice::from_raw_parts(payload as *const u8, payloadlen as usize) };
+        let bytes = unsafe { slice::from_raw_parts(payload.cast::<u8>(), payloadlen as usize) };
         Some(String::from_utf8_lossy(bytes).into_owned())
     };
     TEST_BROKER_PUBLISH_CALL.with(|call| {
@@ -492,13 +492,13 @@ fn record_broker_publish_call(
 #[cfg(any(test, miri, kani))]
 #[unsafe(no_mangle)]
 pub extern "C" fn mosquitto_client_id(_client: *const c_void) -> *const c_char {
-    TEST_CLIENT_ID.as_ptr() as *const c_char
+    TEST_CLIENT_ID.as_ptr().cast::<c_char>()
 }
 
 #[cfg(any(test, miri, kani))]
 #[unsafe(no_mangle)]
 pub extern "C" fn mosquitto_client_username(_client: *const c_void) -> *const c_char {
-    TEST_USERNAME.as_ptr() as *const c_char
+    TEST_USERNAME.as_ptr().cast::<c_char>()
 }
 
 #[cfg(any(test, miri, kani))]
@@ -715,7 +715,7 @@ fn set_reason_string(target: *mut *mut c_char, message: &str) {
     if let Ok(c_msg) = CString::new(message) {
         unsafe {
             let len = c_msg.as_bytes_with_nul().len();
-            let ptr = mosquitto_malloc(len) as *mut c_char;
+            let ptr = mosquitto_malloc(len).cast::<c_char>();
             if ptr.is_null() {
                 return;
             }
@@ -728,14 +728,14 @@ fn set_reason_string(target: *mut *mut c_char, message: &str) {
 
 fn set_control_reauth_signal(evt: &mut MosquittoEvtControl, message: &str) {
     evt.reason_code = MQTT_RC_REAUTHENTICATE;
-    set_reason_string(&mut evt.reason_string, message);
+    set_reason_string(&raw mut evt.reason_string, message);
 }
 
 fn control_payload_bytes(evt: &MosquittoEvtControl) -> &[u8] {
     if evt.payload.is_null() || evt.payloadlen == 0 {
         return &[];
     }
-    unsafe { slice::from_raw_parts(evt.payload as *const u8, evt.payloadlen as usize) }
+    unsafe { slice::from_raw_parts(evt.payload.cast::<u8>(), evt.payloadlen as usize) }
 }
 
 fn message_payload_bytes(evt: &MosquittoEvtMessage) -> &[u8] {
@@ -749,7 +749,7 @@ fn acl_payload_bytes(evt: &MosquittoEvtAclCheck) -> &[u8] {
     if evt.payload.is_null() || evt.payloadlen == 0 {
         return &[];
     }
-    unsafe { slice::from_raw_parts(evt.payload as *const u8, evt.payloadlen as usize) }
+    unsafe { slice::from_raw_parts(evt.payload.cast::<u8>(), evt.payloadlen as usize) }
 }
 
 fn bind_session_username(state: &PluginState, client_id: &str, username: Option<&str>) {
@@ -1033,11 +1033,18 @@ fn publish_control_notification(client_id: &str, topic: &str, payload: &str) {
         }
     };
     let payload_bytes = payload.as_bytes();
+    let Ok(payload_len) = c_int::try_from(payload_bytes.len()) else {
+        log_debug(&format!(
+            "Control notify skipped: payload too large ({} bytes)",
+            payload_bytes.len()
+        ));
+        return;
+    };
     let rc = broker_publish_copy_raw(
         client_id_cstr.as_ptr(),
         topic_cstr.as_ptr(),
-        payload_bytes.len() as c_int,
-        payload_bytes.as_ptr() as *const c_void,
+        payload_len,
+        payload_bytes.as_ptr().cast::<c_void>(),
         0,
         false,
         ptr::null_mut(),
@@ -1313,7 +1320,7 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
             sqlite_policy,
             dynamic_security_policy,
         });
-        *userdata = Box::into_raw(state) as *mut c_void;
+        *userdata = Box::into_raw(state).cast::<c_void>();
 
         mosquitto_callback_register(
             identifier,
@@ -1381,7 +1388,7 @@ pub unsafe extern "C" fn mosquitto_plugin_cleanup(
 ) -> c_int {
     unsafe {
         if !_userdata.is_null() {
-            let state = &*(_userdata as *mut PluginState);
+            let state = &*_userdata.cast::<PluginState>();
             let cache_stats = state.cache.stats();
             let expiry_stats = expiry_stats();
             log_info(&format!(
@@ -1392,7 +1399,7 @@ pub unsafe extern "C" fn mosquitto_plugin_cleanup(
                 "Biscuit expiry extraction stats: calls={}, failures={}, total_nanos={}",
                 expiry_stats.calls, expiry_stats.failures, expiry_stats.total_nanos
             ));
-            let _ = Box::from_raw(_userdata as *mut PluginState);
+            let _ = Box::from_raw(_userdata.cast::<PluginState>());
         }
         MOSQ_ERR_SUCCESS
     }
@@ -1406,8 +1413,8 @@ extern "C" fn basic_auth_callback(
     if event_data.is_null() || userdata.is_null() {
         return MOSQ_ERR_INVAL;
     }
-    let evt = unsafe { &mut *(event_data as *mut MosquittoEvtBasicAuth) };
-    let state = unsafe { &*(userdata as *mut PluginState) };
+    let evt = unsafe { &mut *event_data.cast::<MosquittoEvtBasicAuth>() };
+    let state = unsafe { &*userdata.cast::<PluginState>() };
 
     if evt.password.is_null() {
         return if should_defer_no_token_basic_auth(
@@ -1488,8 +1495,8 @@ extern "C" fn ext_auth_start_callback(
     if event_data.is_null() || userdata.is_null() {
         return MOSQ_ERR_INVAL;
     }
-    let evt = unsafe { &mut *(event_data as *mut MosquittoEvtExtendedAuth) };
-    let state = unsafe { &*(userdata as *mut PluginState) };
+    let evt = unsafe { &mut *event_data.cast::<MosquittoEvtExtendedAuth>() };
+    let state = unsafe { &*userdata.cast::<PluginState>() };
 
     if !state
         .config
@@ -1512,7 +1519,7 @@ extern "C" fn ext_auth_start_callback(
     }
 
     let data =
-        unsafe { std::slice::from_raw_parts(evt.data_in as *const u8, evt.data_in_len as usize) };
+        unsafe { std::slice::from_raw_parts(evt.data_in.cast::<u8>(), evt.data_in_len as usize) };
 
     match state
         .auth_engine
@@ -1584,8 +1591,8 @@ extern "C" fn acl_check_callback(
     if event_data.is_null() || userdata.is_null() {
         return MOSQ_ERR_INVAL;
     }
-    let evt = unsafe { &*(event_data as *mut MosquittoEvtAclCheck) };
-    let state = unsafe { &*(userdata as *mut PluginState) };
+    let evt = unsafe { &*event_data.cast::<MosquittoEvtAclCheck>() };
+    let state = unsafe { &*userdata.cast::<PluginState>() };
 
     if evt.topic.is_null() {
         return MOSQ_ERR_INVAL;
@@ -1688,8 +1695,8 @@ extern "C" fn message_callback(
     if event_data.is_null() || userdata.is_null() {
         return MOSQ_ERR_INVAL;
     }
-    let evt = unsafe { &mut *(event_data as *mut MosquittoEvtMessage) };
-    let state = unsafe { &*(userdata as *mut PluginState) };
+    let evt = unsafe { &mut *event_data.cast::<MosquittoEvtMessage>() };
+    let state = unsafe { &*userdata.cast::<PluginState>() };
     if evt.topic.is_null() {
         return MOSQ_ERR_INVAL;
     }
@@ -1768,8 +1775,8 @@ extern "C" fn control_callback(
     if event_data.is_null() || userdata.is_null() {
         return MOSQ_ERR_INVAL;
     }
-    let evt = unsafe { &mut *(event_data as *mut MosquittoEvtControl) };
-    let state = unsafe { &*(userdata as *mut PluginState) };
+    let evt = unsafe { &mut *event_data.cast::<MosquittoEvtControl>() };
+    let state = unsafe { &*userdata.cast::<PluginState>() };
     if evt.topic.is_null() {
         return MOSQ_ERR_INVAL;
     }
@@ -1897,29 +1904,29 @@ mod tests {
 
         let mut opts = vec![
             MosquittoOpt {
-                key: cstrings[0].as_ptr() as *mut c_char,
-                value: cstrings[1].as_ptr() as *mut c_char,
+                key: cstrings[0].as_ptr().cast_mut(),
+                value: cstrings[1].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[2].as_ptr() as *mut c_char,
-                value: cstrings[3].as_ptr() as *mut c_char,
+                key: cstrings[2].as_ptr().cast_mut(),
+                value: cstrings[3].as_ptr().cast_mut(),
             },
             MosquittoOpt {
-                key: cstrings[4].as_ptr() as *mut c_char,
-                value: cstrings[5].as_ptr() as *mut c_char,
+                key: cstrings[4].as_ptr().cast_mut(),
+                value: cstrings[5].as_ptr().cast_mut(),
             },
         ];
 
         let mut userdata: *mut c_void = ptr::null_mut();
-        let userdata_ptr: *mut *mut c_void = &mut userdata;
+        let userdata_ptr: *mut *mut c_void = &raw mut userdata;
         let mut identifier = MosquittoPluginId { _unused: [] };
 
         let rc = unsafe {
             mosquitto_plugin_init(
-                &mut identifier,
+                &raw mut identifier,
                 userdata_ptr,
                 opts.as_mut_ptr(),
-                opts.len() as c_int,
+                c_int::try_from(opts.len()).expect("opts len fits c_int"),
             )
         };
         assert_eq!(rc, MOSQ_ERR_SUCCESS);
@@ -1934,12 +1941,12 @@ mod tests {
     }
 
     fn set_acl_read_full_authz(userdata: *mut c_void, enabled: bool) {
-        let state = unsafe { &mut *(userdata as *mut PluginState) };
+        let state = unsafe { &mut *userdata.cast::<PluginState>() };
         state.config.acl_read_full_authz = enabled;
     }
 
     fn enable_dynamic_security_anonymous_mode(userdata: *mut c_void) {
-        let state = unsafe { &mut *(userdata as *mut PluginState) };
+        let state = unsafe { &mut *userdata.cast::<PluginState>() };
         let dynsec_path = format!(
             "{}/../../docker/dynamic-security-anon.json",
             env!("CARGO_MANIFEST_DIR")
@@ -1996,7 +2003,7 @@ mod tests {
 }}"#
         );
         fs::write(&dynsec_path, dynsec_cfg).expect("dynsec test control config must be writable");
-        let state = unsafe { &mut *(userdata as *mut PluginState) };
+        let state = unsafe { &mut *userdata.cast::<PluginState>() };
         let policy = DynamicSecurityPolicy::new(
             dynsec_path.to_string_lossy().into_owned(),
             Duration::from_secs(60),
@@ -2073,7 +2080,7 @@ mod tests {
   }
 }"#;
         fs::write(&dynsec_path, dynsec_cfg).expect("dynsec notify config must be writable");
-        let state = unsafe { &mut *(userdata as *mut PluginState) };
+        let state = unsafe { &mut *userdata.cast::<PluginState>() };
         let policy = DynamicSecurityPolicy::new(
             dynsec_path.to_string_lossy().into_owned(),
             Duration::from_secs(60),
@@ -2087,7 +2094,7 @@ mod tests {
     }
 
     fn cache_test_jwt_for_client(userdata: *mut c_void, client_id: &str, exp: i64) {
-        let state = unsafe { &mut *(userdata as *mut PluginState) };
+        let state = unsafe { &mut *userdata.cast::<PluginState>() };
         let token = TokenType::Jwt {
             claims: Claims {
                 sub: client_id.to_string(),
@@ -2111,7 +2118,7 @@ mod tests {
     }
 
     fn cache_test_biscuit(userdata: *mut c_void, expires_at: Option<i64>) {
-        let state = unsafe { &mut *(userdata as *mut PluginState) };
+        let state = unsafe { &mut *userdata.cast::<PluginState>() };
         let token = TokenType::Biscuit {
             bytes: vec![1, 2, 3],
             expires_at,
@@ -2196,7 +2203,7 @@ mod tests {
         };
 
         let (userdata, _identifier) = setup_plugin_with_config();
-        let mut config = unsafe { (&*(userdata as *mut PluginState)).config.clone() };
+        let mut config = unsafe { (&*userdata.cast::<PluginState>()).config.clone() };
         teardown_plugin(userdata);
         config.policy.mode = PolicyMode::StaticAcl;
         config.biscuit_authorizer_profile = BiscuitAuthorizerProfile::Rbac;
@@ -2232,7 +2239,7 @@ mod tests {
 
         let rc = basic_auth_callback(
             MOSQ_EVT_BASIC_AUTH,
-            &mut evt as *mut _ as *mut c_void,
+            (&raw mut evt).cast::<c_void>(),
             userdata,
         );
         assert_eq!(rc, MOSQ_ERR_AUTH);
@@ -2249,14 +2256,14 @@ mod tests {
         let mut evt = MosquittoEvtBasicAuth {
             future: ptr::null_mut(),
             client: ptr::null_mut(),
-            username: username.as_ptr() as *mut c_char,
-            password: password.as_ptr() as *mut c_char,
+            username: username.as_ptr().cast_mut(),
+            password: password.as_ptr().cast_mut(),
             future2: [ptr::null_mut(); 4],
         };
 
         let rc = basic_auth_callback(
             MOSQ_EVT_BASIC_AUTH,
-            &mut evt as *mut _ as *mut c_void,
+            (&raw mut evt).cast::<c_void>(),
             userdata,
         );
         assert_eq!(rc, MOSQ_ERR_AUTH);
@@ -2282,13 +2289,13 @@ mod tests {
             data_out: ptr::null_mut(),
             data_in_len: 0,
             data_out_len: 0,
-            auth_method: auth_method.as_ptr() as *const c_char,
+            auth_method: auth_method.as_ptr().cast::<c_char>(),
             future2: [ptr::null_mut(); 3],
         };
 
         let rc = ext_auth_start_callback(
             MOSQ_EVT_EXT_AUTH_START,
-            &mut evt as *mut _ as *mut c_void,
+            (&raw mut evt).cast::<c_void>(),
             userdata,
         );
         assert_eq!(rc, MOSQ_ERR_AUTH);
@@ -2305,17 +2312,17 @@ mod tests {
         let mut evt = MosquittoEvtExtendedAuth {
             future: ptr::null_mut(),
             client: ptr::null_mut(),
-            data_in: token_data.as_ptr() as *const c_void,
+            data_in: token_data.as_ptr().cast::<c_void>(),
             data_out: ptr::null_mut(),
-            data_in_len: token_data.len() as u16,
+            data_in_len: u16::try_from(token_data.len()).expect("token data length fits u16"),
             data_out_len: 0,
-            auth_method: auth_method.as_ptr() as *const c_char,
+            auth_method: auth_method.as_ptr().cast::<c_char>(),
             future2: [ptr::null_mut(); 3],
         };
 
         let rc = ext_auth_start_callback(
             MOSQ_EVT_EXT_AUTH_START,
-            &mut evt as *mut _ as *mut c_void,
+            (&raw mut evt).cast::<c_void>(),
             userdata,
         );
         assert_eq!(rc, MOSQ_ERR_AUTH);
@@ -2342,17 +2349,17 @@ mod tests {
         let mut evt = MosquittoEvtExtendedAuth {
             future: ptr::null_mut(),
             client: ptr::null_mut(),
-            data_in: token_data.as_ptr() as *const c_void,
+            data_in: token_data.as_ptr().cast::<c_void>(),
             data_out: ptr::null_mut(),
-            data_in_len: token_data.len() as u16,
+            data_in_len: u16::try_from(token_data.len()).expect("token data length fits u16"),
             data_out_len: 0,
-            auth_method: auth_method.as_ptr() as *const c_char,
+            auth_method: auth_method.as_ptr().cast::<c_char>(),
             future2: [ptr::null_mut(); 3],
         };
 
         let rc = ext_auth_continue_callback(
             MOSQ_EVT_EXT_AUTH_CONTINUE,
-            &mut evt as *mut _ as *mut c_void,
+            (&raw mut evt).cast::<c_void>(),
             userdata,
         );
         assert_eq!(rc, MOSQ_ERR_AUTH);
@@ -2383,7 +2390,7 @@ mod tests {
 
         let rc = acl_check_callback(
             MOSQ_EVT_ACL_CHECK,
-            &mut evt as *mut _ as *mut c_void,
+            (&raw mut evt).cast::<c_void>(),
             ptr::null_mut(),
         );
         assert_eq!(rc, MOSQ_ERR_INVAL);
@@ -2397,7 +2404,7 @@ mod tests {
         let mut evt = MosquittoEvtAclCheck {
             future: ptr::null_mut(),
             client: ptr::null_mut(),
-            topic: topic.as_ptr() as *mut c_char,
+            topic: topic.as_ptr().cast_mut(),
             payload: ptr::null(),
             properties: ptr::null_mut(),
             access: 1,
@@ -2409,7 +2416,7 @@ mod tests {
 
         let rc = acl_check_callback(
             MOSQ_EVT_ACL_CHECK,
-            &mut evt as *mut _ as *mut c_void,
+            (&raw mut evt).cast::<c_void>(),
             userdata,
         );
         assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
@@ -2439,7 +2446,7 @@ mod tests {
 
         let rc = acl_check_callback(
             MOSQ_EVT_ACL_CHECK,
-            &mut evt as *mut _ as *mut c_void,
+            (&raw mut evt).cast::<c_void>(),
             userdata,
         );
         assert_eq!(rc, MOSQ_ERR_SUCCESS);
@@ -2470,7 +2477,7 @@ mod tests {
 
         let rc = acl_check_callback(
             MOSQ_EVT_ACL_CHECK,
-            &mut evt as *mut _ as *mut c_void,
+            (&raw mut evt).cast::<c_void>(),
             userdata,
         );
         assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
@@ -2503,7 +2510,7 @@ mod tests {
 
         let rc = acl_check_callback(
             MOSQ_EVT_ACL_CHECK,
-            &mut evt as *mut _ as *mut c_void,
+            (&raw mut evt).cast::<c_void>(),
             userdata,
         );
         assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
@@ -2535,7 +2542,7 @@ mod tests {
 
         let rc = acl_check_callback(
             MOSQ_EVT_ACL_CHECK,
-            &mut evt as *mut _ as *mut c_void,
+            (&raw mut evt).cast::<c_void>(),
             userdata,
         );
         assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
@@ -2566,7 +2573,7 @@ mod tests {
 
         let rc = acl_check_callback(
             MOSQ_EVT_ACL_CHECK,
-            &mut evt as *mut _ as *mut c_void,
+            (&raw mut evt).cast::<c_void>(),
             userdata,
         );
         assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
@@ -2603,14 +2610,14 @@ mod tests {
 
         let rc1 = acl_check_callback(
             MOSQ_EVT_ACL_CHECK,
-            &mut evt as *mut _ as *mut c_void,
+            (&raw mut evt).cast::<c_void>(),
             userdata,
         );
         assert_eq!(rc1, MOSQ_ERR_ACL_DENIED);
 
         let rc2 = acl_check_callback(
             MOSQ_EVT_ACL_CHECK,
-            &mut evt as *mut _ as *mut c_void,
+            (&raw mut evt).cast::<c_void>(),
             userdata,
         );
         assert_eq!(rc2, MOSQ_ERR_ACL_DENIED);
@@ -2646,7 +2653,7 @@ mod tests {
 
         let rc = acl_check_callback(
             MOSQ_EVT_ACL_CHECK,
-            &mut evt as *mut _ as *mut c_void,
+            (&raw mut evt).cast::<c_void>(),
             userdata,
         );
         assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
@@ -2680,7 +2687,7 @@ mod tests {
 
         let rc = acl_check_callback(
             MOSQ_EVT_ACL_CHECK,
-            &mut evt as *mut _ as *mut c_void,
+            (&raw mut evt).cast::<c_void>(),
             userdata,
         );
         assert_eq!(rc, MOSQ_ERR_SUCCESS);
@@ -2710,7 +2717,7 @@ mod tests {
 
         let rc = acl_check_callback(
             MOSQ_EVT_ACL_CHECK,
-            &mut evt as *mut _ as *mut c_void,
+            (&raw mut evt).cast::<c_void>(),
             userdata,
         );
         assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
@@ -2741,7 +2748,7 @@ mod tests {
 
         let rc = acl_check_callback(
             MOSQ_EVT_ACL_CHECK,
-            &mut evt as *mut _ as *mut c_void,
+            (&raw mut evt).cast::<c_void>(),
             userdata,
         );
         assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
@@ -2777,7 +2784,7 @@ mod tests {
 
         let rc = message_callback(
             MOSQ_EVT_MESSAGE,
-            &mut evt as *mut _ as *mut c_void,
+            (&raw mut evt).cast::<c_void>(),
             ptr::null_mut(),
         );
         assert_eq!(rc, MOSQ_ERR_INVAL);
@@ -2791,7 +2798,7 @@ mod tests {
         let mut evt = MosquittoEvtMessage {
             future: ptr::null_mut(),
             client: ptr::null_mut(),
-            topic: topic.as_ptr() as *mut c_char,
+            topic: topic.as_ptr().cast_mut(),
             payload: ptr::null_mut(),
             properties: ptr::null_mut(),
             reason_string: ptr::null_mut(),
@@ -2802,11 +2809,7 @@ mod tests {
             future2: [ptr::null_mut(); 4],
         };
 
-        let rc = message_callback(
-            MOSQ_EVT_MESSAGE,
-            &mut evt as *mut _ as *mut c_void,
-            userdata,
-        );
+        let rc = message_callback(MOSQ_EVT_MESSAGE, (&raw mut evt).cast::<c_void>(), userdata);
         assert_eq!(rc, MOSQ_ERR_SUCCESS);
 
         teardown_plugin(userdata);
@@ -2824,28 +2827,24 @@ mod tests {
         let mut evt = MosquittoEvtMessage {
             future: ptr::null_mut(),
             client: std::ptr::dangling_mut::<c_void>(),
-            topic: topic.as_ptr() as *mut c_char,
-            payload: payload.as_ptr() as *mut c_void,
+            topic: topic.as_ptr().cast_mut(),
+            payload: payload.as_ptr().cast::<c_void>().cast_mut(),
             properties: ptr::null_mut(),
             reason_string: ptr::null_mut(),
-            payloadlen: payload.len() as u32,
+            payloadlen: u32::try_from(payload.len()).expect("payload length fits u32"),
             qos: 1,
             reason_code: 0,
             retain: false,
             future2: [ptr::null_mut(); 4],
         };
 
-        let rc = message_callback(
-            MOSQ_EVT_MESSAGE,
-            &mut evt as *mut _ as *mut c_void,
-            userdata,
-        );
+        let rc = message_callback(MOSQ_EVT_MESSAGE, (&raw mut evt).cast::<c_void>(), userdata);
         assert_eq!(rc, MOSQ_ERR_SUCCESS);
         let kick = kick_client_call_snapshot();
         assert_eq!(kick.count, 1);
         assert_eq!(kick.last_client_id.as_deref(), Some("test_client"));
 
-        let state = unsafe { &*(userdata as *mut PluginState) };
+        let state = unsafe { &*userdata.cast::<PluginState>() };
         assert!(state.cache.get(&"test_client".to_string()).is_none());
         let _ = fs::remove_file(dynsec_path);
         teardown_plugin(userdata);
@@ -2854,7 +2853,7 @@ mod tests {
     #[test]
     fn session_client_lookup_prunes_stale_bindings() {
         let (userdata, _identifier) = setup_plugin_with_config();
-        let state = unsafe { &*(userdata as *mut PluginState) };
+        let state = unsafe { &*userdata.cast::<PluginState>() };
         bind_session_username(state, "stale_client", Some("test_user"));
 
         let resolved = session_client_ids_for_username(state, "test_user");
@@ -2894,7 +2893,7 @@ mod tests {
 
         let rc = control_callback(
             MOSQ_EVT_CONTROL,
-            &mut evt as *mut _ as *mut c_void,
+            (&raw mut evt).cast::<c_void>(),
             ptr::null_mut(),
         );
         assert_eq!(rc, MOSQ_ERR_INVAL);
@@ -2909,7 +2908,7 @@ mod tests {
         let mut evt = MosquittoEvtControl {
             future: ptr::null_mut(),
             client: ptr::null_mut(),
-            topic: topic.as_ptr() as *const c_char,
+            topic: topic.as_ptr().cast::<c_char>(),
             payload: ptr::null(),
             properties: ptr::null(),
             reason_string: ptr::null_mut(),
@@ -2920,11 +2919,7 @@ mod tests {
             future2: [ptr::null_mut(); 4],
         };
 
-        let rc = control_callback(
-            MOSQ_EVT_CONTROL,
-            &mut evt as *mut _ as *mut c_void,
-            userdata,
-        );
+        let rc = control_callback(MOSQ_EVT_CONTROL, (&raw mut evt).cast::<c_void>(), userdata);
         // Non-$CONTROL topics should defer to other plugins
         assert_eq!(rc, MOSQ_ERR_PLUGIN_DEFER);
 
@@ -2939,7 +2934,7 @@ mod tests {
         let mut evt = MosquittoEvtControl {
             future: ptr::null_mut(),
             client: ptr::null_mut(),
-            topic: topic.as_ptr() as *const c_char,
+            topic: topic.as_ptr().cast::<c_char>(),
             payload: ptr::null(),
             properties: ptr::null(),
             reason_string: ptr::null_mut(),
@@ -2950,11 +2945,7 @@ mod tests {
             future2: [ptr::null_mut(); 4],
         };
 
-        let rc = control_callback(
-            MOSQ_EVT_CONTROL,
-            &mut evt as *mut _ as *mut c_void,
-            userdata,
-        );
+        let rc = control_callback(MOSQ_EVT_CONTROL, (&raw mut evt).cast::<c_void>(), userdata);
         assert_eq!(rc, MOSQ_ERR_ACL_DENIED);
 
         teardown_plugin(userdata);
@@ -2972,22 +2963,18 @@ mod tests {
         let mut evt = MosquittoEvtControl {
             future: ptr::null_mut(),
             client: std::ptr::dangling_mut::<c_void>(),
-            topic: topic.as_ptr() as *const c_char,
-            payload: payload.as_ptr() as *const c_void,
+            topic: topic.as_ptr().cast::<c_char>(),
+            payload: payload.as_ptr().cast::<c_void>(),
             properties: ptr::null(),
             reason_string: ptr::null_mut(),
-            payloadlen: payload.len() as u32,
+            payloadlen: u32::try_from(payload.len()).expect("payload length fits u32"),
             qos: 1,
             reason_code: 0,
             retain: false,
             future2: [ptr::null_mut(); 4],
         };
 
-        let rc = control_callback(
-            MOSQ_EVT_CONTROL,
-            &mut evt as *mut _ as *mut c_void,
-            userdata,
-        );
+        let rc = control_callback(MOSQ_EVT_CONTROL, (&raw mut evt).cast::<c_void>(), userdata);
         assert_eq!(rc, MOSQ_ERR_SUCCESS);
 
         let kick = kick_client_call_snapshot();
@@ -2995,7 +2982,7 @@ mod tests {
         assert_eq!(kick.last_client_id.as_deref(), Some("test_client"));
         assert_eq!(kick.last_with_will, Some(false));
 
-        let state = unsafe { &*(userdata as *mut PluginState) };
+        let state = unsafe { &*userdata.cast::<PluginState>() };
         assert!(state.cache.get(&"test_client".to_string()).is_none());
         let policy = state
             .dynamic_security_policy
@@ -3024,7 +3011,7 @@ mod tests {
         cache_test_jwt(userdata, time::unix_timestamp_now() + 60);
         cache_test_jwt_for_client(userdata, "target_client", time::unix_timestamp_now() + 60);
 
-        let state = unsafe { &*(userdata as *mut PluginState) };
+        let state = unsafe { &*userdata.cast::<PluginState>() };
         bind_session_username(state, "target_client", Some("test_user"));
 
         let topic = CString::new("$CONTROL/dynamic-security/v1").unwrap();
@@ -3032,22 +3019,18 @@ mod tests {
         let mut evt = MosquittoEvtControl {
             future: ptr::null_mut(),
             client: std::ptr::dangling_mut::<c_void>(),
-            topic: topic.as_ptr() as *const c_char,
-            payload: payload.as_ptr() as *const c_void,
+            topic: topic.as_ptr().cast::<c_char>(),
+            payload: payload.as_ptr().cast::<c_void>(),
             properties: ptr::null(),
             reason_string: ptr::null_mut(),
-            payloadlen: payload.len() as u32,
+            payloadlen: u32::try_from(payload.len()).expect("payload length fits u32"),
             qos: 1,
             reason_code: 0,
             retain: false,
             future2: [ptr::null_mut(); 4],
         };
 
-        let rc = control_callback(
-            MOSQ_EVT_CONTROL,
-            &mut evt as *mut _ as *mut c_void,
-            userdata,
-        );
+        let rc = control_callback(MOSQ_EVT_CONTROL, (&raw mut evt).cast::<c_void>(), userdata);
         assert_eq!(rc, MOSQ_ERR_SUCCESS);
 
         let kick = kick_client_call_snapshot();
@@ -3055,7 +3038,7 @@ mod tests {
         assert_eq!(kick.last_client_id.as_deref(), Some("target_client"));
         assert_eq!(kick.last_with_will, Some(false));
 
-        let state = unsafe { &*(userdata as *mut PluginState) };
+        let state = unsafe { &*userdata.cast::<PluginState>() };
         assert!(state.cache.get(&"target_client".to_string()).is_none());
 
         let _ = fs::remove_file(dynsec_path);
@@ -3069,7 +3052,7 @@ mod tests {
         let dynsec_path = enable_dynamic_security_control_mode_with_client_id(userdata, false);
         cache_test_jwt(userdata, time::unix_timestamp_now() + 60);
 
-        let state = unsafe { &*(userdata as *mut PluginState) };
+        let state = unsafe { &*userdata.cast::<PluginState>() };
         bind_session_username(state, "stale_client", Some("test_user"));
 
         let topic = CString::new("$CONTROL/dynamic-security/v1").unwrap();
@@ -3077,22 +3060,18 @@ mod tests {
         let mut evt = MosquittoEvtControl {
             future: ptr::null_mut(),
             client: std::ptr::dangling_mut::<c_void>(),
-            topic: topic.as_ptr() as *const c_char,
-            payload: payload.as_ptr() as *const c_void,
+            topic: topic.as_ptr().cast::<c_char>(),
+            payload: payload.as_ptr().cast::<c_void>(),
             properties: ptr::null(),
             reason_string: ptr::null_mut(),
-            payloadlen: payload.len() as u32,
+            payloadlen: u32::try_from(payload.len()).expect("payload length fits u32"),
             qos: 1,
             reason_code: 0,
             retain: false,
             future2: [ptr::null_mut(); 4],
         };
 
-        let rc = control_callback(
-            MOSQ_EVT_CONTROL,
-            &mut evt as *mut _ as *mut c_void,
-            userdata,
-        );
+        let rc = control_callback(MOSQ_EVT_CONTROL, (&raw mut evt).cast::<c_void>(), userdata);
         assert_eq!(rc, MOSQ_ERR_SUCCESS);
 
         let kick = kick_client_call_snapshot();
@@ -3117,7 +3096,7 @@ mod tests {
         let dynsec_path = enable_dynamic_security_control_notify_mode(userdata);
         cache_test_jwt(userdata, time::unix_timestamp_now() + 60);
 
-        let state = unsafe { &*(userdata as *mut PluginState) };
+        let state = unsafe { &*userdata.cast::<PluginState>() };
         bind_session_username(state, "test_client", Some("test_user"));
 
         let topic = CString::new("$CONTROL/dynamic-security/v1").unwrap();
@@ -3125,22 +3104,18 @@ mod tests {
         let mut evt = MosquittoEvtControl {
             future: ptr::null_mut(),
             client: std::ptr::dangling_mut::<c_void>(),
-            topic: topic.as_ptr() as *const c_char,
-            payload: payload.as_ptr() as *const c_void,
+            topic: topic.as_ptr().cast::<c_char>(),
+            payload: payload.as_ptr().cast::<c_void>(),
             properties: ptr::null(),
             reason_string: ptr::null_mut(),
-            payloadlen: payload.len() as u32,
+            payloadlen: u32::try_from(payload.len()).expect("payload length fits u32"),
             qos: 1,
             reason_code: 0,
             retain: false,
             future2: [ptr::null_mut(); 4],
         };
 
-        let rc = control_callback(
-            MOSQ_EVT_CONTROL,
-            &mut evt as *mut _ as *mut c_void,
-            userdata,
-        );
+        let rc = control_callback(MOSQ_EVT_CONTROL, (&raw mut evt).cast::<c_void>(), userdata);
         assert_eq!(rc, MOSQ_ERR_SUCCESS);
 
         let kick = kick_client_call_snapshot();
@@ -3157,7 +3132,7 @@ mod tests {
         assert!(payload_text.contains("\"command\":\"removeRoleACL\""));
         assert!(payload_text.contains("\"topic\":\"fanout/broadcast\""));
 
-        let state = unsafe { &*(userdata as *mut PluginState) };
+        let state = unsafe { &*userdata.cast::<PluginState>() };
         assert!(state.cache.get(&"test_client".to_string()).is_some());
 
         let _ = fs::remove_file(dynsec_path);
@@ -3176,27 +3151,23 @@ mod tests {
         let mut evt = MosquittoEvtControl {
             future: ptr::null_mut(),
             client: std::ptr::dangling_mut::<c_void>(),
-            topic: topic.as_ptr() as *const c_char,
-            payload: payload.as_ptr() as *const c_void,
+            topic: topic.as_ptr().cast::<c_char>(),
+            payload: payload.as_ptr().cast::<c_void>(),
             properties: ptr::null(),
             reason_string: ptr::null_mut(),
-            payloadlen: payload.len() as u32,
+            payloadlen: u32::try_from(payload.len()).expect("payload length fits u32"),
             qos: 1,
             reason_code: 0,
             retain: false,
             future2: [ptr::null_mut(); 4],
         };
 
-        let rc = control_callback(
-            MOSQ_EVT_CONTROL,
-            &mut evt as *mut _ as *mut c_void,
-            userdata,
-        );
+        let rc = control_callback(MOSQ_EVT_CONTROL, (&raw mut evt).cast::<c_void>(), userdata);
         assert_eq!(rc, MOSQ_ERR_SUCCESS);
 
         let kick = kick_client_call_snapshot();
         assert_eq!(kick.count, 0);
-        let state = unsafe { &*(userdata as *mut PluginState) };
+        let state = unsafe { &*userdata.cast::<PluginState>() };
         assert!(state.cache.get(&"test_client".to_string()).is_some());
 
         let _ = fs::remove_file(dynsec_path);

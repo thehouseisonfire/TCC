@@ -837,7 +837,7 @@ async fn main() -> anyhow::Result<()> {
 
     let host = env::var("AUTHZ_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let port = env::var("AUTHZ_PORT").unwrap_or_else(|_| "8081".to_string());
-    let addr: SocketAddr = format!("{}:{}", host, port).parse()?;
+    let addr: SocketAddr = format!("{host}:{port}").parse()?;
 
     let shared_config = AppConfig::from_env();
 
@@ -889,12 +889,9 @@ async fn main() -> anyhow::Result<()> {
                         }
                     };
 
-                    let permit = match state.conn_sema.clone().acquire_owned().await {
-                        Ok(p) => p,
-                        Err(_) => {
-                            warn!("semaphore closed");
-                            continue;
-                        }
+                    let Ok(permit) = state.conn_sema.clone().acquire_owned().await else {
+                        warn!("semaphore closed");
+                        continue;
                     };
 
                     let acceptor = acceptor.clone();
@@ -948,12 +945,9 @@ async fn main() -> anyhow::Result<()> {
                         }
                     };
 
-                    let permit = match state.conn_sema.clone().acquire_owned().await {
-                        Ok(p) => p,
-                        Err(_) => {
-                            warn!("semaphore closed");
-                            continue;
-                        }
+                    let Ok(permit) = state.conn_sema.clone().acquire_owned().await else {
+                        warn!("semaphore closed");
+                        continue;
                     };
 
                     let state_clone = state.clone();

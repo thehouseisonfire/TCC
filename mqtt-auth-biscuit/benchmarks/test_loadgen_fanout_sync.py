@@ -3,13 +3,13 @@
 
 from __future__ import annotations
 
-import os
 import queue
 import sys
 import threading
+from pathlib import Path
 from typing import TypedDict
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from benchmarks import loadgen
 

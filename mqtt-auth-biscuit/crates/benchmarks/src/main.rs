@@ -42,10 +42,13 @@ fn main() {
         val.parse::<i64>()
             .expect("GEN_TOKENS_FIXED_NOW must be int")
     } else {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64
+        i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        )
+        .expect("unix timestamp must fit in i64")
     };
     // JWT (ES256)
     // Deterministic private key material for reproducible tokens.
@@ -227,11 +230,11 @@ fn main() {
 
     let biscuit_short = {
         let exp = now + SHORT_TTL_SECS;
-        let check_src = format!("check if time($t), $t < {}", exp);
+        let check_src = format!("check if time($t), $t < {exp}");
         let b = BlockBuilder::new()
             .check(check_src.as_str())
             .unwrap()
-            .fact(format!("expires_at({})", exp).as_str())
+            .fact(format!("expires_at({exp})").as_str())
             .unwrap();
         biscuit_base.append(b).unwrap()
     };

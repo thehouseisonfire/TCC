@@ -257,7 +257,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 ## 8) Open Issues (Next Steps, Grouped)
 
 ### Priority List
-1. Issue 23: Proactive client reauthentication
+1. Issue 23: Proactive client re-authentication
 2. Issue 41: Containerized benchmark topology
 ---
 
@@ -416,6 +416,37 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 - [x] **Issue 20.1: Verify ACL_CHECK subtype handling across policy modes**
   - **Summary**: Added `MOSQ_ACL_CONTROL` constant (0x08) for control-plane access; fixed `control_callback` hardcoded `access: 2` → `MOSQ_ACL_CONTROL`; updated `access_to_operation()` to map 0x08 → "control"; added comprehensive unit tests for all ACL subtypes (READ/WRITE/SUBSCRIBE/CONTROL) with priority ordering (WRITE > SUBSCRIBE > CONTROL > READ), bitmask combinations, and edge cases. All 7 policy modes verified to correctly handle distinct ACL subtypes.
 
+- [x] **Issue 21: Strengthen Biscuit authorizer template complexity** — **COMPLETED 2026-03-03**
+  - **Summary**: Added configurable Biscuit authorizer profiles and explicit
+    benchmark scenarios that isolate plugin-side authorizer-template complexity
+    while keeping token size constant.
+  - **Implemented**:
+    - Added plugin option `plugin_opt_biscuit_authorizer_profile` with values
+      `simple` (default), `rbac`, `contextual`.
+    - Extended Biscuit authorization engine in
+      `crates/mosquitto-plugin/src/biscuit_handler.rs`:
+      - `simple`: direct `right/deny` evaluation.
+      - `rbac`: role-derived `role_right/role_deny` plus direct `right/deny`.
+      - `contextual`: strict role + active-window
+        (`role_active_from/role_active_until`) evaluation for allows; direct
+        `right` is ignored, while direct `deny` remains enforced.
+    - Wired profile selection through plugin config and ACL/control authz
+      dispatch.
+    - Added deterministic token fixture `biscuit_authorizer_template` in
+      `gen-tokens` for constant-token-size authorizer-template runs.
+    - Added dedicated scenarios in `benchmarks/run_scenarios.py`:
+      - `POLICY-AUTHZ-TEMPLATE-SIMPLE`
+      - `POLICY-AUTHZ-TEMPLATE-RBAC`
+      - `POLICY-AUTHZ-TEMPLATE-CONTEXTUAL`
+    - Added dedicated Mosquitto configs (plain + TLS):
+      - `docker/mosquitto_biscuit_authz_{simple,rbac,contextual}.conf`
+      - `docker/tls/mosquitto_biscuit_authz_{simple,rbac,contextual}.conf`
+    - Added benchmark scenario-shape coverage test:
+      `benchmarks/test_biscuit_authorizer_template_coverage.py`.
+  - **Research Alignment**: closes the gap where plugin-side Biscuit authorizer
+    logic was too thin to represent intended Datalog policy complexity costs in
+    Issue 21 scenarios.
+
 - [x] **Issue 22: Strengthen `seed_demo_rules` (RBAC), make it optional, and add
     runtime policy churn scenarios** — **COMPLETED 2026-03-02**
   - Summary:
@@ -522,37 +553,6 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Scenario capturing denial after privilege reduction
     - Runtime proof that notification + deny transition is caused by control
       operation execution (not manual external policy mutation).
-
-- [x] **Issue 21: Strengthen Biscuit authorizer template complexity** — **COMPLETED 2026-03-03**
-  - **Summary**: Added configurable Biscuit authorizer profiles and explicit
-    benchmark scenarios that isolate plugin-side authorizer-template complexity
-    while keeping token size constant.
-  - **Implemented**:
-    - Added plugin option `plugin_opt_biscuit_authorizer_profile` with values
-      `simple` (default), `rbac`, `contextual`.
-    - Extended Biscuit authorization engine in
-      `crates/mosquitto-plugin/src/biscuit_handler.rs`:
-      - `simple`: direct `right/deny` evaluation.
-      - `rbac`: role-derived `role_right/role_deny` plus direct `right/deny`.
-      - `contextual`: strict role + active-window
-        (`role_active_from/role_active_until`) evaluation for allows; direct
-        `right` is ignored, while direct `deny` remains enforced.
-    - Wired profile selection through plugin config and ACL/control authz
-      dispatch.
-    - Added deterministic token fixture `biscuit_authorizer_template` in
-      `gen-tokens` for constant-token-size authorizer-template runs.
-    - Added dedicated scenarios in `benchmarks/run_scenarios.py`:
-      - `POLICY-AUTHZ-TEMPLATE-SIMPLE`
-      - `POLICY-AUTHZ-TEMPLATE-RBAC`
-      - `POLICY-AUTHZ-TEMPLATE-CONTEXTUAL`
-    - Added dedicated Mosquitto configs (plain + TLS):
-      - `docker/mosquitto_biscuit_authz_{simple,rbac,contextual}.conf`
-      - `docker/tls/mosquitto_biscuit_authz_{simple,rbac,contextual}.conf`
-    - Added benchmark scenario-shape coverage test:
-      `benchmarks/test_biscuit_authorizer_template_coverage.py`.
-  - **Research Alignment**: closes the gap where plugin-side Biscuit authorizer
-    logic was too thin to represent intended Datalog policy complexity costs in
-    Issue 21 scenarios.
 
 - [x] **Issue 33: Enhance HTTP policy expressiveness for parity with token-based
     authorization**

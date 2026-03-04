@@ -609,9 +609,16 @@ fn normalize_username(username: Option<String>) -> Option<String> {
     username.and_then(|u| if u.is_empty() { None } else { Some(u) })
 }
 
-fn should_defer_no_token_basic_auth(mode: PolicyMode, allow_anonymous_no_token: bool) -> bool {
-    matches!(mode, PolicyMode::StaticAcl | PolicyMode::StaticAclStrict)
-        || (mode == PolicyMode::DynamicSecurity && allow_anonymous_no_token)
+const fn should_defer_no_token_basic_auth(
+    mode: PolicyMode,
+    allow_anonymous_no_token: bool,
+) -> bool {
+    matches!(
+        (mode, allow_anonymous_no_token),
+        (PolicyMode::StaticAcl, _)
+            | (PolicyMode::StaticAclStrict, _)
+            | (PolicyMode::DynamicSecurity, true)
+    )
 }
 
 const fn is_acl_read_only(access: c_int) -> bool {

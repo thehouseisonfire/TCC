@@ -2,7 +2,7 @@
 
 **Project**: Eclipse Mosquitto Auth Biscuit Plugin (Rust)\
 **Started**: 2026-01-04\
-**Last Updated**: 2026-03-03\
+**Last Updated**: 2026-03-04\
 
 ---
 
@@ -259,6 +259,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 ### Priority List
 1. Issue 23: Proactive client re-authentication
 2. Issue 41: Containerized benchmark topology
+3. Issue 42: Wait for Mosquitto 2.1.3 Alpine image (required feature)
 ---
 
 #### A) Policy Source Parity
@@ -301,6 +302,12 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Update benchmark clients/scenarios to exercise proactive refresh flow.
     - Add runtime assertions proving session continuity without expiry-driven
       disconnects during proactive-refresh runs.
+
+#### C) Dependency Tracking
+
+- [ ] **Issue 42: Bump Mosquitto image to 2.1.3-alpine when published**
+  - Blocked as of 2026-03-04: `eclipse-mosquitto:2.1.3-alpine` is not yet on Docker Hub.
+  - Reason: we need a feature from Mosquitto 2.1.3.
 
 ---
 

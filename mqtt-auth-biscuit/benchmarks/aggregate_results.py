@@ -1,6 +1,6 @@
 import json
-import os
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -155,21 +155,17 @@ def _aggregate_mqtt5(runs):
     }
 
 
-def _load_scenario(path):
-    with open(path, encoding="utf-8") as f:
+def _load_scenario(path: str | Path):
+    with Path(path).open(encoding="utf-8") as f:
         data = json.load(f)
     return data
 
 
-def _build_summary(input_dir):
+def _build_summary(input_dir: str | Path):
+    input_path = Path(input_dir)
     scenario_summaries = []
-    for entry in sorted(os.listdir(input_dir)):
-        if not entry.endswith(".json"):
-            continue
-        if entry in {"summary.json"}:
-            continue
-        path = os.path.join(input_dir, entry)
-        if not os.path.isfile(path):
+    for path in sorted(input_path.glob("*.json")):
+        if path.name in {"summary.json"}:
             continue
         data = _load_scenario(path)
         if not isinstance(data, dict):
@@ -177,12 +173,12 @@ def _build_summary(input_dir):
         if "runs" not in data or not isinstance(data.get("runs"), list):
             continue
         runs = data.get("runs", [])
-        scenario_id = data.get("scenario") or os.path.splitext(entry)[0]
+        scenario_id = data.get("scenario") or path.stem
         mqtt5 = _aggregate_mqtt5(runs)
 
         summary = {
             "scenario": scenario_id,
-            "file": entry,
+            "file": path.name,
             "runs": len(runs),
             "token_len": data.get("token_len"),
             "tls": data.get("tls"),
@@ -212,7 +208,7 @@ def _build_summary(input_dir):
 
     return {
         "generated_at": datetime.now(UTC).isoformat(),
-        "input_dir": input_dir,
+        "input_dir": str(input_path),
         "scenario_count": len(scenario_summaries),
         "scenarios": scenario_summaries,
     }
@@ -303,19 +299,19 @@ def main(
     log_level: str = typer.Option("INFO", "--log-level"),
 ):
     setup_logging(log_level)
-    input_dir = os.path.abspath(input)
+    input_dir = Path(input).resolve()
     summary = _build_summary(input_dir)
 
-    out_json_path = out_json
-    if not os.path.isabs(out_json_path):
-        out_json_path = os.path.join(input_dir, out_json_path)
-    with open(out_json_path, "w", encoding="utf-8") as f:
+    out_json_path = Path(out_json)
+    if not out_json_path.is_absolute():
+        out_json_path = input_dir / out_json_path
+    with out_json_path.open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
     if not no_csv:
-        out_csv_path = out_csv
-        if not os.path.isabs(out_csv_path):
-            out_csv_path = os.path.join(input_dir, out_csv_path)
+        out_csv_path = Path(out_csv)
+        if not out_csv_path.is_absolute():
+            out_csv_path = input_dir / out_csv_path
         _write_csv(summary, out_csv_path)
     logger.info("Summary written to %s", out_json_path)
 

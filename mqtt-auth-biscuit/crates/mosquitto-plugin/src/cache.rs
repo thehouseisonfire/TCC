@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-fn nonzero_capacity(capacity: usize) -> NonZeroUsize {
+const fn nonzero_capacity(capacity: usize) -> NonZeroUsize {
     let v = if capacity == 0 { 1 } else { capacity };
     unsafe { NonZeroUsize::new_unchecked(v) }
 }
@@ -58,7 +58,7 @@ where
             Err(poisoned) => poisoned.into_inner(),
         };
         let existed = lru.contains(&key);
-        if let Some((evicted_key, _)) = lru.push(key.clone(), ()) {
+        if let Some((evicted_key, ())) = lru.push(key.clone(), ()) {
             // LruCache::push returns the replaced entry for same-key updates.
             // Do not remove the freshly updated cache value in that case.
             if !(existed && evicted_key == key) {
@@ -66,7 +66,7 @@ where
             }
         }
         while lru.len() > self.capacity {
-            if let Some((evicted_key, _)) = lru.pop_lru() {
+            if let Some((evicted_key, ())) = lru.pop_lru() {
                 self.cache.remove(&evicted_key);
             } else {
                 break;

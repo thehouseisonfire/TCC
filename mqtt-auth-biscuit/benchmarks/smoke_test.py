@@ -1,12 +1,16 @@
 import json
 import os
 import subprocess
+import sys
 import time
+from pathlib import Path
 
 import httpx
 import typer
 
 from benchmarks.logging_utils import get_logger, setup_logging
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _compose_bin():
@@ -18,7 +22,7 @@ def _compose(args: list[str], compose_files: list[str]):
     for path in compose_files:
         file_args.extend(["-f", path])
     cmd = _compose_bin().split(" ") + file_args + args
-    subprocess.check_call(cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
+    subprocess.check_call(cmd, cwd=REPO_ROOT)
 
 
 logger = get_logger(__name__)
@@ -80,7 +84,7 @@ def _run_loadgen(
     tls_insecure: bool,
 ):
     cmd = [
-        "python3",
+        sys.executable,
         "benchmarks/loadgen.py",
         "--host",
         host,
@@ -108,8 +112,8 @@ def _run_loadgen(
         cmd.extend(["--tls-ca-file", tls_ca_file])
     if tls_insecure:
         cmd.append("--tls-insecure")
-    out = subprocess.check_output(cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
-    return json.loads(out.decode("utf-8"))
+    out = subprocess.check_output(cmd, cwd=REPO_ROOT, text=True)
+    return json.loads(out)
 
 
 def _run_mqtt5_auth(
@@ -122,7 +126,7 @@ def _run_mqtt5_auth(
     tls_insecure: bool,
 ):
     cmd = [
-        "python3",
+        sys.executable,
         "benchmarks/mqtt_auth_client.py",
         "--host",
         host,
@@ -141,8 +145,8 @@ def _run_mqtt5_auth(
         cmd.extend(["--tls-ca-file", tls_ca_file])
     if tls_insecure:
         cmd.append("--tls-insecure")
-    out = subprocess.check_output(cmd, cwd=os.path.dirname(os.path.dirname(__file__)))
-    return json.loads(out.decode("utf-8"))
+    out = subprocess.check_output(cmd, cwd=REPO_ROOT, text=True)
+    return json.loads(out)
 
 
 @app.command()
@@ -162,9 +166,8 @@ def main(
 ):
     setup_logging(log_level)
 
-    repo_root = os.path.dirname(os.path.dirname(__file__))
     tls_ca = tls_ca_file or ("docker/tls/ca.pem" if tls else None)
-    if tls and tls_ca and not os.path.exists(os.path.join(repo_root, tls_ca)):
+    if tls and tls_ca and not (REPO_ROOT / tls_ca).exists():
         raise SystemExit(
             f"TLS enabled but CA file not found at {tls_ca}. Run docker/tls/generate_certs.sh"
         )
@@ -190,8 +193,8 @@ def main(
         )
         time.sleep(1)
 
-    tokens_path = os.path.join(repo_root, tokens)
-    with open(tokens_path, encoding="utf-8") as f:
+    tokens_path = REPO_ROOT / tokens
+    with tokens_path.open(encoding="utf-8") as f:
         tokens_data: dict[str, object] = json.load(f)
 
     authz_base = authz_base or ("https://localhost:8443" if tls else "http://localhost:8081")

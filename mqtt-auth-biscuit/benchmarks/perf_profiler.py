@@ -16,11 +16,11 @@ Based on Issue 16 requirements from PROGRESS.md:
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from benchmarks.logging_utils import get_logger
@@ -397,11 +397,12 @@ def run_perf_stat(
         )
 
     # Create output directory
-    os.makedirs(config.output_dir, exist_ok=True)
+    output_dir = Path(config.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # Generate unique output file
     timestamp = int(time.time())
-    output_file = os.path.join(config.output_dir, f"perf-{target_pid}-{timestamp}.json")
+    output_file = output_dir / f"perf-{target_pid}-{timestamp}.json"
 
     # Build perf stat command
     cmd = _build_perf_cmd(
@@ -412,7 +413,7 @@ def run_perf_stat(
             "-p",
             str(target_pid),
             "-o",
-            output_file,
+            str(output_file),
             "-x",
             ",",  # CSV format
         ],
@@ -479,7 +480,7 @@ def run_perf_stat(
 
 
 def _parse_perf_stat_output(
-    output_file: str,
+    output_file: str | Path,
     pid: int,
     duration: float,
 ) -> PerfResult:
@@ -495,9 +496,10 @@ def _parse_perf_stat_output(
     """
     result = PerfResult(pid=pid, duration_seconds=duration)
     events = {}
+    output_path = Path(output_file)
 
     try:
-        with open(output_file, encoding="utf-8") as f:
+        with output_path.open(encoding="utf-8") as f:
             content = f.read()
 
         result.raw_data = {"file_content": content}
@@ -521,7 +523,7 @@ def _parse_perf_stat_output(
         return result
 
     except FileNotFoundError:
-        result.error = f"Perf output file not found: {output_file}"
+        result.error = f"Perf output file not found: {output_path}"
         return result
     except Exception as e:
         result.error = f"Error parsing perf output: {e}"
@@ -561,15 +563,16 @@ def run_perf_record(
     perm_check = _check_perf_permissions(perf_path)
     needs_sudo = perm_check.get("needs_sudo", True)
 
-    os.makedirs(config.output_dir, exist_ok=True)
+    output_dir = Path(config.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = int(time.time())
-    data_file = os.path.join(config.output_dir, f"perf-record-{target_pid}-{timestamp}.data")
+    data_file = output_dir / f"perf-record-{target_pid}-{timestamp}.data"
 
     extra_args = [
         "-p",
         str(target_pid),
         "-o",
-        data_file,
+        str(data_file),
         "--freq",
         str(config.sample_rate),
     ]
@@ -594,12 +597,12 @@ def run_perf_record(
             return result
 
         result["success"] = True
-        result["perf_data_file"] = data_file
+        result["perf_data_file"] = str(data_file)
 
         # Generate perf script output (symbolic)
-        script_file = data_file.replace(".data", ".script")
+        script_file = data_file.with_suffix(".script")
         try:
-            script_cmd = _build_perf_cmd(perf_path, "script", needs_sudo, ["-i", data_file])
+            script_cmd = _build_perf_cmd(perf_path, "script", needs_sudo, ["-i", str(data_file)])
             script_result = subprocess.run(
                 script_cmd,
                 capture_output=True,
@@ -607,9 +610,9 @@ def run_perf_record(
                 timeout=60,
             )
             if script_result.returncode == 0:
-                with open(script_file, "w", encoding="utf-8") as f:
+                with script_file.open("w", encoding="utf-8") as f:
                     f.write(script_result.stdout)
-                result["perf_script_file"] = script_file
+                result["perf_script_file"] = str(script_file)
         except Exception as e:
             logger.warning("Failed to generate perf script: %s", e)
 

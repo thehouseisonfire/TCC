@@ -18,10 +18,10 @@ static ROLE_QUERY_CACHE: OnceLock<Mutex<HashMap<String, Arc<str>>>> = OnceLock::
 
 fn get_role_authorizer_template() -> &'static str {
     ROLE_AUTHORIZER_TEMPLATE.get_or_init(|| {
-        r#"
+        r"
         role({role});
         allow if role($role);
-        "#
+        "
         .to_string()
     })
 }
@@ -32,11 +32,11 @@ fn cached_role_query(role_fact: &str) -> Arc<str> {
         if let Some(query) = cache.get(role_fact) {
             return Arc::clone(query);
         }
-        let query: Arc<str> = format!("data($role) <- {}($role)", role_fact).into();
+        let query: Arc<str> = format!("data($role) <- {role_fact}($role)").into();
         cache.insert(role_fact.to_string(), Arc::clone(&query));
         return query;
     }
-    format!("data($role) <- {}($role)", role_fact).into()
+    format!("data($role) <- {role_fact}($role)").into()
 }
 
 pub enum BiscuitAuthOutcome {
@@ -97,9 +97,11 @@ where
         EXPIRY_METRICS.failures.fetch_add(1, Ordering::Relaxed);
     }
     #[cfg(feature = "expiry_stats")]
+    let elapsed_nanos = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    #[cfg(feature = "expiry_stats")]
     EXPIRY_METRICS
         .total_nanos
-        .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        .fetch_add(elapsed_nanos, Ordering::Relaxed);
     result
 }
 

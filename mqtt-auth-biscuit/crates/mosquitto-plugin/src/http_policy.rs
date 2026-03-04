@@ -217,7 +217,7 @@ async fn get_tls_config(
     tls_insecure: bool,
 ) -> Result<Arc<ClientConfig>, String> {
     let key = TlsConfigKey {
-        ca_file: ca_file.map(|path| path.to_string()),
+        ca_file: ca_file.map(std::string::ToString::to_string),
         tls_insecure,
     };
 
@@ -250,7 +250,7 @@ pub struct TlsConfig<'a> {
     pub tls_insecure: bool,
 }
 
-/// Connection key for pooling: (host, port, is_tls)
+/// Connection key for pooling: (host, port, `is_tls`)
 type ConnKey = (String, u16, bool);
 
 /// DNS cache entry with timestamp for TTL enforcement.
@@ -267,7 +267,7 @@ type BufferPool = Mutex<Vec<Vec<u8>>>;
 static DNS_CACHE: OnceLock<DnsCache> = OnceLock::new();
 const DNS_CACHE_TTL_SECONDS: u64 = 60;
 
-/// Pooled HTTP/2 connection with concurrent stream support via poll_ready.
+/// Pooled HTTP/2 connection with concurrent stream support via `poll_ready`.
 ///
 /// Each connection manages a single HTTP/2 connection. To enable parallel
 /// request initiation, we store multiple connections per endpoint and use
@@ -275,23 +275,23 @@ const DNS_CACHE_TTL_SECONDS: u64 = 60;
 struct PooledConnection {
     id: usize,
     /// The sender for this HTTP/2 connection.
-    /// Wrapped in Mutex to allow mutable access for poll_ready/send_request.
+    /// Wrapped in Mutex to allow mutable access for `poll_ready/send_request`.
     sender: tokio::sync::Mutex<SendRequest<Full<Bytes>>>,
     /// Background connection task handle. Must be kept alive for the connection
     /// to remain open. Dropping it would shut down the connection.
     _conn_handle: JoinHandle<std::result::Result<(), hyper::Error>>,
 }
 
-/// Connection pool storage using tokio::sync::Mutex for async-safe locking.
+/// Connection pool storage using `tokio::sync::Mutex` for async-safe locking.
 ///
-/// tokio::sync::Mutex is used instead of std::sync::Mutex because the guard
-/// is held across await points during poll_ready checks. This allows proper
+/// `tokio::sync::Mutex` is used instead of `std::sync::Mutex` because the guard
+/// is held across await points during `poll_ready` checks. This allows proper
 /// async yielding instead of blocking the runtime thread.
 type ConnectionPool = tokio::sync::Mutex<HashMap<ConnKey, Vec<Arc<PooledConnection>>>>;
 
 /// Global connection pool for HTTP/2 connection reuse with parallel initiation.
 ///
-/// ## Concurrency Model (poll_ready variant)
+/// ## Concurrency Model (`poll_ready` variant)
 ///
 /// The pool operates with a "find available connection" strategy:
 ///
@@ -301,8 +301,8 @@ type ConnectionPool = tokio::sync::Mutex<HashMap<ConnKey, Vec<Arc<PooledConnecti
 /// 2. **Non-blocking acquisition**: When a request needs a connection, it iterates through
 ///    the Vec and tries `poll_ready` on each until finding one with capacity.
 ///
-/// 3. **On-demand scaling**: If all connections are at capacity (poll_ready returns Pending),
-///    a new connection is spawned (up to MAX_POOL_SIZE total per endpoint).
+/// 3. **On-demand scaling**: If all connections are at capacity (`poll_ready` returns Pending),
+///    a new connection is spawned (up to `MAX_POOL_SIZE` total per endpoint).
 ///
 /// 4. **Per-connection serialization**: Each `PooledConnection` has a `tokio::sync::Mutex`
 ///    around its `SendRequest`. This is held only for `poll_ready` + `send_request`,
@@ -316,7 +316,7 @@ type ConnectionPool = tokio::sync::Mutex<HashMap<ConnKey, Vec<Arc<PooledConnecti
 /// on their respective HTTP/2 connections.
 ///
 /// HTTP/2 stream multiplexing then allows ~100 concurrent streams per connection
-/// (per SETTINGS_MAX_CONCURRENT_STREAMS), giving ~N×100 total concurrent requests.
+/// (per `SETTINGS_MAX_CONCURRENT_STREAMS`), giving ~N×100 total concurrent requests.
 static CONNECTION_POOL: OnceLock<ConnectionPool> = OnceLock::new();
 static CONNECTION_ID_GEN: AtomicUsize = AtomicUsize::new(1);
 
@@ -337,7 +337,7 @@ const MAX_POOL_SIZE: usize = 25;
 /// - The Vec is dropped after use, returning memory to the allocator
 ///
 /// ### HTTP Policy Request Characteristics
-/// - Request body size: ~150-500 bytes (typical MQTT authz payload with client_id, topic, token)
+/// - Request body size: ~150-500 bytes (typical MQTT authz payload with `client_id`, topic, token)
 /// - Request frequency: One per MQTT PUBLISH/SUBSCRIBE when HTTP policy mode is enabled
 /// - Peak throughput: Potentially thousands of requests/second in benchmark scenarios
 ///
@@ -347,7 +347,7 @@ const MAX_POOL_SIZE: usize = 25;
 /// 2. **Predictable latency**: Eliminates potential allocator slow paths (sbrk/mmap)
 ///    during request serialization
 /// 3. **Zero-allocation hot path**: When pool has available buffers, serialization
-///    requires no heap allocation (just Vec::extend)
+///    requires no heap allocation (just `Vec::extend`)
 ///
 /// ### Buffer Pool Costs
 /// 1. **Code complexity**: Additional ~30 lines + global state
@@ -410,7 +410,7 @@ fn serialize_to_buffer(value: &Value) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-/// Resolve host:port to SocketAddr with caching and TTL.
+/// Resolve host:port to `SocketAddr` with caching and TTL.
 fn resolve_with_cache(host: &str, port: u16) -> Result<SocketAddr, String> {
     let cache_key = (host.to_string(), port);
     let dns_cache = DNS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -463,13 +463,13 @@ struct ConnectionParams<'a> {
     timeout_seconds: u64,
 }
 
-/// Acquire a connection with available capacity using poll_ready.
+/// Acquire a connection with available capacity using `poll_ready`.
 ///
 /// Iterates through existing connections for the endpoint, checking each with
 /// `poll_ready` until finding one that can accept a new request. If all are at
-/// capacity, creates a new connection (up to MAX_POOL_SIZE per endpoint).
+/// capacity, creates a new connection (up to `MAX_POOL_SIZE` per endpoint).
 ///
-/// Returns a cloned sender (SendRequest is Clone) and its connection id for later removal if dead.
+/// Returns a cloned sender (`SendRequest` is Clone) and its connection id for later removal if dead.
 async fn acquire_connection_with_capacity(
     conn_key: &ConnKey,
     pool: &ConnectionPool,
@@ -605,7 +605,7 @@ async fn check_http_pooled(params: HttpCheckParams<'_>) -> Result<bool, String> 
     };
 
     let (host_port, path) = match rest.split_once('/') {
-        Some((hp, p)) => (hp, format!("/{}", p)),
+        Some((hp, p)) => (hp, format!("/{p}")),
         None => (rest, "/".to_string()),
     };
 
@@ -676,7 +676,7 @@ async fn check_http_pooled(params: HttpCheckParams<'_>) -> Result<bool, String> 
         Ok(resp) => resp,
         Err(e) => {
             // Connection might be dead, try to detect and retry once
-            let err_str = e.to_string();
+            let err_str = e.clone();
             if is_connection_error(&err_str) {
                 // Remove dead connection from pool
                 let mut pool_guard = pool.lock().await;

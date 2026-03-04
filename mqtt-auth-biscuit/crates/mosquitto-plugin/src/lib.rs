@@ -102,15 +102,14 @@ fn log_static_acl_policy_bias(token_type: &TokenType, config: &PluginConfig) {
             let has_roles = claims
                 .roles
                 .as_ref()
-                .map(|roles| roles.iter().any(|role| !role.trim().is_empty()))
-                .unwrap_or(false);
-            if !has_roles {
+                .is_some_and(|roles| roles.iter().any(|role| !role.trim().is_empty()));
+            if has_roles {
+                None
+            } else {
                 Some(
                     "StaticAcl warning: JWT token missing roles; token-only rules may allow beyond ACL identity."
                         .to_string(),
                 )
-            } else {
-                None
             }
         }
         TokenType::Biscuit { bytes, .. } => {
@@ -304,7 +303,10 @@ pub extern "C" fn mosquitto_callback_register(
 
 #[cfg(any(test, miri, kani))]
 #[unsafe(no_mangle)]
-pub extern "C" fn mosquitto_set_username(_client: *mut c_void, _username: *const c_char) -> c_int {
+pub const extern "C" fn mosquitto_set_username(
+    _client: *mut c_void,
+    _username: *const c_char,
+) -> c_int {
     MOSQ_ERR_SUCCESS
 }
 
@@ -336,7 +338,7 @@ pub extern "C" fn mosquitto_broker_publish_copy(
 }
 
 #[cfg(any(test, miri, kani))]
-fn set_username_raw(client: *mut c_void, username: *const c_char) -> c_int {
+const fn set_username_raw(client: *mut c_void, username: *const c_char) -> c_int {
     mosquitto_set_username(client, username)
 }
 
@@ -472,11 +474,13 @@ fn record_broker_publish_call(
     qos: c_int,
     retain: bool,
 ) {
-    let payload_text = if payload.is_null() || payloadlen <= 0 {
+    let payload_text = if payload.is_null() {
         Some(String::new())
     } else {
-        let bytes = unsafe { slice::from_raw_parts(payload.cast::<u8>(), payloadlen as usize) };
-        Some(String::from_utf8_lossy(bytes).into_owned())
+        bytes_from_payload_len(payloadlen).map_or(Some(String::new()), |len| {
+            let bytes = unsafe { bytes_from_c_void(payload, len) };
+            Some(String::from_utf8_lossy(bytes).into_owned())
+        })
     };
     TEST_BROKER_PUBLISH_CALL.with(|call| {
         let mut state = call.borrow_mut();
@@ -528,7 +532,7 @@ enum CacheTtlError {
 impl std::fmt::Display for CacheTtlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CacheTtlError::Expired => write!(f, "token expired"),
+            Self::Expired => write!(f, "token expired"),
         }
     }
 }
@@ -544,29 +548,26 @@ fn cache_ttl_for_token(
         TokenType::Biscuit { expires_at, .. } => *expires_at,
     };
 
-    let ttl = match expires_at {
-        Some(exp) => {
-            let remaining = exp - now;
-            if remaining <= 0 {
-                return Err(CacheTtlError::Expired);
-            }
-            // Preserve a short post-expiry grace window so ACL_CHECK can still
-            // observe expired sessions and force disconnect.
-            let remaining_with_grace =
-                Duration::from_secs((remaining as u64) + EXPIRY_DISCONNECT_GRACE_SECONDS);
-            if remaining_with_grace < configured_ttl {
-                remaining_with_grace
-            } else {
-                configured_ttl
-            }
+    let ttl = if let Some(exp) = expires_at {
+        let remaining = exp - now;
+        if remaining <= 0 {
+            return Err(CacheTtlError::Expired);
         }
-        None => {
-            let fallback = Duration::from_secs(FALLBACK_CACHE_TTL_SECONDS);
-            if fallback < configured_ttl {
-                fallback
-            } else {
-                configured_ttl
-            }
+        // Preserve a short post-expiry grace window so ACL_CHECK can still
+        // observe expired sessions and force disconnect.
+        let remaining_with_grace =
+            Duration::from_secs((remaining as u64) + EXPIRY_DISCONNECT_GRACE_SECONDS);
+        if remaining_with_grace < configured_ttl {
+            remaining_with_grace
+        } else {
+            configured_ttl
+        }
+    } else {
+        let fallback = Duration::from_secs(FALLBACK_CACHE_TTL_SECONDS);
+        if fallback < configured_ttl {
+            fallback
+        } else {
+            configured_ttl
         }
     };
 
@@ -574,7 +575,7 @@ fn cache_ttl_for_token(
 }
 
 #[cfg(any(test, miri, kani))]
-fn log_info(_msg: &str) {}
+const fn log_info(_msg: &str) {}
 
 #[cfg(not(any(test, miri, kani)))]
 fn log_debug(msg: &str) {
@@ -613,7 +614,7 @@ fn should_defer_no_token_basic_auth(mode: PolicyMode, allow_anonymous_no_token: 
         || (mode == PolicyMode::DynamicSecurity && allow_anonymous_no_token)
 }
 
-fn is_acl_read_only(access: c_int) -> bool {
+const fn is_acl_read_only(access: c_int) -> bool {
     (access & MOSQ_ACL_READ) != 0
         && (access & (MOSQ_ACL_WRITE | MOSQ_ACL_SUBSCRIBE | MOSQ_ACL_CONTROL)) == 0
 }
@@ -731,25 +732,57 @@ fn set_control_reauth_signal(evt: &mut MosquittoEvtControl, message: &str) {
     set_reason_string(&raw mut evt.reason_string, message);
 }
 
-fn control_payload_bytes(evt: &MosquittoEvtControl) -> &[u8] {
-    if evt.payload.is_null() || evt.payloadlen == 0 {
-        return &[];
-    }
-    unsafe { slice::from_raw_parts(evt.payload.cast::<u8>(), evt.payloadlen as usize) }
+#[inline]
+unsafe fn plugin_state<'a>(userdata: *mut c_void) -> &'a PluginState {
+    unsafe { &*userdata.cast::<PluginState>() }
 }
 
-fn message_payload_bytes(evt: &MosquittoEvtMessage) -> &[u8] {
-    if evt.payload.is_null() || evt.payloadlen == 0 {
-        return &[];
-    }
-    unsafe { slice::from_raw_parts(evt.payload as *const u8, evt.payloadlen as usize) }
+#[inline]
+#[cfg(any(test, miri, kani))]
+unsafe fn plugin_state_mut<'a>(userdata: *mut c_void) -> &'a mut PluginState {
+    unsafe { &mut *userdata.cast::<PluginState>() }
 }
 
-fn acl_payload_bytes(evt: &MosquittoEvtAclCheck) -> &[u8] {
+#[inline]
+unsafe fn event_ref<'a, T>(event_data: *mut c_void) -> &'a T {
+    unsafe { &*event_data.cast::<T>() }
+}
+
+#[inline]
+unsafe fn event_mut<'a, T>(event_data: *mut c_void) -> &'a mut T {
+    unsafe { &mut *event_data.cast::<T>() }
+}
+
+#[inline]
+#[cfg(test)]
+fn bytes_from_payload_len(payloadlen: c_int) -> Option<usize> {
+    usize::try_from(payloadlen).ok().filter(|len| *len > 0)
+}
+
+#[inline]
+const unsafe fn bytes_from_c_void<'a>(ptr: *const c_void, len: usize) -> &'a [u8] {
+    unsafe { slice::from_raw_parts(ptr.cast::<u8>(), len) }
+}
+
+const fn control_payload_bytes(evt: &MosquittoEvtControl) -> &[u8] {
     if evt.payload.is_null() || evt.payloadlen == 0 {
         return &[];
     }
-    unsafe { slice::from_raw_parts(evt.payload.cast::<u8>(), evt.payloadlen as usize) }
+    unsafe { bytes_from_c_void(evt.payload, evt.payloadlen as usize) }
+}
+
+const fn message_payload_bytes(evt: &MosquittoEvtMessage) -> &[u8] {
+    if evt.payload.is_null() || evt.payloadlen == 0 {
+        return &[];
+    }
+    unsafe { bytes_from_c_void(evt.payload, evt.payloadlen as usize) }
+}
+
+const fn acl_payload_bytes(evt: &MosquittoEvtAclCheck) -> &[u8] {
+    if evt.payload.is_null() || evt.payloadlen == 0 {
+        return &[];
+    }
+    unsafe { bytes_from_c_void(evt.payload, evt.payloadlen as usize) }
 }
 
 fn bind_session_username(state: &PluginState, client_id: &str, username: Option<&str>) {
@@ -845,8 +878,7 @@ fn apply_dynamic_security_control_enforcement(
     let client_id_key = client_id.to_string();
     let Some(token_type) = state.cache.get(&client_id_key) else {
         log_debug(&format!(
-            "Control command skipped: missing cached session for client={}",
-            client_id
+            "Control command skipped: missing cached session for client={client_id}"
         ));
         return;
     };
@@ -871,8 +903,7 @@ fn apply_dynamic_security_control_enforcement(
     };
     if check_authorization(&token_type, params) != AuthzOutcome::Allowed {
         log_debug(&format!(
-            "Control command skipped: authorization denied for client={} topic={}",
-            client_id, topic
+            "Control command skipped: authorization denied for client={client_id} topic={topic}"
         ));
         return;
     }
@@ -897,15 +928,13 @@ fn apply_dynamic_security_control_enforcement(
                 let evicted = state.cache.remove(&affected_client);
                 let session_binding_removed = remove_session_username(state, &affected_client);
                 log_debug(&format!(
-                    "Control enforcement target: client={} cache_evicted={} session_binding_removed={}",
-                    affected_client, evicted, session_binding_removed
+                    "Control enforcement target: client={affected_client} cache_evicted={evicted} session_binding_removed={session_binding_removed}"
                 ));
                 if evicted {
                     disconnect_control_enforcement_client(&affected_client);
                 } else {
                     log_debug(&format!(
-                        "Control enforcement kick skipped: client={} not present in live session cache",
-                        affected_client
+                        "Control enforcement kick skipped: client={affected_client} not present in live session cache"
                     ));
                 }
             }
@@ -916,61 +945,52 @@ fn apply_dynamic_security_control_enforcement(
         }
         Err(err) => {
             log_debug(&format!(
-                "Control command processing failed: client={} topic={} error={}",
-                client_id, topic, err
+                "Control command processing failed: client={client_id} topic={topic} error={err}"
             ));
         }
     }
 }
 
 fn disconnect_expired_acl_client(client_id: &str) {
-    let client_id_cstr = match CString::new(client_id) {
-        Ok(value) => value,
-        Err(_) => {
-            log_debug(&format!(
-                "ACL expiry disconnect skipped: invalid client id '{}'",
-                client_id
-            ));
-            return;
-        }
+    let client_id_cstr = if let Ok(value) = CString::new(client_id) {
+        value
+    } else {
+        log_debug(&format!(
+            "ACL expiry disconnect skipped: invalid client id '{client_id}'"
+        ));
+        return;
     };
     // ACL callbacks do not support MQTT v5 reason signaling.
     // Enforce expiry by denying ACL and forcefully disconnecting the client.
     let rc = kick_client_by_clientid_raw(client_id_cstr.as_ptr(), false);
     if rc == MOSQ_ERR_SUCCESS {
         log_debug(&format!(
-            "ACL expiry disconnect applied: client={} with_will=false",
-            client_id
+            "ACL expiry disconnect applied: client={client_id} with_will=false"
         ));
     } else {
         log_debug(&format!(
-            "ACL expiry disconnect failed: client={} with_will=false rc={}",
-            client_id, rc
+            "ACL expiry disconnect failed: client={client_id} with_will=false rc={rc}"
         ));
     }
 }
 
 fn disconnect_control_enforcement_client(client_id: &str) {
-    let client_id_cstr = match CString::new(client_id) {
-        Ok(value) => value,
-        Err(_) => {
-            log_debug(&format!(
-                "Control enforcement kick skipped: invalid client id '{}'",
-                client_id
-            ));
-            return;
-        }
+    let client_id_cstr = if let Ok(value) = CString::new(client_id) {
+        value
+    } else {
+        log_debug(&format!(
+            "Control enforcement kick skipped: invalid client id '{client_id}'"
+        ));
+        return;
     };
     let rc = kick_client_by_clientid_raw(client_id_cstr.as_ptr(), false);
     if rc == MOSQ_ERR_SUCCESS {
         log_debug(&format!(
-            "Control enforcement kick applied: client={} with_will=false",
-            client_id
+            "Control enforcement kick applied: client={client_id} with_will=false"
         ));
     } else {
         log_debug(&format!(
-            "Control enforcement kick failed: client={} with_will=false rc={}",
-            client_id, rc
+            "Control enforcement kick failed: client={client_id} with_will=false rc={rc}"
         ));
     }
 }
@@ -988,8 +1008,7 @@ fn publish_control_notify_event(state: &PluginState, event: &ControlNotifyEvent)
         let session_client_ids = session_client_ids_for_username(state, username);
         if session_client_ids.is_empty() {
             log_debug(&format!(
-                "Control notify skipped: no live sessions for username={}",
-                username
+                "Control notify skipped: no live sessions for username={username}"
             ));
             continue;
         }
@@ -1012,25 +1031,19 @@ fn publish_control_notify_event(state: &PluginState, event: &ControlNotifyEvent)
 }
 
 fn publish_control_notification(client_id: &str, topic: &str, payload: &str) {
-    let client_id_cstr = match CString::new(client_id) {
-        Ok(value) => value,
-        Err(_) => {
-            log_debug(&format!(
-                "Control notify skipped: invalid client id '{}'",
-                client_id
-            ));
-            return;
-        }
+    let client_id_cstr = if let Ok(value) = CString::new(client_id) {
+        value
+    } else {
+        log_debug(&format!(
+            "Control notify skipped: invalid client id '{client_id}'"
+        ));
+        return;
     };
-    let topic_cstr = match CString::new(topic) {
-        Ok(value) => value,
-        Err(_) => {
-            log_debug(&format!(
-                "Control notify skipped: invalid topic '{}'",
-                topic
-            ));
-            return;
-        }
+    let topic_cstr = if let Ok(value) = CString::new(topic) {
+        value
+    } else {
+        log_debug(&format!("Control notify skipped: invalid topic '{topic}'"));
+        return;
     };
     let payload_bytes = payload.as_bytes();
     let Ok(payload_len) = c_int::try_from(payload_bytes.len()) else {
@@ -1051,13 +1064,11 @@ fn publish_control_notification(client_id: &str, topic: &str, payload: &str) {
     );
     if rc == MOSQ_ERR_SUCCESS {
         log_debug(&format!(
-            "Control notify published: client={} topic={}",
-            client_id, topic
+            "Control notify published: client={client_id} topic={topic}"
         ));
     } else {
         log_debug(&format!(
-            "Control notify publish failed: client={} topic={} rc={}",
-            client_id, topic, rc
+            "Control notify publish failed: client={client_id} topic={topic} rc={rc}"
         ));
     }
 }
@@ -1138,8 +1149,7 @@ fn select_preferred_role(roles: &[String]) -> Option<String> {
     }
     if roles.len() > 1 {
         log_debug(&format!(
-            "Static ACL role selection prefers a single role; candidates={:?}",
-            roles
+            "Static ACL role selection prefers a single role; candidates={roles:?}"
         ));
     }
     if let Some(role) = roles.iter().find(|r| r.trim() == "admin") {
@@ -1174,7 +1184,7 @@ fn role_to_username(token_type: &TokenType, config: &PluginConfig) -> Option<Str
                     );
                 });
             }
-            let roles = roles.as_ref().cloned().or_else(|| {
+            let roles = roles.clone().or_else(|| {
                 biscuit.as_ref().and_then(|token| {
                     extract_roles_from_biscuit_with_limits(
                         token.as_ref(),
@@ -1220,7 +1230,7 @@ fn set_synthetic_username(
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn mosquitto_plugin_version(
+pub const extern "C" fn mosquitto_plugin_version(
     _supported_version_count: c_int,
     _supported_versions: *const c_int,
 ) -> c_int {
@@ -1230,7 +1240,7 @@ pub extern "C" fn mosquitto_plugin_version(
 /// # Safety
 ///
 /// This function is part of the Mosquitto plugin FFI interface.
-/// - `identifier` must be a valid pointer to a MosquittoPluginId
+/// - `identifier` must be a valid pointer to a `MosquittoPluginId`
 /// - `userdata` must be a valid pointer to a null pointer that will be set to plugin state
 /// - `options` must be valid for `option_count` iterations or null if `option_count` is 0
 /// - The caller ensures all pointers are valid and properly aligned
@@ -1376,19 +1386,19 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
 /// # Safety
 ///
 /// This function is part of the Mosquitto plugin FFI interface.
-/// - `userdata` must be a valid pointer that was previously set by mosquitto_plugin_init
+/// - `userdata` must be a valid pointer that was previously set by `mosquitto_plugin_init`
 /// - `options` and `option_count` are ignored in this implementation but may be valid pointers
 /// - The caller ensures all pointers are valid and properly aligned
 /// - This function cleans up plugin state and must be called before plugin unload
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn mosquitto_plugin_cleanup(
-    _userdata: *mut c_void,
+    userdata: *mut c_void,
     _options: *mut MosquittoOpt,
     _option_count: c_int,
 ) -> c_int {
     unsafe {
-        if !_userdata.is_null() {
-            let state = &*_userdata.cast::<PluginState>();
+        if !userdata.is_null() {
+            let state = plugin_state(userdata);
             let cache_stats = state.cache.stats();
             let expiry_stats = expiry_stats();
             log_info(&format!(
@@ -1399,7 +1409,7 @@ pub unsafe extern "C" fn mosquitto_plugin_cleanup(
                 "Biscuit expiry extraction stats: calls={}, failures={}, total_nanos={}",
                 expiry_stats.calls, expiry_stats.failures, expiry_stats.total_nanos
             ));
-            let _ = Box::from_raw(_userdata.cast::<PluginState>());
+            let _ = Box::from_raw(userdata.cast::<PluginState>());
         }
         MOSQ_ERR_SUCCESS
     }
@@ -1413,8 +1423,8 @@ extern "C" fn basic_auth_callback(
     if event_data.is_null() || userdata.is_null() {
         return MOSQ_ERR_INVAL;
     }
-    let evt = unsafe { &mut *event_data.cast::<MosquittoEvtBasicAuth>() };
-    let state = unsafe { &*userdata.cast::<PluginState>() };
+    let evt = unsafe { event_mut::<MosquittoEvtBasicAuth>(event_data) };
+    let state = unsafe { plugin_state(userdata) };
 
     if evt.password.is_null() {
         return if should_defer_no_token_basic_auth(
@@ -1495,22 +1505,16 @@ extern "C" fn ext_auth_start_callback(
     if event_data.is_null() || userdata.is_null() {
         return MOSQ_ERR_INVAL;
     }
-    let evt = unsafe { &mut *event_data.cast::<MosquittoEvtExtendedAuth>() };
-    let state = unsafe { &*userdata.cast::<PluginState>() };
+    let evt = unsafe { event_mut::<MosquittoEvtExtendedAuth>(event_data) };
+    let state = unsafe { plugin_state(userdata) };
 
-    if !state
-        .config
-        .ext_auth_method
-        .as_deref()
-        .map(|m| {
-            if evt.auth_method.is_null() {
-                return false;
-            }
-            let am = unsafe { CStr::from_ptr(evt.auth_method).to_string_lossy() };
-            am == m
-        })
-        .unwrap_or(false)
-    {
+    if !state.config.ext_auth_method.as_deref().is_some_and(|m| {
+        if evt.auth_method.is_null() {
+            return false;
+        }
+        let am = unsafe { CStr::from_ptr(evt.auth_method).to_string_lossy() };
+        am == m
+    }) {
         return MOSQ_ERR_PLUGIN_DEFER;
     }
 
@@ -1518,8 +1522,7 @@ extern "C" fn ext_auth_start_callback(
         return MOSQ_ERR_AUTH;
     }
 
-    let data =
-        unsafe { std::slice::from_raw_parts(evt.data_in.cast::<u8>(), evt.data_in_len as usize) };
+    let data = unsafe { bytes_from_c_void(evt.data_in, evt.data_in_len as usize) };
 
     match state
         .auth_engine
@@ -1591,8 +1594,8 @@ extern "C" fn acl_check_callback(
     if event_data.is_null() || userdata.is_null() {
         return MOSQ_ERR_INVAL;
     }
-    let evt = unsafe { &*event_data.cast::<MosquittoEvtAclCheck>() };
-    let state = unsafe { &*userdata.cast::<PluginState>() };
+    let evt = unsafe { event_ref::<MosquittoEvtAclCheck>(event_data) };
+    let state = unsafe { plugin_state(userdata) };
 
     if evt.topic.is_null() {
         return MOSQ_ERR_INVAL;
@@ -1695,8 +1698,8 @@ extern "C" fn message_callback(
     if event_data.is_null() || userdata.is_null() {
         return MOSQ_ERR_INVAL;
     }
-    let evt = unsafe { &mut *event_data.cast::<MosquittoEvtMessage>() };
-    let state = unsafe { &*userdata.cast::<PluginState>() };
+    let evt = unsafe { event_mut::<MosquittoEvtMessage>(event_data) };
+    let state = unsafe { plugin_state(userdata) };
     if evt.topic.is_null() {
         return MOSQ_ERR_INVAL;
     }
@@ -1744,13 +1747,13 @@ extern "C" fn message_callback(
 /// When a control message modifies policies (e.g., revoking a role), the broker
 /// can apply enforcement via two strategies:
 ///
-/// ### Variant A: Kick/Re-authenticate (No ACL_READ checks)
+/// ### Variant A: Kick/Re-authenticate (No `ACL_READ` checks)
 /// - Immediately disconnect affected clients
 /// - Clients must re-authenticate with new token reflecting updated policies
 /// - Lower overhead for high fan-out scenarios
 /// - Requires clients to handle reconnection gracefully
 ///
-/// ### Variant B: ACL_READ + Warning Publication
+/// ### Variant B: `ACL_READ` + Warning Publication
 /// - Keep sessions alive
 /// - Enforce new policies via `ACL_READ` on next message delivery
 /// - Publish warning to affected clients (e.g., `system/notification/<client_id>`)
@@ -1758,7 +1761,7 @@ extern "C" fn message_callback(
 /// - Clients learn of privilege changes via notification topic
 ///
 /// The plugin supports both variants through policy configuration:
-/// - DynamicSecurity mode: Supports control-triggered kick for `disableClient`
+/// - `DynamicSecurity` mode: Supports control-triggered kick for `disableClient`
 /// - SQLite/HTTP modes: Configurable per deployment
 ///
 /// ## Research Alignment
@@ -1766,7 +1769,7 @@ extern "C" fn message_callback(
 /// This callback enables H₂/H₃ validation by measuring:
 /// - Control-plane latency vs data-plane (token verification costs)
 /// - Policy churn impact (cache invalidation overhead)
-/// - Enforcement variant comparison (kick vs ACL_READ scaling)
+/// - Enforcement variant comparison (kick vs `ACL_READ` scaling)
 extern "C" fn control_callback(
     _event: c_int,
     event_data: *mut c_void,
@@ -1775,8 +1778,8 @@ extern "C" fn control_callback(
     if event_data.is_null() || userdata.is_null() {
         return MOSQ_ERR_INVAL;
     }
-    let evt = unsafe { &mut *event_data.cast::<MosquittoEvtControl>() };
-    let state = unsafe { &*userdata.cast::<PluginState>() };
+    let evt = unsafe { event_mut::<MosquittoEvtControl>(event_data) };
+    let state = unsafe { plugin_state(userdata) };
     if evt.topic.is_null() {
         return MOSQ_ERR_INVAL;
     }
@@ -1787,8 +1790,7 @@ extern "C" fn control_callback(
     // Non-control topics are deferred to other plugins or default ACLs.
     if !topic.starts_with("$CONTROL/") {
         log_debug(&format!(
-            "Control callback: deferring non-control topic '{}'",
-            topic
+            "Control callback: deferring non-control topic '{topic}'"
         ));
         return MOSQ_ERR_PLUGIN_DEFER;
     }
@@ -1821,8 +1823,7 @@ extern "C" fn control_callback(
         match check_authorization(&token_type, params) {
             AuthzOutcome::Allowed => {
                 log_debug(&format!(
-                    "Control authorized: client={} topic={}",
-                    client_id, topic
+                    "Control authorized: client={client_id} topic={topic}"
                 ));
                 apply_dynamic_security_control_enforcement(
                     state,
@@ -1839,16 +1840,12 @@ extern "C" fn control_callback(
             AuthzOutcome::Expired => {
                 set_control_reauth_signal(evt, "token expired; reauthenticate");
                 log_debug(&format!(
-                    "Control rejected (expired): client={} topic={}",
-                    client_id, topic
+                    "Control rejected (expired): client={client_id} topic={topic}"
                 ));
                 return MOSQ_ERR_ACL_DENIED;
             }
             AuthzOutcome::Denied => {
-                log_debug(&format!(
-                    "Control denied: client={} topic={}",
-                    client_id, topic
-                ));
+                log_debug(&format!("Control denied: client={client_id} topic={topic}"));
                 if state.config.policy.mode == PolicyMode::StaticAcl {
                     return MOSQ_ERR_PLUGIN_DEFER;
                 }
@@ -1859,8 +1856,7 @@ extern "C" fn control_callback(
         }
     } else {
         log_debug(&format!(
-            "Control rejected (no session): client={} topic={}",
-            client_id, topic
+            "Control rejected (no session): client={client_id} topic={topic}"
         ));
     }
     MOSQ_ERR_ACL_DENIED
@@ -1941,12 +1937,12 @@ mod tests {
     }
 
     fn set_acl_read_full_authz(userdata: *mut c_void, enabled: bool) {
-        let state = unsafe { &mut *userdata.cast::<PluginState>() };
+        let state = unsafe { plugin_state_mut(userdata) };
         state.config.acl_read_full_authz = enabled;
     }
 
     fn enable_dynamic_security_anonymous_mode(userdata: *mut c_void) {
-        let state = unsafe { &mut *userdata.cast::<PluginState>() };
+        let state = unsafe { plugin_state_mut(userdata) };
         let dynsec_path = format!(
             "{}/../../docker/dynamic-security-anon.json",
             env!("CARGO_MANIFEST_DIR")
@@ -2003,7 +1999,7 @@ mod tests {
 }}"#
         );
         fs::write(&dynsec_path, dynsec_cfg).expect("dynsec test control config must be writable");
-        let state = unsafe { &mut *userdata.cast::<PluginState>() };
+        let state = unsafe { plugin_state_mut(userdata) };
         let policy = DynamicSecurityPolicy::new(
             dynsec_path.to_string_lossy().into_owned(),
             Duration::from_secs(60),
@@ -2080,7 +2076,7 @@ mod tests {
   }
 }"#;
         fs::write(&dynsec_path, dynsec_cfg).expect("dynsec notify config must be writable");
-        let state = unsafe { &mut *userdata.cast::<PluginState>() };
+        let state = unsafe { plugin_state_mut(userdata) };
         let policy = DynamicSecurityPolicy::new(
             dynsec_path.to_string_lossy().into_owned(),
             Duration::from_secs(60),
@@ -2094,7 +2090,7 @@ mod tests {
     }
 
     fn cache_test_jwt_for_client(userdata: *mut c_void, client_id: &str, exp: i64) {
-        let state = unsafe { &mut *userdata.cast::<PluginState>() };
+        let state = unsafe { plugin_state_mut(userdata) };
         let token = TokenType::Jwt {
             claims: Claims {
                 sub: client_id.to_string(),
@@ -2118,7 +2114,7 @@ mod tests {
     }
 
     fn cache_test_biscuit(userdata: *mut c_void, expires_at: Option<i64>) {
-        let state = unsafe { &mut *userdata.cast::<PluginState>() };
+        let state = unsafe { plugin_state_mut(userdata) };
         let token = TokenType::Biscuit {
             bytes: vec![1, 2, 3],
             expires_at,
@@ -2203,7 +2199,7 @@ mod tests {
         };
 
         let (userdata, _identifier) = setup_plugin_with_config();
-        let mut config = unsafe { (&*userdata.cast::<PluginState>()).config.clone() };
+        let mut config = unsafe { plugin_state(userdata).config.clone() };
         teardown_plugin(userdata);
         config.policy.mode = PolicyMode::StaticAcl;
         config.biscuit_authorizer_profile = BiscuitAuthorizerProfile::Rbac;
@@ -2844,7 +2840,7 @@ mod tests {
         assert_eq!(kick.count, 1);
         assert_eq!(kick.last_client_id.as_deref(), Some("test_client"));
 
-        let state = unsafe { &*userdata.cast::<PluginState>() };
+        let state = unsafe { plugin_state(userdata) };
         assert!(state.cache.get(&"test_client".to_string()).is_none());
         let _ = fs::remove_file(dynsec_path);
         teardown_plugin(userdata);
@@ -2853,7 +2849,7 @@ mod tests {
     #[test]
     fn session_client_lookup_prunes_stale_bindings() {
         let (userdata, _identifier) = setup_plugin_with_config();
-        let state = unsafe { &*userdata.cast::<PluginState>() };
+        let state = unsafe { plugin_state(userdata) };
         bind_session_username(state, "stale_client", Some("test_user"));
 
         let resolved = session_client_ids_for_username(state, "test_user");
@@ -2982,7 +2978,7 @@ mod tests {
         assert_eq!(kick.last_client_id.as_deref(), Some("test_client"));
         assert_eq!(kick.last_with_will, Some(false));
 
-        let state = unsafe { &*userdata.cast::<PluginState>() };
+        let state = unsafe { plugin_state(userdata) };
         assert!(state.cache.get(&"test_client".to_string()).is_none());
         let policy = state
             .dynamic_security_policy
@@ -3011,7 +3007,7 @@ mod tests {
         cache_test_jwt(userdata, time::unix_timestamp_now() + 60);
         cache_test_jwt_for_client(userdata, "target_client", time::unix_timestamp_now() + 60);
 
-        let state = unsafe { &*userdata.cast::<PluginState>() };
+        let state = unsafe { plugin_state(userdata) };
         bind_session_username(state, "target_client", Some("test_user"));
 
         let topic = CString::new("$CONTROL/dynamic-security/v1").unwrap();
@@ -3038,7 +3034,7 @@ mod tests {
         assert_eq!(kick.last_client_id.as_deref(), Some("target_client"));
         assert_eq!(kick.last_with_will, Some(false));
 
-        let state = unsafe { &*userdata.cast::<PluginState>() };
+        let state = unsafe { plugin_state(userdata) };
         assert!(state.cache.get(&"target_client".to_string()).is_none());
 
         let _ = fs::remove_file(dynsec_path);
@@ -3052,7 +3048,7 @@ mod tests {
         let dynsec_path = enable_dynamic_security_control_mode_with_client_id(userdata, false);
         cache_test_jwt(userdata, time::unix_timestamp_now() + 60);
 
-        let state = unsafe { &*userdata.cast::<PluginState>() };
+        let state = unsafe { plugin_state(userdata) };
         bind_session_username(state, "stale_client", Some("test_user"));
 
         let topic = CString::new("$CONTROL/dynamic-security/v1").unwrap();
@@ -3096,7 +3092,7 @@ mod tests {
         let dynsec_path = enable_dynamic_security_control_notify_mode(userdata);
         cache_test_jwt(userdata, time::unix_timestamp_now() + 60);
 
-        let state = unsafe { &*userdata.cast::<PluginState>() };
+        let state = unsafe { plugin_state(userdata) };
         bind_session_username(state, "test_client", Some("test_user"));
 
         let topic = CString::new("$CONTROL/dynamic-security/v1").unwrap();
@@ -3132,7 +3128,7 @@ mod tests {
         assert!(payload_text.contains("\"command\":\"removeRoleACL\""));
         assert!(payload_text.contains("\"topic\":\"fanout/broadcast\""));
 
-        let state = unsafe { &*userdata.cast::<PluginState>() };
+        let state = unsafe { plugin_state(userdata) };
         assert!(state.cache.get(&"test_client".to_string()).is_some());
 
         let _ = fs::remove_file(dynsec_path);
@@ -3167,7 +3163,7 @@ mod tests {
 
         let kick = kick_client_call_snapshot();
         assert_eq!(kick.count, 0);
-        let state = unsafe { &*userdata.cast::<PluginState>() };
+        let state = unsafe { plugin_state(userdata) };
         assert!(state.cache.get(&"test_client".to_string()).is_some());
 
         let _ = fs::remove_file(dynsec_path);

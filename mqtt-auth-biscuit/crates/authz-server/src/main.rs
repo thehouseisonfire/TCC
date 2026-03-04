@@ -286,7 +286,7 @@ fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> Response<Full
     }
 }
 
-fn access_to_operation(access: i32) -> &'static str {
+const fn access_to_operation(access: i32) -> &'static str {
     if (access & 0x02) != 0 {
         "publish"
     } else if (access & 0x04) != 0 {
@@ -355,10 +355,16 @@ fn make_rule(
 ) -> Rule {
     Rule {
         effect,
-        ops: ops.iter().map(|v| v.to_string()).collect(),
-        topics: topics.iter().map(|v| v.to_string()).collect(),
-        client_ids: client_ids.iter().map(|v| v.to_string()).collect(),
-        roles: roles.iter().map(|v| v.to_string()).collect(),
+        ops: ops.iter().map(std::string::ToString::to_string).collect(),
+        topics: topics
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect(),
+        client_ids: client_ids
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect(),
+        roles: roles.iter().map(std::string::ToString::to_string).collect(),
         id: Some(id.to_string()),
     }
 }

@@ -106,7 +106,7 @@ struct TokenResponse {
     alg: String,
 }
 
-/// Binary token response for MQTT v5 AUTH packet (raw Protobuf, no Base64URL)
+/// Binary token response for MQTT v5 AUTH packet (raw Protobuf, no `Base64URL`)
 #[derive(Debug, Serialize)]
 struct BinaryTokenResponse {
     /// Base64-encoded binary data (for JSON transport)
@@ -371,7 +371,7 @@ fn handle_biscuit(req: BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<TokenR
 }
 
 /// Generate a Biscuit token and return it in binary format (raw Protobuf)
-/// for MQTT v5 AUTH packet transport without Base64URL overhead.
+/// for MQTT v5 AUTH packet transport without `Base64URL` overhead.
 fn handle_biscuit_binary(
     req: BiscuitIssueRequest,
     cfg: &IssuerConfig,

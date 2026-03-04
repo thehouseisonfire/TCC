@@ -15,7 +15,7 @@ const MOSQ_ACL_WRITE: i32 = 0x02;
 
 // Mosquitto ACL access bitmask mapping:
 // MOSQ_ACL_READ=0x01, MOSQ_ACL_WRITE=0x02, MOSQ_ACL_SUBSCRIBE=0x04, MOSQ_ACL_CONTROL=0x08
-fn access_to_operation(access: i32) -> &'static str {
+const fn access_to_operation(access: i32) -> &'static str {
     if (access & 0x02) != 0 {
         "publish"
     } else if (access & 0x04) != 0 {
@@ -476,7 +476,7 @@ fn is_valid_filter(filter: &str) -> bool {
     true
 }
 
-pub(crate) fn topic_matches(filter: &str, topic: &str) -> bool {
+pub fn topic_matches(filter: &str, topic: &str) -> bool {
     if !is_valid_filter(filter) {
         return false;
     }

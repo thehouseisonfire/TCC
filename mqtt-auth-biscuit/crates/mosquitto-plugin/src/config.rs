@@ -105,9 +105,9 @@ pub struct PluginConfig {
 }
 
 /// Transport mode for Biscuit tokens
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BiscuitTransportMode {
-    /// Base64URL encoding (CONNECT password compatible, ~33% size overhead)
+    /// `Base64URL` encoding (CONNECT password compatible, ~33% size overhead)
     Base64Url,
     /// Native Protobuf binary (MQTT v5 AUTH packet only, no overhead)
     Mqtt5AuthData,
@@ -120,7 +120,7 @@ pub enum BiscuitAuthorizerProfile {
     Contextual,
 }
 
-/// Builder for PluginConfig with fluent interface and validation
+/// Builder for `PluginConfig` with fluent interface and validation
 pub struct PluginConfigBuilder {
     jwt_alg: Option<String>,
     jwt_key_file: Option<String>,
@@ -158,7 +158,7 @@ impl Default for PluginConfigBuilder {
 }
 
 impl PluginConfigBuilder {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             jwt_alg: None,
             jwt_key_file: None,
@@ -215,7 +215,7 @@ impl PluginConfigBuilder {
         self
     }
 
-    pub fn policy_mode(mut self, mode: PolicyMode) -> Self {
+    pub const fn policy_mode(mut self, mode: PolicyMode) -> Self {
         self.policy_mode = Some(mode);
         self
     }
@@ -225,7 +225,7 @@ impl PluginConfigBuilder {
         self
     }
 
-    pub fn sqlite_seed_demo_rules(mut self, enabled: bool) -> Self {
+    pub const fn sqlite_seed_demo_rules(mut self, enabled: bool) -> Self {
         self.sqlite_seed_demo_rules = Some(enabled);
         self
     }
@@ -240,17 +240,17 @@ impl PluginConfigBuilder {
         self
     }
 
-    pub fn http_tls_insecure(mut self, enabled: bool) -> Self {
+    pub const fn http_tls_insecure(mut self, enabled: bool) -> Self {
         self.http_tls_insecure = Some(enabled);
         self
     }
 
-    pub fn http_timeout_seconds(mut self, seconds: u64) -> Self {
+    pub const fn http_timeout_seconds(mut self, seconds: u64) -> Self {
         self.http_timeout_seconds = Some(seconds);
         self
     }
 
-    pub fn http_max_response_bytes(mut self, bytes: u64) -> Self {
+    pub const fn http_max_response_bytes(mut self, bytes: u64) -> Self {
         self.http_max_response_bytes = Some(bytes);
         self
     }
@@ -270,22 +270,22 @@ impl PluginConfigBuilder {
         self
     }
 
-    pub fn dynamic_security_reload_interval_seconds(mut self, seconds: u64) -> Self {
+    pub const fn dynamic_security_reload_interval_seconds(mut self, seconds: u64) -> Self {
         self.dynamic_security_reload_interval_seconds = Some(seconds);
         self
     }
 
-    pub fn cache_ttl_seconds(mut self, ttl: u64) -> Self {
+    pub const fn cache_ttl_seconds(mut self, ttl: u64) -> Self {
         self.cache_ttl_seconds = Some(ttl);
         self
     }
 
-    pub fn allow_anonymous_no_token(mut self, enabled: bool) -> Self {
+    pub const fn allow_anonymous_no_token(mut self, enabled: bool) -> Self {
         self.allow_anonymous_no_token = Some(enabled);
         self
     }
 
-    pub fn acl_read_full_authz(mut self, enabled: bool) -> Self {
+    pub const fn acl_read_full_authz(mut self, enabled: bool) -> Self {
         self.acl_read_full_authz = Some(enabled);
         self
     }
@@ -310,17 +310,17 @@ impl PluginConfigBuilder {
         self
     }
 
-    pub fn biscuit_authorizer_profile(mut self, profile: BiscuitAuthorizerProfile) -> Self {
+    pub const fn biscuit_authorizer_profile(mut self, profile: BiscuitAuthorizerProfile) -> Self {
         self.biscuit_authorizer_profile = Some(profile);
         self
     }
 
-    pub fn biscuit_authorizer_max_time_ms(mut self, millis: u64) -> Self {
+    pub const fn biscuit_authorizer_max_time_ms(mut self, millis: u64) -> Self {
         self.biscuit_authorizer_max_time_ms = Some(millis);
         self
     }
 
-    pub fn biscuit_transport(mut self, mode: BiscuitTransportMode) -> Self {
+    pub const fn biscuit_transport(mut self, mode: BiscuitTransportMode) -> Self {
         self.biscuit_transport = Some(mode);
         self
     }

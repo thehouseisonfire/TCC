@@ -37,7 +37,7 @@ pub struct AuthEngine {
 }
 
 impl AuthEngine {
-    pub fn new(jwt_key: DecodingKey, jwt_validation: Validation) -> Self {
+    pub const fn new(jwt_key: DecodingKey, jwt_validation: Validation) -> Self {
         Self {
             jwt_key,
             jwt_validation,
@@ -47,7 +47,7 @@ impl AuthEngine {
     /// Authenticate a token from MQTT v5 AUTH packet (binary data).
     ///
     /// For Biscuit tokens, this accepts the raw Protobuf binary format
-    /// when `transport_mode` is `Mqtt5AuthData`, avoiding Base64URL overhead.
+    /// when `transport_mode` is `Mqtt5AuthData`, avoiding `Base64URL` overhead.
     /// For JWT tokens, the data is converted to a string (UTF-8) as they
     /// are inherently text-based.
     #[cfg(not(kani))]

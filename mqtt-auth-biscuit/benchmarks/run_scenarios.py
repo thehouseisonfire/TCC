@@ -1649,11 +1649,7 @@ def main(
     scenarios: list[ScenarioConfig] = []
     tls_enabled = tls
     tls_ca = tls_ca_file or ("docker/tls/ca.pem" if tls_enabled else None)
-    if (
-        tls_enabled
-        and tls_ca
-        and not _resolve_repo_path(tls_ca).exists()
-    ):
+    if tls_enabled and tls_ca and not _resolve_repo_path(tls_ca).exists():
         raise SystemExit(
             f"TLS enabled but CA file not found at {tls_ca}. Run docker/tls/generate_certs.sh"
         )

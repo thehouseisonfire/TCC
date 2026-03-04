@@ -7,6 +7,6 @@ pub(crate) fn unix_timestamp_now() -> i64 {
 }
 
 #[cfg(not(miri))]
-pub(crate) fn unix_timestamp_now() -> i64 {
+pub fn unix_timestamp_now() -> i64 {
     chrono::Utc::now().timestamp()
 }

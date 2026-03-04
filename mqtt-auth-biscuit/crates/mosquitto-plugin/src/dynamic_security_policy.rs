@@ -637,17 +637,17 @@ enum AccessKind {
 }
 
 impl AccessKind {
-    fn from_access(access: i32) -> Self {
+    const fn from_access(access: i32) -> Self {
         if (access & ACL_WRITE) != 0 {
-            AccessKind::PublishSend
+            Self::PublishSend
         } else if (access & ACL_SUBSCRIBE) != 0 {
-            AccessKind::Subscribe
+            Self::Subscribe
         } else if (access & ACL_UNSUBSCRIBE) != 0 {
-            AccessKind::Unsubscribe
+            Self::Unsubscribe
         } else if (access & ACL_READ) != 0 {
-            AccessKind::PublishReceive
+            Self::PublishReceive
         } else {
-            AccessKind::Unknown
+            Self::Unknown
         }
     }
 }
@@ -689,7 +689,7 @@ impl DynSecState {
             }
         }
 
-        for (group_name, group) in groups.iter() {
+        for (group_name, group) in &groups {
             for client_ref in &group.clients {
                 let entry = clients
                     .entry(client_ref.name.clone())
@@ -716,8 +716,7 @@ fn role_member_usernames(state: &DynSecState, rolename: &str) -> Vec<String> {
             state
                 .groups
                 .get(&group_ref.name)
-                .map(|group| group.roles.iter().any(|role| role.name == rolename))
-                .unwrap_or(false)
+                .is_some_and(|group| group.roles.iter().any(|role| role.name == rolename))
         });
         if has_direct_role || has_group_role {
             usernames.insert(username.clone());
@@ -924,29 +923,29 @@ enum AclType {
 impl AclType {
     fn from_str(value: &str) -> Self {
         match value {
-            "publishClientSend" => AclType::PublishClientSend,
-            "publishClientReceive" => AclType::PublishClientReceive,
-            "subscribeLiteral" => AclType::SubscribeLiteral,
-            "subscribePattern" => AclType::SubscribePattern,
-            "unsubscribeLiteral" => AclType::UnsubscribeLiteral,
-            "unsubscribePattern" => AclType::UnsubscribePattern,
-            "subscribe" => AclType::SubscribeGeneric,
-            "unsubscribe" => AclType::UnsubscribeGeneric,
+            "publishClientSend" => Self::PublishClientSend,
+            "publishClientReceive" => Self::PublishClientReceive,
+            "subscribeLiteral" => Self::SubscribeLiteral,
+            "subscribePattern" => Self::SubscribePattern,
+            "unsubscribeLiteral" => Self::UnsubscribeLiteral,
+            "unsubscribePattern" => Self::UnsubscribePattern,
+            "subscribe" => Self::SubscribeGeneric,
+            "unsubscribe" => Self::UnsubscribeGeneric,
             _ => {
                 eprintln!("dynsec: unknown acltype '{value}', defaulting to subscribe");
-                AclType::SubscribeGeneric
+                Self::SubscribeGeneric
             }
         }
     }
 
     fn from_control_str(value: &str) -> Option<Self> {
         match value {
-            "publishClientSend" => Some(AclType::PublishClientSend),
-            "publishClientReceive" => Some(AclType::PublishClientReceive),
-            "subscribeLiteral" => Some(AclType::SubscribeLiteral),
-            "subscribePattern" => Some(AclType::SubscribePattern),
-            "unsubscribeLiteral" => Some(AclType::UnsubscribeLiteral),
-            "unsubscribePattern" => Some(AclType::UnsubscribePattern),
+            "publishClientSend" => Some(Self::PublishClientSend),
+            "publishClientReceive" => Some(Self::PublishClientReceive),
+            "subscribeLiteral" => Some(Self::SubscribeLiteral),
+            "subscribePattern" => Some(Self::SubscribePattern),
+            "unsubscribeLiteral" => Some(Self::UnsubscribeLiteral),
+            "unsubscribePattern" => Some(Self::UnsubscribePattern),
             _ => None,
         }
     }
@@ -980,7 +979,7 @@ impl DefaultAclAccess {
         }
     }
 
-    fn allow_for(&self, access: AccessKind) -> bool {
+    const fn allow_for(&self, access: AccessKind) -> bool {
         match access {
             AccessKind::PublishSend => self.publish_client_send,
             AccessKind::PublishReceive => self.publish_client_receive,

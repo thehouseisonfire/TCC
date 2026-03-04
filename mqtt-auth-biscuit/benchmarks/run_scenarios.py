@@ -159,7 +159,9 @@ class ScenarioConfig(TypedDict, total=False):
     biscuit_delegate_public_key_hex: str | None
     biscuit_delegate_public_key_file: str | None
     biscuit_delegate_bin: str | None
-    policy_complexity_kind: Literal["block_chain", "datalog", "http_policy"] | None
+    policy_complexity_kind: (
+        Literal["block_chain", "datalog", "http_policy", "authorizer_template"] | None
+    )
     policy_complexity_tier: Literal["simple", "med", "complex"] | None
     mqtt5_auth: Mqtt5AuthConfig | None
     restart_mosquitto: bool
@@ -220,6 +222,50 @@ def _compose(
         file_args.extend(["-f", path])
     cmd = _compose_bin().split(" ") + file_args + args
     subprocess.check_call(cmd, cwd=os.path.dirname(os.path.dirname(__file__)), env=env)
+
+
+def _compose_service_container_id(
+    service: str,
+    *,
+    compose_files: list[str] | None = None,
+    compose_project_name: str | None = None,
+) -> str:
+    files = compose_files or ["docker/docker-compose.yml"]
+    file_args: list[str] = []
+    for path in files:
+        file_args.extend(["-f", path])
+
+    cmd = _compose_bin().split(" ") + file_args
+    if compose_project_name:
+        cmd.extend(["-p", compose_project_name])
+    cmd.extend(["ps", "--status", "running", "-q", service])
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=os.path.dirname(os.path.dirname(__file__)),
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to resolve running container for compose service {service!r} "
+            f"in project {compose_project_name or '<default>'!r}"
+        ) from exc
+
+    container_ids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if len(container_ids) == 0:
+        raise RuntimeError(
+            f"No running container found for compose service {service!r} "
+            f"in project {compose_project_name or '<default>'!r}"
+        )
+    if len(container_ids) > 1:
+        raise RuntimeError(
+            f"Multiple running containers found for compose service {service!r} "
+            f"in project {compose_project_name or '<default>'!r}: {container_ids}"
+        )
+    return container_ids[0][:12]
 
 
 def _http_client(ca_file: str | None, insecure: bool) -> httpx.Client:
@@ -392,7 +438,13 @@ def _prom_query(base_url: str, query: str, ca_file: str | None, insecure: bool):
 
 
 def _resource_snapshot(
-    base_url: str, ca_file: str | None, insecure: bool, cpu_query_type: str = "instant"
+    base_url: str,
+    ca_file: str | None,
+    insecure: bool,
+    cpu_query_type: str = "instant",
+    *,
+    compose_files: list[str] | None = None,
+    compose_project_name: str | None = None,
 ):
     """
     Capture resource snapshot from Prometheus.
@@ -403,22 +455,12 @@ def _resource_snapshot(
         insecure: Skip TLS verification
         cpu_query_type: "instant" for immediate values, "rate" for rate over time
     """
-    import subprocess
-
-    # Get mosquitto container ID dynamically
-    try:
-        result = subprocess.run(
-            ["docker", "inspect", "docker-mosquitto-1", "--format", "{{.Id}}"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        container_id = result.stdout.strip()[
-            :12
-        ]  # Use first 12 chars for regex matching (Docker ID prefix convention)
-    except Exception:
-        # Fallback: try to find container by name in metrics
-        container_id = "mosquitto"
+    # Get mosquitto container ID for the active compose project.
+    container_id = _compose_service_container_id(
+        "mosquitto",
+        compose_files=compose_files,
+        compose_project_name=compose_project_name,
+    )
 
     # Use container ID-based queries instead of Docker Compose labels
     if cpu_query_type == "rate":
@@ -435,6 +477,48 @@ def _resource_snapshot(
         }
     }
     return snap
+
+
+def _validate_resource_snapshot(
+    snapshot: dict[str, Any],
+    *,
+    scenario_id: str,
+    run_index: int,
+) -> None:
+    issues: list[str] = []
+    prom = snapshot.get("prometheus")
+    if not isinstance(prom, dict):
+        raise RuntimeError(
+            f"Resource snapshot validation failed for scenario {scenario_id} run {run_index + 1}: "
+            "missing prometheus payload"
+        )
+
+    for metric in ("cpu", "memory"):
+        metric_payload = prom.get(metric)
+        if not isinstance(metric_payload, dict):
+            issues.append(f"{metric}: missing metric payload")
+            continue
+
+        if metric_payload.get("status") != "success":
+            issues.append(f"{metric}: status={metric_payload.get('status')!r}")
+            continue
+
+        data = metric_payload.get("data")
+        if not isinstance(data, dict):
+            issues.append(f"{metric}: missing data payload")
+            continue
+
+        result = data.get("result")
+        if not isinstance(result, list):
+            issues.append(f"{metric}: result is not a list")
+        elif not result:
+            issues.append(f"{metric}: result vector is empty")
+
+    if issues:
+        raise RuntimeError(
+            f"Resource snapshot validation failed for scenario {scenario_id} run {run_index + 1}: "
+            + "; ".join(issues)
+        )
 
 
 def _run_loadgen(
@@ -924,6 +1008,51 @@ def _http_hybrid_fanout_authz_config_profile_matrix(
             "client_2": ["reader"],
             "client_3": ["observer"],
             "fanout_publisher": ["writer", "admin"],
+        },
+    }
+
+
+def _biscuit_authorizer_template_scenarios(tokens: dict[str, Any]) -> dict[str, ScenarioConfig]:
+    template_token = tokens.get("biscuit_authorizer_template")
+    if template_token is None:
+        return {}
+
+    return {
+        "POLICY-AUTHZ-TEMPLATE-SIMPLE": {
+            "mosquitto_conf": "./mosquitto_biscuit_authz_simple.conf",
+            "username": "biscuit",
+            "password": template_token,
+            "topic": "sensors/{client_id}/temp",
+            "authz": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "policy_complexity_kind": "authorizer_template",
+            "policy_complexity_tier": "simple",
+            "policy_profile": "simple",
+        },
+        "POLICY-AUTHZ-TEMPLATE-RBAC": {
+            "mosquitto_conf": "./mosquitto_biscuit_authz_rbac.conf",
+            "username": "biscuit",
+            "password": template_token,
+            "topic": "sensors/{client_id}/temp",
+            "authz": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "policy_complexity_kind": "authorizer_template",
+            "policy_complexity_tier": "med",
+            "policy_profile": "rbac",
+        },
+        "POLICY-AUTHZ-TEMPLATE-CONTEXTUAL": {
+            "mosquitto_conf": "./mosquitto_biscuit_authz_contextual.conf",
+            "username": "biscuit",
+            "password": template_token,
+            "topic": "sensors/{client_id}/temp",
+            "authz": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "policy_complexity_kind": "authorizer_template",
+            "policy_complexity_tier": "complex",
+            "policy_profile": "contextual",
         },
     }
 
@@ -1527,6 +1656,16 @@ def main(
         )
     if scenarios_arg:
         scenario_ids = [s.strip() for s in scenarios_arg.split(",")]
+        authorizer_template_scenarios = _biscuit_authorizer_template_scenarios(tokens)
+
+        def _is_authorizer_template_scenario_id(scenario_id: str) -> bool:
+            base = scenario_id.removesuffix("-TLS")
+            return base in {
+                "POLICY-AUTHZ-TEMPLATE-SIMPLE",
+                "POLICY-AUTHZ-TEMPLATE-RBAC",
+                "POLICY-AUTHZ-TEMPLATE-CONTEXTUAL",
+            }
+
         # Define available scenarios mapping
         available_scenarios: dict[str, ScenarioConfig] = {
             "BASE-01": {
@@ -1735,6 +1874,7 @@ def main(
                 "message_size": 0,
                 "policy_complexity_kind": "datalog",
             },
+            **authorizer_template_scenarios,
             **_static_acl_scenarios(tokens),
             **_acl_read_fanout_churn_scenarios(tokens),
             **_acl_read_profile_matrix_scenarios(tokens),
@@ -2366,6 +2506,16 @@ def main(
 
         # Select requested scenarios
         for scenario_id in scenario_ids:
+            if (
+                _is_authorizer_template_scenario_id(scenario_id)
+                and not authorizer_template_scenarios
+            ):
+                raise SystemExit(
+                    "Scenario "
+                    f"{scenario_id!r} requires token fixture key "
+                    "'biscuit_authorizer_template'. "
+                    "Regenerate tokens with: cargo run -p gen-tokens --bin gen-tokens"
+                )
             if scenario_id in available_scenarios:
                 scenario = available_scenarios[scenario_id].copy()
                 scenario["id"] = scenario_id
@@ -2385,7 +2535,9 @@ def main(
             "QOS-MIXED-JWT, QOS-MIXED-BISCUIT, BIS-ATTENUATE-CLIENT, "
             "BIS-ATTENUATE-TTL, BIS-ATTENUATE-DENY, BIS-ATTENUATE-OP-ONLY, "
             "POLICY-COMPLEX-1, POLICY-COMPLEX-5, POLICY-COMPLEX-25, "
-            "POLICY-COMPLEX-LOW, POLICY-COMPLEX-MED, POLICY-COMPLEX-HIGH",
+            "POLICY-COMPLEX-LOW, POLICY-COMPLEX-MED, POLICY-COMPLEX-HIGH, "
+            "POLICY-AUTHZ-TEMPLATE-SIMPLE, POLICY-AUTHZ-TEMPLATE-RBAC, "
+            "POLICY-AUTHZ-TEMPLATE-CONTEXTUAL",
         )
         logger.info(
             "JWT-HTTP-200MS, JWT-HTTP-1000MS, HYBRID-AUTHZ-DOWN, MTU-200-JWT",
@@ -2773,6 +2925,9 @@ def main(
 
         _validate_dynsec_fanout_alignment(s["id"], s)
         dynsec_baseline = _capture_dynsec_baseline()
+        compose_project_name = extra_env.get("COMPOSE_PROJECT_NAME") or os.environ.get(
+            "COMPOSE_PROJECT_NAME"
+        )
         try:
             for idx in range(repeats):
                 if s.get("dynsec_config"):
@@ -2942,10 +3097,14 @@ def main(
                     )
                 # Small delay to ensure container metrics are available after loadgen
                 time.sleep(2)
-                try:
-                    snap = _resource_snapshot(prom_base, tls_ca, tls_insecure)
-                except Exception as e:
-                    snap = {"error": str(e)}
+                snap = _resource_snapshot(
+                    prom_base,
+                    tls_ca,
+                    tls_insecure,
+                    compose_files=compose_files,
+                    compose_project_name=compose_project_name,
+                )
+                _validate_resource_snapshot(snap, scenario_id=s["id"], run_index=idx)
 
                 # Run perf profiling if enabled and scenario matches filter
                 perf_result: dict[str, Any] = {"enabled": False}

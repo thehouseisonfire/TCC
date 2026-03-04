@@ -1,5 +1,8 @@
 use crate::auth::TokenType;
-use crate::biscuit_handler::{BiscuitAuthOutcome, authorize_biscuit, verify_biscuit_token};
+use crate::biscuit_handler::{
+    BiscuitAuthOutcome, authorize_biscuit_with_limits, verify_biscuit_token_with_limits,
+};
+use crate::config::BiscuitAuthorizerProfile;
 use crate::dynamic_security_policy::DynamicSecurityPolicy;
 use crate::http_policy;
 use crate::jwt_handler::JwtGrant;
@@ -47,6 +50,7 @@ mod tests {
         topic_matches,
     };
     use crate::auth::TokenType;
+    use crate::config::BiscuitAuthorizerProfile;
     use crate::dynamic_security_policy::DynamicSecurityPolicy;
     use crate::jwt_handler::Claims;
     use crate::policy::PolicyMode;
@@ -328,6 +332,8 @@ mod tests {
             topic: "sensors/a",
             access: 0x08,
             is_control_request: false,
+            biscuit_authorizer_profile: BiscuitAuthorizerProfile::Simple,
+            biscuit_authorizer_max_time_ms: 25,
             biscuit_root_key: &root_key,
             policy_mode: PolicyMode::DynamicSecurity,
             sqlite_policy: None,
@@ -544,6 +550,8 @@ pub struct AuthzParams<'a> {
     pub topic: &'a str,
     pub access: i32,
     pub is_control_request: bool,
+    pub biscuit_authorizer_profile: BiscuitAuthorizerProfile,
+    pub biscuit_authorizer_max_time_ms: u64,
     pub biscuit_root_key: &'a BiscuitPublicKey,
     pub policy_mode: PolicyMode,
     pub sqlite_policy: Option<&'a SqlitePolicy>,
@@ -711,15 +719,23 @@ pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> A
 
             let token_only = || {
                 let outcome = if let Some(biscuit) = biscuit {
-                    authorize_biscuit(biscuit.as_ref(), params.topic, operation)
+                    authorize_biscuit_with_limits(
+                        biscuit.as_ref(),
+                        params.topic,
+                        operation,
+                        params.biscuit_authorizer_profile,
+                        params.biscuit_authorizer_max_time_ms,
+                    )
                 } else {
-                    verify_biscuit_token(
+                    verify_biscuit_token_with_limits(
                         bytes,
                         params.biscuit_root_key,
                         AuthContext {
                             topic: params.topic,
                             operation,
                         },
+                        params.biscuit_authorizer_profile,
+                        params.biscuit_authorizer_max_time_ms,
                     )
                 };
                 match outcome {

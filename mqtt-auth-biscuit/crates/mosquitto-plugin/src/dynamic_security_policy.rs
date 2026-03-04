@@ -1390,16 +1390,15 @@ mod tests {
         assert_eq!(targets.kick_client_ids, vec!["test_client".to_string()]);
         assert_eq!(targets.kick_usernames, vec!["test_user".to_string()]);
         assert!(targets.notify_events.is_empty());
-        assert_eq!(
-            policy
+        assert!(
+            !policy
                 .check(
                     Some("test_user"),
                     Some("test_client"),
                     "$CONTROL/dynamic-security/v1",
                     ACL_WRITE
                 )
-                .expect("policy check should succeed"),
-            false
+                .expect("policy check should succeed")
         );
         let _ = fs::remove_file(path);
     }
@@ -1417,7 +1416,7 @@ mod tests {
         assert!(targets.kick_client_ids.is_empty());
         assert!(targets.kick_usernames.is_empty());
         assert!(targets.notify_events.is_empty());
-        assert_eq!(
+        assert!(
             policy
                 .check(
                     Some("test_user"),
@@ -1425,8 +1424,7 @@ mod tests {
                     "$CONTROL/dynamic-security/v1",
                     ACL_WRITE
                 )
-                .expect("policy check should succeed"),
-            true
+                .expect("policy check should succeed")
         );
         let _ = fs::remove_file(path);
     }
@@ -1459,16 +1457,15 @@ mod tests {
         assert!(targets.notify_events.is_empty());
 
         // Runtime disable overlay must continue denying even after config reloads.
-        assert_eq!(
-            policy
+        assert!(
+            !policy
                 .check(
                     Some("test_user"),
                     Some("another_client"),
                     "$CONTROL/dynamic-security/v1",
                     ACL_WRITE
                 )
-                .expect("policy check should succeed"),
-            false
+                .expect("policy check should succeed")
         );
         let _ = fs::remove_file(path);
     }
@@ -1493,16 +1490,15 @@ mod tests {
             vec!["test_user".to_string()]
         );
         assert!(disable_targets.notify_events.is_empty());
-        assert_eq!(
-            policy
+        assert!(
+            !policy
                 .check(
                     Some("test_user"),
                     Some("test_client"),
                     "$CONTROL/dynamic-security/v1",
                     ACL_WRITE
                 )
-                .expect("policy check should succeed"),
-            false
+                .expect("policy check should succeed")
         );
 
         let enable_payload = br#"{"commands":[{"command":"enableClient","username":"test_user"}]}"#;
@@ -1512,7 +1508,7 @@ mod tests {
         assert!(enable_targets.kick_client_ids.is_empty());
         assert!(enable_targets.kick_usernames.is_empty());
         assert!(enable_targets.notify_events.is_empty());
-        assert_eq!(
+        assert!(
             policy
                 .check(
                     Some("test_user"),
@@ -1520,8 +1516,7 @@ mod tests {
                     "$CONTROL/dynamic-security/v1",
                     ACL_WRITE
                 )
-                .expect("policy check should succeed"),
-            true
+                .expect("policy check should succeed")
         );
         let _ = fs::remove_file(path);
     }
@@ -1544,7 +1539,7 @@ mod tests {
         assert!(targets.kick_client_ids.is_empty());
         assert!(targets.kick_usernames.is_empty());
         assert!(targets.notify_events.is_empty());
-        assert_eq!(
+        assert!(
             policy
                 .check(
                     Some("test_user"),
@@ -1552,8 +1547,7 @@ mod tests {
                     "$CONTROL/dynamic-security/v1",
                     ACL_WRITE
                 )
-                .expect("policy check should succeed"),
-            true
+                .expect("policy check should succeed")
         );
         let _ = fs::remove_file(path);
     }
@@ -1572,16 +1566,15 @@ mod tests {
 
         // Simulate a state overlay mismatch by externally setting the file back to enabled.
         set_client_disabled(&path, "test_user", false);
-        assert_eq!(
-            policy
+        assert!(
+            !policy
                 .check(
                     Some("test_user"),
                     Some("test_client"),
                     "$CONTROL/dynamic-security/v1",
                     ACL_WRITE
                 )
-                .expect("policy check should succeed"),
-            false
+                .expect("policy check should succeed")
         );
 
         let enable_payload = br#"{"commands":[{"command":"enableClient","username":"test_user"}]}"#;
@@ -1591,7 +1584,7 @@ mod tests {
         assert!(targets.kick_client_ids.is_empty());
         assert!(targets.kick_usernames.is_empty());
         assert!(targets.notify_events.is_empty());
-        assert_eq!(
+        assert!(
             policy
                 .check(
                     Some("test_user"),
@@ -1599,8 +1592,7 @@ mod tests {
                     "$CONTROL/dynamic-security/v1",
                     ACL_WRITE
                 )
-                .expect("policy check should succeed"),
-            true
+                .expect("policy check should succeed")
         );
         let _ = fs::remove_file(path);
     }
@@ -1626,16 +1618,15 @@ mod tests {
         assert_eq!(event.topic.as_deref(), Some("fanout/broadcast"));
         assert_eq!(event.usernames, vec!["test_user".to_string()]);
 
-        assert_eq!(
-            policy
+        assert!(
+            !policy
                 .check(
                     Some("test_user"),
                     Some("test_client"),
                     "fanout/broadcast",
                     ACL_READ
                 )
-                .expect("policy check should succeed"),
-            false
+                .expect("policy check should succeed")
         );
         let _ = fs::remove_file(path);
     }
@@ -1658,16 +1649,15 @@ mod tests {
         assert_eq!(event.command, "addRoleACL");
         assert_eq!(event.usernames, vec!["test_user".to_string()]);
 
-        assert_eq!(
-            policy
+        assert!(
+            !policy
                 .check(
                     Some("test_user"),
                     Some("test_client"),
                     "fanout/broadcast",
                     ACL_READ
                 )
-                .expect("policy check should succeed"),
-            false
+                .expect("policy check should succeed")
         );
         let _ = fs::remove_file(path);
     }
@@ -1686,16 +1676,15 @@ mod tests {
         // Simulate stale file state that still contains the removed ACL.
         restore_fanout_reader_publish_receive_acl(&path);
 
-        assert_eq!(
-            policy
+        assert!(
+            !policy
                 .check(
                     Some("test_user"),
                     Some("test_client"),
                     "fanout/broadcast",
                     ACL_READ
                 )
-                .expect("policy check should succeed"),
-            false
+                .expect("policy check should succeed")
         );
         let _ = fs::remove_file(path);
     }

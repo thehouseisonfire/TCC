@@ -705,6 +705,9 @@ def get_default_perf_scenarios() -> list[str]:
         "POLICY-COMPLEX-LOW",  # Datalog complexity low
         "POLICY-COMPLEX-MED",  # Datalog complexity medium
         "POLICY-COMPLEX-HIGH",  # Datalog complexity high
+        "POLICY-AUTHZ-TEMPLATE-SIMPLE",  # Authorizer template baseline
+        "POLICY-AUTHZ-TEMPLATE-RBAC",  # Authorizer template with role derivation
+        "POLICY-AUTHZ-TEMPLATE-CONTEXTUAL",  # Authorizer template with contextual checks
         "THUNDERING-HERD",  # Connection burst CPU load
     ]
 

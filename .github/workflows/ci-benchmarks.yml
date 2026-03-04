@@ -93,6 +93,12 @@ jobs:
         working-directory: mqtt-auth-biscuit/docker
         run: docker compose -f docker-compose.yml config
 
+      - name: Validate resource snapshot telemetry
+        working-directory: mqtt-auth-biscuit
+        env:
+          PYTHONPATH: .
+        run: pytest -q benchmarks/test_resource_snapshot.py
+
       - name: Build Docker images (dry run)
         working-directory: mqtt-auth-biscuit/docker
         run: docker compose -f docker-compose.yml build --dry-run 2>/dev/null || echo 'Dry-run completed'

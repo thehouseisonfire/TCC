@@ -141,6 +141,11 @@ docker compose -f docker/docker-compose.yml up --build -d
 > [!NOTE]
 > The `--build` flag ensures that the plugin is copied into the Docker image
 > correctly.
+>
+> Resource snapshots in `benchmarks/run_scenarios.py` now fail fast if
+> Prometheus returns empty CPU or memory vectors. Keep `mosquitto`,
+> `metrics-collector`, and `cadvisor` running for benchmark executions that
+> collect resource telemetry.
 
 ## Step 4: Run Benchmarks
 
@@ -159,9 +164,31 @@ Relevant plugin options (set in `mosquitto_*.conf`):
 
 - `plugin_opt_role_username_prefix` (default: `role:`)
 - `plugin_opt_biscuit_role_fact` (default: `role`, must be a simple predicate identifier like `role` or `device_role`)
+- `plugin_opt_biscuit_authorizer_profile` (default: `simple`; allowed: `simple`, `rbac`, `contextual`)
+- `plugin_opt_biscuit_authorizer_max_time_ms` (default: `25`; must be `>= 1`; caps Biscuit authorizer runtime per evaluation to avoid false denials under host contention)
 - `plugin_opt_acl_read_full_authz false` in static configs (documents expiry-only `ACL_READ` fan-out behavior for static-policy runs)
+- StaticAcl bias warnings are intentionally conservative diagnostics. For Biscuit, warning inspection is profile-aware (`simple`: direct `right`; `rbac`/`contextual`: derived `role_right` grants), and indicates token grant shape risk in StaticAcl mode rather than a definitive allow/deny result for the current request.
 
 Ensure the ACL file (`docker/static-acl.conf`) uses the same role names.
+
+### Biscuit Authorizer Template Profiles (Issue 21)
+
+Token-only Biscuit scenarios can now select plugin-side authorizer complexity with:
+
+- `plugin_opt_biscuit_authorizer_profile simple`:
+  direct `right/deny` evaluation baseline.
+- `plugin_opt_biscuit_authorizer_profile rbac`:
+  includes role-derived rights/denies (`role_right`, `role_deny`).
+- `plugin_opt_biscuit_authorizer_profile contextual`:
+  strict contextual profile with role-derived allows/denies gated by
+  `role_active_from/role_active_until`; direct `right(...)` is ignored while
+  direct `deny(...)` is always enforced.
+
+Dedicated scenarios for this axis:
+
+- `POLICY-AUTHZ-TEMPLATE-SIMPLE`
+- `POLICY-AUTHZ-TEMPLATE-RBAC`
+- `POLICY-AUTHZ-TEMPLATE-CONTEXTUAL`
 
 Static scenario ACL coverage:
 - `STATIC-ACL-JWT`, `STATIC-ACL-BIS`: publish path (`ACL_WRITE`) with writer role tokens.
@@ -507,6 +534,13 @@ You can also monitor resource usage via:
 
 - **Prometheus**: `http://localhost:9090`
 - **Docker Stats**: `docker stats`
+
+If resource snapshots fail because vectors are empty, validate telemetry wiring
+with:
+
+```bash
+python3 benchmarks/verify_prometheus.py
+```
 
 ## Network Baseline Measurement (iperf3)
 

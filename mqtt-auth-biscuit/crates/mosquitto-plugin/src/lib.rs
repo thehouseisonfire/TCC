@@ -1,8 +1,8 @@
 use crate::auth::{AuthEngine, AuthError, TokenType};
 use crate::authz::{AuthzOutcome, AuthzParams, check_authorization, check_token_expiry};
 use crate::biscuit_handler::{
-    expiry_stats, extract_min_expiry_from_biscuit, extract_roles_from_biscuit, has_right_facts,
-    parse_biscuit,
+    expiry_stats, extract_min_expiry_from_biscuit_with_limits,
+    extract_roles_from_biscuit_with_limits, has_profile_grant_facts_with_limits, parse_biscuit,
 };
 use crate::cache::SessionCache;
 use crate::config::{PluginConfig, parse_options};
@@ -93,6 +93,10 @@ fn log_static_acl_policy_bias(token_type: &TokenType, config: &PluginConfig) {
     ) {
         return;
     }
+    // This warning is intentionally conservative: in StaticAcl modes we flag any
+    // token grant shape that can authorize independently of ACL identity under
+    // the active Biscuit profile. It is a safety diagnostic, not a per-request
+    // allow/deny decision.
     let warn_message = match token_type {
         TokenType::Jwt { claims, .. } => {
             let has_roles = claims
@@ -110,17 +114,22 @@ fn log_static_acl_policy_bias(token_type: &TokenType, config: &PluginConfig) {
             }
         }
         TokenType::Biscuit { bytes, .. } => {
-            match has_right_facts(bytes, &config.biscuit.root_public_key) {
+            match has_profile_grant_facts_with_limits(
+                bytes,
+                &config.biscuit.root_public_key,
+                config.biscuit_authorizer_profile,
+                config.biscuit_authorizer_max_time_ms,
+            ) {
                 Ok(true) => {
                     Some(
-                        "StaticAcl warning: Biscuit token includes right(...) facts; token-only rules may allow beyond ACL identity."
+                        "StaticAcl warning: Biscuit token includes grant facts (right(...) and/or profile-derived role_right(...)); token-only rules may allow beyond ACL identity."
                             .to_string(),
                     )
                 }
                 Ok(false) => None,
                 Err(err) => {
                     Some(format!(
-                        "StaticAcl warning: failed to inspect Biscuit rights facts: {err}"
+                        "StaticAcl warning: failed to inspect Biscuit grant facts: {err}"
                     ))
                 }
             }
@@ -402,6 +411,7 @@ struct BrokerPublishCall {
 thread_local! {
     static TEST_KICK_CLIENT_CALL: RefCell<KickClientCall> = RefCell::new(KickClientCall::default());
     static TEST_BROKER_PUBLISH_CALL: RefCell<BrokerPublishCall> = RefCell::new(BrokerPublishCall::default());
+    static TEST_DEBUG_LOGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
@@ -426,6 +436,21 @@ fn kick_client_call_snapshot() -> KickClientCall {
 #[cfg(test)]
 fn broker_publish_call_snapshot() -> BrokerPublishCall {
     TEST_BROKER_PUBLISH_CALL.with(|call| call.borrow().clone())
+}
+
+#[cfg(test)]
+fn reset_debug_logs() {
+    TEST_DEBUG_LOGS.with(|logs| logs.borrow_mut().clear());
+}
+
+#[cfg(test)]
+fn debug_logs_snapshot() -> Vec<String> {
+    TEST_DEBUG_LOGS.with(|logs| logs.borrow().clone())
+}
+
+#[cfg(test)]
+fn record_debug_log(message: &str) {
+    TEST_DEBUG_LOGS.with(|logs| logs.borrow_mut().push(message.to_string()));
 }
 
 #[cfg(test)]
@@ -561,7 +586,12 @@ fn log_debug(msg: &str) {
 }
 
 #[cfg(any(test, miri, kani))]
-fn log_debug(_msg: &str) {}
+fn log_debug(msg: &str) {
+    #[cfg(test)]
+    record_debug_log(msg);
+    #[cfg(not(test))]
+    let _ = msg;
+}
 
 fn cstr_to_string(ptr: *const c_char) -> Option<String> {
     if ptr.is_null() {
@@ -827,6 +857,8 @@ fn apply_dynamic_security_control_enforcement(
         topic,
         access: MOSQ_ACL_CONTROL,
         is_control_request: true,
+        biscuit_authorizer_profile: state.config.biscuit_authorizer_profile,
+        biscuit_authorizer_max_time_ms: state.config.biscuit_authorizer_max_time_ms,
         biscuit_root_key: &state.config.biscuit.root_public_key,
         policy_mode: state.config.policy.mode,
         sqlite_policy: state.sqlite_policy.as_ref(),
@@ -1026,6 +1058,7 @@ fn publish_control_notification(client_id: &str, topic: &str, payload: &str) {
 fn attach_biscuit_expiry(
     token_type: TokenType,
     root_public_key: &biscuit_auth::PublicKey,
+    biscuit_authorizer_max_time_ms: u64,
 ) -> Result<TokenType, biscuit_auth::error::Token> {
     match token_type {
         TokenType::Biscuit {
@@ -1040,7 +1073,10 @@ fn attach_biscuit_expiry(
             };
             let expires_at = match expires_at {
                 Some(value) => Some(value),
-                None => extract_min_expiry_from_biscuit(&biscuit)?,
+                None => extract_min_expiry_from_biscuit_with_limits(
+                    &biscuit,
+                    biscuit_authorizer_max_time_ms,
+                )?,
             };
             Ok(TokenType::Biscuit {
                 bytes,
@@ -1070,9 +1106,12 @@ fn attach_biscuit_roles(token_type: TokenType, config: &PluginConfig) -> TokenTy
                 };
             }
             let roles = match biscuit.as_ref() {
-                Some(token) => {
-                    extract_roles_from_biscuit(token.as_ref(), &config.biscuit_role_fact).ok()
-                }
+                Some(token) => extract_roles_from_biscuit_with_limits(
+                    token.as_ref(),
+                    &config.biscuit_role_fact,
+                    config.biscuit_authorizer_max_time_ms,
+                )
+                .ok(),
                 None => None,
             };
             TokenType::Biscuit {
@@ -1130,7 +1169,12 @@ fn role_to_username(token_type: &TokenType, config: &PluginConfig) -> Option<Str
             }
             let roles = roles.as_ref().cloned().or_else(|| {
                 biscuit.as_ref().and_then(|token| {
-                    extract_roles_from_biscuit(token.as_ref(), &config.biscuit_role_fact).ok()
+                    extract_roles_from_biscuit_with_limits(
+                        token.as_ref(),
+                        &config.biscuit_role_fact,
+                        config.biscuit_authorizer_max_time_ms,
+                    )
+                    .ok()
                 })
             });
             roles
@@ -1390,16 +1434,19 @@ extern "C" fn basic_auth_callback(
 
     match state.auth_engine.authenticate(&password) {
         Ok(token_type) => {
-            let token_type =
-                match attach_biscuit_expiry(token_type, &state.config.biscuit.root_public_key) {
-                    Ok(token_type) => token_type,
-                    Err(err) => {
-                        log_debug(&format!(
-                            "Authentication rejected: biscuit expiry extraction failed: {err}"
-                        ));
-                        return MOSQ_ERR_AUTH;
-                    }
-                };
+            let token_type = match attach_biscuit_expiry(
+                token_type,
+                &state.config.biscuit.root_public_key,
+                state.config.biscuit_authorizer_max_time_ms,
+            ) {
+                Ok(token_type) => token_type,
+                Err(err) => {
+                    log_debug(&format!(
+                        "Authentication rejected: biscuit expiry extraction failed: {err}"
+                    ));
+                    return MOSQ_ERR_AUTH;
+                }
+            };
             let token_type = attach_biscuit_roles(token_type, &state.config);
             log_static_acl_policy_bias(&token_type, &state.config);
             if let Err(err) = set_synthetic_username(evt.client, &token_type, &state.config) {
@@ -1472,16 +1519,19 @@ extern "C" fn ext_auth_start_callback(
         .authenticate_binary(data, state.config.biscuit_transport)
     {
         Ok(token_type) => {
-            let token_type =
-                match attach_biscuit_expiry(token_type, &state.config.biscuit.root_public_key) {
-                    Ok(token_type) => token_type,
-                    Err(err) => {
-                        log_debug(&format!(
-                            "Enhanced auth rejected: biscuit expiry extraction failed: {err}"
-                        ));
-                        return MOSQ_ERR_AUTH;
-                    }
-                };
+            let token_type = match attach_biscuit_expiry(
+                token_type,
+                &state.config.biscuit.root_public_key,
+                state.config.biscuit_authorizer_max_time_ms,
+            ) {
+                Ok(token_type) => token_type,
+                Err(err) => {
+                    log_debug(&format!(
+                        "Enhanced auth rejected: biscuit expiry extraction failed: {err}"
+                    ));
+                    return MOSQ_ERR_AUTH;
+                }
+            };
             let token_type = attach_biscuit_roles(token_type, &state.config);
             log_static_acl_policy_bias(&token_type, &state.config);
             if let Err(err) = set_synthetic_username(evt.client, &token_type, &state.config) {
@@ -1566,6 +1616,8 @@ extern "C" fn acl_check_callback(
             topic: &topic,
             access: evt.access,
             is_control_request: false,
+            biscuit_authorizer_profile: state.config.biscuit_authorizer_profile,
+            biscuit_authorizer_max_time_ms: state.config.biscuit_authorizer_max_time_ms,
             biscuit_root_key: &state.config.biscuit.root_public_key,
             policy_mode: state.config.policy.mode,
             sqlite_policy: state.sqlite_policy.as_ref(),
@@ -1746,6 +1798,8 @@ extern "C" fn control_callback(
             topic: &topic,
             access: MOSQ_ACL_CONTROL,
             is_control_request: true,
+            biscuit_authorizer_profile: state.config.biscuit_authorizer_profile,
+            biscuit_authorizer_max_time_ms: state.config.biscuit_authorizer_max_time_ms,
             biscuit_root_key: &state.config.biscuit.root_public_key,
             policy_mode: state.config.policy.mode,
             sqlite_policy: state.sqlite_policy.as_ref(),
@@ -1808,13 +1862,22 @@ extern "C" fn control_callback(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::BiscuitAuthorizerProfile;
     use crate::jwt_handler::Claims;
+    use biscuit_auth::{Biscuit, KeyPair, PrivateKey};
     use std::ffi::CString;
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
     static TEST_DYNSEC_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn root_keypair() -> KeyPair {
+        let root_bytes = [1u8; 32];
+        KeyPair::from(
+            &PrivateKey::from_bytes(&root_bytes, biscuit_auth::Algorithm::Ed25519).unwrap(),
+        )
+    }
 
     fn setup_plugin_with_config() -> (*mut c_void, MosquittoPluginId) {
         let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
@@ -2113,6 +2176,40 @@ mod tests {
         assert!(!is_acl_read_only(
             MOSQ_ACL_READ | MOSQ_ACL_WRITE | MOSQ_ACL_SUBSCRIBE
         ));
+    }
+
+    #[test]
+    fn static_acl_bias_warning_logs_for_biscuit_role_right_in_rbac_profile() {
+        let keypair = root_keypair();
+        let biscuit = Biscuit::builder()
+            .fact(r#"role("writer")"#)
+            .unwrap()
+            .fact(r#"role_right("writer", "publish", "sensors/client_1/#")"#)
+            .unwrap()
+            .build(&keypair)
+            .unwrap();
+        let token_type = TokenType::Biscuit {
+            bytes: biscuit.to_vec().unwrap(),
+            expires_at: None,
+            roles: None,
+            biscuit: None,
+        };
+
+        let (userdata, _identifier) = setup_plugin_with_config();
+        let mut config = unsafe { (&*(userdata as *mut PluginState)).config.clone() };
+        teardown_plugin(userdata);
+        config.policy.mode = PolicyMode::StaticAcl;
+        config.biscuit_authorizer_profile = BiscuitAuthorizerProfile::Rbac;
+        config.biscuit.root_public_key = keypair.public();
+
+        reset_debug_logs();
+        log_static_acl_policy_bias(&token_type, &config);
+        let logs = debug_logs_snapshot();
+        assert!(
+            logs.iter().any(
+                |entry| entry.contains("StaticAcl warning: Biscuit token includes grant facts")
+            )
+        );
     }
 
     #[test]
@@ -3161,6 +3258,8 @@ mod verification {
             ext_auth_method: Some("token".to_string()),
             role_username_prefix: "role:".to_string(),
             biscuit_role_fact: "role".to_string(),
+            biscuit_authorizer_profile: crate::config::BiscuitAuthorizerProfile::Simple,
+            biscuit_authorizer_max_time_ms: 25,
             biscuit_transport: crate::config::BiscuitTransportMode::Base64Url,
         };
 

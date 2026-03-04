@@ -8,6 +8,8 @@ use thiserror::Error;
 
 const MIN_HTTP_TIMEOUT_SECONDS: u64 = 1;
 const MAX_HTTP_RESPONSE_BYTES: u64 = 1024 * 1024;
+const DEFAULT_BISCUIT_AUTHORIZER_MAX_TIME_MS: u64 = 25;
+const MIN_BISCUIT_AUTHORIZER_MAX_TIME_MS: u64 = 1;
 
 /// Configuration errors using thiserror for better error handling
 #[derive(Debug, Error)]
@@ -97,6 +99,8 @@ pub struct PluginConfig {
     pub ext_auth_method: Option<String>,
     pub role_username_prefix: String,
     pub biscuit_role_fact: String,
+    pub biscuit_authorizer_profile: BiscuitAuthorizerProfile,
+    pub biscuit_authorizer_max_time_ms: u64,
     pub biscuit_transport: BiscuitTransportMode,
 }
 
@@ -107,6 +111,13 @@ pub enum BiscuitTransportMode {
     Base64Url,
     /// Native Protobuf binary (MQTT v5 AUTH packet only, no overhead)
     Mqtt5AuthData,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BiscuitAuthorizerProfile {
+    Simple,
+    Rbac,
+    Contextual,
 }
 
 /// Builder for PluginConfig with fluent interface and validation
@@ -135,6 +146,8 @@ pub struct PluginConfigBuilder {
     ext_auth_method: Option<String>,
     role_username_prefix: Option<String>,
     biscuit_role_fact: Option<String>,
+    biscuit_authorizer_profile: Option<BiscuitAuthorizerProfile>,
+    biscuit_authorizer_max_time_ms: Option<u64>,
     biscuit_transport: Option<BiscuitTransportMode>,
 }
 
@@ -171,6 +184,8 @@ impl PluginConfigBuilder {
             ext_auth_method: None,
             role_username_prefix: None,
             biscuit_role_fact: None,
+            biscuit_authorizer_profile: None,
+            biscuit_authorizer_max_time_ms: None,
             biscuit_transport: None,
         }
     }
@@ -295,6 +310,16 @@ impl PluginConfigBuilder {
         self
     }
 
+    pub fn biscuit_authorizer_profile(mut self, profile: BiscuitAuthorizerProfile) -> Self {
+        self.biscuit_authorizer_profile = Some(profile);
+        self
+    }
+
+    pub fn biscuit_authorizer_max_time_ms(mut self, millis: u64) -> Self {
+        self.biscuit_authorizer_max_time_ms = Some(millis);
+        self
+    }
+
     pub fn biscuit_transport(mut self, mode: BiscuitTransportMode) -> Self {
         self.biscuit_transport = Some(mode);
         self
@@ -385,6 +410,12 @@ impl PluginConfigBuilder {
         let biscuit_transport = self
             .biscuit_transport
             .unwrap_or(BiscuitTransportMode::Base64Url);
+        let biscuit_authorizer_profile = self
+            .biscuit_authorizer_profile
+            .unwrap_or(BiscuitAuthorizerProfile::Simple);
+        let biscuit_authorizer_max_time_ms = self
+            .biscuit_authorizer_max_time_ms
+            .unwrap_or(DEFAULT_BISCUIT_AUTHORIZER_MAX_TIME_MS);
         let control_notify_topic_prefix = self
             .control_notify_topic_prefix
             .as_deref()
@@ -412,6 +443,8 @@ impl PluginConfigBuilder {
                 .role_username_prefix
                 .unwrap_or_else(|| "role:".to_string()),
             biscuit_role_fact,
+            biscuit_authorizer_profile,
+            biscuit_authorizer_max_time_ms,
             biscuit_transport,
         })
     }
@@ -540,6 +573,28 @@ pub fn parse_options(
             "ext_auth_method" => builder.ext_auth_method(value),
             "role_username_prefix" => builder.role_username_prefix(value),
             "biscuit_role_fact" => builder.biscuit_role_fact(value),
+            "biscuit_authorizer_profile" => {
+                let profile = match value.as_str() {
+                    "simple" => BiscuitAuthorizerProfile::Simple,
+                    "rbac" => BiscuitAuthorizerProfile::Rbac,
+                    "contextual" => BiscuitAuthorizerProfile::Contextual,
+                    _ => {
+                        return Err(format!(
+                            "Invalid biscuit_authorizer_profile: {value}. Use 'simple', 'rbac' or 'contextual'"
+                        ));
+                    }
+                };
+                builder.biscuit_authorizer_profile(profile)
+            }
+            "biscuit_authorizer_max_time_ms" => {
+                let millis = value
+                    .parse::<u64>()
+                    .map_err(|e| format!("Invalid biscuit_authorizer_max_time_ms: {e}"))?;
+                if millis < MIN_BISCUIT_AUTHORIZER_MAX_TIME_MS {
+                    return Err("biscuit_authorizer_max_time_ms must be >= 1".to_string());
+                }
+                builder.biscuit_authorizer_max_time_ms(millis)
+            }
             "biscuit_transport" => {
                 let mode = match value.as_str() {
                     "base64url" => BiscuitTransportMode::Base64Url,
@@ -561,7 +616,7 @@ pub fn parse_options(
 
 #[cfg(test)]
 mod tests {
-    use super::{ConfigError, PluginConfigBuilder, parse_options};
+    use super::{BiscuitAuthorizerProfile, ConfigError, PluginConfigBuilder, parse_options};
     use crate::MosquittoOpt;
     use std::ffi::{CString, c_char};
 
@@ -604,6 +659,222 @@ mod tests {
             .build();
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn defaults_biscuit_authorizer_profile_to_simple() {
+        let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
+        let biscuit_root_key_file = format!(
+            "{}/../../docker/biscuit_public.key",
+            env!("CARGO_MANIFEST_DIR")
+        );
+
+        let config = PluginConfigBuilder::new()
+            .jwt_algorithm("ES256")
+            .jwt_key_file(jwt_pub_pem)
+            .biscuit_root_key_file(biscuit_root_key_file)
+            .build()
+            .expect("config should build");
+
+        assert_eq!(
+            config.biscuit_authorizer_profile,
+            BiscuitAuthorizerProfile::Simple
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn defaults_biscuit_authorizer_max_time_ms_to_25() {
+        let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
+        let biscuit_root_key_file = format!(
+            "{}/../../docker/biscuit_public.key",
+            env!("CARGO_MANIFEST_DIR")
+        );
+
+        let config = PluginConfigBuilder::new()
+            .jwt_algorithm("ES256")
+            .jwt_key_file(jwt_pub_pem)
+            .biscuit_root_key_file(biscuit_root_key_file)
+            .build()
+            .expect("config should build");
+
+        assert_eq!(config.biscuit_authorizer_max_time_ms, 25);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn parse_options_supports_biscuit_authorizer_profile() {
+        let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
+        let biscuit_root_key_file = format!(
+            "{}/../../docker/biscuit_public.key",
+            env!("CARGO_MANIFEST_DIR")
+        );
+
+        let cstrings: Vec<CString> = vec![
+            CString::new("jwt_alg").unwrap(),
+            CString::new("ES256").unwrap(),
+            CString::new("jwt_key_file").unwrap(),
+            CString::new(jwt_pub_pem).unwrap(),
+            CString::new("biscuit_root_key_file").unwrap(),
+            CString::new(biscuit_root_key_file).unwrap(),
+            CString::new("biscuit_authorizer_profile").unwrap(),
+            CString::new("contextual").unwrap(),
+        ];
+        let mut opts = vec![
+            MosquittoOpt {
+                key: cstrings[0].as_ptr() as *mut c_char,
+                value: cstrings[1].as_ptr() as *mut c_char,
+            },
+            MosquittoOpt {
+                key: cstrings[2].as_ptr() as *mut c_char,
+                value: cstrings[3].as_ptr() as *mut c_char,
+            },
+            MosquittoOpt {
+                key: cstrings[4].as_ptr() as *mut c_char,
+                value: cstrings[5].as_ptr() as *mut c_char,
+            },
+            MosquittoOpt {
+                key: cstrings[6].as_ptr() as *mut c_char,
+                value: cstrings[7].as_ptr() as *mut c_char,
+            },
+        ];
+
+        let config = parse_options(opts.as_mut_ptr(), opts.len() as i32).expect("config parse");
+        assert_eq!(
+            config.biscuit_authorizer_profile,
+            BiscuitAuthorizerProfile::Contextual
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn parse_options_rejects_invalid_biscuit_authorizer_profile() {
+        let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
+        let biscuit_root_key_file = format!(
+            "{}/../../docker/biscuit_public.key",
+            env!("CARGO_MANIFEST_DIR")
+        );
+
+        let cstrings: Vec<CString> = vec![
+            CString::new("jwt_alg").unwrap(),
+            CString::new("ES256").unwrap(),
+            CString::new("jwt_key_file").unwrap(),
+            CString::new(jwt_pub_pem).unwrap(),
+            CString::new("biscuit_root_key_file").unwrap(),
+            CString::new(biscuit_root_key_file).unwrap(),
+            CString::new("biscuit_authorizer_profile").unwrap(),
+            CString::new("unknown").unwrap(),
+        ];
+        let mut opts = vec![
+            MosquittoOpt {
+                key: cstrings[0].as_ptr() as *mut c_char,
+                value: cstrings[1].as_ptr() as *mut c_char,
+            },
+            MosquittoOpt {
+                key: cstrings[2].as_ptr() as *mut c_char,
+                value: cstrings[3].as_ptr() as *mut c_char,
+            },
+            MosquittoOpt {
+                key: cstrings[4].as_ptr() as *mut c_char,
+                value: cstrings[5].as_ptr() as *mut c_char,
+            },
+            MosquittoOpt {
+                key: cstrings[6].as_ptr() as *mut c_char,
+                value: cstrings[7].as_ptr() as *mut c_char,
+            },
+        ];
+
+        match parse_options(opts.as_mut_ptr(), opts.len() as i32) {
+            Ok(_) => panic!("must fail"),
+            Err(err) => assert!(err.contains("Invalid biscuit_authorizer_profile")),
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn parse_options_supports_biscuit_authorizer_max_time_ms() {
+        let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
+        let biscuit_root_key_file = format!(
+            "{}/../../docker/biscuit_public.key",
+            env!("CARGO_MANIFEST_DIR")
+        );
+
+        let cstrings: Vec<CString> = vec![
+            CString::new("jwt_alg").unwrap(),
+            CString::new("ES256").unwrap(),
+            CString::new("jwt_key_file").unwrap(),
+            CString::new(jwt_pub_pem).unwrap(),
+            CString::new("biscuit_root_key_file").unwrap(),
+            CString::new(biscuit_root_key_file).unwrap(),
+            CString::new("biscuit_authorizer_max_time_ms").unwrap(),
+            CString::new("50").unwrap(),
+        ];
+        let mut opts = vec![
+            MosquittoOpt {
+                key: cstrings[0].as_ptr() as *mut c_char,
+                value: cstrings[1].as_ptr() as *mut c_char,
+            },
+            MosquittoOpt {
+                key: cstrings[2].as_ptr() as *mut c_char,
+                value: cstrings[3].as_ptr() as *mut c_char,
+            },
+            MosquittoOpt {
+                key: cstrings[4].as_ptr() as *mut c_char,
+                value: cstrings[5].as_ptr() as *mut c_char,
+            },
+            MosquittoOpt {
+                key: cstrings[6].as_ptr() as *mut c_char,
+                value: cstrings[7].as_ptr() as *mut c_char,
+            },
+        ];
+
+        let config = parse_options(opts.as_mut_ptr(), opts.len() as i32).expect("config parse");
+        assert_eq!(config.biscuit_authorizer_max_time_ms, 50);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn parse_options_rejects_zero_biscuit_authorizer_max_time_ms() {
+        let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
+        let biscuit_root_key_file = format!(
+            "{}/../../docker/biscuit_public.key",
+            env!("CARGO_MANIFEST_DIR")
+        );
+
+        let cstrings: Vec<CString> = vec![
+            CString::new("jwt_alg").unwrap(),
+            CString::new("ES256").unwrap(),
+            CString::new("jwt_key_file").unwrap(),
+            CString::new(jwt_pub_pem).unwrap(),
+            CString::new("biscuit_root_key_file").unwrap(),
+            CString::new(biscuit_root_key_file).unwrap(),
+            CString::new("biscuit_authorizer_max_time_ms").unwrap(),
+            CString::new("0").unwrap(),
+        ];
+        let mut opts = vec![
+            MosquittoOpt {
+                key: cstrings[0].as_ptr() as *mut c_char,
+                value: cstrings[1].as_ptr() as *mut c_char,
+            },
+            MosquittoOpt {
+                key: cstrings[2].as_ptr() as *mut c_char,
+                value: cstrings[3].as_ptr() as *mut c_char,
+            },
+            MosquittoOpt {
+                key: cstrings[4].as_ptr() as *mut c_char,
+                value: cstrings[5].as_ptr() as *mut c_char,
+            },
+            MosquittoOpt {
+                key: cstrings[6].as_ptr() as *mut c_char,
+                value: cstrings[7].as_ptr() as *mut c_char,
+            },
+        ];
+
+        match parse_options(opts.as_mut_ptr(), opts.len() as i32) {
+            Ok(_) => panic!("must fail"),
+            Err(err) => assert!(err.contains("biscuit_authorizer_max_time_ms must be >= 1")),
+        }
     }
 
     #[test]

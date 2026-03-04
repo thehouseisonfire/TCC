@@ -420,6 +420,28 @@ fn main() {
         t.append(block_device).unwrap()
     };
 
+    // Shared fixture for authorizer-template complexity scenarios.
+    // This keeps token bytes constant while plugin-side authorizer profiles change.
+    let biscuit_authorizer_template = Biscuit::builder()
+        .fact(r#"right("publish", "sensors/client_1/#")"#)
+        .unwrap()
+        .fact(r#"right("subscribe", "sensors/client_1/#")"#)
+        .unwrap()
+        .fact(r#"role("writer")"#)
+        .unwrap()
+        .fact(r#"role_right("writer", "publish", "sensors/client_1/#")"#)
+        .unwrap()
+        .fact(r#"role_right("writer", "subscribe", "sensors/client_1/#")"#)
+        .unwrap()
+        .fact(r#"role_active_from("writer", 0)"#)
+        .unwrap()
+        .fact(r#"role_active_until("writer", 4102444800)"#)
+        .unwrap()
+        .fact("expires_at(2000000000)")
+        .unwrap()
+        .build(&root_keypair)
+        .unwrap();
+
     let biscuit_handoff = Biscuit::builder()
         .fact("right(\"publish\", \"delegation/handoff\")")
         .unwrap()
@@ -461,6 +483,8 @@ fn main() {
         general_purpose::URL_SAFE_NO_PAD.encode(biscuit_complex_med.to_vec().unwrap());
     let biscuit_complex_high_b64 =
         general_purpose::URL_SAFE_NO_PAD.encode(biscuit_complex_high.to_vec().unwrap());
+    let biscuit_authorizer_template_b64 =
+        general_purpose::URL_SAFE_NO_PAD.encode(biscuit_authorizer_template.to_vec().unwrap());
 
     let biscuit_pubkey_hex = hex::encode(root_keypair.public().to_bytes());
     std::fs::write("docker/biscuit_public.key", biscuit_pubkey_hex.as_bytes()).unwrap();
@@ -505,6 +529,7 @@ fn main() {
         "biscuit_complex_low": biscuit_complex_low_b64,
         "biscuit_complex_med": biscuit_complex_med_b64,
         "biscuit_complex_high": biscuit_complex_high_b64,
+        "biscuit_authorizer_template": biscuit_authorizer_template_b64,
         "biscuit_root_key_hex": biscuit_pubkey_hex
     });
 

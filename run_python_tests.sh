@@ -6,6 +6,8 @@ WORKDIR="$SCRIPT_DIR/mqtt-auth-biscuit"
 COMPOSE_BIN=${DOCKER_COMPOSE_BIN:-"docker compose"}
 COMPOSE_FILES=("-f" "$WORKDIR/docker/docker-compose.yml")
 SERVICES=(mosquitto authz netem metrics-collector cadvisor token-issuer)
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-python-tests}"
+export RESOURCE_SNAPSHOT_COMPOSE_PROJECT_NAME="$COMPOSE_PROJECT_NAME"
 
 cleanup() {
   $COMPOSE_BIN "${COMPOSE_FILES[@]}" down

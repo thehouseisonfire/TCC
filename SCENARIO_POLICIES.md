@@ -104,6 +104,19 @@ increasing rule count and block structure to isolate Datalog evaluation cost. Sc
 defined in `gen-tokens` (see `biscuit_complex_*` in
 @/home/eagle/TCC2/mqtt-auth-biscuit/crates/benchmarks/src/main.rs#205-365).
 
+#### C) Authorizer Template Complexity (Constant Token Size)
+
+| Scenario | Token | Policy Source | Policy Detail | Expected Outcome |
+| --- | --- | --- | --- | --- |
+| POLICY-AUTHZ-TEMPLATE-SIMPLE | Biscuit | Token-only | `plugin_opt_biscuit_authorizer_profile=simple` with direct `right/deny` evaluation | Allows |
+| POLICY-AUTHZ-TEMPLATE-RBAC | Biscuit | Token-only | `plugin_opt_biscuit_authorizer_profile=rbac` with role-derived `role_right/role_deny` support | Allows |
+| POLICY-AUTHZ-TEMPLATE-CONTEXTUAL | Biscuit | Token-only | `plugin_opt_biscuit_authorizer_profile=contextual` with strict role + active-window evaluation for role-derived rights/denies; direct `right` ignored and direct `deny` enforced | Allows |
+
+**Analysis:** these scenarios reuse a single deterministic token fixture
+(`biscuit_authorizer_template`) so `token_len` remains constant while only the
+plugin-side authorizer template/rule complexity changes. Scenario outputs include
+`policy_complexity.kind = "authorizer_template"`.
+
 ### 2.3 HTTP Introspection (Parity Scenario)
 
 | Scenario | Token | Policy Source | Policy Detail | Expected Outcome |

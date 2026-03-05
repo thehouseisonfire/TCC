@@ -259,7 +259,6 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 ### Priority List
 1. Issue 23: Proactive client re-authentication
 2. Issue 41: Containerized benchmark topology
-3. Issue 42: Wait for Mosquitto 2.1.3 Alpine image (required feature)
 ---
 
 #### A) Policy Source Parity

@@ -17,7 +17,8 @@ COPY crates/mosquitto-plugin ./crates/mosquitto-plugin
 COPY crates/token-issuer ./crates/token-issuer
 COPY crates/benchmarks ./crates/benchmarks
 COPY crates/authz-server ./crates/authz-server
-RUN RUSTFLAGS="-C target-feature=-crt-static" cargo build --release -p mosquitto-auth-biscuit
+RUN RUSTFLAGS="-C target-feature=-crt-static -C strip=symbols" cargo build --release -p mosquitto-auth-biscuit
+RUN strip --strip-unneeded /app/target/release/libmosquitto_auth_biscuit.so
 
 # Stage 2: build Mosquitto from source
 FROM alpine:3.23.3 AS mosq-builder
@@ -28,6 +29,11 @@ WORKDIR /src
 RUN git checkout ${MOSQ_REF}
 RUN make -j"$(nproc)" prefix=/usr WITH_SHARED_LIBRARIES=yes WITH_DOCS=no WITH_EDITLINE=no WITH_HTTP_API=no WITH_SQLITE=no
 RUN make prefix=/usr WITH_SHARED_LIBRARIES=yes WITH_DOCS=no WITH_EDITLINE=no WITH_HTTP_API=no WITH_SQLITE=no install DESTDIR=/out
+RUN set -eux; \
+    for f in /out/usr/sbin/mosquitto /out/usr/lib/libmosquitto.so.1 /out/usr/lib/libmosquitto_common.so.1 /out/usr/lib/mosquitto_*.so /out/usr/bin/mosquitto_*; do \
+        [ -e "$f" ] || continue; \
+        strip --strip-unneeded "$f" || true; \
+    done
 
 # Stage 3: runtime
 FROM alpine:3.23.3

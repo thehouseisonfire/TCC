@@ -45,6 +45,7 @@ def _read_tokens(path: str) -> dict[str, Any]:
 logger = get_logger(__name__)
 app = typer.Typer(add_completion=False)
 REPO_ROOT = Path(__file__).resolve().parents[1]
+RAW_BISCUIT_MARKER = "b64:"
 
 
 class NetemConfig(TypedDict, total=False):
@@ -136,7 +137,6 @@ class TokenRefreshConfig(TypedDict):
 class Mqtt5AuthConfig(TypedDict, total=False):
     token1: str
     token2: str
-    binary_mode: bool
 
 
 class ScenarioConfig(TypedDict, total=False):
@@ -279,6 +279,27 @@ def _http_client(ca_file: str | None, insecure: bool) -> httpx.Client:
         verify = ca_file
     transport = httpx.HTTPTransport(http1=False, http2=True)
     return httpx.Client(verify=verify, timeout=5.0, transport=transport)
+
+
+def _mark_biscuit_cli_token(tokens: dict[str, Any], token: str | None) -> str | None:
+    if token is None:
+        return None
+    biscuit_values = {
+        value
+        for key, value in tokens.items()
+        if key.startswith("biscuit") and key != "biscuit_root_key_hex" and isinstance(value, str)
+    }
+    if token in biscuit_values:
+        return f"{RAW_BISCUIT_MARKER}{token}"
+    return token
+
+
+def _mark_mqtt5_auth_token(token: str) -> str:
+    # JWT stays UTF-8 text on MQTT AUTH. Biscuit uses raw bytes and is carried
+    # through the CLI as Base64URL with an explicit marker.
+    if token.startswith("eyJ") and token.count(".") == 2:
+        return token
+    return f"{RAW_BISCUIT_MARKER}{token}"
 
 
 def _authz_config(
@@ -599,7 +620,7 @@ def _run_loadgen(
         "--username",
         username,
         "--password",
-        password,
+        _mark_biscuit_cli_token(tokens, password) or "",
         "--clients",
         str(clients),
         "--messages",
@@ -623,7 +644,12 @@ def _run_loadgen(
     if fanout_publisher_username:
         cmd.extend(["--fanout-publisher-username", fanout_publisher_username])
     if fanout_publisher_password:
-        cmd.extend(["--fanout-publisher-password", fanout_publisher_password])
+        cmd.extend(
+            [
+                "--fanout-publisher-password",
+                _mark_biscuit_cli_token(tokens, fanout_publisher_password) or "",
+            ]
+        )
     if token_issuer_url:
         cmd.extend(["--token-issuer-url", token_issuer_url])
     if token_issuer_kind:
@@ -683,7 +709,12 @@ def _run_loadgen(
     if biscuit_delegate_handoff_topic:
         cmd.extend(["--biscuit-delegate-handoff-topic", biscuit_delegate_handoff_topic])
     if biscuit_delegate_handoff_token:
-        cmd.extend(["--biscuit-delegate-handoff-token", biscuit_delegate_handoff_token])
+        cmd.extend(
+            [
+                "--biscuit-delegate-handoff-token",
+                _mark_biscuit_cli_token(tokens, biscuit_delegate_handoff_token) or "",
+            ]
+        )
     if biscuit_delegate_handoff_qos is not None:
         cmd.extend(["--biscuit-delegate-handoff-qos", str(biscuit_delegate_handoff_qos)])
     if biscuit_delegate_handoff_retain is False:
@@ -912,7 +943,6 @@ def _run_mqtt5_auth(
     tls_enabled: bool,
     tls_ca_file: str | None,
     tls_insecure: bool,
-    binary_mode: bool = False,
 ):
     cmd = [
         sys.executable,
@@ -924,9 +954,9 @@ def _run_mqtt5_auth(
         "--auth-method",
         "token",
         "--token1",
-        token1,
+        _mark_mqtt5_auth_token(token1),
         "--token2",
-        token2,
+        _mark_mqtt5_auth_token(token2),
     ]
     if tls_enabled:
         cmd.append("--tls")
@@ -934,8 +964,6 @@ def _run_mqtt5_auth(
         cmd.extend(["--tls-ca-file", tls_ca_file])
     if tls_insecure:
         cmd.append("--tls-insecure")
-    if binary_mode:
-        cmd.append("--binary")
     out = subprocess.check_output(cmd, cwd=REPO_ROOT, text=True)
     return json.loads(out)
 
@@ -2023,17 +2051,6 @@ def main(
                     "token2": tokens["biscuit"],
                 },
             },
-            # Issue 18: Binary Biscuit transport using native Protobuf format (no Base64URL)
-            "MQTT5-REAUTH-BISCUIT-BINARY": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "authz": None,
-                "netem": {"clear": True},
-                "mqtt5_auth": {
-                    "token1": tokens["biscuit_short"],
-                    "token2": tokens["biscuit"],
-                    "binary_mode": True,
-                },
-            },
             "THUNDERING-HERD": {
                 "mosquitto_conf": "./mosquitto.conf",
                 "username": "biscuit",
@@ -2547,7 +2564,7 @@ def main(
             "HTTP-POLICY-SIMPLE-BIS, HTTP-POLICY-MED-BIS, HTTP-POLICY-COMPLEX-BIS",
         )
         logger.info(
-            "MQTT5-REAUTH-JWT, MQTT5-REAUTH-BISCUIT, MQTT5-REAUTH-BISCUIT-BINARY, "
+            "MQTT5-REAUTH-JWT, MQTT5-REAUTH-BISCUIT, "
             "THUNDERING-HERD, DELEGATION-TEMP-ONLY, DELEGATION-HANDOFF, DELEGATION-SIMULATED",
         )
         logger.info(
@@ -2945,7 +2962,6 @@ def main(
                     )
                 mqtt5_cfg = s.get("mqtt5_auth")
                 if mqtt5_cfg is not None:
-                    binary_mode: bool = mqtt5_cfg.get("binary_mode", False)
                     res = _run_mqtt5_auth(
                         mqtt_host,
                         mqtt_port,
@@ -2954,7 +2970,6 @@ def main(
                         scenario_tls,
                         tls_ca,
                         tls_insecure,
-                        binary_mode,
                     )
                 else:
                     token_refresh = s.get("token_refresh")

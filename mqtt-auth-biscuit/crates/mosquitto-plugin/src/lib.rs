@@ -233,12 +233,25 @@ pub struct MosquittoPluginId {
 }
 
 #[repr(C)]
+pub union MosquittoEvtBasicAuthFuture {
+    pub future2: [*mut c_void; 4],
+    pub password_len: u16,
+}
+
+#[repr(C)]
 pub struct MosquittoEvtBasicAuth {
     pub future: *mut c_void,
     pub client: *mut c_void,
     pub username: *mut c_char,
     pub password: *mut c_char,
-    pub future2: [*mut c_void; 4],
+    pub extra: MosquittoEvtBasicAuthFuture,
+}
+
+impl MosquittoEvtBasicAuth {
+    #[inline]
+    fn password_len(&self) -> usize {
+        unsafe { usize::from(self.extra.password_len) }
+    }
 }
 
 #[repr(C)]
@@ -1444,8 +1457,8 @@ extern "C" fn basic_auth_callback(
         };
     }
 
-    let password = unsafe { CStr::from_ptr(evt.password).to_string_lossy() };
-    if password.is_empty() {
+    let password_len = evt.password_len();
+    if password_len == 0 {
         return if should_defer_no_token_basic_auth(
             state.config.policy.mode,
             state.config.allow_anonymous_no_token,
@@ -1455,8 +1468,9 @@ extern "C" fn basic_auth_callback(
             MOSQ_ERR_AUTH
         };
     }
+    let password = unsafe { slice::from_raw_parts(evt.password.cast::<u8>(), password_len) };
 
-    match state.auth_engine.authenticate(&password) {
+    match state.auth_engine.authenticate_basic(password) {
         Ok(token_type) => {
             let token_type = match attach_biscuit_expiry(
                 token_type,
@@ -1531,10 +1545,7 @@ extern "C" fn ext_auth_start_callback(
 
     let data = unsafe { bytes_from_c_void(evt.data_in, evt.data_in_len as usize) };
 
-    match state
-        .auth_engine
-        .authenticate_binary(data, state.config.biscuit_transport)
-    {
+    match state.auth_engine.authenticate_binary(data) {
         Ok(token_type) => {
             let token_type = match attach_biscuit_expiry(
                 token_type,
@@ -2237,7 +2248,9 @@ mod tests {
             client: ptr::null_mut(),
             username: ptr::null_mut(),
             password: ptr::null_mut(),
-            future2: [ptr::null_mut(); 4],
+            extra: MosquittoEvtBasicAuthFuture {
+                future2: [ptr::null_mut(); 4],
+            },
         };
 
         let rc = basic_auth_callback(
@@ -2261,7 +2274,10 @@ mod tests {
             client: ptr::null_mut(),
             username: username.as_ptr().cast_mut(),
             password: password.as_ptr().cast_mut(),
-            future2: [ptr::null_mut(); 4],
+            extra: MosquittoEvtBasicAuthFuture {
+                password_len: u16::try_from(password.as_bytes().len())
+                    .expect("password length fits u16"),
+            },
         };
 
         let rc = basic_auth_callback(
@@ -2270,6 +2286,53 @@ mod tests {
             userdata,
         );
         assert_eq!(rc, MOSQ_ERR_AUTH);
+
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn basic_auth_callback_accepts_binary_biscuit_password_with_nul_bytes() {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        let keypair = root_keypair();
+        unsafe {
+            (*(userdata as *mut PluginState))
+                .config
+                .biscuit
+                .root_public_key = keypair.public();
+        }
+
+        let biscuit = Biscuit::builder()
+            .fact(r#"right("publish", "sensors/client_1/temp")"#)
+            .unwrap()
+            .fact(r#"right("subscribe", "sensors/client_1/temp")"#)
+            .unwrap()
+            .fact("expires_at(2000000000)")
+            .unwrap()
+            .build(&keypair)
+            .unwrap();
+        let mut password = biscuit.to_vec().unwrap();
+        assert!(
+            password.contains(&0),
+            "serialized Biscuit should exercise binary password handling"
+        );
+
+        let username = CString::new("biscuit").unwrap();
+        let mut evt = MosquittoEvtBasicAuth {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            username: username.as_ptr().cast_mut(),
+            password: password.as_mut_ptr().cast(),
+            extra: MosquittoEvtBasicAuthFuture {
+                password_len: u16::try_from(password.len()).expect("password length fits u16"),
+            },
+        };
+
+        let rc = basic_auth_callback(
+            MOSQ_EVT_BASIC_AUTH,
+            (&raw mut evt).cast::<c_void>(),
+            userdata,
+        );
+        assert_eq!(rc, MOSQ_ERR_SUCCESS);
 
         teardown_plugin(userdata);
     }
@@ -3234,7 +3297,6 @@ mod verification {
             biscuit_role_fact: "role".to_string(),
             biscuit_authorizer_profile: crate::config::BiscuitAuthorizerProfile::Simple,
             biscuit_authorizer_max_time_ms: 25,
-            biscuit_transport: crate::config::BiscuitTransportMode::Base64Url,
         };
 
         let state = Box::new(PluginState {
@@ -3299,14 +3361,14 @@ mod verification {
     fn verify_basic_auth_callback_with_symbolic_inputs() {
         let state = mock_plugin_state();
         let username = symbolic_cstr::<8>();
-        let password = symbolic_cstr::<16>();
+        let password = kani::any::<[u8; 16]>();
 
         let mut evt = MosquittoEvtBasicAuth {
             future: ptr::null_mut(),
             client: 0x1 as *mut c_void,
             username: username.as_ptr() as *mut _,
             password: password.as_ptr() as *mut _,
-            future2: [ptr::null_mut(); 4],
+            extra: MosquittoEvtBasicAuthFuture { password_len: 16 },
         };
 
         unsafe {

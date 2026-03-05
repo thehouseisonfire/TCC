@@ -1,3 +1,4 @@
+import base64
 import json
 import statistics
 import time
@@ -10,6 +11,11 @@ from benchmarks.logging_utils import get_logger, setup_logging
 
 logger = get_logger(__name__)
 app = typer.Typer(add_completion=False)
+
+
+def _decode_biscuit_token(token: str) -> bytes:
+    padding = "=" * (-len(token) % 4)
+    return base64.urlsafe_b64decode(token + padding)
 
 
 def run_benchmark(
@@ -92,11 +98,14 @@ def main(
 
     for token_type in ["jwt", "biscuit"]:
         logger.info("Benchmarking %s...", token_type)
+        password = tokens[token_type]
+        if token_type == "biscuit":
+            password = _decode_biscuit_token(password)
         latencies = run_benchmark(
             host,
             port,
             token_type,
-            tokens[token_type],
+            password,
             "sensors/client_1/temp",
             message_count=messages,
             qos=qos,

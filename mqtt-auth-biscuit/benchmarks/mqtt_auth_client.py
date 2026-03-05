@@ -8,6 +8,8 @@ import typer
 
 from benchmarks.logging_utils import get_logger, setup_logging
 
+RAW_BISCUIT_MARKER = "b64:"
+
 
 def _enc_varint(n: int) -> bytes:
     out = bytearray()
@@ -125,6 +127,18 @@ logger = get_logger(__name__)
 app = typer.Typer(add_completion=False)
 
 
+def _decode_token_arg(token: str) -> bytes:
+    if token.startswith(RAW_BISCUIT_MARKER):
+        encoded = token[len(RAW_BISCUIT_MARKER) :]
+        padding = "=" * (-len(encoded) % 4)
+        try:
+            return base64.urlsafe_b64decode(encoded + padding)
+        except Exception as e:
+            logger.error(f"Failed to decode Biscuit token: {e}")
+            raise typer.Exit(1) from e
+    return token.encode("utf-8")
+
+
 @app.command()
 def main(
     host: str = "localhost",
@@ -133,9 +147,6 @@ def main(
     auth_method: str = "token",
     token1: str = typer.Option(..., "--token1"),
     token2: str = typer.Option(..., "--token2"),
-    binary_mode: bool = typer.Option(
-        False, "--binary/--text", help="Use binary Protobuf format (Biscuit only)"
-    ),
     sleep: float = 2.0,
     tls: bool = False,
     tls_ca_file: str | None = None,
@@ -144,18 +155,8 @@ def main(
 ):
     setup_logging(log_level)
 
-    # Prepare auth data: binary mode decodes base64 to raw bytes
-    if binary_mode:
-        try:
-            auth_data1 = base64.urlsafe_b64decode(token1 + "==")  # Add padding if needed
-            auth_data2 = base64.urlsafe_b64decode(token2 + "==")
-        except Exception as e:
-            logger.error(f"Failed to decode binary token: {e}")
-            raise typer.Exit(1) from e
-    else:
-        # Text mode (default): encode string as UTF-8
-        auth_data1 = token1.encode("utf-8")
-        auth_data2 = token2.encode("utf-8")
+    auth_data1 = _decode_token_arg(token1)
+    auth_data2 = _decode_token_arg(token2)
 
     raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     raw_sock.settimeout(10)
@@ -203,7 +204,6 @@ def main(
         "reauth_ms": reauth_ms,
         "reauth_pkt_type": pkt_type2,
         "reauth_payload_len": len(payload2),
-        "binary_mode": binary_mode,
         "token1_bytes": len(auth_data1),
         "token2_bytes": len(auth_data2),
     }

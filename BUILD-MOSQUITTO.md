@@ -3,6 +3,15 @@
 If the official `eclipse-mosquitto:2.1.3-alpine` image takes too long to appear,
 you can build Mosquitto yourself and still run the Rust auth plugin.
 
+This migration requires Mosquitto commit `43c271504277941a4423a7e8c6b07bbcb611080b`
+or newer so `MOSQ_EVT_BASIC_AUTH` exposes `password_len` for binary `CONNECT`
+passwords.
+
+Older brokers are unsupported with the current plugin. The auth path now
+assumes the newer `MOSQ_EVT_BASIC_AUTH` layout at runtime, so using an older
+broker may fail later as confusing `CONNECT` authentication errors rather than
+as a clean startup error.
+
 ## 1) Create a custom Dockerfile
 
 Create `mqtt-auth-biscuit/docker/Dockerfile.mosquitto.custom`:
@@ -106,6 +115,9 @@ docker compose -f mqtt-auth-biscuit/docker/docker-compose.yml run --rm mosquitto
 ## Notes
 
 - Prefer a commit SHA over a moving branch for reproducibility.
+- If you see unexpected password-based auth failures on `CONNECT`, verify the
+  broker build first; the plugin does not currently fail fast on an older
+  `MOSQ_EVT_BASIC_AUTH` ABI.
 - On unreleased commits, `mosquitto -h` may still print `2.1.2` until upstream bumps the version string.
 - Keep the image tag explicit (`2.1.3-custom`, `2.1.3-rc`, etc.) to avoid confusion.
 - Once `eclipse-mosquitto:2.1.3-alpine` is published, you can switch back to the official image.

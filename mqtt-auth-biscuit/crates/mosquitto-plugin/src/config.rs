@@ -101,16 +101,6 @@ pub struct PluginConfig {
     pub biscuit_role_fact: String,
     pub biscuit_authorizer_profile: BiscuitAuthorizerProfile,
     pub biscuit_authorizer_max_time_ms: u64,
-    pub biscuit_transport: BiscuitTransportMode,
-}
-
-/// Transport mode for Biscuit tokens
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BiscuitTransportMode {
-    /// `Base64URL` encoding (CONNECT password compatible, ~33% size overhead)
-    Base64Url,
-    /// Native Protobuf binary (MQTT v5 AUTH packet only, no overhead)
-    Mqtt5AuthData,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,7 +138,6 @@ pub struct PluginConfigBuilder {
     biscuit_role_fact: Option<String>,
     biscuit_authorizer_profile: Option<BiscuitAuthorizerProfile>,
     biscuit_authorizer_max_time_ms: Option<u64>,
-    biscuit_transport: Option<BiscuitTransportMode>,
 }
 
 impl Default for PluginConfigBuilder {
@@ -186,7 +175,6 @@ impl PluginConfigBuilder {
             biscuit_role_fact: None,
             biscuit_authorizer_profile: None,
             biscuit_authorizer_max_time_ms: None,
-            biscuit_transport: None,
         }
     }
 
@@ -320,11 +308,6 @@ impl PluginConfigBuilder {
         self
     }
 
-    pub const fn biscuit_transport(mut self, mode: BiscuitTransportMode) -> Self {
-        self.biscuit_transport = Some(mode);
-        self
-    }
-
     pub fn build(self) -> Result<PluginConfig, ConfigError> {
         let jwt_alg = self.jwt_alg.ok_or(ConfigError::MissingJwtAlgorithm)?;
 
@@ -407,9 +390,6 @@ impl PluginConfigBuilder {
             return Err(ConfigError::InvalidBiscuitRoleFact(biscuit_role_fact));
         }
 
-        let biscuit_transport = self
-            .biscuit_transport
-            .unwrap_or(BiscuitTransportMode::Base64Url);
         let biscuit_authorizer_profile = self
             .biscuit_authorizer_profile
             .unwrap_or(BiscuitAuthorizerProfile::Simple);
@@ -445,7 +425,6 @@ impl PluginConfigBuilder {
             biscuit_role_fact,
             biscuit_authorizer_profile,
             biscuit_authorizer_max_time_ms,
-            biscuit_transport,
         })
     }
 }
@@ -596,16 +575,9 @@ pub fn parse_options(
                 builder.biscuit_authorizer_max_time_ms(millis)
             }
             "biscuit_transport" => {
-                let mode = match value.as_str() {
-                    "base64url" => BiscuitTransportMode::Base64Url,
-                    "mqtt5_auth_data" => BiscuitTransportMode::Mqtt5AuthData,
-                    _ => {
-                        return Err(format!(
-                            "Invalid biscuit_transport: {value}. Use 'base64url' or 'mqtt5_auth_data'"
-                        ));
-                    }
-                };
-                builder.biscuit_transport(mode)
+                return Err(format!(
+                    "biscuit_transport={value} is no longer supported; Biscuit now uses raw bytes on MQTT transport"
+                ));
             }
             _ => builder,
         };

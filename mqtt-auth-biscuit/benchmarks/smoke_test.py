@@ -11,6 +11,7 @@ import typer
 from benchmarks.logging_utils import get_logger, setup_logging
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+RAW_BISCUIT_MARKER = "b64:"
 
 
 def _compose_bin():
@@ -227,7 +228,7 @@ def main(
     )
     results["loadgen"]["biscuit"] = _run_loadgen(
         "biscuit",
-        str(tokens_data["biscuit"]),
+        f"{RAW_BISCUIT_MARKER}{tokens_data['biscuit']}",
         mqtt_host,
         mqtt_port,
         clients,

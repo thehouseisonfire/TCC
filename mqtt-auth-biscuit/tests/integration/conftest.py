@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import contextlib
 import json
 import os
@@ -14,7 +15,7 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import paho.mqtt.client as mqtt
@@ -92,7 +93,7 @@ def _artifact_dir_from_env() -> Path | None:
 
 @dataclass
 class IssuedToken:
-    token: str
+    token: str | bytes
     exp: int
 
 
@@ -112,6 +113,23 @@ class TokenIssuerClient:
             resp.raise_for_status()
             body = resp.json()
         return IssuedToken(token=str(body["token"]), exp=int(body["exp"]))
+
+    def _post_binary_token(self, path: str, payload: dict[str, Any]) -> IssuedToken:
+        transport = httpx.HTTPTransport(http1=False, http2=True, verify=self.verify)
+        with httpx.Client(timeout=10.0, transport=transport) as client:
+            resp = client.post(
+                self.base_url.rstrip("/") + path,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            resp.raise_for_status()
+            body = resp.json()
+        data_b64 = str(body["data_b64"])
+        padding = "=" * (-len(data_b64) % 4)
+        return IssuedToken(
+            token=base64.urlsafe_b64decode(data_b64 + padding),
+            exp=int(body["exp"]),
+        )
 
     def issue_jwt(
         self,
@@ -150,7 +168,7 @@ class TokenIssuerClient:
         }
         if denies is not None:
             payload["denies"] = denies
-        return self._post_token("/biscuit", payload)
+        return self._post_binary_token("/biscuit/binary", payload)
 
 
 @dataclass
@@ -315,7 +333,7 @@ class ObservedMqttClient:
     port: int
     client_id: str
     username: str
-    password: str
+    password: str | bytes
     tls: bool = False
     tls_ca_file: str | None = None
     tls_insecure: bool = False
@@ -355,7 +373,7 @@ class ObservedMqttClient:
                 retain=self.will_retain,
             )
         if self.username or self.password:
-            self._client.username_pw_set(self.username, self.password)
+            cast(Any, self._client).username_pw_set(self.username, self.password)
         if self.tls:
             self._client.tls_set(ca_certs=self.tls_ca_file)
             if self.tls_insecure:

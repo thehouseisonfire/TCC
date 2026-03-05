@@ -43,6 +43,15 @@ cargo build --release -p mosquitto-auth-biscuit
 
 This generates `target/release/libmosquitto_auth_biscuit.so`.
 
+> [!IMPORTANT]
+> Current benchmark runs require a Mosquitto build that includes
+> `MOSQ_EVT_BASIC_AUTH.password_len` for binary `CONNECT` passwords. Older
+> brokers are unsupported with the current plugin and may fail later as
+> misleading password-authentication errors instead of failing cleanly at
+> startup. Use the custom source-build path documented in
+> [`../../BUILD-MOSQUITTO.md`](../../BUILD-MOSQUITTO.md) when the official
+> image does not yet contain the required commit.
+
 ## Step 2: Generate Tokens
 
 The benchmarking suite uses predefined tokens. Generate them with:

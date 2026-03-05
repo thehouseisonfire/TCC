@@ -395,15 +395,15 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
   - **Summary**: Added full QoS 0/1/2 support with per-QoS latency tracking. Implemented QoS distribution parsing (`0:0.6,1:0.3,2:0.1` format) in `loadgen.py` with `--qos-distribution` CLI option. `WorkerResult` now tracks `publish_ms_by_qos` per level; `aggregate_results.py` reports per-QoS statistics in JSON and CSV. Added scenarios: `QOS0-BASE-01`, `QOS2-JWT`, `QOS2-BISCUIT`, `QOS-MIXED-JWT`, `QOS-MIXED-BISCUIT`. Enables H₂/H₃ validation of latency differences across QoS levels.
 
 - [x] **Issue 18: Avoid Base64URL encoding for Biscuit tokens where possible (use native Protobuf format)** — **COMPLETED 2026-02-06**
-  - **Summary**: Implemented native Protobuf transport for Biscuit tokens via MQTT v5 AUTH packets, avoiding ~33% Base64URL overhead while maintaining CONNECT password compatibility.
+  - **Summary**: Native Protobuf transport for Biscuit tokens is now used across MQTT transport. Initial authentication uses raw Biscuit bytes in `CONNECT.password` (via Mosquitto's password-length fix), and MQTT v5 reauthentication uses raw Authentication Data.
   - **Deliverables**:
-    - Added `biscuit_transport` config option with two modes: `base64url` (default, CONNECT compatible) and `mqtt5_auth_data` (native binary Protobuf for MQTT v5 AUTH packets)
-    - Updated `auth.rs` with `authenticate_binary()` method supporting both transport modes
-    - Updated `ext_auth_start_callback` in `lib.rs` to use binary authentication for AUTH packets
+    - Updated the plugin FFI for `MOSQ_EVT_BASIC_AUTH` to consume `password_len`
+    - Migrated Biscuit authentication in `auth.rs` to raw serialized bytes for both basic auth and enhanced auth
+    - Removed the old `biscuit_transport` plugin option
     - Added `/biscuit/binary` endpoint to token-issuer for raw binary token generation
-    - Updated `mqtt_auth_client.py` with `--binary` flag for binary transport testing
-    - Added `MQTT5-REAUTH-BISCUIT-BINARY` scenario demonstrating native Protobuf transport
-  - **Technical Details**: Biscuit's native `Biscuit::to_vec()` produces Protobuf-encoded bytes; Base64URL inflates size by ~33%; binary transport only available for MQTT v5 AUTH packets (not CONNECT password); JWT tokens remain text-based
+    - Updated MQTT benchmark/integration clients to pass raw Biscuit bytes at the MQTT boundary while still allowing Base64URL in JSON/file wrappers
+    - Updated MQTT v5 reauth scenarios to use binary Authentication Data for Biscuit
+  - **Technical Details**: Biscuit's native `Biscuit::to_vec()` produces Protobuf-encoded bytes; Base64URL inflates size by ~33%; JWT tokens remain text-based, while Biscuit now stays binary on MQTT transport and is only Base64URL-wrapped for text-only tooling surfaces
   - **Research Alignment**: Enables fair MTU/fragmentation comparisons by eliminating encoding bias between JWT (text-based) and Biscuit (binary-capable) token formats
 
 - [x] **Issue 19: Validate ACL_READ fan-out authorization cost measurement**

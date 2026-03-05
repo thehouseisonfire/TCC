@@ -1,3 +1,4 @@
+import base64
 import contextlib
 import json
 import os
@@ -27,6 +28,8 @@ from benchmarks.logging_utils import get_logger, setup_logging
 logger = get_logger(__name__)
 app = typer.Typer(add_completion=False)
 REPO_ROOT = Path(__file__).resolve().parents[1]
+MqttPassword = str | bytes
+RAW_BISCUIT_MARKER = "b64:"
 
 # Backward-compatible export used by packet analysis tests/importers.
 EMPTY_QOS_METRICS: dict[int, list[float]] = {0: [], 1: [], 2: []}
@@ -152,7 +155,7 @@ class WorkerConfig:
     port: int
     client_id: str
     username: str
-    password: str
+    password: MqttPassword
     topic: str
     qos: int
     qos_distribution: list[tuple[int, float]] | None
@@ -192,7 +195,7 @@ class WorkerConfig:
     biscuit_delegate_bin: str | None
     biscuit_delegate_handoff: bool
     biscuit_delegate_handoff_topic: str | None
-    biscuit_delegate_handoff_token: str | None
+    biscuit_delegate_handoff_token: MqttPassword | None
     biscuit_delegate_handoff_qos: int
     biscuit_delegate_handoff_retain: bool
     biscuit_delegate_handoff_nonce: str | None
@@ -302,7 +305,7 @@ def _fetch_token(
     no_default_grants: bool,
     tls_ca_file: str | None,
     tls_insecure: bool,
-) -> str:
+) -> MqttPassword:
     payload = {"client_id": client_id, "ttl_seconds": ttl}
     if kind == "biscuit":
         payload["topic"] = topic
@@ -318,22 +321,54 @@ def _fetch_token(
         verify = tls_ca_file
     transport = httpx.HTTPTransport(http1=False, http2=True)
     with httpx.Client(verify=verify, timeout=5.0, transport=transport) as client:
+        endpoint = f"/{kind}"
+        if kind == "biscuit":
+            endpoint = "/biscuit/binary"
         resp = client.post(
-            issuer_url.rstrip("/") + f"/{kind}",
+            issuer_url.rstrip("/") + endpoint,
             json=payload,
             headers={"Content-Type": "application/json"},
         )
         resp.raise_for_status()
         body = resp.json()
+    if kind == "biscuit":
+        data_b64 = body.get("data_b64")
+        if not data_b64:
+            raise ValueError("token issuer response missing data_b64")
+        return _decode_biscuit_token(str(data_b64))
     token = body.get("token")
     if not token:
         raise ValueError("token issuer response missing token")
     return token
 
 
-def _set_credentials_if_present(client: Any, username: str, password: str) -> None:
+def _decode_biscuit_token(token: str) -> bytes:
+    token = token.strip()
+    if token.startswith(RAW_BISCUIT_MARKER):
+        token = token[len(RAW_BISCUIT_MARKER) :]
+    padding = "=" * (-len(token) % 4)
+    return base64.urlsafe_b64decode(token + padding)
+
+
+def _biscuit_token_arg(token: MqttPassword) -> str:
+    if isinstance(token, bytes):
+        return base64.urlsafe_b64encode(token).rstrip(b"=").decode("ascii")
+    if token.startswith(RAW_BISCUIT_MARKER):
+        return token[len(RAW_BISCUIT_MARKER) :]
+    return token
+
+
+def _mqtt_password_value(password: MqttPassword) -> MqttPassword:
+    if isinstance(password, bytes):
+        return password
+    if password.startswith(RAW_BISCUIT_MARKER):
+        return _decode_biscuit_token(password)
+    return password
+
+
+def _set_credentials_if_present(client: Any, username: str, password: MqttPassword) -> None:
     if username or password:
-        client.username_pw_set(username, password)
+        client.username_pw_set(username, _mqtt_password_value(password))
 
 
 def _resolve_attenuate_cmd(custom_bin: str | None) -> list[str]:
@@ -355,7 +390,7 @@ def _resolve_attenuate_cmd(custom_bin: str | None) -> list[str]:
 
 
 def _build_biscuit_attenuate_cmd(
-    token: str,
+    token: MqttPassword,
     *,
     custom_bin: str | None,
     public_key_hex: str | None,
@@ -367,7 +402,7 @@ def _build_biscuit_attenuate_cmd(
     checks: list[str],
 ) -> list[str]:
     cmd = _resolve_attenuate_cmd(custom_bin)
-    cmd.extend(["--token", token])
+    cmd.extend(["--token", _biscuit_token_arg(token)])
     if public_key_hex:
         cmd.extend(["--public-key-hex", public_key_hex])
     if public_key_file:
@@ -385,7 +420,7 @@ def _build_biscuit_attenuate_cmd(
     return cmd
 
 
-def _attenuate_biscuit_token(token: str, cfg: WorkerConfig) -> tuple[str, float, int]:
+def _attenuate_biscuit_token(token: MqttPassword, cfg: WorkerConfig) -> tuple[bytes, float, int]:
     cmd = _build_biscuit_attenuate_cmd(
         token,
         custom_bin=cfg.biscuit_attenuate_bin,
@@ -408,11 +443,12 @@ def _attenuate_biscuit_token(token: str, cfg: WorkerConfig) -> tuple[str, float,
     token_out = output.strip()
     if not token_out:
         raise ValueError("attenuation produced empty token")
-    return token_out, (t1 - t0) * 1000.0, len(token_out)
+    decoded = _decode_biscuit_token(token_out)
+    return decoded, (t1 - t0) * 1000.0, len(decoded)
 
 
 def _delegate_biscuit_token(
-    token: str,
+    token: MqttPassword,
     *,
     custom_bin: str | None,
     public_key_hex: str | None,
@@ -445,14 +481,14 @@ def _delegate_biscuit_token(
     token_out = output.strip()
     if not token_out:
         raise ValueError("delegation produced empty token")
-    return token_out, (t1 - t0) * 1000.0, len(token_out)
+    return token_out, (t1 - t0) * 1000.0, len(_decode_biscuit_token(token_out))
 
 
 def _publish_delegated_tokens(
     host: str,
     port: int,
     username: str,
-    password: str,
+    password: MqttPassword,
     tokens_by_client: dict[str, str],
     topic: str,
     qos: int,
@@ -469,7 +505,7 @@ def _publish_delegated_tokens(
         protocol=cast(Any, protocol),
         callback_api_version=cast(Any, mqtt.CallbackAPIVersion.VERSION2),
     )
-    client.username_pw_set(username, password)
+    _set_credentials_if_present(client, username, password)
     if tls_enabled:
         if tls_ca_file:
             client.tls_set(ca_certs=tls_ca_file)
@@ -508,8 +544,8 @@ def _publish_delegated_tokens(
 def _receive_delegated_token(
     cfg: WorkerConfig,
     timeout_s: float = 10.0,
-) -> str:
-    token_holder: dict[str, str | None] = {"token": None}
+) -> bytes:
+    token_holder: dict[str, bytes | None] = {"token": None}
     errors: list[str] = []
     event = threading.Event()
 
@@ -527,7 +563,7 @@ def _receive_delegated_token(
             return
         token = payload.get("token")
         if token:
-            token_holder["token"] = token
+            token_holder["token"] = _decode_biscuit_token(str(token))
             event.set()
 
     client = cast(Any, mqtt.Client)(
@@ -536,7 +572,7 @@ def _receive_delegated_token(
         callback_api_version=cast(Any, mqtt.CallbackAPIVersion.VERSION2),
     )
     client.user_data_set(token_holder)
-    client.username_pw_set(cfg.username, cfg.biscuit_delegate_handoff_token)
+    _set_credentials_if_present(client, cfg.username, cfg.biscuit_delegate_handoff_token or "")
     if cfg.tls_enabled:
         if cfg.tls_ca_file:
             client.tls_set(ca_certs=cfg.tls_ca_file)
@@ -710,7 +746,7 @@ def _run_worker(
     control_errors: list[str] = []
     control_injection_delay_ms: list[float] = []
 
-    def attempt_connect(password: str):
+    def attempt_connect(password: MqttPassword):
         userdata = {
             "connected": False,
             "connect_start": 0.0,
@@ -1024,7 +1060,7 @@ def _run_fanout_publisher(
     host: str,
     port: int,
     username: str,
-    password: str,
+    password: MqttPassword,
     client_id: str,
     topic: str,
     message_count: int,
@@ -1107,9 +1143,9 @@ def run_load(
     host: str,
     port: int,
     username: str,
-    password: str,
+    password: MqttPassword,
     fanout_publisher_username: str | None,
-    fanout_publisher_password: str | None,
+    fanout_publisher_password: MqttPassword | None,
     topic_template: str,
     clients: int,
     message_count: int,
@@ -1149,7 +1185,7 @@ def run_load(
     biscuit_delegate_bin: str | None = None,
     biscuit_delegate_handoff: bool = False,
     biscuit_delegate_handoff_topic: str | None = None,
-    biscuit_delegate_handoff_token: str | None = None,
+    biscuit_delegate_handoff_token: MqttPassword | None = None,
     biscuit_delegate_handoff_qos: int | None = 1,
     biscuit_delegate_handoff_no_retain: bool = False,
     # CONTROL message parameters
@@ -1227,7 +1263,7 @@ def run_load(
         delegated_password = password
         if biscuit_delegate:
             try:
-                delegated_password, delegation_ms, delegation_len = _delegate_biscuit_token(
+                delegated_password_b64, delegation_ms, delegation_len = _delegate_biscuit_token(
                     password,
                     custom_bin=biscuit_delegate_bin,
                     public_key_hex=biscuit_delegate_public_key_hex,
@@ -1262,9 +1298,12 @@ def run_load(
                     )
                 )
                 continue
+            delegated_password = delegated_password_b64
         if biscuit_delegate and biscuit_delegate_handoff:
-            delegated_tokens_by_client[client_id] = delegated_password
+            delegated_tokens_by_client[client_id] = delegated_password_b64
             delegated_password = password
+        elif biscuit_delegate:
+            delegated_password = _decode_biscuit_token(delegated_password_b64)
         cfg = WorkerConfig(
             host=host,
             port=port,

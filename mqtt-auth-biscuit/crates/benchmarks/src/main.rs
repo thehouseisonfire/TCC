@@ -455,7 +455,8 @@ fn main() {
         .build(&root_keypair)
         .unwrap();
 
-    // We want the token as Base64URL for the MQTT password field
+    // Store Biscuit fixtures as Base64URL text for JSON/file transport.
+    // MQTT clients decode these fixtures back to raw serialized bytes.
     let biscuit_bytes = biscuit_1_block.to_vec().unwrap();
     use base64::{Engine as _, engine::general_purpose};
     let biscuit_b64 = general_purpose::URL_SAFE_NO_PAD.encode(&biscuit_bytes);

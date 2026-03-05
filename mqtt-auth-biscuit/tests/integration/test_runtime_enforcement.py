@@ -17,7 +17,7 @@ EXPIRY_TRIGGER_DELAY_S = 4.2
 
 
 class _IssuedTokenLike(Protocol):
-    token: str
+    token: str | bytes
 
 
 class _TokenIssuerLike(Protocol):
@@ -94,7 +94,7 @@ def _issue_token(
     ttl_seconds: int,
     grants: list[dict[str, str]] | None = None,
     denies: list[dict[str, str]] | None = None,
-) -> str:
+) -> str | bytes:
     if token_kind == "jwt":
         token = issuer.issue_jwt(
             client_id=client_id,

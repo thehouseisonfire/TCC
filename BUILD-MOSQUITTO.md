@@ -21,17 +21,17 @@ RUN RUSTFLAGS="-C target-feature=-crt-static" cargo build --release -p mosquitto
 
 # Stage 2: build Mosquitto from source
 FROM alpine:3.23.3 AS mosq-builder
-ARG MOSQ_REF=v2.1.3
+ARG MOSQ_REF=3a76714e3dcc36ba0b254dbff2a2df81ffe2882b
 RUN apk add --no-cache git build-base cmake openssl-dev cjson-dev libwebsockets-dev c-ares-dev
 RUN git clone https://github.com/eclipse-mosquitto/mosquitto.git /src
 WORKDIR /src
 RUN git checkout ${MOSQ_REF}
-RUN make -j"$(nproc)" prefix=/usr WITH_SHARED_LIBRARIES=yes
-RUN make install DESTDIR=/out
+RUN make -j"$(nproc)" prefix=/usr WITH_SHARED_LIBRARIES=yes WITH_DOCS=no WITH_EDITLINE=no WITH_HTTP_API=no WITH_SQLITE=no
+RUN make prefix=/usr WITH_SHARED_LIBRARIES=yes WITH_DOCS=no WITH_EDITLINE=no WITH_HTTP_API=no WITH_SQLITE=no install DESTDIR=/out
 
 # Stage 3: runtime
 FROM alpine:3.23.3
-RUN apk add --no-cache ca-certificates libstdc++ openssl cjson libwebsockets c-ares
+RUN apk add --no-cache ca-certificates libgcc libstdc++ openssl cjson libwebsockets c-ares
 COPY --from=mosq-builder /out/ /
 COPY --from=plugin-builder /app/target/release/libmosquitto_auth_biscuit.so /mosquitto/plugins/
 COPY docker/jwt_public.pem /mosquitto/config/
@@ -58,13 +58,22 @@ docker build -f Dockerfile.mosquitto.custom \
 ## 3) Use it in Compose
 
 In `mqtt-auth-biscuit/docker/docker-compose.yml`, for the `mosquitto` service,
-replace `build:` with:
+either replace `build:` with:
 
 ```yaml
 image: mosquitto:2.1.3-custom
 ```
 
-(or keep a `build:` section that points to `Dockerfile.mosquitto.custom`).
+or keep a `build:` section that points to `Dockerfile.mosquitto.custom` and pins the SHA:
+
+```yaml
+image: mosquitto:2.1.3-custom
+build:
+  context: ..
+  dockerfile: docker/Dockerfile.mosquitto.custom
+  args:
+    MOSQ_REF: ${MOSQ_REF:-<commit-sha>}
+```
 
 ## 4) Verify version inside container
 
@@ -72,8 +81,25 @@ image: mosquitto:2.1.3-custom
 docker compose -f mqtt-auth-biscuit/docker/docker-compose.yml run --rm mosquitto mosquitto -h | head -n 1
 ```
 
+## 5) Refresh to the latest upstream commit
+
+From the repository root:
+
+```bash
+cd /home/eagle/TCC2
+
+MOSQ_REF=$(git ls-remote https://github.com/eclipse-mosquitto/mosquitto.git HEAD | awk '{print $1}')
+echo "Using MOSQ_REF=$MOSQ_REF"
+
+MOSQ_REF="$MOSQ_REF" docker compose -f mqtt-auth-biscuit/docker/docker-compose.yml build --pull mosquitto
+MOSQ_REF="$MOSQ_REF" docker compose -f mqtt-auth-biscuit/docker/docker-compose.yml up -d --force-recreate mosquitto
+
+docker compose -f mqtt-auth-biscuit/docker/docker-compose.yml run --rm mosquitto mosquitto -h | head -n 1
+```
+
 ## Notes
 
 - Prefer a commit SHA over a moving branch for reproducibility.
+- On unreleased commits, `mosquitto -h` may still print `2.1.2` until upstream bumps the version string.
 - Keep the image tag explicit (`2.1.3-custom`, `2.1.3-rc`, etc.) to avoid confusion.
 - Once `eclipse-mosquitto:2.1.3-alpine` is published, you can switch back to the official image.

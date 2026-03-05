@@ -1,0 +1,30 @@
+FROM rust:1.93.1-alpine AS plugin-builder
+RUN apk add --no-cache build-base cmake perl libc-dev
+
+WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+COPY crates/mosquitto-plugin ./crates/mosquitto-plugin
+COPY crates/token-issuer ./crates/token-issuer
+COPY crates/benchmarks ./crates/benchmarks
+COPY crates/authz-server ./crates/authz-server
+RUN RUSTFLAGS="-C target-feature=-crt-static" cargo build --release -p mosquitto-auth-biscuit
+
+FROM alpine:3.23.3 AS mosq-builder
+ARG MOSQ_REF=3a76714e3dcc36ba0b254dbff2a2df81ffe2882b
+RUN apk add --no-cache git build-base cmake openssl-dev cjson-dev libwebsockets-dev c-ares-dev
+RUN git clone https://github.com/eclipse-mosquitto/mosquitto.git /src
+
+WORKDIR /src
+RUN git checkout "${MOSQ_REF}"
+RUN make -j"$(nproc)" prefix=/usr WITH_SHARED_LIBRARIES=yes WITH_DOCS=no WITH_EDITLINE=no WITH_HTTP_API=no WITH_SQLITE=no
+RUN make prefix=/usr WITH_SHARED_LIBRARIES=yes WITH_DOCS=no WITH_EDITLINE=no WITH_HTTP_API=no WITH_SQLITE=no install DESTDIR=/out
+
+FROM alpine:3.23.3
+RUN apk add --no-cache ca-certificates libgcc libstdc++ openssl cjson libwebsockets c-ares
+
+COPY --from=mosq-builder /out/ /
+COPY --from=plugin-builder /app/target/release/libmosquitto_auth_biscuit.so /mosquitto/plugins/
+COPY docker/jwt_public.pem /mosquitto/config/
+COPY docker/biscuit_public.key /mosquitto/config/
+
+CMD ["/usr/sbin/mosquitto", "-c", "/mosquitto/config/mosquitto.conf"]

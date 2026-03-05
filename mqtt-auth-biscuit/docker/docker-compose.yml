@@ -1,8 +1,11 @@
 services:
   mosquitto:
+    image: mosquitto:2.1.3-custom
     build:
       context: ..
-      dockerfile: docker/Dockerfile.mosquitto
+      dockerfile: docker/Dockerfile.mosquitto.custom
+      args:
+        MOSQ_REF: ${MOSQ_REF:-3a76714e3dcc36ba0b254dbff2a2df81ffe2882b}
     ports:
       - "1883:1883"
     volumes:

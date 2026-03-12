@@ -20,6 +20,4 @@ pub struct PolicyBackendConfig {
     pub http_max_response_bytes: u64,
     pub dynamic_security_url: Option<String>,
     pub dynamic_security_reload_interval_seconds: Option<u64>,
-    pub dynamic_security_username: Option<String>,
-    pub dynamic_security_password: Option<String>,
 }

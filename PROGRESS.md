@@ -2,7 +2,7 @@
 
 **Project**: Eclipse Mosquitto Auth Biscuit Plugin (Rust)\
 **Started**: 2026-01-04\
-**Last Updated**: 2026-03-04\
+**Last Updated**: 2026-03-11\
 
 ---
 
@@ -740,6 +740,31 @@ features to ensure accurate performance measurements. This should be done
 
 ## 13) Research Footnotes
 
+### Dynamic Security Control Durability Semantics
+
+- **Decision**: The Dynamic Security control path now favors **runtime
+  availability** over strict durability when `dynamic-security.json` is not
+  writable.
+- **Behavior**:
+  - Valid control commands still apply to in-memory policy state even if dynsec
+    JSON persistence fails.
+  - Persistence failure is surfaced as a **warning** on the successful control
+    result and logged by the control callback, rather than treated as a hard
+    post-commit failure.
+  - Failed-persist structural mutations (`createRole`, `deleteRole`,
+    `createGroup`, `deleteGroup`, `addGroupClient`, `removeGroupClient`) are
+    kept in a process-local pending queue and re-applied after reloads so live
+    enforcement remains stable during the current broker process lifetime.
+  - Pending persistence is retried opportunistically on later control commands.
+  - This state is **not durable across broker restart** until a later
+    successful file write commits the queued mutations.
+- **Research relevance**: This preserves control-plane functionality and
+  resilience under degraded local-dependency conditions, which better matches
+  the thesis focus on availability and contingency behavior. Baseline benchmark
+  runs that use writable temp dynsec files will not normally exercise this path,
+  so it should be treated as a deliberate failure-mode scenario rather than part
+  of the main throughput/latency matrix.
+
 ### Biscuit Parsing Cache Vs Per-Message Verification
 
 - **Decision**: Parse/verify Biscuit tokens once during authentication, cache the parsed token in session state, and reuse it for per-message authorization checks.
@@ -840,3 +865,30 @@ maintaining research validity.
 - **Consistent expiration handling**: Enforcing JWT expiration on every
   authorization decision matches the Biscuit approach where policies are
   evaluated per-request, maintaining fairness in comparison.
+
+### Cached-Read Notify-Only Enforcement Limitation
+
+**Context**: The plugin supports a notify-only control-enforcement path for
+read-access revocations, intended for comparison against kick/re-auth behavior.
+
+**Operational Limitation**:
+
+- When `plugin_opt_acl_read_full_authz false` is used, `MOSQ_ACL_READ` for
+  cached sessions performs expiry-only validation rather than full dynamic
+  policy re-evaluation.
+- In that configuration, notify-only revocation commands do **not** immediately
+  revoke already-subscribed cached readers at the broker.
+- Effective enforcement for those sessions becomes:
+  - client-assisted, if the client reacts to the control-notify topic and
+    refreshes its subscriptions/session state
+  - eventual, on reconnect/resubscribe
+  - immediate only when using kick-based enforcement or
+    `plugin_opt_acl_read_full_authz true`
+
+**Research Interpretation**:
+
+- Results collected under notify-only enforcement with
+  `acl_read_full_authz = false` must be interpreted as measuring a
+  lower-overhead, lower-disruption, but not fully immediate revocation mode.
+- This is a deliberate tradeoff of the cached-read fast path, not evidence that
+  the control command failed to update in-memory policy state.

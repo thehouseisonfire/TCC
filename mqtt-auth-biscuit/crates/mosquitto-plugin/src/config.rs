@@ -126,8 +126,6 @@ pub struct PluginConfigBuilder {
     http_timeout_seconds: Option<u64>,
     http_max_response_bytes: Option<u64>,
     dynamic_security_url: Option<String>,
-    dynamic_security_username: Option<String>,
-    dynamic_security_password: Option<String>,
     dynamic_security_reload_interval_seconds: Option<u64>,
     cache_ttl_seconds: Option<u64>,
     allow_anonymous_no_token: Option<bool>,
@@ -163,8 +161,6 @@ impl PluginConfigBuilder {
             http_timeout_seconds: None,
             http_max_response_bytes: None,
             dynamic_security_url: None,
-            dynamic_security_username: None,
-            dynamic_security_password: None,
             dynamic_security_reload_interval_seconds: None,
             cache_ttl_seconds: None,
             allow_anonymous_no_token: None,
@@ -245,16 +241,6 @@ impl PluginConfigBuilder {
 
     pub fn dynamic_security_url(mut self, url: impl Into<String>) -> Self {
         self.dynamic_security_url = Some(url.into());
-        self
-    }
-
-    pub fn dynamic_security_username(mut self, username: impl Into<String>) -> Self {
-        self.dynamic_security_username = Some(username.into());
-        self
-    }
-
-    pub fn dynamic_security_password(mut self, password: impl Into<String>) -> Self {
-        self.dynamic_security_password = Some(password.into());
         self
     }
 
@@ -379,8 +365,6 @@ impl PluginConfigBuilder {
             http_max_response_bytes: self.http_max_response_bytes.unwrap_or(64 * 1024),
             dynamic_security_url: self.dynamic_security_url,
             dynamic_security_reload_interval_seconds: self.dynamic_security_reload_interval_seconds,
-            dynamic_security_username: self.dynamic_security_username,
-            dynamic_security_password: self.dynamic_security_password,
         };
 
         let cache_ttl_seconds = self.cache_ttl_seconds.unwrap_or(3600);
@@ -522,8 +506,6 @@ pub fn parse_options(
                 builder.http_max_response_bytes(bytes)
             }
             "dynamic_security_url" => builder.dynamic_security_url(value),
-            "dynamic_security_username" => builder.dynamic_security_username(value),
-            "dynamic_security_password" => builder.dynamic_security_password(value),
             "dynamic_security_reload_interval_seconds" => {
                 let seconds = value.parse::<u64>().map_err(|e| {
                     format!("Invalid dynamic_security_reload_interval_seconds: {e}")

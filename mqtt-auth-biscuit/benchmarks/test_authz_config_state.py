@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from benchmarks import run_scenarios as rs
@@ -134,3 +136,32 @@ def test_authz_reset_posts_reset_path(monkeypatch):
     assert out == rs.AUTHZ_BASELINE_STATE
     assert len(fake.calls) == 1
     assert fake.calls[0]["url"].endswith("/config/reset")
+
+
+def test_default_dynsec_snapshot_preserves_publish_and_fanout_baselines():
+    # NOTE: Calls rs._resolve_repo_path, an internal helper. If that helper is
+    # renamed, this test will fail at call time rather than via a typed interface.
+    cfg = json.loads(
+        rs._resolve_repo_path("docker/dynamic-security.json").read_text(encoding="utf-8")
+    )
+    clients = {client["username"]: client for client in cfg["clients"]}
+    groups = {group["groupname"]: group for group in cfg["groups"]}
+    roles = {role["rolename"]: role for role in cfg["roles"]}
+
+    subscriber_roles = {
+        role_ref["rolename"] for role_ref in clients["dynsec_client_1"].get("roles", [])
+    }
+    assert "sensor_writer" in subscriber_roles
+
+    sensor_group_members = {
+        client_ref["username"] for client_ref in groups["sensors"].get("clients", [])
+    }
+    assert "dynsec_client_1" in sensor_group_members
+
+    fanout_writer_topics = {
+        acl["topic"]
+        for acl in roles["fanout_writer"].get("acls", [])
+        if acl.get("acltype") == "publishClientSend" and acl.get("allow") is True
+    }
+    assert "fanout/broadcast" in fanout_writer_topics
+    assert "$CONTROL/dynamic-security/v1" not in fanout_writer_topics

@@ -203,6 +203,45 @@ def _build_dynsec_control_notify_snapshot(
     return output_path
 
 
+def _build_dynsec_group_membership_snapshot(
+    *,
+    source_path: str,
+    output_path: Path,
+    topic: str,
+) -> Path:
+    src = REPO_ROOT / source_path
+    cfg = json.loads(src.read_text(encoding="utf-8"))
+    clients = {client["username"]: client for client in cfg.get("clients", [])}
+    subscriber = clients["dynsec_client_1"]
+    subscriber["roles"] = []
+    subscriber.pop("groups", None)
+
+    for group in cfg.get("groups", []):
+        group["clients"] = [
+            client_ref
+            for client_ref in group.get("clients", [])
+            if client_ref.get("username") != "dynsec_client_1"
+        ]
+
+    roles = {role["rolename"]: role for role in cfg.get("roles", [])}
+    fanout_writer = roles["fanout_writer"]
+    _upsert_acl(
+        fanout_writer,
+        acltype="publishClientSend",
+        topic=topic,
+        allow=True,
+    )
+    _upsert_acl(
+        fanout_writer,
+        acltype="publishClientSend",
+        topic="$CONTROL/dynamic-security/v1",
+        allow=True,
+    )
+
+    output_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    return output_path
+
+
 def _total_messages(clients: list[_ObservedMqttClientLike]) -> int:
     return sum(client.message_count for client in clients)
 
@@ -508,6 +547,173 @@ def test_runtime_control_acl_read_notify_workflow(
     finally:
         subscriber.close()
         publisher.close()
+
+
+@pytest.mark.broker_integration
+@pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
+def test_runtime_control_group_membership_role_churn_workflow(
+    compose_harness,
+    mqtt_client_factory,
+    unique_suffix: str,
+    token_kind: str,
+    tmp_path,
+) -> None:
+    topic = "fanout/broadcast"
+    original_dynsec = tmp_path / "dynsec-group-membership-role-churn-original.json"
+    original_dynsec.write_text(
+        (REPO_ROOT / "docker" / "dynamic-security.json").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    snapshot = _build_dynsec_group_membership_snapshot(
+        source_path="docker/dynamic-security.json",
+        output_path=tmp_path / "dynsec-group-membership-role-churn.json",
+        topic=topic,
+    )
+    policy_churn.apply_dynsec_snapshot(str(snapshot))
+    compose_harness.up(mosquitto_conf="./mosquitto_dynsec_acl_read.conf", tls=False)
+    issuer = compose_harness.token_issuer(tls=False)
+
+    subscriber_token = _issue_token(
+        issuer,
+        token_kind=token_kind,
+        client_id="client_1",
+        topic=topic,
+        ttl_seconds=180,
+        grants=[],
+    )
+    controller_token = _issue_token(
+        issuer,
+        token_kind=token_kind,
+        client_id="fanout_publisher",
+        topic=topic,
+        ttl_seconds=180,
+        grants=[],
+    )
+
+    subscriber = mqtt_client_factory(
+        host="localhost",
+        port=1883,
+        client_id="client_1",
+        username="dynsec_client_1",
+        password=subscriber_token,
+    )
+    controller = mqtt_client_factory(
+        host="localhost",
+        port=1883,
+        client_id="fanout_publisher",
+        username="dynsec_publisher",
+        password=controller_token,
+    )
+
+    try:
+        subscriber.connect()
+        assert _is_denied(subscriber.subscribe(topic, qos=1))
+        controller.connect()
+
+        grant_payload = json.dumps(
+            {
+                "commands": [
+                    {
+                        "command": "createRole",
+                        "rolename": "dynamic_reader",
+                        "acls": [
+                            {
+                                "acltype": "subscribeLiteral",
+                                "topic": topic,
+                                "priority": 1,
+                                "allow": True,
+                            },
+                            {
+                                "acltype": "publishClientReceive",
+                                "topic": topic,
+                                "priority": 1,
+                                "allow": True,
+                            },
+                        ],
+                    },
+                    {
+                        "command": "createGroup",
+                        "groupname": "dynamic_readers",
+                        "roles": [{"rolename": "dynamic_reader", "priority": 0}],
+                    },
+                    {
+                        "command": "addGroupClient",
+                        "groupname": "dynamic_readers",
+                        "username": "dynsec_client_1",
+                        "priority": 0,
+                    },
+                ]
+            }
+        )
+        controller.publish("$CONTROL/dynamic-security/v1", grant_payload, qos=1)
+        # time.sleep gates below allow the broker's control callback to process
+        # the QoS-1 command before the next subscribe/publish step. This is a
+        # fixed-delay synchronisation strategy; it may flake under high CI load.
+        # If this test becomes brittle, replace each sleep+check pair with a
+        # polling loop using wait_for_topic_messages or a status-topic pattern.
+        time.sleep(1.2)
+
+        assert _is_granted(subscriber.subscribe(topic, qos=1))
+        controller.publish(topic, f"grant|{unique_suffix}", qos=0)
+        assert subscriber.wait_for_topic_messages(topic, 1, timeout_s=5.0)
+        granted_count = subscriber.message_count_for_topic(topic)
+
+        delete_group_payload = json.dumps(
+            {"commands": [{"command": "deleteGroup", "groupname": "dynamic_readers"}]}
+        )
+        controller.publish("$CONTROL/dynamic-security/v1", delete_group_payload, qos=1)
+        time.sleep(1.2)
+
+        for idx in range(3):
+            controller.publish(topic, f"delete-group|{idx}|{unique_suffix}", qos=0)
+        time.sleep(1.2)
+        assert subscriber.message_count_for_topic(topic) == granted_count
+        subscriber.assert_connected_for(1.0)
+
+        restore_membership_payload = json.dumps(
+            {
+                "commands": [
+                    {
+                        "command": "createGroup",
+                        "groupname": "dynamic_readers",
+                        "roles": [{"rolename": "dynamic_reader", "priority": 0}],
+                    },
+                    {
+                        "command": "addGroupClient",
+                        "groupname": "dynamic_readers",
+                        "username": "dynsec_client_1",
+                        "priority": 0,
+                    },
+                ]
+            }
+        )
+        controller.publish("$CONTROL/dynamic-security/v1", restore_membership_payload, qos=1)
+        time.sleep(1.2)
+
+        controller.publish(topic, f"restore|{unique_suffix}", qos=0)
+        assert subscriber.wait_for_topic_messages(topic, granted_count + 1, timeout_s=5.0)
+
+        delete_role_payload = json.dumps(
+            {"commands": [{"command": "deleteRole", "rolename": "dynamic_reader"}]}
+        )
+        controller.publish("$CONTROL/dynamic-security/v1", delete_role_payload, qos=1)
+        time.sleep(1.2)
+        post_delete_role_count = subscriber.message_count_for_topic(topic)
+
+        for idx in range(3):
+            controller.publish(topic, f"delete-role|{idx}|{unique_suffix}", qos=0)
+        time.sleep(1.2)
+
+        assert subscriber.message_count_for_topic(topic) == post_delete_role_count
+        subscriber.assert_connected_for(1.0)
+
+        logs = compose_harness.logs("mosquitto")
+        assert "Control enforcement kick applied:" not in logs
+        assert "Control notify published: client=client_1" in logs
+    finally:
+        subscriber.close()
+        controller.close()
+        policy_churn.apply_dynsec_snapshot(str(original_dynsec))
 
 
 @pytest.mark.broker_integration

@@ -423,9 +423,17 @@ struct BrokerPublishCall {
 }
 
 #[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TestControlAction {
+    Kick { client_id: Option<String> },
+    Publish { client_id: Option<String> },
+}
+
+#[cfg(test)]
 thread_local! {
     static TEST_KICK_CLIENT_CALL: RefCell<KickClientCall> = RefCell::new(KickClientCall::default());
     static TEST_BROKER_PUBLISH_CALL: RefCell<BrokerPublishCall> = RefCell::new(BrokerPublishCall::default());
+    static TEST_CONTROL_ACTIONS: RefCell<Vec<TestControlAction>> = const { RefCell::new(Vec::new()) };
     static TEST_DEBUG_LOGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -454,6 +462,16 @@ fn broker_publish_call_snapshot() -> BrokerPublishCall {
 }
 
 #[cfg(test)]
+fn reset_control_action_log() {
+    TEST_CONTROL_ACTIONS.with(|actions| actions.borrow_mut().clear());
+}
+
+#[cfg(test)]
+fn control_action_log_snapshot() -> Vec<TestControlAction> {
+    TEST_CONTROL_ACTIONS.with(|actions| actions.borrow().clone())
+}
+
+#[cfg(test)]
 fn reset_debug_logs() {
     TEST_DEBUG_LOGS.with(|logs| logs.borrow_mut().clear());
 }
@@ -470,11 +488,17 @@ fn record_debug_log(message: &str) {
 
 #[cfg(test)]
 fn record_kick_client_call(clientid: *const c_char, with_will: bool) {
+    let client_id = cstr_to_string(clientid);
     TEST_KICK_CLIENT_CALL.with(|call| {
         let mut state = call.borrow_mut();
         state.count += 1;
-        state.last_client_id = cstr_to_string(clientid);
+        state.last_client_id = client_id.clone();
         state.last_with_will = Some(with_will);
+    });
+    TEST_CONTROL_ACTIONS.with(|actions| {
+        actions
+            .borrow_mut()
+            .push(TestControlAction::Kick { client_id });
     });
 }
 
@@ -487,6 +511,7 @@ fn record_broker_publish_call(
     qos: c_int,
     retain: bool,
 ) {
+    let client_id = cstr_to_string(clientid);
     let payload_text = if payload.is_null() {
         Some(String::new())
     } else {
@@ -498,11 +523,16 @@ fn record_broker_publish_call(
     TEST_BROKER_PUBLISH_CALL.with(|call| {
         let mut state = call.borrow_mut();
         state.count += 1;
-        state.last_client_id = cstr_to_string(clientid);
+        state.last_client_id = client_id.clone();
         state.last_topic = cstr_to_string(topic);
         state.last_payload = payload_text;
         state.last_qos = Some(qos);
         state.last_retain = Some(retain);
+    });
+    TEST_CONTROL_ACTIONS.with(|actions| {
+        actions
+            .borrow_mut()
+            .push(TestControlAction::Publish { client_id });
     });
 }
 
@@ -936,12 +966,20 @@ fn apply_dynamic_security_control_enforcement(
             kick_client_ids,
             kick_usernames,
             notify_events,
+            persist_warning,
         }) => {
             let mut kick_targets: HashSet<String> = kick_client_ids.into_iter().collect();
             for username in kick_usernames {
                 for session_client_id in session_client_ids_for_username(state, &username) {
                     kick_targets.insert(session_client_id);
                 }
+            }
+
+            if let Some(warning) = persist_warning {
+                publish_control_persist_warning(state, client_id, username, topic, &warning);
+                log_info(&format!(
+                    "Control command applied without durable persistence: client={client_id} topic={topic} warning={warning}"
+                ));
             }
 
             for affected_client in kick_targets {
@@ -1048,6 +1086,36 @@ fn publish_control_notify_event(state: &PluginState, event: &ControlNotifyEvent)
             publish_control_notification(&session_client_id, &notification_topic, &payload);
         }
     }
+}
+
+fn publish_control_persist_warning(
+    state: &PluginState,
+    client_id: &str,
+    username: Option<&str>,
+    topic: &str,
+    warning: &str,
+) {
+    let prefix = state
+        .config
+        .control_notify_topic_prefix
+        .trim_end_matches('/');
+    if prefix.is_empty() {
+        log_debug("Control notify skipped: empty topic prefix");
+        return;
+    }
+
+    let notification_topic = format!("{prefix}/{client_id}");
+    let payload = json!({
+        "event": "control_persist_warning",
+        "source": "$CONTROL/dynamic-security/v1",
+        "topic": topic,
+        "username": username,
+        "client_id": client_id,
+        "durable": false,
+        "warning": warning,
+    })
+    .to_string();
+    publish_control_notification(client_id, &notification_topic, &payload);
 }
 
 fn publish_control_notification(client_id: &str, topic: &str, payload: &str) {
@@ -1888,6 +1956,7 @@ mod tests {
     use biscuit_auth::{Biscuit, KeyPair, PrivateKey};
     use std::ffi::CString;
     use std::fs;
+    use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
@@ -2105,6 +2174,20 @@ mod tests {
         state.config.control_notify_topic_prefix = "system_notification".to_string();
         state.dynamic_security_policy = Some(policy);
         dynsec_path.to_string_lossy().into_owned()
+    }
+
+    fn replace_dynsec_file_with_directory(path: &str) {
+        fs::remove_file(path).expect("dynsec test control config should be removable");
+        fs::create_dir(path).expect("dynsec test control config path should become a directory");
+    }
+
+    fn cleanup_dynsec_test_path(path: &str) {
+        let dynsec_path = Path::new(path);
+        if dynsec_path.is_dir() {
+            let _ = fs::remove_dir(dynsec_path);
+        } else if dynsec_path.exists() {
+            let _ = fs::remove_file(dynsec_path);
+        }
     }
 
     fn cache_test_jwt_for_client(userdata: *mut c_void, client_id: &str, exp: i64) {
@@ -3202,6 +3285,394 @@ mod tests {
         assert!(state.cache.get(&"test_client".to_string()).is_some());
 
         let _ = fs::remove_file(dynsec_path);
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn control_callback_group_membership_churn_publishes_notify_without_kick() {
+        reset_kick_client_call();
+        reset_broker_publish_call();
+        let (userdata, _identifier) = setup_plugin_with_config();
+        let dynsec_path = enable_dynamic_security_control_mode(userdata);
+        cache_test_jwt(userdata, time::unix_timestamp_now() + 60);
+
+        let state = unsafe { plugin_state_mut(userdata) };
+        state.config.control_notify_topic_prefix = "system_notification".to_string();
+        bind_session_username(state, "test_client", Some("test_user"));
+
+        let topic = CString::new("$CONTROL/dynamic-security/v1").unwrap();
+        let grant_payload = br#"{
+          "commands": [
+            {
+              "command":"createRole",
+              "rolename":"fanout_reader",
+              "acls":[
+                {"acltype":"subscribeLiteral","topic":"fanout/broadcast","priority":1,"allow":true},
+                {"acltype":"publishClientReceive","topic":"fanout/broadcast","priority":1,"allow":true}
+              ]
+            },
+            {
+              "command":"createGroup",
+              "groupname":"fanout",
+              "roles":[{"rolename":"fanout_reader","priority":5}]
+            },
+            {
+              "command":"addGroupClient",
+              "groupname":"fanout",
+              "username":"test_user",
+              "priority":7
+            }
+          ]
+        }"#;
+        let mut grant_evt = MosquittoEvtControl {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr().cast::<c_char>(),
+            payload: grant_payload.as_ptr().cast::<c_void>(),
+            properties: ptr::null(),
+            reason_string: ptr::null_mut(),
+            payloadlen: u32::try_from(grant_payload.len()).expect("payload length fits u32"),
+            qos: 1,
+            reason_code: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = control_callback(
+            MOSQ_EVT_CONTROL,
+            (&raw mut grant_evt).cast::<c_void>(),
+            userdata,
+        );
+        assert_eq!(rc, MOSQ_ERR_SUCCESS);
+
+        let kick = kick_client_call_snapshot();
+        assert_eq!(kick.count, 0);
+        let publish = broker_publish_call_snapshot();
+        assert_eq!(publish.count, 0);
+
+        let state = unsafe { plugin_state(userdata) };
+        assert!(state.cache.get(&"test_client".to_string()).is_some());
+        let policy = state
+            .dynamic_security_policy
+            .as_ref()
+            .expect("dynamic security policy should be configured");
+        assert!(
+            policy
+                .check(
+                    Some("test_user"),
+                    Some("test_client"),
+                    "fanout/broadcast",
+                    MOSQ_ACL_READ
+                )
+                .expect("policy check should succeed")
+        );
+
+        let revoke_payload =
+            br#"{"commands":[{"command":"removeGroupClient","groupname":"fanout","username":"test_user"}]}"#;
+        let mut revoke_evt = MosquittoEvtControl {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr().cast::<c_char>(),
+            payload: revoke_payload.as_ptr().cast::<c_void>(),
+            properties: ptr::null(),
+            reason_string: ptr::null_mut(),
+            payloadlen: u32::try_from(revoke_payload.len()).expect("payload length fits u32"),
+            qos: 1,
+            reason_code: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = control_callback(
+            MOSQ_EVT_CONTROL,
+            (&raw mut revoke_evt).cast::<c_void>(),
+            userdata,
+        );
+        assert_eq!(rc, MOSQ_ERR_SUCCESS);
+
+        let kick = kick_client_call_snapshot();
+        assert_eq!(kick.count, 0);
+        let publish = broker_publish_call_snapshot();
+        assert_eq!(publish.count, 1);
+        assert_eq!(publish.last_client_id.as_deref(), Some("test_client"));
+        assert_eq!(
+            publish.last_topic.as_deref(),
+            Some("system_notification/test_client")
+        );
+        let payload_text = publish.last_payload.unwrap_or_default();
+        assert!(payload_text.contains("\"command\":\"removeGroupClient\""));
+        assert!(payload_text.contains("\"topic\":\"fanout/broadcast\""));
+        let state = unsafe { plugin_state(userdata) };
+        assert!(state.cache.get(&"test_client".to_string()).is_some());
+        let policy = state
+            .dynamic_security_policy
+            .as_ref()
+            .expect("dynamic security policy should be configured");
+        assert!(
+            !policy
+                .check(
+                    Some("test_user"),
+                    Some("test_client"),
+                    "fanout/broadcast",
+                    MOSQ_ACL_READ
+                )
+                .expect("policy check should succeed")
+        );
+
+        let _ = fs::remove_file(dynsec_path);
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn control_callback_add_group_client_updates_existing_priority_without_side_effects() {
+        reset_kick_client_call();
+        reset_broker_publish_call();
+        let (userdata, _identifier) = setup_plugin_with_config();
+        let dynsec_path = enable_dynamic_security_control_mode(userdata);
+        cache_test_jwt(userdata, time::unix_timestamp_now() + 60);
+
+        let topic = CString::new("$CONTROL/dynamic-security/v1").unwrap();
+        let grant_payload = br#"{
+          "commands": [
+            {
+              "command":"createRole",
+              "rolename":"fanout_reader",
+              "acls":[
+                {"acltype":"subscribeLiteral","topic":"fanout/broadcast","priority":1,"allow":true},
+                {"acltype":"publishClientReceive","topic":"fanout/broadcast","priority":1,"allow":true}
+              ]
+            },
+            {
+              "command":"createGroup",
+              "groupname":"fanout",
+              "roles":[{"rolename":"fanout_reader","priority":5}]
+            },
+            {
+              "command":"addGroupClient",
+              "groupname":"fanout",
+              "username":"test_user",
+              "priority":7
+            }
+          ]
+        }"#;
+        let mut grant_evt = MosquittoEvtControl {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr().cast::<c_char>(),
+            payload: grant_payload.as_ptr().cast::<c_void>(),
+            properties: ptr::null(),
+            reason_string: ptr::null_mut(),
+            payloadlen: u32::try_from(grant_payload.len()).expect("payload length fits u32"),
+            qos: 1,
+            reason_code: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = control_callback(
+            MOSQ_EVT_CONTROL,
+            (&raw mut grant_evt).cast::<c_void>(),
+            userdata,
+        );
+        assert_eq!(rc, MOSQ_ERR_SUCCESS);
+
+        let update_payload =
+            br#"{"commands":[{"command":"addGroupClient","groupname":"fanout","username":"test_user","priority":1}]}"#;
+        let mut update_evt = MosquittoEvtControl {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr().cast::<c_char>(),
+            payload: update_payload.as_ptr().cast::<c_void>(),
+            properties: ptr::null(),
+            reason_string: ptr::null_mut(),
+            payloadlen: u32::try_from(update_payload.len()).expect("payload length fits u32"),
+            qos: 1,
+            reason_code: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = control_callback(
+            MOSQ_EVT_CONTROL,
+            (&raw mut update_evt).cast::<c_void>(),
+            userdata,
+        );
+        assert_eq!(rc, MOSQ_ERR_SUCCESS);
+
+        let kick = kick_client_call_snapshot();
+        assert_eq!(kick.count, 0);
+        let publish = broker_publish_call_snapshot();
+        assert_eq!(publish.count, 0);
+
+        let raw = fs::read_to_string(&dynsec_path).expect("dynsec config should be readable");
+        let root: serde_json::Value =
+            serde_json::from_str(&raw).expect("dynsec config should parse");
+        let groups = root["groups"]
+            .as_array()
+            .expect("groups should be an array");
+        let fanout_group = groups
+            .iter()
+            .find(|group| group["groupname"].as_str() == Some("fanout"))
+            .expect("fanout group should exist");
+        let clients = fanout_group["clients"]
+            .as_array()
+            .expect("group clients should be an array");
+        let test_user = clients
+            .iter()
+            .find(|entry| entry["username"].as_str() == Some("test_user"))
+            .expect("test_user group client should exist");
+        assert_eq!(test_user["priority"].as_i64(), Some(1));
+
+        let _ = fs::remove_file(dynsec_path);
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn control_callback_persist_failure_keeps_transport_success_and_applies_runtime_change() {
+        reset_kick_client_call();
+        reset_broker_publish_call();
+        let (userdata, _identifier) = setup_plugin_with_config();
+        let dynsec_path = enable_dynamic_security_control_mode(userdata);
+        cache_test_jwt(userdata, time::unix_timestamp_now() + 60);
+
+        let state = unsafe { plugin_state_mut(userdata) };
+        bind_session_username(state, "test_client", Some("test_user"));
+        state.config.control_notify_topic_prefix = "system_notification".to_string();
+        replace_dynsec_file_with_directory(&dynsec_path);
+
+        let topic = CString::new("$CONTROL/dynamic-security/v1").unwrap();
+        let payload = br#"{
+          "commands": [
+            {
+              "command":"createRole",
+              "rolename":"fanout_reader",
+              "acls":[
+                {"acltype":"subscribeLiteral","topic":"fanout/broadcast","priority":1,"allow":true},
+                {"acltype":"publishClientReceive","topic":"fanout/broadcast","priority":1,"allow":true}
+              ]
+            },
+            {
+              "command":"createGroup",
+              "groupname":"fanout",
+              "roles":[{"rolename":"fanout_reader","priority":5}]
+            },
+            {
+              "command":"addGroupClient",
+              "groupname":"fanout",
+              "username":"test_user",
+              "priority":7
+            }
+          ]
+        }"#;
+        let mut evt = MosquittoEvtControl {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr().cast::<c_char>(),
+            payload: payload.as_ptr().cast::<c_void>(),
+            properties: ptr::null(),
+            reason_string: ptr::null_mut(),
+            payloadlen: u32::try_from(payload.len()).expect("payload length fits u32"),
+            qos: 1,
+            reason_code: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = control_callback(MOSQ_EVT_CONTROL, (&raw mut evt).cast::<c_void>(), userdata);
+        assert_eq!(rc, MOSQ_ERR_SUCCESS);
+
+        let kick = kick_client_call_snapshot();
+        assert_eq!(kick.count, 0);
+        let publish = broker_publish_call_snapshot();
+        assert_eq!(publish.count, 1);
+        assert_eq!(publish.last_client_id.as_deref(), Some("test_client"));
+        assert_eq!(
+            publish.last_topic.as_deref(),
+            Some("system_notification/test_client")
+        );
+        let payload_text = publish.last_payload.unwrap_or_default();
+        assert!(payload_text.contains("\"event\":\"control_persist_warning\""));
+        assert!(payload_text.contains("\"durable\":false"));
+        assert!(payload_text.contains("\"topic\":\"$CONTROL/dynamic-security/v1\""));
+        assert!(payload_text.contains("dynsec config read failed"));
+
+        let state = unsafe { plugin_state(userdata) };
+        assert!(state.cache.get(&"test_client".to_string()).is_some());
+        let policy = state
+            .dynamic_security_policy
+            .as_ref()
+            .expect("dynamic security policy should be configured");
+        assert!(
+            policy
+                .check(
+                    Some("test_user"),
+                    Some("test_client"),
+                    "fanout/broadcast",
+                    MOSQ_ACL_READ
+                )
+                .expect("policy check should succeed")
+        );
+
+        cleanup_dynsec_test_path(&dynsec_path);
+        teardown_plugin(userdata);
+    }
+
+    #[test]
+    fn control_callback_self_disable_publishes_persist_warning_before_kick() {
+        reset_kick_client_call();
+        reset_broker_publish_call();
+        reset_control_action_log();
+        let (userdata, _identifier) = setup_plugin_with_config();
+        let dynsec_path = enable_dynamic_security_control_mode(userdata);
+        cache_test_jwt(userdata, time::unix_timestamp_now() + 60);
+
+        let state = unsafe { plugin_state_mut(userdata) };
+        state.config.control_notify_topic_prefix = "system_notification".to_string();
+        replace_dynsec_file_with_directory(&dynsec_path);
+
+        let topic = CString::new("$CONTROL/dynamic-security/v1").unwrap();
+        let payload = br#"{"commands":[{"command":"disableClient","username":"test_user"}]}"#;
+        let mut evt = MosquittoEvtControl {
+            future: ptr::null_mut(),
+            client: std::ptr::dangling_mut::<c_void>(),
+            topic: topic.as_ptr().cast::<c_char>(),
+            payload: payload.as_ptr().cast::<c_void>(),
+            properties: ptr::null(),
+            reason_string: ptr::null_mut(),
+            payloadlen: u32::try_from(payload.len()).expect("payload length fits u32"),
+            qos: 1,
+            reason_code: 0,
+            retain: false,
+            future2: [ptr::null_mut(); 4],
+        };
+
+        let rc = control_callback(MOSQ_EVT_CONTROL, (&raw mut evt).cast::<c_void>(), userdata);
+        assert_eq!(rc, MOSQ_ERR_SUCCESS);
+
+        let publish = broker_publish_call_snapshot();
+        assert_eq!(publish.count, 1);
+        assert_eq!(publish.last_client_id.as_deref(), Some("test_client"));
+        let payload_text = publish.last_payload.unwrap_or_default();
+        assert!(payload_text.contains("\"event\":\"control_persist_warning\""));
+
+        let kick = kick_client_call_snapshot();
+        assert_eq!(kick.count, 1);
+        assert_eq!(kick.last_client_id.as_deref(), Some("test_client"));
+
+        let actions = control_action_log_snapshot();
+        assert_eq!(
+            actions,
+            vec![
+                TestControlAction::Publish {
+                    client_id: Some("test_client".to_string()),
+                },
+                TestControlAction::Kick {
+                    client_id: Some("test_client".to_string()),
+                },
+            ]
+        );
+
+        cleanup_dynsec_test_path(&dynsec_path);
         teardown_plugin(userdata);
     }
 

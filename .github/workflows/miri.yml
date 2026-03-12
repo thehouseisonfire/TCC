@@ -29,6 +29,8 @@ jobs:
       - name: Run Miri tests
         run: cargo --config build.rustflags=[] miri test -p mosquitto-auth-biscuit
         working-directory: mqtt-auth-biscuit
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
 
   # Disable Kani test from the CI due to resource constraints (Kani takes a lot of memory)
   # kani:

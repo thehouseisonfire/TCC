@@ -395,6 +395,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn seed_demo_rules_enables_rbac_checks() {
         let path = temp_sqlite_path("seed-demo");
         let policy = SqlitePolicy::open(&path).expect("sqlite should open");
@@ -447,6 +448,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn deny_overrides_allow_with_same_priority() {
         let path = temp_sqlite_path("deny-overrides-allow");
         let policy = SqlitePolicy::open(&path).expect("sqlite should open");
@@ -511,6 +513,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn higher_priority_allow_beats_lower_priority_deny() {
         let path = temp_sqlite_path("priority-allow-beats-deny");
         let policy = SqlitePolicy::open(&path).expect("sqlite should open");
@@ -575,6 +578,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn rbac_decision_does_not_fall_back_to_legacy_acl() {
         let path = temp_sqlite_path("no-fallback");
         let policy = SqlitePolicy::open(&path).expect("sqlite should open");
@@ -615,6 +619,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn legacy_acl_is_used_when_no_rbac_identity_exists() {
         let path = temp_sqlite_path("legacy-fallback");
         let policy = SqlitePolicy::open(&path).expect("sqlite should open");

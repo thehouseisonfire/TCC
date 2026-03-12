@@ -100,7 +100,8 @@ fn enable_dynamic_security_control_mode_with_client_id(
 ) -> String {
     let unique = TEST_DYNSEC_COUNTER.fetch_add(1, Ordering::Relaxed);
     let prefix = unique_test_prefix();
-    let dynsec_path = std::env::temp_dir().join(format!("dynsec-control-lib-{}-{}.json", prefix, unique));
+    let dynsec_path =
+        std::env::temp_dir().join(format!("dynsec-control-lib-{}-{}.json", prefix, unique));
     let client_id_line = if include_client_id {
         "\"clientid\": \"test_client\","
     } else {
@@ -158,7 +159,8 @@ fn enable_dynamic_security_control_mode(userdata: *mut c_void) -> String {
 fn enable_dynamic_security_control_notify_mode(userdata: *mut c_void) -> String {
     let unique = TEST_DYNSEC_COUNTER.fetch_add(1, Ordering::Relaxed);
     let prefix = unique_test_prefix();
-    let dynsec_path = std::env::temp_dir().join(format!("dynsec-control-notify-lib-{prefix}-{unique}.json"));
+    let dynsec_path =
+        std::env::temp_dir().join(format!("dynsec-control-notify-lib-{prefix}-{unique}.json"));
     let dynsec_cfg = r#"{
   "clients": [
     {

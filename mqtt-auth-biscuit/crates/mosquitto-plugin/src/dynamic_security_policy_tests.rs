@@ -191,7 +191,8 @@ fn write_invalid_json(path: &str) {
 fn write_test_dynsec_config_without_client_id() -> String {
     let unique = DYNSEC_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     let prefix = unique_test_prefix();
-    let path = std::env::temp_dir().join(format!("dynsec-control-no-clientid-{prefix}-{unique}.json"));
+    let path =
+        std::env::temp_dir().join(format!("dynsec-control-no-clientid-{prefix}-{unique}.json"));
     let config = r#"{
   "clients": [
     {
@@ -266,8 +267,9 @@ fn write_test_dynsec_notify_config() -> String {
 fn write_test_dynsec_client_side_group_notify_config() -> String {
     let unique = DYNSEC_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     let prefix = unique_test_prefix();
-    let path =
-        std::env::temp_dir().join(format!("dynsec-control-client-group-notify-{prefix}-{unique}.json"));
+    let path = std::env::temp_dir().join(format!(
+        "dynsec-control-client-group-notify-{prefix}-{unique}.json"
+    ));
     let config = r#"{
   "clients": [
     {
@@ -310,7 +312,9 @@ fn write_test_dynsec_client_side_group_notify_config() -> String {
 fn write_test_dynsec_overlap_notify_config() -> String {
     let unique = DYNSEC_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     let prefix = unique_test_prefix();
-    let path = std::env::temp_dir().join(format!("dynsec-control-overlap-notify-{prefix}-{unique}.json"));
+    let path = std::env::temp_dir().join(format!(
+        "dynsec-control-overlap-notify-{prefix}-{unique}.json"
+    ));
     let config = r#"{
   "clients": [
     {
@@ -411,7 +415,9 @@ fn write_test_dynsec_anonymous_config() -> String {
 fn write_test_dynsec_conflicting_membership_priority_config() -> String {
     let unique = DYNSEC_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     let prefix = unique_test_prefix();
-    let path = std::env::temp_dir().join(format!("dynsec-control-merge-priority-{prefix}-{unique}.json"));
+    let path = std::env::temp_dir().join(format!(
+        "dynsec-control-merge-priority-{prefix}-{unique}.json"
+    ));
     let config = r#"{
   "clients": [
     {

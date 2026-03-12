@@ -31,7 +31,7 @@ RUN strip --strip-unneeded /app/target/release/libmosquitto_auth_biscuit.so
 
 # Stage 2: build Mosquitto from source
 FROM alpine:3.23.3 AS mosq-builder
-ARG MOSQ_REF=3a76714e3dcc36ba0b254dbff2a2df81ffe2882b
+ARG MOSQ_REF=b3b4d77ef3faef6dfcdfac3fb00a9b5a42859aca
 RUN apk add --no-cache git build-base cmake openssl-dev cjson-dev libwebsockets-dev c-ares-dev
 RUN git clone https://github.com/eclipse-mosquitto/mosquitto.git /src
 WORKDIR /src

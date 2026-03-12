@@ -5,7 +5,7 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.mosquitto.custom
       args:
-        MOSQ_REF: ${MOSQ_REF:-3a76714e3dcc36ba0b254dbff2a2df81ffe2882b}
+        MOSQ_REF: ${MOSQ_REF:-b3b4d77ef3faef6dfcdfac3fb00a9b5a42859aca}
     ports:
       - "1883:1883"
     volumes:

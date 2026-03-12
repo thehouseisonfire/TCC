@@ -2,11 +2,13 @@ use std::ffi::{c_char, c_int, c_void};
 
 // Mosquitto Error Codes
 pub const MOSQ_ERR_SUCCESS: c_int = 0;
+#[allow(dead_code)]
 pub const MOSQ_ERR_NOMEM: c_int = 1;
 pub const MOSQ_ERR_INVAL: c_int = 3;
 pub const MOSQ_ERR_AUTH: c_int = 11;
 pub const MOSQ_ERR_ACL_DENIED: c_int = 12;
 pub const MOSQ_ERR_PLUGIN_DEFER: c_int = 17;
+#[allow(dead_code)]
 pub const MOSQ_ERR_AUTH_CONTINUE: c_int = -4;
 
 // Mosquitto ACL access constants
@@ -21,8 +23,10 @@ pub const MOSQ_ACL_SUBSCRIBE: c_int = 0x04;
 pub const MOSQ_ACL_CONTROL: c_int = 0x08;
 
 // MQTT v5 reason codes (subset needed for auth signaling)
+#[allow(dead_code)]
 pub const MQTT_RC_CONTINUE_AUTHENTICATION: u8 = 24;
 pub const MQTT_RC_REAUTHENTICATE: u8 = 25;
+#[allow(dead_code)]
 pub const MQTT_RC_NOT_AUTHORIZED: u8 = 135;
 
 // Mosquitto Event Types

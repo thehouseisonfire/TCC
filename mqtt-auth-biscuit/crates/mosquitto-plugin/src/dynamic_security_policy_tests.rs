@@ -9,9 +9,16 @@ use std::thread;
 
 static DYNSEC_TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+fn unique_test_prefix() -> String {
+    let pid = std::process::id();
+    let thread_id = format!("{:?}", std::thread::current().id());
+    format!("{pid}-{thread_id}")
+}
+
 fn write_test_dynsec_config() -> String {
     let unique = DYNSEC_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("dynsec-control-{unique}.json"));
+    let prefix = unique_test_prefix();
+    let path = std::env::temp_dir().join(format!("dynsec-control-{prefix}-{unique}.json"));
     let config = r#"{
   "clients": [
     {
@@ -183,7 +190,8 @@ fn write_invalid_json(path: &str) {
 
 fn write_test_dynsec_config_without_client_id() -> String {
     let unique = DYNSEC_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("dynsec-control-no-clientid-{unique}.json"));
+    let prefix = unique_test_prefix();
+    let path = std::env::temp_dir().join(format!("dynsec-control-no-clientid-{prefix}-{unique}.json"));
     let config = r#"{
   "clients": [
     {
@@ -219,7 +227,8 @@ fn write_test_dynsec_config_without_client_id() -> String {
 
 fn write_test_dynsec_notify_config() -> String {
     let unique = DYNSEC_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("dynsec-control-notify-{unique}.json"));
+    let prefix = unique_test_prefix();
+    let path = std::env::temp_dir().join(format!("dynsec-control-notify-{prefix}-{unique}.json"));
     let config = r#"{
   "clients": [
     {
@@ -256,8 +265,9 @@ fn write_test_dynsec_notify_config() -> String {
 
 fn write_test_dynsec_client_side_group_notify_config() -> String {
     let unique = DYNSEC_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let prefix = unique_test_prefix();
     let path =
-        std::env::temp_dir().join(format!("dynsec-control-client-group-notify-{unique}.json"));
+        std::env::temp_dir().join(format!("dynsec-control-client-group-notify-{prefix}-{unique}.json"));
     let config = r#"{
   "clients": [
     {
@@ -299,7 +309,8 @@ fn write_test_dynsec_client_side_group_notify_config() -> String {
 
 fn write_test_dynsec_overlap_notify_config() -> String {
     let unique = DYNSEC_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("dynsec-control-overlap-notify-{unique}.json"));
+    let prefix = unique_test_prefix();
+    let path = std::env::temp_dir().join(format!("dynsec-control-overlap-notify-{prefix}-{unique}.json"));
     let config = r#"{
   "clients": [
     {
@@ -361,7 +372,8 @@ fn write_test_dynsec_overlap_notify_config() -> String {
 
 fn write_test_dynsec_anonymous_config() -> String {
     let unique = DYNSEC_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("dynsec-control-anon-{unique}.json"));
+    let prefix = unique_test_prefix();
+    let path = std::env::temp_dir().join(format!("dynsec-control-anon-{prefix}-{unique}.json"));
     let config = r#"{
   "clients": [],
   "groups": [
@@ -398,7 +410,8 @@ fn write_test_dynsec_anonymous_config() -> String {
 
 fn write_test_dynsec_conflicting_membership_priority_config() -> String {
     let unique = DYNSEC_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("dynsec-control-merge-priority-{unique}.json"));
+    let prefix = unique_test_prefix();
+    let path = std::env::temp_dir().join(format!("dynsec-control-merge-priority-{prefix}-{unique}.json"));
     let config = r#"{
   "clients": [
     {
@@ -2528,6 +2541,7 @@ fn apply_control_payload_delete_group_clears_superseded_pending_add_group_client
 }
 
 #[cfg(unix)]
+#[cfg_attr(miri, ignore)]
 #[test]
 fn apply_control_payload_create_group_repair_stays_pending_after_write_failure() {
     let path = write_test_dynsec_client_side_group_notify_config();
@@ -2609,6 +2623,7 @@ fn apply_control_payload_create_group_repair_stays_pending_after_write_failure()
 }
 
 #[cfg(unix)]
+#[cfg_attr(miri, ignore)]
 #[test]
 fn apply_control_payload_create_role_repair_stays_pending_after_write_failure() {
     let path = write_test_dynsec_notify_config();

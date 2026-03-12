@@ -1,4 +1,3 @@
-use libc;
 use std::ffi::{c_char, c_int, c_void};
 #[cfg(test)]
 use std::{cell::RefCell, thread_local};

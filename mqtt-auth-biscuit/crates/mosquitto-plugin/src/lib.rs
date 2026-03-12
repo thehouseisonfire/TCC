@@ -93,8 +93,8 @@ use mosquitto_ffi::mosquitto_abi::{
 use mosquitto_ffi::mosquitto_abi::{MOSQ_ACL_READ, MOSQ_ACL_SUBSCRIBE, MOSQ_ACL_WRITE};
 #[cfg(any(test, kani))]
 use mosquitto_ffi::mosquitto_abi::{
-    MOSQ_ERR_ACL_DENIED, MOSQ_ERR_AUTH, MOSQ_ERR_AUTH_CONTINUE, MOSQ_ERR_PLUGIN_DEFER,
-    MosquittoEvtAclCheck, MosquittoEvtBasicAuth, MosquittoEvtBasicAuthFuture, MosquittoEvtControl,
+    MOSQ_ERR_ACL_DENIED, MOSQ_ERR_AUTH, MOSQ_ERR_PLUGIN_DEFER, MosquittoEvtAclCheck,
+    MosquittoEvtBasicAuth, MosquittoEvtBasicAuthFuture, MosquittoEvtControl,
     MosquittoEvtExtendedAuth, MosquittoEvtMessage,
 };
 use mosquitto_ffi::mosquitto_runtime::{

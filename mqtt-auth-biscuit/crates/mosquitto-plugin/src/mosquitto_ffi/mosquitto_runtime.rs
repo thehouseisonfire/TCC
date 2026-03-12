@@ -16,8 +16,11 @@ use super::mosquitto_test_api::{
     mosquitto_kick_client_by_clientid, mosquitto_malloc, mosquitto_set_username,
 };
 
+#[allow(dead_code)]
 pub const MOSQ_LOG_INFO: c_int = 1 << 0;
+#[allow(dead_code)]
 pub const MOSQ_LOG_ERR: c_int = 1 << 3;
+#[allow(dead_code)]
 pub const MOSQ_LOG_DEBUG: c_int = 1 << 4;
 
 #[cfg(not(any(test, miri, kani)))]

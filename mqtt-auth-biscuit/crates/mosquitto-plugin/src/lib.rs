@@ -134,6 +134,7 @@ pub extern "C" fn mosquitto_callback_register(
     MOSQ_ERR_SUCCESS
 }
 
+#[cfg(not(test))]
 static STATIC_ACL_BIAS_WARN_ONCE: Once = Once::new();
 static STATIC_ACL_ROLE_MISSING_WARN_ONCE: Once = Once::new();
 
@@ -187,6 +188,9 @@ fn log_static_acl_policy_bias(token_type: &TokenType, config: &PluginConfig) {
     };
 
     if let Some(message) = warn_message {
+        #[cfg(test)]
+        log_debug(&message);
+        #[cfg(not(test))]
         STATIC_ACL_BIAS_WARN_ONCE.call_once(|| log_debug(&message));
     }
 }

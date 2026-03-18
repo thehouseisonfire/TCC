@@ -10,14 +10,14 @@ def _tokens() -> dict[str, str]:
 
 def test_sqlite_rbac_churn_toggle_scenario_ids_are_present() -> None:
     scenarios = rs._sqlite_rbac_churn_toggle_scenarios(_tokens())
-    assert set(scenarios.keys()) == {"SQLITE-RBAC-CHURN-JWT", "SQLITE-RBAC-CHURN-BIS"}
+    assert set(scenarios.keys()) == {"SQLITE-RBAC-CHURN-JWT", "SQLITE-RBAC-CHURN-BISCUIT"}
 
 
 def test_sqlite_rbac_churn_toggle_uses_periodic_sqlite_toggle_churn() -> None:
     scenarios = rs._sqlite_rbac_churn_toggle_scenarios(_tokens())
     for scenario in scenarios.values():
         assert scenario["mosquitto_conf"] == "./mosquitto_sqlite_acl_read.conf"
-        assert scenario["mode"] == "fanout"
+        assert scenario["traffic_pattern"] == "fanout"
         assert scenario["fanout_topic"] == "fanout/broadcast"
         assert scenario["sqlite_seed_fanout"] is True
         assert scenario["sqlite_seed_profile"] == "fanout_basic"

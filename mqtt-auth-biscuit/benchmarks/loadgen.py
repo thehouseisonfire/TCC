@@ -264,7 +264,7 @@ class FanoutChurnConfig:
     interval_messages: int = 0
     max_events: int = 1
     settle_ms: int = 0
-    dynsec_source: str | None = None
+    dynamic_security_source: str | None = None
     sqlite_db: str | None = None
     sqlite_topic: str | None = None
     sqlite_subscribers: int | None = None
@@ -616,10 +616,10 @@ def _apply_fanout_churn(cfg: FanoutChurnConfig) -> str | None:
     if not cfg.enabled or cfg.kind is None:
         return None
     try:
-        if cfg.kind == "dynsec_swap":
-            if not cfg.dynsec_source:
-                return "fanout_churn_missing_dynsec_source"
-            policy_churn.apply_dynsec_snapshot(cfg.dynsec_source)
+        if cfg.kind == "dynamic_security_swap":
+            if not cfg.dynamic_security_source:
+                return "fanout_churn_missing_dynamic_security_source"
+            policy_churn.apply_dynsec_snapshot(cfg.dynamic_security_source)
         elif cfg.kind == "sqlite_revoke_read":
             if not cfg.sqlite_db:
                 return "fanout_churn_missing_sqlite_db"
@@ -1202,7 +1202,7 @@ def run_load(
     fanout_churn_interval_messages: int = 0,
     fanout_churn_max_events: int = 1,
     fanout_churn_settle_ms: int = 0,
-    fanout_churn_dynsec_source: str | None = None,
+    fanout_churn_dynamic_security_source: str | None = None,
     fanout_churn_sqlite_db: str | None = None,
     fanout_churn_sqlite_topic: str | None = None,
     fanout_churn_sqlite_subscribers: int | None = None,
@@ -1238,7 +1238,7 @@ def run_load(
         interval_messages=fanout_churn_interval_messages,
         max_events=fanout_churn_max_events,
         settle_ms=fanout_churn_settle_ms,
-        dynsec_source=fanout_churn_dynsec_source,
+        dynamic_security_source=fanout_churn_dynamic_security_source,
         sqlite_db=fanout_churn_sqlite_db,
         sqlite_topic=fanout_churn_sqlite_topic or fanout_topic,
         sqlite_subscribers=fanout_churn_sqlite_subscribers or clients,
@@ -1569,7 +1569,7 @@ def run_load(
                 "interval_messages": fanout_churn_cfg.interval_messages,
                 "max_events": fanout_churn_cfg.max_events,
                 "settle_ms": fanout_churn_cfg.settle_ms,
-                "dynsec_source": fanout_churn_cfg.dynsec_source,
+                "dynamic_security_source": fanout_churn_cfg.dynamic_security_source,
                 "sqlite_db": fanout_churn_cfg.sqlite_db,
                 "sqlite_topic": fanout_churn_cfg.sqlite_topic,
                 "sqlite_subscribers": fanout_churn_cfg.sqlite_subscribers,
@@ -1730,7 +1730,7 @@ def main(
         "--fanout-churn-kind",
         envvar="MQTT_FANOUT_CHURN_KIND",
         help=(
-            "Fan-out churn mode: dynsec_swap, sqlite_revoke_read, "
+            "Fan-out churn mode: dynamic_security_swap, sqlite_revoke_read, "
             "sqlite_toggle_read, or sqlite_toggle_private_deny."
         ),
     ),
@@ -1758,10 +1758,10 @@ def main(
         envvar="MQTT_FANOUT_CHURN_SETTLE_MS",
         help="Wait time after churn operation before continuing publisher loop.",
     ),
-    fanout_churn_dynsec_source: str | None = typer.Option(
+    fanout_churn_dynamic_security_source: str | None = typer.Option(
         None,
-        "--fanout-churn-dynsec-source",
-        envvar="MQTT_FANOUT_CHURN_DYNSEC_SOURCE",
+        "--fanout-churn-dynamic-security-source",
+        envvar="MQTT_FANOUT_CHURN_DYNAMIC_SECURITY_SOURCE",
         help="Dynamic Security snapshot to copy into docker/dynamic-security.json.",
     ),
     fanout_churn_sqlite_db: str | None = typer.Option(
@@ -1833,8 +1833,10 @@ def main(
         control_topic = "$CONTROL/dynamic-security/v1"
     if fanout_churn_kind and mode != "fanout":
         raise typer.BadParameter("fanout churn options require --mode fanout")
-    if fanout_churn_kind == "dynsec_swap" and not fanout_churn_dynsec_source:
-        raise typer.BadParameter("--fanout-churn-dynsec-source is required for dynsec_swap")
+    if fanout_churn_kind == "dynamic_security_swap" and not fanout_churn_dynamic_security_source:
+        raise typer.BadParameter(
+            "--fanout-churn-dynamic-security-source is required for dynamic_security_swap"
+        )
     if fanout_churn_kind in {
         "sqlite_revoke_read",
         "sqlite_toggle_read",
@@ -1912,7 +1914,7 @@ def main(
         fanout_churn_interval_messages=fanout_churn_interval_messages,
         fanout_churn_max_events=fanout_churn_max_events,
         fanout_churn_settle_ms=fanout_churn_settle_ms,
-        fanout_churn_dynsec_source=fanout_churn_dynsec_source,
+        fanout_churn_dynamic_security_source=fanout_churn_dynamic_security_source,
         fanout_churn_sqlite_db=fanout_churn_sqlite_db,
         fanout_churn_sqlite_topic=fanout_churn_sqlite_topic,
         fanout_churn_sqlite_subscribers=fanout_churn_sqlite_subscribers,

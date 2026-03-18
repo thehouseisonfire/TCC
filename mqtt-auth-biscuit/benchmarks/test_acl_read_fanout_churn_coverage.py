@@ -14,10 +14,10 @@ def _expected_ids() -> set[str]:
     subscribers = [10, 50, 100]
     out: set[str] = set()
     for count in subscribers:
-        out.add(f"DYNSEC-ACLREAD-FANOUT-CHURN-JWT-{count}")
-        out.add(f"DYNSEC-ACLREAD-FANOUT-CHURN-BIS-{count}")
-        out.add(f"SQLITE-ACLREAD-FANOUT-CHURN-JWT-{count}")
-        out.add(f"SQLITE-ACLREAD-FANOUT-CHURN-BIS-{count}")
+        out.add(f"DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-JWT-{count}")
+        out.add(f"DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-BISCUIT-{count}")
+        out.add(f"SQLITE-ACL-READ-FANOUT-CHURN-JWT-{count}")
+        out.add(f"SQLITE-ACL-READ-FANOUT-CHURN-BISCUIT-{count}")
     return out
 
 
@@ -30,21 +30,21 @@ def test_acl_read_fanout_churn_scenarios_use_fanout_and_subscriber_scaling() -> 
     scenarios = rs._acl_read_fanout_churn_scenarios(_tokens())
 
     for scenario_id, scenario in scenarios.items():
-        assert scenario["mode"] == "fanout"
+        assert scenario["traffic_pattern"] == "fanout"
         assert scenario["fanout_topic"] == "fanout/broadcast"
         assert scenario["fanout_churn_after_messages"] == 5
         assert scenario["fanout_churn_settle_ms"] == 1200
         assert scenario["subscriber_count"] in {10, 50, 100}
 
-        if scenario_id.startswith("DYNSEC-"):
+        if scenario_id.startswith("DYNAMIC-SECURITY-"):
             assert scenario["mosquitto_conf"] == "./mosquitto_dynsec_acl_read.conf"
             assert (
-                scenario["dynsec_config"]
+                scenario["dynamic_security_config"]
                 == "docker/dynamic-security-fanout-read-allow-unpinned.json"
             )
-            assert scenario["fanout_churn_kind"] == "dynsec_swap"
+            assert scenario["fanout_churn_kind"] == "dynamic_security_swap"
             assert (
-                scenario["fanout_churn_dynsec_source"]
+                scenario["fanout_churn_dynamic_security_source"]
                 == "docker/dynamic-security-fanout-read-deny-unpinned.json"
             )
         elif scenario_id.startswith("SQLITE-"):
@@ -63,19 +63,21 @@ def test_acl_read_fanout_churn_scenarios_use_fanout_and_subscriber_scaling() -> 
 def test_acl_read_fanout_churn_dynsec_scenarios_pass_fanout_alignment_validator() -> None:
     scenarios = rs._acl_read_fanout_churn_scenarios(_tokens())
     for scenario_id, scenario in scenarios.items():
-        if scenario_id.startswith("DYNSEC-"):
-            rs._validate_dynsec_fanout_alignment(scenario_id, scenario)
+        if scenario_id.startswith("DYNAMIC-SECURITY-"):
+            rs._validate_dynamic_security_fanout_alignment(scenario_id, scenario)
 
 
 def test_dynsec_fanout_alignment_rejects_pinned_single_identity() -> None:
     scenario: rs.ScenarioConfig = {
-        "id": "TEST-DYNSEC-PINNED",
-        "mode": "fanout",
+        "id": "TEST-DYNAMIC-SECURITY-PINNED",
+        "traffic_pattern": "fanout",
         "subscriber_count": 10,
         "username": "dynsec_client_1",
-        "dynsec_config": "docker/dynamic-security.json",
-        "fanout_churn_kind": "dynsec_swap",
-        "fanout_churn_dynsec_source": "docker/dynamic-security-fanout-read-deny.json",
+        "dynamic_security_config": "docker/dynamic-security.json",
+        "fanout_churn_kind": "dynamic_security_swap",
+        "fanout_churn_dynamic_security_source": (
+            "docker/dynamic-security-fanout-read-deny-unpinned.json"
+        ),
     }
     with pytest.raises(ValueError, match="pins username"):
-        rs._validate_dynsec_fanout_alignment(scenario["id"], scenario)
+        rs._validate_dynamic_security_fanout_alignment(scenario["id"], scenario)

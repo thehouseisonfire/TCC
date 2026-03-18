@@ -60,7 +60,7 @@ class AuthzConfig(TypedDict, total=False):
     delay_ms: int
     fail_mode: str
     fail_rate: float
-    policy_profile: str
+    authz_profile: str
     rules: list[dict[str, Any]]
     client_roles: dict[str, list[str]]
 
@@ -71,7 +71,7 @@ AUTHZ_BASELINE_STATE: dict[str, object] = {
     "fail_rate": 0.0,
     "allow_mode": "topic_prefix",
     "topic_prefix": "sensors/",
-    "policy_profile": "legacy_prefix",
+    "authz_profile": "legacy_prefix",
     "rules_count": 0,
     "client_roles_count": 0,
 }
@@ -82,7 +82,7 @@ AUTHZ_STATE_KEYS: tuple[str, ...] = (
     "fail_rate",
     "allow_mode",
     "topic_prefix",
-    "policy_profile",
+    "authz_profile",
     "rules_count",
     "client_roles_count",
 )
@@ -145,14 +145,14 @@ class ScenarioConfig(TypedDict, total=False):
     username: str
     password: str
     topic: str
-    authz: AuthzConfig | None
+    authz_config: AuthzConfig | None
     netem: NetemConfig | None
     message_size: int
     qos: int
     qos_distribution: str
     fanout_publisher_username: str
     fanout_publisher_password: str
-    mode: str
+    traffic_pattern: str
     fanout_topic: str
     biscuit_attenuate: BiscuitAttenuateConfig
     biscuit_public_key_hex: str | None
@@ -162,24 +162,24 @@ class ScenarioConfig(TypedDict, total=False):
     biscuit_delegate_public_key_hex: str | None
     biscuit_delegate_public_key_file: str | None
     biscuit_delegate_bin: str | None
-    policy_complexity_kind: (
-        Literal["block_chain", "datalog", "http_policy", "authorizer_template"] | None
+    complexity_axis: (
+        Literal["chain_length", "datalog", "http_profile", "authorizer_template"] | None
     )
-    policy_complexity_tier: Literal["simple", "med", "complex"] | None
+    complexity_level: Literal["simple", "med", "complex"] | None
     mqtt5_auth: Mqtt5AuthConfig | None
     restart_mosquitto: bool
     sync_connect: bool
     repeat: int
     sleep_between: int
     token_refresh: TokenRefreshConfig
-    dynsec_config: str
-    dynsec_churn: list[str]
+    dynamic_security_config: str
+    dynamic_security_churn: list[str]
     fanout_churn_kind: str
     fanout_churn_after_messages: int
     fanout_churn_interval_messages: int
     fanout_churn_max_events: int
     fanout_churn_settle_ms: int
-    fanout_churn_dynsec_source: str
+    fanout_churn_dynamic_security_source: str
     fanout_churn_sqlite_db: str
     fanout_churn_sqlite_topic: str
     fanout_churn_sqlite_subscribers: int
@@ -202,9 +202,9 @@ class ScenarioConfig(TypedDict, total=False):
     subscriber_count: int
     # Issue 37: ACL_READ fan-out source/profile metadata
     policy_source: str
-    policy_profile: str
-    acl_read_full_authz: bool
-    acl_read_mode: str
+    authz_profile: str
+    authorizer_profile: str
+    acl_read_enforcement: Literal["expiry_only", "strict"]
 
 
 def _compose_bin():
@@ -307,7 +307,7 @@ def _authz_config(
     delay_ms: int | None = None,
     fail_mode: str | None = None,
     fail_rate: float | None = None,
-    policy_profile: str | None = None,
+    authz_profile: str | None = None,
     rules: list[dict[str, Any]] | None = None,
     client_roles: dict[str, list[str]] | None = None,
     ca_file: str | None = None,
@@ -320,8 +320,8 @@ def _authz_config(
         body["fail_mode"] = fail_mode
     if fail_rate is not None:
         body["fail_rate"] = fail_rate
-    if policy_profile is not None:
-        body["policy_profile"] = policy_profile
+    if authz_profile is not None:
+        body["authz_profile"] = authz_profile
     if rules is not None:
         body["rules"] = rules
     if client_roles is not None:
@@ -391,9 +391,9 @@ def _expected_authz_state(
         expected["fail_mode"] = cfg["fail_mode"]
     if "fail_rate" in cfg:
         expected["fail_rate"] = float(cfg["fail_rate"])
-    if "policy_profile" in cfg:
-        expected["policy_profile"] = cfg["policy_profile"]
-    profile = cast(str, expected["policy_profile"])
+    if "authz_profile" in cfg:
+        expected["authz_profile"] = cfg["authz_profile"]
+    profile = cast(str, expected["authz_profile"])
     expected["rules_count"] = AUTHZ_PROFILE_RULE_COUNT.get(profile, 0) + len(cfg.get("rules", []))
     expected["client_roles_count"] = len(cfg.get("client_roles", {}))
     return expected
@@ -605,7 +605,7 @@ def _run_loadgen(
     fanout_churn_interval_messages: int = 0,
     fanout_churn_max_events: int = 1,
     fanout_churn_settle_ms: int = 0,
-    fanout_churn_dynsec_source: str | None = None,
+    fanout_churn_dynamic_security_source: str | None = None,
     fanout_churn_sqlite_db: str | None = None,
     fanout_churn_sqlite_topic: str | None = None,
     fanout_churn_sqlite_subscribers: int | None = None,
@@ -740,8 +740,13 @@ def _run_loadgen(
         cmd.extend(["--fanout-churn-max-events", str(fanout_churn_max_events)])
     if fanout_churn_settle_ms > 0:
         cmd.extend(["--fanout-churn-settle-ms", str(fanout_churn_settle_ms)])
-    if fanout_churn_dynsec_source:
-        cmd.extend(["--fanout-churn-dynsec-source", fanout_churn_dynsec_source])
+    if fanout_churn_dynamic_security_source:
+        cmd.extend(
+            [
+                "--fanout-churn-dynamic-security-source",
+                fanout_churn_dynamic_security_source,
+            ]
+        )
     if fanout_churn_sqlite_db:
         cmd.extend(["--fanout-churn-sqlite-db", fanout_churn_sqlite_db])
     if fanout_churn_sqlite_topic:
@@ -753,11 +758,11 @@ def _run_loadgen(
     return json.loads(out)
 
 
-def _apply_dynsec_config(source_path: str):
+def _apply_dynamic_security_config(source_path: str):
     policy_churn.apply_dynsec_snapshot(source_path)
 
 
-def _capture_dynsec_baseline() -> bytes | None:
+def _capture_dynamic_security_baseline() -> bytes | None:
     path = _resolve_repo_path("docker/dynamic-security.json")
     try:
         with path.open("rb") as f:
@@ -766,7 +771,7 @@ def _capture_dynsec_baseline() -> bytes | None:
         return None
 
 
-def _restore_dynsec_baseline(snapshot: bytes | None) -> None:
+def _restore_dynamic_security_baseline(snapshot: bytes | None) -> None:
     if snapshot is None:
         return
     path = _resolve_repo_path("docker/dynamic-security.json")
@@ -781,32 +786,34 @@ def _resolve_repo_path(path: str | Path) -> Path:
     return REPO_ROOT / resolved_path
 
 
-def _load_dynsec_snapshot(path: str) -> dict[str, Any]:
+def _load_dynamic_security_snapshot(path: str) -> dict[str, Any]:
     resolved = _resolve_repo_path(path)
     try:
         with resolved.open(encoding="utf-8") as f:
             payload = json.load(f)
     except FileNotFoundError as exc:
-        raise ValueError(f"dynsec snapshot file not found: {path}") from exc
+        raise ValueError(f"dynamic security snapshot file not found: {path}") from exc
     except json.JSONDecodeError as exc:
-        raise ValueError(f"dynsec snapshot parse failed: {path}: {exc}") from exc
+        raise ValueError(f"dynamic security snapshot parse failed: {path}: {exc}") from exc
 
     if not isinstance(payload, dict):
-        raise ValueError(f"dynsec snapshot must be a JSON object: {path}")
+        raise ValueError(f"dynamic security snapshot must be a JSON object: {path}")
     return payload
 
 
-def _validate_dynsec_snapshot_supports_fanout_subscribers(
+def _validate_dynamic_security_snapshot_supports_fanout_subscribers(
     *,
     scenario_id: str,
     snapshot_path: str,
     subscriber_username: str,
     subscriber_count: int,
 ) -> None:
-    snapshot = _load_dynsec_snapshot(snapshot_path)
+    snapshot = _load_dynamic_security_snapshot(snapshot_path)
     clients = snapshot.get("clients")
     if not isinstance(clients, list):
-        raise ValueError(f"{scenario_id}: dynsec snapshot missing clients list: {snapshot_path}")
+        raise ValueError(
+            f"{scenario_id}: dynamic security snapshot missing clients list: {snapshot_path}"
+        )
 
     matching_client: dict[str, Any] | None = None
     for client in clients:
@@ -816,48 +823,48 @@ def _validate_dynsec_snapshot_supports_fanout_subscribers(
 
     if matching_client is None:
         raise ValueError(
-            f"{scenario_id}: dynsec snapshot '{snapshot_path}' has no client for username "
-            f"'{subscriber_username}'"
+            f"{scenario_id}: dynamic security snapshot '{snapshot_path}' has no client for "
+            f"username '{subscriber_username}'"
         )
 
     pinned_client_id = matching_client.get("clientid")
     if isinstance(pinned_client_id, str) and pinned_client_id:
         raise ValueError(
-            f"{scenario_id}: dynsec snapshot '{snapshot_path}' pins username "
+            f"{scenario_id}: dynamic security snapshot '{snapshot_path}' pins username "
             f"'{subscriber_username}' to clientid '{pinned_client_id}' but scenario "
             f"declares subscriber_count={subscriber_count}. Remove clientid pinning or "
             "expand identities to match subscriber_count."
         )
 
 
-def _validate_dynsec_fanout_alignment(scenario_id: str, scenario: ScenarioConfig) -> None:
-    if scenario.get("mode") != "fanout":
+def _validate_dynamic_security_fanout_alignment(scenario_id: str, scenario: ScenarioConfig) -> None:
+    if scenario.get("traffic_pattern") != "fanout":
         return
 
     subscriber_count = int(scenario.get("subscriber_count", 0) or 0)
     if subscriber_count <= 1:
         return
 
-    dynsec_config = scenario.get("dynsec_config")
+    dynamic_security_config = scenario.get("dynamic_security_config")
     subscriber_username = scenario.get("username")
-    if not dynsec_config or not subscriber_username:
+    if not dynamic_security_config or not subscriber_username:
         return
 
-    _validate_dynsec_snapshot_supports_fanout_subscribers(
+    _validate_dynamic_security_snapshot_supports_fanout_subscribers(
         scenario_id=scenario_id,
-        snapshot_path=dynsec_config,
+        snapshot_path=dynamic_security_config,
         subscriber_username=subscriber_username,
         subscriber_count=subscriber_count,
     )
 
-    if scenario.get("fanout_churn_kind") == "dynsec_swap":
-        churn_snapshot = scenario.get("fanout_churn_dynsec_source")
+    if scenario.get("fanout_churn_kind") == "dynamic_security_swap":
+        churn_snapshot = scenario.get("fanout_churn_dynamic_security_source")
         if not churn_snapshot:
             raise ValueError(
-                f"{scenario_id}: fanout_churn_kind=dynsec_swap requires "
-                "fanout_churn_dynsec_source"
+                f"{scenario_id}: fanout_churn_kind=dynamic_security_swap requires "
+                "fanout_churn_dynamic_security_source"
             )
-        _validate_dynsec_snapshot_supports_fanout_subscribers(
+        _validate_dynamic_security_snapshot_supports_fanout_subscribers(
             scenario_id=scenario_id,
             snapshot_path=churn_snapshot,
             subscriber_username=subscriber_username,
@@ -977,11 +984,11 @@ class ScenarioModel(BaseModel):
     topic: str | None = None
 
 
-def _http_policy_authz_config(tier: Literal["simple", "med", "complex"]) -> AuthzConfig:
+def _http_profile_authz_config(tier: Literal["simple", "med", "complex"]) -> AuthzConfig:
     return {
         "delay_ms": 0,
         "fail_mode": "none",
-        "policy_profile": tier,
+        "authz_profile": tier,
         # Deterministic local role source for role-aware rule paths.
         "client_roles": {
             "client_1": ["admin", "writer"],
@@ -1033,7 +1040,7 @@ def _http_hybrid_fanout_authz_config_profile_matrix(
     return {
         "delay_ms": 0,
         "fail_mode": "none",
-        "policy_profile": tier,
+        "authz_profile": tier,
         "rules": rules,
         # Deterministic local role source for role-aware paths in med/complex profiles.
         "client_roles": {
@@ -1045,47 +1052,56 @@ def _http_hybrid_fanout_authz_config_profile_matrix(
     }
 
 
+AUTHORIZER_TEMPLATE_SCENARIO_IDS = frozenset(
+    {
+        "TOKEN-AUTHORIZER-PROFILE-SIMPLE-BISCUIT",
+        "TOKEN-AUTHORIZER-PROFILE-RBAC-BISCUIT",
+        "TOKEN-AUTHORIZER-PROFILE-CONTEXTUAL-BISCUIT",
+    }
+)
+
+
 def _biscuit_authorizer_template_scenarios(tokens: dict[str, Any]) -> dict[str, ScenarioConfig]:
     template_token = tokens.get("biscuit_authorizer_template")
     if template_token is None:
         return {}
 
     return {
-        "POLICY-AUTHZ-TEMPLATE-SIMPLE": {
+        "TOKEN-AUTHORIZER-PROFILE-SIMPLE-BISCUIT": {
             "mosquitto_conf": "./mosquitto_biscuit_authz_simple.conf",
             "username": "biscuit",
             "password": template_token,
             "topic": "sensors/{client_id}/temp",
-            "authz": None,
+            "authz_config": None,
             "netem": {"clear": True},
             "message_size": 0,
-            "policy_complexity_kind": "authorizer_template",
-            "policy_complexity_tier": "simple",
-            "policy_profile": "simple",
+            "complexity_axis": "authorizer_template",
+            "complexity_level": "simple",
+            "authorizer_profile": "simple",
         },
-        "POLICY-AUTHZ-TEMPLATE-RBAC": {
+        "TOKEN-AUTHORIZER-PROFILE-RBAC-BISCUIT": {
             "mosquitto_conf": "./mosquitto_biscuit_authz_rbac.conf",
             "username": "biscuit",
             "password": template_token,
             "topic": "sensors/{client_id}/temp",
-            "authz": None,
+            "authz_config": None,
             "netem": {"clear": True},
             "message_size": 0,
-            "policy_complexity_kind": "authorizer_template",
-            "policy_complexity_tier": "med",
-            "policy_profile": "rbac",
+            "complexity_axis": "authorizer_template",
+            "complexity_level": "med",
+            "authorizer_profile": "rbac",
         },
-        "POLICY-AUTHZ-TEMPLATE-CONTEXTUAL": {
+        "TOKEN-AUTHORIZER-PROFILE-CONTEXTUAL-BISCUIT": {
             "mosquitto_conf": "./mosquitto_biscuit_authz_contextual.conf",
             "username": "biscuit",
             "password": template_token,
             "topic": "sensors/{client_id}/temp",
-            "authz": None,
+            "authz_config": None,
             "netem": {"clear": True},
             "message_size": 0,
-            "policy_complexity_kind": "authorizer_template",
-            "policy_complexity_tier": "complex",
-            "policy_profile": "contextual",
+            "complexity_axis": "authorizer_template",
+            "complexity_level": "complex",
+            "authorizer_profile": "contextual",
         },
     }
 
@@ -1093,47 +1109,47 @@ def _biscuit_authorizer_template_scenarios(tokens: dict[str, Any]) -> dict[str, 
 def _static_acl_scenarios(tokens: dict[str, Any]) -> dict[str, ScenarioConfig]:
     """Static ACL scenarios with role-only tokens to isolate ACL-file enforcement."""
     return {
-        "STATIC-ACL-JWT": {
+        "STATIC-ACL-PUBLISH-JWT": {
             "mosquitto_conf": "./mosquitto_static.conf",
             "username": "jwt",
             "password": tokens["jwt_static_writer"],
             "topic": "sensors/{client_id}/temp",
-            "authz": None,
+            "authz_config": None,
             "netem": {"clear": True},
             "message_size": 0,
         },
-        "STATIC-ACL-BIS": {
+        "STATIC-ACL-PUBLISH-BISCUIT": {
             "mosquitto_conf": "./mosquitto_static.conf",
             "username": "biscuit",
             "password": tokens["biscuit_static_writer"],
             "topic": "sensors/{client_id}/temp",
-            "authz": None,
+            "authz_config": None,
             "netem": {"clear": True},
             "message_size": 0,
         },
-        "STATIC-ACL-FANOUT": {
+        "STATIC-ACL-FANOUT-JWT": {
             "mosquitto_conf": "./mosquitto_static.conf",
             "username": "jwt",
             "password": tokens["jwt_static_reader"],
             "fanout_publisher_username": "jwt",
             "fanout_publisher_password": tokens["jwt_static_writer"],
             "topic": "fanout/broadcast",
-            "mode": "fanout",
+            "traffic_pattern": "fanout",
             "fanout_topic": "fanout/broadcast",
-            "authz": None,
+            "authz_config": None,
             "netem": {"clear": True},
             "message_size": 0,
         },
-        "STATIC-ACL-FANOUT-BIS": {
+        "STATIC-ACL-FANOUT-BISCUIT": {
             "mosquitto_conf": "./mosquitto_static.conf",
             "username": "biscuit",
             "password": tokens["biscuit_static_reader"],
             "fanout_publisher_username": "biscuit",
             "fanout_publisher_password": tokens["biscuit_static_writer"],
             "topic": "fanout/broadcast",
-            "mode": "fanout",
+            "traffic_pattern": "fanout",
             "fanout_topic": "fanout/broadcast",
-            "authz": None,
+            "authz_config": None,
             "netem": {"clear": True},
             "message_size": 0,
         },
@@ -1146,58 +1162,62 @@ def _acl_read_fanout_churn_scenarios(tokens: dict[str, Any]) -> dict[str, Scenar
     base_topic = "fanout/broadcast"
 
     for subscribers in subscriber_slices:
-        scenarios[f"DYNSEC-ACLREAD-FANOUT-CHURN-JWT-{subscribers}"] = {
+        scenarios[f"DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-JWT-{subscribers}"] = {
             "mosquitto_conf": "./mosquitto_dynsec_acl_read.conf",
             "username": "dynsec_client_1",
             "password": tokens["jwt"],
             "fanout_publisher_username": "dynsec_publisher",
             "fanout_publisher_password": tokens["jwt"],
             "topic": base_topic,
-            "mode": "fanout",
+            "traffic_pattern": "fanout",
             "subscriber_count": subscribers,
             "fanout_topic": base_topic,
-            "authz": None,
+            "authz_config": None,
             "netem": {"clear": True},
             "message_size": 256,
             "qos": 1,
-            "dynsec_config": "docker/dynamic-security-fanout-read-allow-unpinned.json",
-            "fanout_churn_kind": "dynsec_swap",
+            "dynamic_security_config": "docker/dynamic-security-fanout-read-allow-unpinned.json",
+            "fanout_churn_kind": "dynamic_security_swap",
             "fanout_churn_after_messages": 5,
             "fanout_churn_settle_ms": 1200,
-            "fanout_churn_dynsec_source": "docker/dynamic-security-fanout-read-deny-unpinned.json",
+            "fanout_churn_dynamic_security_source": (
+                "docker/dynamic-security-fanout-read-deny-unpinned.json"
+            ),
         }
-        scenarios[f"DYNSEC-ACLREAD-FANOUT-CHURN-BIS-{subscribers}"] = {
+        scenarios[f"DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-BISCUIT-{subscribers}"] = {
             "mosquitto_conf": "./mosquitto_dynsec_acl_read.conf",
             "username": "dynsec_client_1",
             "password": tokens["biscuit"],
             "fanout_publisher_username": "dynsec_publisher",
             "fanout_publisher_password": tokens["biscuit"],
             "topic": base_topic,
-            "mode": "fanout",
+            "traffic_pattern": "fanout",
             "subscriber_count": subscribers,
             "fanout_topic": base_topic,
-            "authz": None,
+            "authz_config": None,
             "netem": {"clear": True},
             "message_size": 256,
             "qos": 1,
-            "dynsec_config": "docker/dynamic-security-fanout-read-allow-unpinned.json",
-            "fanout_churn_kind": "dynsec_swap",
+            "dynamic_security_config": "docker/dynamic-security-fanout-read-allow-unpinned.json",
+            "fanout_churn_kind": "dynamic_security_swap",
             "fanout_churn_after_messages": 5,
             "fanout_churn_settle_ms": 1200,
-            "fanout_churn_dynsec_source": "docker/dynamic-security-fanout-read-deny-unpinned.json",
+            "fanout_churn_dynamic_security_source": (
+                "docker/dynamic-security-fanout-read-deny-unpinned.json"
+            ),
         }
 
-        scenarios[f"SQLITE-ACLREAD-FANOUT-CHURN-JWT-{subscribers}"] = {
+        scenarios[f"SQLITE-ACL-READ-FANOUT-CHURN-JWT-{subscribers}"] = {
             "mosquitto_conf": "./mosquitto_sqlite_acl_read.conf",
             "username": "jwt",
             "password": tokens["jwt"],
             "fanout_publisher_username": "jwt",
             "fanout_publisher_password": tokens["jwt"],
             "topic": base_topic,
-            "mode": "fanout",
+            "traffic_pattern": "fanout",
             "subscriber_count": subscribers,
             "fanout_topic": base_topic,
-            "authz": None,
+            "authz_config": None,
             "netem": {"clear": True},
             "message_size": 256,
             "qos": 1,
@@ -1212,17 +1232,17 @@ def _acl_read_fanout_churn_scenarios(tokens: dict[str, Any]) -> dict[str, Scenar
             "fanout_churn_sqlite_topic": base_topic,
             "fanout_churn_sqlite_subscribers": subscribers,
         }
-        scenarios[f"SQLITE-ACLREAD-FANOUT-CHURN-BIS-{subscribers}"] = {
+        scenarios[f"SQLITE-ACL-READ-FANOUT-CHURN-BISCUIT-{subscribers}"] = {
             "mosquitto_conf": "./mosquitto_sqlite_acl_read.conf",
             "username": "biscuit",
             "password": tokens["biscuit"],
             "fanout_publisher_username": "biscuit",
             "fanout_publisher_password": tokens["biscuit"],
             "topic": base_topic,
-            "mode": "fanout",
+            "traffic_pattern": "fanout",
             "subscriber_count": subscribers,
             "fanout_topic": base_topic,
-            "authz": None,
+            "authz_config": None,
             "netem": {"clear": True},
             "message_size": 256,
             "qos": 1,
@@ -1246,7 +1266,7 @@ def _acl_read_profile_matrix_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
     subscriber_slices = [10, 50, 100]
     base_topic = "fanout/broadcast"
 
-    for token_label, token_key in (("JWT", "jwt"), ("BIS", "biscuit")):
+    for token_label, token_key in (("JWT", "jwt"), ("BISCUIT", "biscuit")):
         allow_token = tokens.get(f"{token_key}_fanout_allow", tokens[token_key])
         deny_token = tokens.get(
             f"{token_key}_fanout_read_deny",
@@ -1255,44 +1275,40 @@ def _acl_read_profile_matrix_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
         username = "jwt" if token_key == "jwt" else "biscuit"
 
         for subscribers in subscriber_slices:
-            scenarios[f"TOKEN-ACLREAD-FANOUT-ALLOW-{token_label}-{subscribers}"] = {
+            scenarios[f"TOKEN-ACL-READ-FANOUT-STRICT-ALLOW-{token_label}-{subscribers}"] = {
                 "mosquitto_conf": "./mosquitto_integration_acl_read_full.conf",
                 "username": username,
                 "password": allow_token,
                 "fanout_publisher_username": username,
                 "fanout_publisher_password": allow_token,
                 "topic": base_topic,
-                "mode": "fanout",
+                "traffic_pattern": "fanout",
                 "subscriber_count": subscribers,
                 "fanout_topic": base_topic,
-                "authz": None,
+                "authz_config": None,
                 "netem": {"clear": True},
                 "message_size": 256,
                 "qos": 1,
                 "policy_source": "token",
-                "policy_profile": "default",
-                "acl_read_full_authz": True,
-                "acl_read_mode": "strict",
+                "acl_read_enforcement": "strict",
             }
 
-        scenarios[f"TOKEN-ACLREAD-FANOUT-DENY-{token_label}-10"] = {
+        scenarios[f"TOKEN-ACL-READ-FANOUT-STRICT-DENY-{token_label}-10"] = {
             "mosquitto_conf": "./mosquitto_integration_acl_read_full.conf",
             "username": username,
             "password": deny_token,
             "fanout_publisher_username": username,
             "fanout_publisher_password": allow_token,
             "topic": base_topic,
-            "mode": "fanout",
+            "traffic_pattern": "fanout",
             "subscriber_count": 10,
             "fanout_topic": base_topic,
-            "authz": None,
+            "authz_config": None,
             "netem": {"clear": True},
             "message_size": 256,
             "qos": 1,
             "policy_source": "token",
-            "policy_profile": "default",
-            "acl_read_full_authz": True,
-            "acl_read_mode": "strict",
+            "acl_read_enforcement": "strict",
         }
 
     for source_label, source_key, mosquitto_conf in (
@@ -1300,7 +1316,7 @@ def _acl_read_profile_matrix_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
         ("HYBRID", "hybrid", "./mosquitto_hybrid_acl_read.conf"),
     ):
         for tier in ("simple", "med", "complex"):
-            for token_label, token_key in (("JWT", "jwt"), ("BIS", "biscuit")):
+            for token_label, token_key in (("JWT", "jwt"), ("BISCUIT", "biscuit")):
                 username = "jwt" if token_key == "jwt" else "biscuit"
                 allow_token = tokens.get(f"{token_key}_fanout_allow", tokens[token_key])
                 deny_token = tokens.get(
@@ -1309,7 +1325,7 @@ def _acl_read_profile_matrix_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
                 )
 
                 scenarios[
-                    f"{source_label}-ACLREAD-FANOUT-{tier.upper()}-ALLOW-{token_label}-10"
+                    f"{source_label}-ACL-READ-FANOUT-STRICT-{tier.upper()}-ALLOW-{token_label}-10"
                 ] = {
                     "mosquitto_conf": mosquitto_conf,
                     "username": username,
@@ -1317,10 +1333,10 @@ def _acl_read_profile_matrix_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
                     "fanout_publisher_username": username,
                     "fanout_publisher_password": allow_token,
                     "topic": base_topic,
-                    "mode": "fanout",
+                    "traffic_pattern": "fanout",
                     "subscriber_count": 10,
                     "fanout_topic": base_topic,
-                    "authz": _http_hybrid_fanout_authz_config_profile_matrix(
+                    "authz_config": _http_hybrid_fanout_authz_config_profile_matrix(
                         cast(Literal["simple", "med", "complex"], tier),
                         topic=base_topic,
                         deny_read=False,
@@ -1329,21 +1345,22 @@ def _acl_read_profile_matrix_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
                     "message_size": 256,
                     "qos": 1,
                     "policy_source": source_key,
-                    "policy_profile": tier,
-                    "acl_read_full_authz": True,
-                    "acl_read_mode": "strict",
+                    "authz_profile": tier,
+                    "acl_read_enforcement": "strict",
                 }
-                scenarios[f"{source_label}-ACLREAD-FANOUT-{tier.upper()}-DENY-{token_label}-10"] = {
+                scenarios[
+                    f"{source_label}-ACL-READ-FANOUT-STRICT-{tier.upper()}-DENY-{token_label}-10"
+                ] = {
                     "mosquitto_conf": mosquitto_conf,
                     "username": username,
                     "password": deny_token,
                     "fanout_publisher_username": username,
                     "fanout_publisher_password": allow_token,
                     "topic": base_topic,
-                    "mode": "fanout",
+                    "traffic_pattern": "fanout",
                     "subscriber_count": 10,
                     "fanout_topic": base_topic,
-                    "authz": _http_hybrid_fanout_authz_config_profile_matrix(
+                    "authz_config": _http_hybrid_fanout_authz_config_profile_matrix(
                         cast(Literal["simple", "med", "complex"], tier),
                         topic=base_topic,
                         deny_read=True,
@@ -1352,9 +1369,8 @@ def _acl_read_profile_matrix_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
                     "message_size": 256,
                     "qos": 1,
                     "policy_source": source_key,
-                    "policy_profile": tier,
-                    "acl_read_full_authz": True,
-                    "acl_read_mode": "strict",
+                    "authz_profile": tier,
+                    "acl_read_enforcement": "strict",
                 }
 
                 if tier != "med":
@@ -1362,7 +1378,7 @@ def _acl_read_profile_matrix_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
 
                 for subscribers in (50, 100):
                     scenarios[
-                        f"{source_label}-ACLREAD-FANOUT-{tier.upper()}-ALLOW-{token_label}-{subscribers}"
+                        f"{source_label}-ACL-READ-FANOUT-STRICT-{tier.upper()}-ALLOW-{token_label}-{subscribers}"
                     ] = {
                         "mosquitto_conf": mosquitto_conf,
                         "username": username,
@@ -1370,10 +1386,10 @@ def _acl_read_profile_matrix_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
                         "fanout_publisher_username": username,
                         "fanout_publisher_password": allow_token,
                         "topic": base_topic,
-                        "mode": "fanout",
+                        "traffic_pattern": "fanout",
                         "subscriber_count": subscribers,
                         "fanout_topic": base_topic,
-                        "authz": _http_hybrid_fanout_authz_config_profile_matrix(
+                        "authz_config": _http_hybrid_fanout_authz_config_profile_matrix(
                             cast(Literal["simple", "med", "complex"], tier),
                             topic=base_topic,
                             deny_read=False,
@@ -1382,9 +1398,8 @@ def _acl_read_profile_matrix_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
                         "message_size": 256,
                         "qos": 1,
                         "policy_source": source_key,
-                        "policy_profile": tier,
-                        "acl_read_full_authz": True,
-                        "acl_read_mode": "strict",
+                        "authz_profile": tier,
+                        "acl_read_enforcement": "strict",
                     }
 
     return scenarios
@@ -1409,9 +1424,11 @@ def _infer_policy_source(scenario: ScenarioConfig) -> str | None:
     return None
 
 
-def _infer_acl_read_full_authz(scenario: ScenarioConfig) -> bool:
-    if "acl_read_full_authz" in scenario:
-        return bool(scenario["acl_read_full_authz"])
+def _infer_acl_read_enforcement(
+    scenario: ScenarioConfig,
+) -> Literal["expiry_only", "strict"]:
+    if "acl_read_enforcement" in scenario:
+        return cast(Literal["expiry_only", "strict"], scenario["acl_read_enforcement"])
     conf = str(scenario.get("mosquitto_conf", ""))
     strict_conf_suffixes = (
         "mosquitto_integration_acl_read_full.conf",
@@ -1420,7 +1437,7 @@ def _infer_acl_read_full_authz(scenario: ScenarioConfig) -> bool:
         "mosquitto_http_acl_read.conf",
         "mosquitto_hybrid_acl_read.conf",
     )
-    return conf.endswith(strict_conf_suffixes)
+    return "strict" if conf.endswith(strict_conf_suffixes) else "expiry_only"
 
 
 def _sqlite_rbac_churn_toggle_scenarios(tokens: dict[str, Any]) -> dict[str, ScenarioConfig]:
@@ -1433,10 +1450,10 @@ def _sqlite_rbac_churn_toggle_scenarios(tokens: dict[str, Any]) -> dict[str, Sce
             "fanout_publisher_username": "jwt",
             "fanout_publisher_password": tokens["jwt"],
             "topic": base_topic,
-            "mode": "fanout",
+            "traffic_pattern": "fanout",
             "subscriber_count": 50,
             "fanout_topic": base_topic,
-            "authz": None,
+            "authz_config": None,
             "netem": {"clear": True},
             "message_size": 256,
             "qos": 1,
@@ -1454,17 +1471,17 @@ def _sqlite_rbac_churn_toggle_scenarios(tokens: dict[str, Any]) -> dict[str, Sce
             "fanout_churn_sqlite_topic": base_topic,
             "fanout_churn_sqlite_subscribers": 50,
         },
-        "SQLITE-RBAC-CHURN-BIS": {
+        "SQLITE-RBAC-CHURN-BISCUIT": {
             "mosquitto_conf": "./mosquitto_sqlite_acl_read.conf",
             "username": "biscuit",
             "password": tokens["biscuit"],
             "fanout_publisher_username": "biscuit",
             "fanout_publisher_password": tokens["biscuit"],
             "topic": base_topic,
-            "mode": "fanout",
+            "traffic_pattern": "fanout",
             "subscriber_count": 50,
             "fanout_topic": base_topic,
-            "authz": None,
+            "authz_config": None,
             "netem": {"clear": True},
             "message_size": 256,
             "qos": 1,
@@ -1494,10 +1511,10 @@ def _sqlite_rbac_deep_toggle_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
             "fanout_publisher_username": "jwt",
             "fanout_publisher_password": tokens["jwt"],
             "topic": "sensors/private/broadcast",
-            "mode": "fanout",
+            "traffic_pattern": "fanout",
             "subscriber_count": 50,
             "fanout_topic": "sensors/private/broadcast",
-            "authz": None,
+            "authz_config": None,
             "netem": {"clear": True},
             "message_size": 256,
             "qos": 1,
@@ -1515,17 +1532,17 @@ def _sqlite_rbac_deep_toggle_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
             "fanout_churn_sqlite_topic": "sensors/private/broadcast",
             "fanout_churn_sqlite_subscribers": 50,
         },
-        "SQLITE-RBAC-DEEP-CONFLICT-BIS": {
+        "SQLITE-RBAC-DEEP-CONFLICT-BISCUIT": {
             "mosquitto_conf": "./mosquitto_sqlite_acl_read.conf",
             "username": "biscuit",
             "password": tokens["biscuit"],
             "fanout_publisher_username": "biscuit",
             "fanout_publisher_password": tokens["biscuit"],
             "topic": "sensors/private/broadcast",
-            "mode": "fanout",
+            "traffic_pattern": "fanout",
             "subscriber_count": 50,
             "fanout_topic": "sensors/private/broadcast",
-            "authz": None,
+            "authz_config": None,
             "netem": {"clear": True},
             "message_size": 256,
             "qos": 1,
@@ -1548,7 +1565,7 @@ def _sqlite_rbac_deep_toggle_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
             "username": "jwt",
             "password": tokens["jwt"],
             "topic": "system/notifications/acl-change",
-            "authz": None,
+            "authz_config": None,
             "netem": {"clear": True},
             "message_size": 128,
             "qos": 1,
@@ -1563,12 +1580,12 @@ def _sqlite_rbac_deep_toggle_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
             "control_topic": "$CONTROL/dynamic-security/v1",
             "control_payload": {"commands": [{"command": "listClients"}]},
         },
-        "SQLITE-RBAC-DEEP-CONTROL-BIS": {
+        "SQLITE-RBAC-DEEP-CONTROL-BISCUIT": {
             "mosquitto_conf": "./mosquitto_sqlite_acl_read.conf",
             "username": "biscuit",
             "password": tokens["biscuit"],
             "topic": "system/notifications/acl-change",
-            "authz": None,
+            "authz_config": None,
             "netem": {"clear": True},
             "message_size": 128,
             "qos": 1,
@@ -1584,6 +1601,840 @@ def _sqlite_rbac_deep_toggle_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
             "control_payload": {"commands": [{"command": "listClients"}]},
         },
     }
+
+
+def _build_available_scenarios(
+    tokens: dict[str, Any],
+    *,
+    token_issuer_no_default_roles: bool,
+    token_issuer_no_default_grants: bool,
+) -> dict[str, ScenarioConfig]:
+    authorizer_template_scenarios = _biscuit_authorizer_template_scenarios(tokens)
+    available_scenarios: dict[str, ScenarioConfig] = {
+        "BASELINE-NO-AUTH": {
+            "mosquitto_conf": "./mosquitto_base.conf",
+            "username": "",
+            "password": "",
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "qos": 0,
+        },
+        "BASELINE-NO-AUTH-QOS0": {
+            "mosquitto_conf": "./mosquitto_base.conf",
+            "username": "",
+            "password": "",
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "qos": 0,
+        },
+        "TOKEN-BASELINE-JWT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "jwt",
+            "password": tokens["jwt"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+        },
+        "TOKEN-QOS2-JWT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "jwt",
+            "password": tokens["jwt"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "qos": 2,
+        },
+        "TOKEN-DENY-READ-JWT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "jwt",
+            "password": tokens["jwt_deny"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+        },
+        "TOKEN-BASELINE-BISCUIT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+        },
+        "TOKEN-QOS2-BISCUIT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "qos": 2,
+        },
+        "TOKEN-QOS-MIXED-JWT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "jwt",
+            "password": tokens["jwt"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "qos": 1,
+            "qos_distribution": "0:0.6,1:0.3,2:0.1",
+        },
+        "TOKEN-QOS-MIXED-BISCUIT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "qos": 1,
+            "qos_distribution": "0:0.6,1:0.3,2:0.1",
+        },
+        "TOKEN-ATTENUATED-DENY-BISCUIT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit_deny"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+        },
+        "TOKEN-ATTENUATION-CLIENT-BISCUIT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "biscuit_attenuate": {
+                "denies": ["publish:sensors/{client_id}/temp"],
+                "ttl_seconds": 300,
+                "topic": "sensors/{client_id}/temp",
+                "op": "publish",
+            },
+        },
+        "TOKEN-ATTENUATION-TTL-BISCUIT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "biscuit_attenuate": {"ttl_seconds": 120},
+        },
+        "TOKEN-ATTENUATION-DENY-BISCUIT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "biscuit_attenuate": {
+                "denies": ["subscribe:sensors/{client_id}/temp"],
+                "checks": ['resource("sensors/{client_id}/temp")'],
+            },
+        },
+        "TOKEN-ATTENUATION-OP-ONLY-BISCUIT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "biscuit_attenuate": {"op": "publish"},
+        },
+        "TOKEN-COMPLEXITY-CHAIN-1-BISCUIT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "complexity_axis": "chain_length",
+        },
+        "TOKEN-COMPLEXITY-CHAIN-5-BISCUIT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit_5"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "complexity_axis": "chain_length",
+        },
+        "TOKEN-COMPLEXITY-CHAIN-25-BISCUIT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit_25"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "complexity_axis": "chain_length",
+        },
+        "TOKEN-COMPLEXITY-DATALOG-LOW-BISCUIT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit_complex_low"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "complexity_axis": "datalog",
+        },
+        "TOKEN-COMPLEXITY-DATALOG-MED-BISCUIT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit_complex_med"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "complexity_axis": "datalog",
+        },
+        "TOKEN-COMPLEXITY-DATALOG-HIGH-BISCUIT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit_complex_high"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "complexity_axis": "datalog",
+        },
+        **authorizer_template_scenarios,
+        **_static_acl_scenarios(tokens),
+        **_acl_read_fanout_churn_scenarios(tokens),
+        **_acl_read_profile_matrix_scenarios(tokens),
+        **_sqlite_rbac_churn_toggle_scenarios(tokens),
+        **_sqlite_rbac_deep_toggle_scenarios(tokens),
+        "HTTP-LATENCY-200MS-JWT": {
+            "mosquitto_conf": "./mosquitto_http.conf",
+            "username": "jwt",
+            "password": tokens["jwt"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": {"delay_ms": 200, "fail_mode": "none"},
+            "netem": {"clear": True},
+            "message_size": 0,
+        },
+        "HTTP-PROFILE-SIMPLE-JWT": {
+            "mosquitto_conf": "./mosquitto_http.conf",
+            "username": "jwt",
+            "password": tokens["jwt"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": _http_profile_authz_config("simple"),
+            "netem": {"clear": True},
+            "message_size": 0,
+            "complexity_axis": "http_profile",
+            "complexity_level": "simple",
+        },
+        "HTTP-PROFILE-MED-JWT": {
+            "mosquitto_conf": "./mosquitto_http.conf",
+            "username": "jwt",
+            "password": tokens["jwt"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": _http_profile_authz_config("med"),
+            "netem": {"clear": True},
+            "message_size": 0,
+            "complexity_axis": "http_profile",
+            "complexity_level": "med",
+        },
+        "HTTP-PROFILE-COMPLEX-JWT": {
+            "mosquitto_conf": "./mosquitto_http.conf",
+            "username": "jwt",
+            "password": tokens["jwt"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": _http_profile_authz_config("complex"),
+            "netem": {"clear": True},
+            "message_size": 0,
+            "complexity_axis": "http_profile",
+            "complexity_level": "complex",
+        },
+        "HTTP-LATENCY-1000MS-JWT": {
+            "mosquitto_conf": "./mosquitto_http.conf",
+            "username": "jwt",
+            "password": tokens["jwt"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": {"delay_ms": 1000, "fail_mode": "none"},
+            "netem": {"clear": True},
+            "message_size": 0,
+        },
+        "HYBRID-FALLBACK-AUTHZ-DOWN-JWT": {
+            "mosquitto_conf": "./mosquitto_hybrid.conf",
+            "username": "jwt",
+            "password": tokens["jwt"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": {"delay_ms": 0, "fail_mode": "always"},
+            "netem": {"clear": True},
+            "message_size": 0,
+        },
+        "NETWORK-MTU-200-JWT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "jwt",
+            "password": tokens["jwt"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"mtu": 200},
+            "message_size": 0,
+        },
+        "HTTP-LATENCY-200MS-BISCUIT": {
+            "mosquitto_conf": "./mosquitto_http.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": {"delay_ms": 200, "fail_mode": "none"},
+            "netem": {"clear": True},
+            "message_size": 0,
+        },
+        "HTTP-PROFILE-SIMPLE-BISCUIT": {
+            "mosquitto_conf": "./mosquitto_http.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": _http_profile_authz_config("simple"),
+            "netem": {"clear": True},
+            "message_size": 0,
+            "complexity_axis": "http_profile",
+            "complexity_level": "simple",
+        },
+        "HTTP-PROFILE-MED-BISCUIT": {
+            "mosquitto_conf": "./mosquitto_http.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": _http_profile_authz_config("med"),
+            "netem": {"clear": True},
+            "message_size": 0,
+            "complexity_axis": "http_profile",
+            "complexity_level": "med",
+        },
+        "HTTP-PROFILE-COMPLEX-BISCUIT": {
+            "mosquitto_conf": "./mosquitto_http.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": _http_profile_authz_config("complex"),
+            "netem": {"clear": True},
+            "message_size": 0,
+            "complexity_axis": "http_profile",
+            "complexity_level": "complex",
+        },
+        "HTTP-LATENCY-200MS-FAILURE-1PCT-JWT": {
+            "mosquitto_conf": "./mosquitto_http.conf",
+            "username": "jwt",
+            "password": tokens["jwt"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": {"delay_ms": 200, "fail_mode": "rate", "fail_rate": 0.01},
+            "netem": {"clear": True},
+            "message_size": 0,
+        },
+        "HTTP-LATENCY-200MS-FAILURE-5PCT-JWT": {
+            "mosquitto_conf": "./mosquitto_http.conf",
+            "username": "jwt",
+            "password": tokens["jwt"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": {"delay_ms": 200, "fail_mode": "rate", "fail_rate": 0.05},
+            "netem": {"clear": True},
+            "message_size": 0,
+        },
+        "TOKEN-MQTT5-REAUTH-JWT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "mqtt5_auth": {"token1": tokens["jwt_short"], "token2": tokens["jwt"]},
+        },
+        "TOKEN-MQTT5-REAUTH-BISCUIT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "mqtt5_auth": {
+                "token1": tokens["biscuit_short"],
+                "token2": tokens["biscuit"],
+            },
+        },
+        "TOKEN-THUNDERING-HERD-BISCUIT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "restart_mosquitto": True,
+            "sync_connect": True,
+        },
+        "TOKEN-DELEGATION-TEMP-ONLY-BISCUIT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "biscuit_delegate": {
+                "topic": "sensors/{client_id}/temp",
+                "op": "publish",
+                "ttl_seconds": 300,
+            },
+        },
+        "TOKEN-DELEGATION-HANDOFF-BISCUIT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "biscuit_delegate": {
+                "topic": "sensors/{client_id}/temp",
+                "op": "publish",
+                "ttl_seconds": 300,
+                "handoff": {
+                    "topic": "delegation/handoff",
+                    "token": tokens["biscuit_delegation_handoff"],
+                    "qos": 1,
+                    "retain": True,
+                },
+            },
+        },
+        "TOKEN-DELEGATION-SIMULATED-BISCUIT": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit_delegated"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+        },
+        "TOKEN-LIFECYCLE-SHORT-RECONNECT-JWT": {
+            "mosquitto_conf": "./mosquitto_shortcache.conf",
+            "username": "jwt",
+            "password": tokens["jwt_short"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "repeat": 3,
+            "sleep_between": 2,
+            "token_refresh": {"kind": "jwt", "ttl_seconds": 5},
+        },
+        "TOKEN-LIFECYCLE-SHORT-RECONNECT-BISCUIT": {
+            "mosquitto_conf": "./mosquitto_shortcache.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit_short"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "repeat": 3,
+            "sleep_between": 2,
+            "token_refresh": {"kind": "biscuit", "ttl_seconds": 5},
+        },
+        "DYNAMIC-SECURITY-BASELINE": {
+            "mosquitto_conf": "./mosquitto_dynsec.conf",
+            "username": "dynsec_client_1",
+            "password": tokens["jwt"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "dynamic_security_config": "docker/dynamic-security.json",
+        },
+        "DYNAMIC-SECURITY-CHURN": {
+            "mosquitto_conf": "./mosquitto_dynsec.conf",
+            "username": "dynsec_client_1",
+            "password": tokens["jwt"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "repeat": 2,
+            "sleep_between": 2,
+            "dynamic_security_churn": [
+                "docker/dynamic-security.json",
+                "docker/dynamic-security-churn.json",
+            ],
+        },
+        "DYNAMIC-SECURITY-READ-FANOUT": {
+            "mosquitto_conf": "./mosquitto_dynsec.conf",
+            "username": "dynsec_client_1",
+            "password": tokens["jwt"],
+            "fanout_publisher_username": "dynsec_publisher",
+            "fanout_publisher_password": tokens["jwt"],
+            "topic": "fanout/broadcast",
+            "traffic_pattern": "fanout",
+            "fanout_topic": "fanout/broadcast",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "dynamic_security_config": "docker/dynamic-security.json",
+        },
+        "DYNAMIC-SECURITY-READ-FANOUT-CHURN": {
+            "mosquitto_conf": "./mosquitto_dynsec.conf",
+            "username": "dynsec_client_1",
+            "password": tokens["jwt"],
+            "fanout_publisher_username": "dynsec_publisher",
+            "fanout_publisher_password": tokens["jwt"],
+            "topic": "fanout/broadcast",
+            "traffic_pattern": "fanout",
+            "fanout_topic": "fanout/broadcast",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "repeat": 2,
+            "sleep_between": 2,
+            "dynamic_security_churn": [
+                "docker/dynamic-security.json",
+                "docker/dynamic-security-fanout-churn.json",
+            ],
+        },
+        # Issue 19: ACL_READ fan-out authorization cost measurement scenarios
+        # These scenarios measure per-subscriber authorization scaling with varying counts
+        "TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-JWT-10": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "jwt",
+            "password": tokens["jwt"],
+            "fanout_publisher_username": "jwt",
+            "fanout_publisher_password": tokens["jwt"],
+            "topic": "fanout/broadcast",
+            "traffic_pattern": "fanout",
+            "subscriber_count": 10,
+            "fanout_topic": "fanout/broadcast",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+        },
+        "TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-JWT-50": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "jwt",
+            "password": tokens["jwt"],
+            "fanout_publisher_username": "jwt",
+            "fanout_publisher_password": tokens["jwt"],
+            "topic": "fanout/broadcast",
+            "traffic_pattern": "fanout",
+            "subscriber_count": 50,
+            "fanout_topic": "fanout/broadcast",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+        },
+        "TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-JWT-100": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "jwt",
+            "password": tokens["jwt"],
+            "fanout_publisher_username": "jwt",
+            "fanout_publisher_password": tokens["jwt"],
+            "topic": "fanout/broadcast",
+            "traffic_pattern": "fanout",
+            "subscriber_count": 100,
+            "fanout_topic": "fanout/broadcast",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+        },
+        "TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-BISCUIT-10": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "fanout_publisher_username": "biscuit",
+            "fanout_publisher_password": tokens["biscuit"],
+            "topic": "fanout/broadcast",
+            "traffic_pattern": "fanout",
+            "subscriber_count": 10,
+            "fanout_topic": "fanout/broadcast",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+        },
+        "TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-BISCUIT-50": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "fanout_publisher_username": "biscuit",
+            "fanout_publisher_password": tokens["biscuit"],
+            "topic": "fanout/broadcast",
+            "traffic_pattern": "fanout",
+            "subscriber_count": 50,
+            "fanout_topic": "fanout/broadcast",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+        },
+        "TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-BISCUIT-100": {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "fanout_publisher_username": "biscuit",
+            "fanout_publisher_password": tokens["biscuit"],
+            "topic": "fanout/broadcast",
+            "traffic_pattern": "fanout",
+            "subscriber_count": 100,
+            "fanout_topic": "fanout/broadcast",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+        },
+        # Issue 20: Control-Triggered Enforcement Scenarios
+        # These scenarios exercise the $CONTROL callback semantics and measure
+        # control-plane overhead vs data-plane operations.
+        # Issue 35: Renamed to CONTROL-OVERHEAD to distinguish from CONTROL-CHURN
+        "CONTROL-OVERHEAD-KICK-REAUTH-JWT": {
+            "mosquitto_conf": "./mosquitto_dynsec.conf",
+            "username": "admin",
+            "password": tokens["jwt_admin"],
+            "topic": "$CONTROL/dynamic-security/v1",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "dynamic_security_config": "docker/dynamic-security.json",
+            "repeat": 2,
+            "sleep_between": 3,
+        },
+        "CONTROL-OVERHEAD-KICK-REAUTH-BISCUIT": {
+            "mosquitto_conf": "./mosquitto_dynsec.conf",
+            "username": "admin",
+            "password": tokens["biscuit_admin"],
+            "topic": "$CONTROL/dynamic-security/v1",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "dynamic_security_config": "docker/dynamic-security.json",
+            "repeat": 2,
+            "sleep_between": 3,
+        },
+        "CONTROL-OVERHEAD-ACL-READ-NOTIFY-JWT": {
+            "mosquitto_conf": "./mosquitto_dynsec.conf",
+            "username": "admin",
+            "password": tokens["jwt_admin"],
+            "topic": "$CONTROL/dynamic-security/v1",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "fanout_publisher_username": "admin",
+            "fanout_publisher_password": tokens["jwt_admin"],
+            "traffic_pattern": "fanout",
+            "fanout_topic": "system/notifications/acl-change",
+            "dynamic_security_config": "docker/dynamic-security.json",
+            "repeat": 2,
+            "sleep_between": 3,
+        },
+        "CONTROL-OVERHEAD-ACL-READ-NOTIFY-BISCUIT": {
+            "mosquitto_conf": "./mosquitto_dynsec.conf",
+            "username": "admin",
+            "password": tokens["biscuit_admin"],
+            "topic": "$CONTROL/dynamic-security/v1",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "fanout_publisher_username": "admin",
+            "fanout_publisher_password": tokens["biscuit_admin"],
+            "traffic_pattern": "fanout",
+            "fanout_topic": "system/notifications/acl-change",
+            "dynamic_security_config": "docker/dynamic-security.json",
+            "repeat": 2,
+            "sleep_between": 3,
+        },
+        # Issue 35: CONTROL-CHURN scenarios with actual Dynamic Security command payloads
+        # These scenarios exercise actual policy modifications via Dynamic Security commands
+        "CONTROL-CHURN-CREATE-ROLE-JWT": {
+            "mosquitto_conf": "./mosquitto_dynsec.conf",
+            "username": "admin",
+            "password": tokens["jwt_admin"],
+            "topic": "sensors/{client_id}/temp",
+            "control_topic": "$CONTROL/dynamic-security/v1",
+            "control_mode": True,
+            "control_repeat": 3,
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "dynamic_security_config": "docker/dynamic-security.json",
+            "repeat": 2,
+            "sleep_between": 3,
+        },
+        "CONTROL-CHURN-CREATE-ROLE-BISCUIT": {
+            "mosquitto_conf": "./mosquitto_dynsec.conf",
+            "username": "admin",
+            "password": tokens["biscuit_admin"],
+            "topic": "sensors/{client_id}/temp",
+            "control_topic": "$CONTROL/dynamic-security/v1",
+            "control_mode": True,
+            "control_repeat": 3,
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "dynamic_security_config": "docker/dynamic-security.json",
+            "repeat": 2,
+            "sleep_between": 3,
+        },
+        "CONTROL-CHURN-GROUP-CLIENT-JWT": {
+            "mosquitto_conf": "./mosquitto_dynsec.conf",
+            "username": "admin",
+            "password": tokens["jwt_admin"],
+            "topic": "sensors/{client_id}/temp",
+            "control_topic": "$CONTROL/dynamic-security/v1",
+            "control_mode": True,
+            "control_repeat": 2,
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "dynamic_security_config": "docker/dynamic-security.json",
+            "repeat": 2,
+            "sleep_between": 3,
+        },
+        "CONTROL-CHURN-GROUP-CLIENT-BISCUIT": {
+            "mosquitto_conf": "./mosquitto_dynsec.conf",
+            "username": "admin",
+            "password": tokens["biscuit_admin"],
+            "topic": "sensors/{client_id}/temp",
+            "control_topic": "$CONTROL/dynamic-security/v1",
+            "control_mode": True,
+            "control_repeat": 2,
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "dynamic_security_config": "docker/dynamic-security.json",
+            "repeat": 2,
+            "sleep_between": 3,
+        },
+        "CONTROL-CHURN-ACL-MODIFY-JWT": {
+            "mosquitto_conf": "./mosquitto_dynsec.conf",
+            "username": "admin",
+            "password": tokens["jwt_admin"],
+            "topic": "sensors/{client_id}/temp",
+            "control_topic": "$CONTROL/dynamic-security/v1",
+            "control_mode": True,
+            "control_repeat": 2,
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "dynamic_security_config": "docker/dynamic-security.json",
+            "repeat": 2,
+            "sleep_between": 3,
+        },
+        "CONTROL-CHURN-ACL-MODIFY-BISCUIT": {
+            "mosquitto_conf": "./mosquitto_dynsec.conf",
+            "username": "admin",
+            "password": tokens["biscuit_admin"],
+            "topic": "sensors/{client_id}/temp",
+            "control_topic": "$CONTROL/dynamic-security/v1",
+            "control_mode": True,
+            "control_repeat": 2,
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "dynamic_security_config": "docker/dynamic-security.json",
+            "repeat": 2,
+            "sleep_between": 3,
+        },
+        # Issue 36: Interleaved control message scenarios
+        # These scenarios publish control messages interleaved with data messages
+        # to measure control plane latency under active data plane load.
+        "CONTROL-INTERLEAVED-DATA-JWT": {
+            "mosquitto_conf": "./mosquitto_dynsec.conf",
+            "username": "jwt",
+            "password": tokens["jwt"],
+            "topic": "sensors/{client_id}/temp",
+            "control_topic": "$CONTROL/dynamic-security/v1",
+            "control_mode": False,
+            "control_repeat": 1,
+            "control_after_messages": 10,
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "dynamic_security_config": "docker/dynamic-security.json",
+        },
+        "CONTROL-INTERLEAVED-DATA-BISCUIT": {
+            "mosquitto_conf": "./mosquitto_dynsec.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit"],
+            "topic": "sensors/{client_id}/temp",
+            "control_topic": "$CONTROL/dynamic-security/v1",
+            "control_mode": False,
+            "control_repeat": 1,
+            "control_after_messages": 10,
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "dynamic_security_config": "docker/dynamic-security.json",
+        },
+        # Issue 29: Anonymous flow scenario using Dynamic Security anonymousGroup
+        # Demonstrates how Dynamic Security can enforce policies for unauthenticated clients
+        "DYNAMIC-SECURITY-ANONYMOUS-BASELINE": {
+            "mosquitto_conf": "./mosquitto_anon.conf",
+            "username": "",
+            "password": "",
+            "topic": "public/announce",
+            "traffic_pattern": "fanout",
+            "fanout_topic": "public/announce",
+            "fanout_publisher_username": "",
+            "fanout_publisher_password": "",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "dynamic_security_config": "docker/dynamic-security-anon.json",
+        },
+    }
+
+    # Add dynamic MTU scenarios
+    for mtu in [500, 1500, 9000]:
+        available_scenarios[f"NETWORK-MTU-{mtu}-BISCUIT-CHAIN-25"] = {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit_25"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"mtu": mtu},
+            "message_size": 0,
+        }
+        available_scenarios[f"NETWORK-MTU-{mtu}-JWT"] = {
+            "mosquitto_conf": "./mosquitto.conf",
+            "username": "jwt",
+            "password": tokens["jwt"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"mtu": mtu},
+            "message_size": 0,
+        }
+
+    for scenario in available_scenarios.values():
+        scenario.setdefault("token_issuer_no_default_roles", token_issuer_no_default_roles)
+        scenario.setdefault("token_issuer_no_default_grants", token_issuer_no_default_grants)
+
+    return available_scenarios
 
 
 @app.command()
@@ -1683,848 +2534,21 @@ def main(
         )
     if scenarios_arg:
         scenario_ids = [s.strip() for s in scenarios_arg.split(",")]
-        authorizer_template_scenarios = _biscuit_authorizer_template_scenarios(tokens)
+        available_scenarios = _build_available_scenarios(
+            tokens,
+            token_issuer_no_default_roles=token_issuer_no_default_roles,
+            token_issuer_no_default_grants=token_issuer_no_default_grants,
+        )
+        available_scenarios = _expand_tls_matrix(available_scenarios)
 
         def _is_authorizer_template_scenario_id(scenario_id: str) -> bool:
-            base = scenario_id.removesuffix("-TLS")
-            return base in {
-                "POLICY-AUTHZ-TEMPLATE-SIMPLE",
-                "POLICY-AUTHZ-TEMPLATE-RBAC",
-                "POLICY-AUTHZ-TEMPLATE-CONTEXTUAL",
-            }
-
-        # Define available scenarios mapping
-        available_scenarios: dict[str, ScenarioConfig] = {
-            "BASE-01": {
-                "mosquitto_conf": "./mosquitto_base.conf",
-                "username": "",
-                "password": "",
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "qos": 0,
-            },
-            "QOS0-BASE-01": {
-                "mosquitto_conf": "./mosquitto_base.conf",
-                "username": "",
-                "password": "",
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "qos": 0,
-            },
-            "JWT-01": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "jwt",
-                "password": tokens["jwt"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-            },
-            "QOS2-JWT": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "jwt",
-                "password": tokens["jwt"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "qos": 2,
-            },
-            "JWT-DENY": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "jwt",
-                "password": tokens["jwt_deny"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-            },
-            "BIS-01": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-            },
-            "QOS2-BISCUIT": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "qos": 2,
-            },
-            "QOS-MIXED-JWT": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "jwt",
-                "password": tokens["jwt"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "qos": 1,
-                "qos_distribution": "0:0.6,1:0.3,2:0.1",
-            },
-            "QOS-MIXED-BISCUIT": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "qos": 1,
-                "qos_distribution": "0:0.6,1:0.3,2:0.1",
-            },
-            "BIS-DENY-ATTENUATED": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit_deny"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-            },
-            "BIS-ATTENUATE-CLIENT": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "biscuit_attenuate": {
-                    "denies": ["publish:sensors/{client_id}/temp"],
-                    "ttl_seconds": 300,
-                    "topic": "sensors/{client_id}/temp",
-                    "op": "publish",
-                },
-            },
-            "BIS-ATTENUATE-TTL": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "biscuit_attenuate": {"ttl_seconds": 120},
-            },
-            "BIS-ATTENUATE-DENY": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "biscuit_attenuate": {
-                    "denies": ["subscribe:sensors/{client_id}/temp"],
-                    "checks": ['resource("sensors/{client_id}/temp")'],
-                },
-            },
-            "BIS-ATTENUATE-OP-ONLY": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "biscuit_attenuate": {"op": "publish"},
-            },
-            "POLICY-COMPLEX-1": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "policy_complexity_kind": "block_chain",
-            },
-            "POLICY-COMPLEX-5": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit_5"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "policy_complexity_kind": "block_chain",
-            },
-            "POLICY-COMPLEX-25": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit_25"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "policy_complexity_kind": "block_chain",
-            },
-            "POLICY-COMPLEX-LOW": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit_complex_low"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "policy_complexity_kind": "datalog",
-            },
-            "POLICY-COMPLEX-MED": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit_complex_med"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "policy_complexity_kind": "datalog",
-            },
-            "POLICY-COMPLEX-HIGH": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit_complex_high"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "policy_complexity_kind": "datalog",
-            },
-            **authorizer_template_scenarios,
-            **_static_acl_scenarios(tokens),
-            **_acl_read_fanout_churn_scenarios(tokens),
-            **_acl_read_profile_matrix_scenarios(tokens),
-            **_sqlite_rbac_churn_toggle_scenarios(tokens),
-            **_sqlite_rbac_deep_toggle_scenarios(tokens),
-            "JWT-HTTP-200MS": {
-                "mosquitto_conf": "./mosquitto_http.conf",
-                "username": "jwt",
-                "password": tokens["jwt"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": {"delay_ms": 200, "fail_mode": "none"},
-                "netem": {"clear": True},
-                "message_size": 0,
-            },
-            "HTTP-POLICY-SIMPLE-JWT": {
-                "mosquitto_conf": "./mosquitto_http.conf",
-                "username": "jwt",
-                "password": tokens["jwt"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": _http_policy_authz_config("simple"),
-                "netem": {"clear": True},
-                "message_size": 0,
-                "policy_complexity_kind": "http_policy",
-                "policy_complexity_tier": "simple",
-            },
-            "HTTP-POLICY-MED-JWT": {
-                "mosquitto_conf": "./mosquitto_http.conf",
-                "username": "jwt",
-                "password": tokens["jwt"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": _http_policy_authz_config("med"),
-                "netem": {"clear": True},
-                "message_size": 0,
-                "policy_complexity_kind": "http_policy",
-                "policy_complexity_tier": "med",
-            },
-            "HTTP-POLICY-COMPLEX-JWT": {
-                "mosquitto_conf": "./mosquitto_http.conf",
-                "username": "jwt",
-                "password": tokens["jwt"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": _http_policy_authz_config("complex"),
-                "netem": {"clear": True},
-                "message_size": 0,
-                "policy_complexity_kind": "http_policy",
-                "policy_complexity_tier": "complex",
-            },
-            "JWT-HTTP-1000MS": {
-                "mosquitto_conf": "./mosquitto_http.conf",
-                "username": "jwt",
-                "password": tokens["jwt"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": {"delay_ms": 1000, "fail_mode": "none"},
-                "netem": {"clear": True},
-                "message_size": 0,
-            },
-            "HYBRID-AUTHZ-DOWN": {
-                "mosquitto_conf": "./mosquitto_hybrid.conf",
-                "username": "jwt",
-                "password": tokens["jwt"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": {"delay_ms": 0, "fail_mode": "always"},
-                "netem": {"clear": True},
-                "message_size": 0,
-            },
-            "MTU-200-JWT": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "jwt",
-                "password": tokens["jwt"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"mtu": 200},
-                "message_size": 0,
-            },
-            "BIS-HTTP-200MS": {
-                "mosquitto_conf": "./mosquitto_http.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": {"delay_ms": 200, "fail_mode": "none"},
-                "netem": {"clear": True},
-                "message_size": 0,
-            },
-            "HTTP-POLICY-SIMPLE-BIS": {
-                "mosquitto_conf": "./mosquitto_http.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": _http_policy_authz_config("simple"),
-                "netem": {"clear": True},
-                "message_size": 0,
-                "policy_complexity_kind": "http_policy",
-                "policy_complexity_tier": "simple",
-            },
-            "HTTP-POLICY-MED-BIS": {
-                "mosquitto_conf": "./mosquitto_http.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": _http_policy_authz_config("med"),
-                "netem": {"clear": True},
-                "message_size": 0,
-                "policy_complexity_kind": "http_policy",
-                "policy_complexity_tier": "med",
-            },
-            "HTTP-POLICY-COMPLEX-BIS": {
-                "mosquitto_conf": "./mosquitto_http.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": _http_policy_authz_config("complex"),
-                "netem": {"clear": True},
-                "message_size": 0,
-                "policy_complexity_kind": "http_policy",
-                "policy_complexity_tier": "complex",
-            },
-            "JWT-HTTP-200MS-LOSS1": {
-                "mosquitto_conf": "./mosquitto_http.conf",
-                "username": "jwt",
-                "password": tokens["jwt"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": {"delay_ms": 200, "fail_mode": "rate", "fail_rate": 0.01},
-                "netem": {"clear": True},
-                "message_size": 0,
-            },
-            "JWT-HTTP-200MS-LOSS5": {
-                "mosquitto_conf": "./mosquitto_http.conf",
-                "username": "jwt",
-                "password": tokens["jwt"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": {"delay_ms": 200, "fail_mode": "rate", "fail_rate": 0.05},
-                "netem": {"clear": True},
-                "message_size": 0,
-            },
-            "MQTT5-REAUTH-JWT": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "authz": None,
-                "netem": {"clear": True},
-                "mqtt5_auth": {"token1": tokens["jwt_short"], "token2": tokens["jwt"]},
-            },
-            "MQTT5-REAUTH-BISCUIT": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "authz": None,
-                "netem": {"clear": True},
-                "mqtt5_auth": {
-                    "token1": tokens["biscuit_short"],
-                    "token2": tokens["biscuit"],
-                },
-            },
-            "THUNDERING-HERD": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "restart_mosquitto": True,
-                "sync_connect": True,
-            },
-            "DELEGATION-TEMP-ONLY": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "biscuit_delegate": {
-                    "topic": "sensors/{client_id}/temp",
-                    "op": "publish",
-                    "ttl_seconds": 300,
-                },
-            },
-            "DELEGATION-HANDOFF": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "biscuit_delegate": {
-                    "topic": "sensors/{client_id}/temp",
-                    "op": "publish",
-                    "ttl_seconds": 300,
-                    "handoff": {
-                        "topic": "delegation/handoff",
-                        "token": tokens["biscuit_delegation_handoff"],
-                        "qos": 1,
-                        "retain": True,
-                    },
-                },
-            },
-            "DELEGATION-SIMULATED": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit_delegated"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-            },
-            "LIFECYCLE-JWT-SHORT-RECONNECT": {
-                "mosquitto_conf": "./mosquitto_shortcache.conf",
-                "username": "jwt",
-                "password": tokens["jwt_short"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "repeat": 3,
-                "sleep_between": 2,
-                "token_refresh": {"kind": "jwt", "ttl_seconds": 5},
-            },
-            "LIFECYCLE-BIS-SHORT-RECONNECT": {
-                "mosquitto_conf": "./mosquitto_shortcache.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit_short"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "repeat": 3,
-                "sleep_between": 2,
-                "token_refresh": {"kind": "biscuit", "ttl_seconds": 5},
-            },
-            "DYNSEC-BASE": {
-                "mosquitto_conf": "./mosquitto_dynsec.conf",
-                "username": "dynsec_client_1",
-                "password": tokens["jwt"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "dynsec_config": "docker/dynamic-security.json",
-            },
-            "DYNSEC-CHURN": {
-                "mosquitto_conf": "./mosquitto_dynsec.conf",
-                "username": "dynsec_client_1",
-                "password": tokens["jwt"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "repeat": 2,
-                "sleep_between": 2,
-                "dynsec_churn": [
-                    "docker/dynamic-security.json",
-                    "docker/dynamic-security-alt.json",
-                ],
-            },
-            "DYNSEC-READ-FANOUT": {
-                "mosquitto_conf": "./mosquitto_dynsec.conf",
-                "username": "dynsec_client_1",
-                "password": tokens["jwt"],
-                "fanout_publisher_username": "dynsec_publisher",
-                "fanout_publisher_password": tokens["jwt"],
-                "topic": "fanout/broadcast",
-                "mode": "fanout",
-                "fanout_topic": "fanout/broadcast",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "dynsec_config": "docker/dynamic-security.json",
-            },
-            "DYNSEC-READ-FANOUT-CHURN": {
-                "mosquitto_conf": "./mosquitto_dynsec.conf",
-                "username": "dynsec_client_1",
-                "password": tokens["jwt"],
-                "fanout_publisher_username": "dynsec_publisher",
-                "fanout_publisher_password": tokens["jwt"],
-                "topic": "fanout/broadcast",
-                "mode": "fanout",
-                "fanout_topic": "fanout/broadcast",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 0,
-                "repeat": 2,
-                "sleep_between": 2,
-                "dynsec_churn": [
-                    "docker/dynamic-security.json",
-                    "docker/dynamic-security-fanout-churn.json",
-                ],
-            },
-            # Issue 19: ACL_READ fan-out authorization cost measurement scenarios
-            # These scenarios measure per-subscriber authorization scaling with varying counts
-            "ACL-READ-FANOUT-10": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "jwt",
-                "password": tokens["jwt"],
-                "fanout_publisher_username": "jwt",
-                "fanout_publisher_password": tokens["jwt"],
-                "topic": "fanout/broadcast",
-                "mode": "fanout",
-                "subscriber_count": 10,
-                "fanout_topic": "fanout/broadcast",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 256,
-                "qos": 1,
-            },
-            "ACL-READ-FANOUT-50": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "jwt",
-                "password": tokens["jwt"],
-                "fanout_publisher_username": "jwt",
-                "fanout_publisher_password": tokens["jwt"],
-                "topic": "fanout/broadcast",
-                "mode": "fanout",
-                "subscriber_count": 50,
-                "fanout_topic": "fanout/broadcast",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 256,
-                "qos": 1,
-            },
-            "ACL-READ-FANOUT-100": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "jwt",
-                "password": tokens["jwt"],
-                "fanout_publisher_username": "jwt",
-                "fanout_publisher_password": tokens["jwt"],
-                "topic": "fanout/broadcast",
-                "mode": "fanout",
-                "subscriber_count": 100,
-                "fanout_topic": "fanout/broadcast",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 256,
-                "qos": 1,
-            },
-            "ACL-READ-FANOUT-BIS-10": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit"],
-                "fanout_publisher_username": "biscuit",
-                "fanout_publisher_password": tokens["biscuit"],
-                "topic": "fanout/broadcast",
-                "mode": "fanout",
-                "subscriber_count": 10,
-                "fanout_topic": "fanout/broadcast",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 256,
-                "qos": 1,
-            },
-            "ACL-READ-FANOUT-BIS-50": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit"],
-                "fanout_publisher_username": "biscuit",
-                "fanout_publisher_password": tokens["biscuit"],
-                "topic": "fanout/broadcast",
-                "mode": "fanout",
-                "subscriber_count": 50,
-                "fanout_topic": "fanout/broadcast",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 256,
-                "qos": 1,
-            },
-            "ACL-READ-FANOUT-BIS-100": {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit"],
-                "fanout_publisher_username": "biscuit",
-                "fanout_publisher_password": tokens["biscuit"],
-                "topic": "fanout/broadcast",
-                "mode": "fanout",
-                "subscriber_count": 100,
-                "fanout_topic": "fanout/broadcast",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 256,
-                "qos": 1,
-            },
-            # Issue 20: Control-Triggered Enforcement Scenarios
-            # These scenarios exercise the $CONTROL callback semantics and measure
-            # control-plane overhead vs data-plane operations.
-            # Issue 35: Renamed to CONTROL-OVERHEAD to distinguish from CONTROL-CHURN
-            "CONTROL-OVERHEAD-KICK-REAUTH-JWT": {
-                "mosquitto_conf": "./mosquitto_dynsec.conf",
-                "username": "admin",
-                "password": tokens["jwt_admin"],
-                "topic": "$CONTROL/dynamic-security/v1",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 256,
-                "qos": 1,
-                "dynsec_config": "docker/dynamic-security.json",
-                "repeat": 2,
-                "sleep_between": 3,
-            },
-            "CONTROL-OVERHEAD-KICK-REAUTH-BISCUIT": {
-                "mosquitto_conf": "./mosquitto_dynsec.conf",
-                "username": "admin",
-                "password": tokens["biscuit_admin"],
-                "topic": "$CONTROL/dynamic-security/v1",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 256,
-                "qos": 1,
-                "dynsec_config": "docker/dynamic-security.json",
-                "repeat": 2,
-                "sleep_between": 3,
-            },
-            "CONTROL-OVERHEAD-ACL-READ-NOTIFY-JWT": {
-                "mosquitto_conf": "./mosquitto_dynsec.conf",
-                "username": "admin",
-                "password": tokens["jwt_admin"],
-                "topic": "$CONTROL/dynamic-security/v1",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 256,
-                "qos": 1,
-                "fanout_publisher_username": "admin",
-                "fanout_publisher_password": tokens["jwt_admin"],
-                "mode": "fanout",
-                "fanout_topic": "system/notifications/acl-change",
-                "dynsec_config": "docker/dynamic-security.json",
-                "repeat": 2,
-                "sleep_between": 3,
-            },
-            "CONTROL-OVERHEAD-ACL-READ-NOTIFY-BISCUIT": {
-                "mosquitto_conf": "./mosquitto_dynsec.conf",
-                "username": "admin",
-                "password": tokens["biscuit_admin"],
-                "topic": "$CONTROL/dynamic-security/v1",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 256,
-                "qos": 1,
-                "fanout_publisher_username": "admin",
-                "fanout_publisher_password": tokens["biscuit_admin"],
-                "mode": "fanout",
-                "fanout_topic": "system/notifications/acl-change",
-                "dynsec_config": "docker/dynamic-security.json",
-                "repeat": 2,
-                "sleep_between": 3,
-            },
-            # Issue 35: CONTROL-CHURN scenarios with actual Dynamic Security command payloads
-            # These scenarios exercise actual policy modifications via Dynamic Security commands
-            "CONTROL-CHURN-CREATE-ROLE-JWT": {
-                "mosquitto_conf": "./mosquitto_dynsec.conf",
-                "username": "admin",
-                "password": tokens["jwt_admin"],
-                "topic": "sensors/{client_id}/temp",
-                "control_topic": "$CONTROL/dynamic-security/v1",
-                "control_mode": True,
-                "control_repeat": 3,
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 256,
-                "qos": 1,
-                "dynsec_config": "docker/dynamic-security.json",
-                "repeat": 2,
-                "sleep_between": 3,
-            },
-            "CONTROL-CHURN-CREATE-ROLE-BISCUIT": {
-                "mosquitto_conf": "./mosquitto_dynsec.conf",
-                "username": "admin",
-                "password": tokens["biscuit_admin"],
-                "topic": "sensors/{client_id}/temp",
-                "control_topic": "$CONTROL/dynamic-security/v1",
-                "control_mode": True,
-                "control_repeat": 3,
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 256,
-                "qos": 1,
-                "dynsec_config": "docker/dynamic-security.json",
-                "repeat": 2,
-                "sleep_between": 3,
-            },
-            "CONTROL-CHURN-GROUP-CLIENT-JWT": {
-                "mosquitto_conf": "./mosquitto_dynsec.conf",
-                "username": "admin",
-                "password": tokens["jwt_admin"],
-                "topic": "sensors/{client_id}/temp",
-                "control_topic": "$CONTROL/dynamic-security/v1",
-                "control_mode": True,
-                "control_repeat": 2,
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 256,
-                "qos": 1,
-                "dynsec_config": "docker/dynamic-security.json",
-                "repeat": 2,
-                "sleep_between": 3,
-            },
-            "CONTROL-CHURN-GROUP-CLIENT-BISCUIT": {
-                "mosquitto_conf": "./mosquitto_dynsec.conf",
-                "username": "admin",
-                "password": tokens["biscuit_admin"],
-                "topic": "sensors/{client_id}/temp",
-                "control_topic": "$CONTROL/dynamic-security/v1",
-                "control_mode": True,
-                "control_repeat": 2,
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 256,
-                "qos": 1,
-                "dynsec_config": "docker/dynamic-security.json",
-                "repeat": 2,
-                "sleep_between": 3,
-            },
-            "CONTROL-CHURN-ACL-MODIFY-JWT": {
-                "mosquitto_conf": "./mosquitto_dynsec.conf",
-                "username": "admin",
-                "password": tokens["jwt_admin"],
-                "topic": "sensors/{client_id}/temp",
-                "control_topic": "$CONTROL/dynamic-security/v1",
-                "control_mode": True,
-                "control_repeat": 2,
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 256,
-                "qos": 1,
-                "dynsec_config": "docker/dynamic-security.json",
-                "repeat": 2,
-                "sleep_between": 3,
-            },
-            "CONTROL-CHURN-ACL-MODIFY-BISCUIT": {
-                "mosquitto_conf": "./mosquitto_dynsec.conf",
-                "username": "admin",
-                "password": tokens["biscuit_admin"],
-                "topic": "sensors/{client_id}/temp",
-                "control_topic": "$CONTROL/dynamic-security/v1",
-                "control_mode": True,
-                "control_repeat": 2,
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 256,
-                "qos": 1,
-                "dynsec_config": "docker/dynamic-security.json",
-                "repeat": 2,
-                "sleep_between": 3,
-            },
-            # Issue 36: Interleaved control message scenarios
-            # These scenarios publish control messages interleaved with data messages
-            # to measure control plane latency under active data plane load.
-            "INTERLEAVED-CONTROL-DATA-JWT": {
-                "mosquitto_conf": "./mosquitto_dynsec.conf",
-                "username": "jwt",
-                "password": tokens["jwt"],
-                "topic": "sensors/{client_id}/temp",
-                "control_topic": "$CONTROL/dynamic-security/v1",
-                "control_mode": False,
-                "control_repeat": 1,
-                "control_after_messages": 10,
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 256,
-                "qos": 1,
-                "dynsec_config": "docker/dynamic-security.json",
-            },
-            "INTERLEAVED-CONTROL-DATA-BISCUIT": {
-                "mosquitto_conf": "./mosquitto_dynsec.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit"],
-                "topic": "sensors/{client_id}/temp",
-                "control_topic": "$CONTROL/dynamic-security/v1",
-                "control_mode": False,
-                "control_repeat": 1,
-                "control_after_messages": 10,
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 256,
-                "qos": 1,
-                "dynsec_config": "docker/dynamic-security.json",
-            },
-            # Issue 29: Anonymous flow scenario using Dynamic Security anonymousGroup
-            # Demonstrates how Dynamic Security can enforce policies for unauthenticated clients
-            "ANON-BASE": {
-                "mosquitto_conf": "./mosquitto_anon.conf",
-                "username": "",
-                "password": "",
-                "topic": "public/announce",
-                "mode": "fanout",
-                "fanout_topic": "public/announce",
-                "fanout_publisher_username": "",
-                "fanout_publisher_password": "",
-                "authz": None,
-                "netem": {"clear": True},
-                "message_size": 256,
-                "qos": 1,
-                "dynsec_config": "docker/dynamic-security-anon.json",
-            },
-        }
-
-        # Add dynamic MTU scenarios
-        for mtu in [500, 1500, 9000]:
-            available_scenarios[f"MTU-{mtu}-BIS-25"] = {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "biscuit",
-                "password": tokens["biscuit_25"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"mtu": mtu},
-                "message_size": 0,
-            }
-            available_scenarios[f"MTU-{mtu}-JWT"] = {
-                "mosquitto_conf": "./mosquitto.conf",
-                "username": "jwt",
-                "password": tokens["jwt"],
-                "topic": "sensors/{client_id}/temp",
-                "authz": None,
-                "netem": {"mtu": mtu},
-                "message_size": 0,
-            }
-
-        for scenario in available_scenarios.values():
-            scenario.setdefault("token_issuer_no_default_roles", token_issuer_no_default_roles)
-            scenario.setdefault("token_issuer_no_default_grants", token_issuer_no_default_grants)
-
-        available_scenarios = _expand_tls_matrix(available_scenarios)
+            return scenario_id.removesuffix("-TLS") in AUTHORIZER_TEMPLATE_SCENARIO_IDS
 
         # Select requested scenarios
         for scenario_id in scenario_ids:
             if (
                 _is_authorizer_template_scenario_id(scenario_id)
-                and not authorizer_template_scenarios
+                and tokens.get("biscuit_authorizer_template") is None
             ):
                 raise SystemExit(
                     "Scenario "
@@ -2546,86 +2570,13 @@ def main(
     else:
         logger.info("No scenarios specified. Use --scenarios to specify which scenarios to run.")
         logger.info("Available scenarios:")
-        logger.info(
-            "BASE-01, QOS0-BASE-01, JWT-01, BIS-01, QOS2-JWT, QOS2-BISCUIT, "
-            "QOS-MIXED-JWT, QOS-MIXED-BISCUIT, BIS-ATTENUATE-CLIENT, "
-            "BIS-ATTENUATE-TTL, BIS-ATTENUATE-DENY, BIS-ATTENUATE-OP-ONLY, "
-            "POLICY-COMPLEX-1, POLICY-COMPLEX-5, POLICY-COMPLEX-25, "
-            "POLICY-COMPLEX-LOW, POLICY-COMPLEX-MED, POLICY-COMPLEX-HIGH, "
-            "POLICY-AUTHZ-TEMPLATE-SIMPLE, POLICY-AUTHZ-TEMPLATE-RBAC, "
-            "POLICY-AUTHZ-TEMPLATE-CONTEXTUAL",
+        available_scenarios = _build_available_scenarios(
+            tokens,
+            token_issuer_no_default_roles=token_issuer_no_default_roles,
+            token_issuer_no_default_grants=token_issuer_no_default_grants,
         )
-        logger.info(
-            "JWT-HTTP-200MS, JWT-HTTP-1000MS, HYBRID-AUTHZ-DOWN, MTU-200-JWT",
-        )
-        logger.info(
-            "BIS-HTTP-200MS, JWT-HTTP-200MS-LOSS1, JWT-HTTP-200MS-LOSS5, "
-            "HTTP-POLICY-SIMPLE-JWT, HTTP-POLICY-MED-JWT, HTTP-POLICY-COMPLEX-JWT, "
-            "HTTP-POLICY-SIMPLE-BIS, HTTP-POLICY-MED-BIS, HTTP-POLICY-COMPLEX-BIS",
-        )
-        logger.info(
-            "MQTT5-REAUTH-JWT, MQTT5-REAUTH-BISCUIT, "
-            "THUNDERING-HERD, DELEGATION-TEMP-ONLY, DELEGATION-HANDOFF, DELEGATION-SIMULATED",
-        )
-        logger.info(
-            "LIFECYCLE-JWT-SHORT-RECONNECT, LIFECYCLE-BIS-SHORT-RECONNECT",
-        )
-        logger.info("MTU-500-BIS-25, MTU-1500-BIS-25, MTU-9000-BIS-25")
-        logger.info("MTU-500-JWT, MTU-1500-JWT, MTU-9000-JWT")
-        logger.info("DYNSEC-BASE, DYNSEC-CHURN, DYNSEC-READ-FANOUT")
-        logger.info("DYNSEC-READ-FANOUT-CHURN")
-        logger.info(
-            "DYNSEC-ACLREAD-FANOUT-CHURN-JWT-10/50/100, "
-            "DYNSEC-ACLREAD-FANOUT-CHURN-BIS-10/50/100",
-        )
-        logger.info(
-            "SQLITE-ACLREAD-FANOUT-CHURN-JWT-10/50/100, "
-            "SQLITE-ACLREAD-FANOUT-CHURN-BIS-10/50/100",
-        )
-        logger.info(
-            "TOKEN-ACLREAD-FANOUT-ALLOW-{JWT|BIS}-{10|50|100}, "
-            "TOKEN-ACLREAD-FANOUT-DENY-{JWT|BIS}-10",
-        )
-        logger.info(
-            "HTTP-ACLREAD-FANOUT-{SIMPLE|MED|COMPLEX}-{ALLOW|DENY}-{JWT|BIS}-10, "
-            "HTTP-ACLREAD-FANOUT-MED-ALLOW-{JWT|BIS}-{50|100}",
-        )
-        logger.info(
-            "HYBRID-ACLREAD-FANOUT-{SIMPLE|MED|COMPLEX}-{ALLOW|DENY}-{JWT|BIS}-10, "
-            "HYBRID-ACLREAD-FANOUT-MED-ALLOW-{JWT|BIS}-{50|100}",
-        )
-        logger.info("SQLITE-RBAC-CHURN-JWT, SQLITE-RBAC-CHURN-BIS")
-        logger.info(
-            "SQLITE-RBAC-DEEP-CONFLICT-JWT, SQLITE-RBAC-DEEP-CONFLICT-BIS, "
-            "SQLITE-RBAC-DEEP-CONTROL-JWT, SQLITE-RBAC-DEEP-CONTROL-BIS",
-        )
-        logger.info(
-            "STATIC-ACL-JWT, STATIC-ACL-BIS, STATIC-ACL-FANOUT, STATIC-ACL-FANOUT-BIS",
-        )
-        # Issue 20: Control-triggered enforcement scenarios (renamed to CONTROL-OVERHEAD)
-        logger.info(
-            "CONTROL-OVERHEAD-KICK-REAUTH-JWT, CONTROL-OVERHEAD-KICK-REAUTH-BISCUIT, "
-            "CONTROL-OVERHEAD-ACL-READ-NOTIFY-JWT, CONTROL-OVERHEAD-ACL-READ-NOTIFY-BISCUIT",
-        )
-        # Issue 35: Control-triggered enforcement with actual policy churn (CONTROL-CHURN)
-        logger.info(
-            "CONTROL-CHURN-CREATE-ROLE-JWT, CONTROL-CHURN-CREATE-ROLE-BISCUIT, "
-            "CONTROL-CHURN-GROUP-CLIENT-JWT, CONTROL-CHURN-GROUP-CLIENT-BISCUIT, "
-            "CONTROL-CHURN-ACL-MODIFY-JWT, CONTROL-CHURN-ACL-MODIFY-BISCUIT",
-        )
-        # Issue 36: Interleaved control message scenarios for data+control plane testing
-        logger.info(
-            "INTERLEAVED-CONTROL-DATA-JWT, INTERLEAVED-CONTROL-DATA-BISCUIT",
-        )
-        # Issue 29: Anonymous flow scenario using Dynamic Security anonymousGroup
-        logger.info(
-            "ANON-BASE (anonymous clients with Dynamic Security policy)",
-        )
-        # Issue 19: ACL_READ fan-out authorization cost measurement scenarios
-        logger.info(
-            "ACL-READ-FANOUT-10, ACL-READ-FANOUT-50, ACL-READ-FANOUT-100, "
-            "ACL-READ-FANOUT-BIS-10, ACL-READ-FANOUT-BIS-50, ACL-READ-FANOUT-BIS-100",
-        )
+        for scenario_id in sorted(_expand_tls_matrix(available_scenarios)):
+            logger.info("%s", scenario_id)
         logger.info("Append -TLS to any scenario id for TLS variants.")
         return
 
@@ -2751,7 +2702,7 @@ def main(
                 )
                 logger.info("Network baseline: %.2f Mbps capacity confirmed", throughput_mbps)
 
-        cfg = s.get("authz")
+        cfg = s.get("authz_config")
         uses_http_authz = (
             "mosquitto_http.conf" in s["mosquitto_conf"]
             or "mosquitto_hybrid.conf" in s["mosquitto_conf"]
@@ -2786,7 +2737,7 @@ def main(
                 delay_ms=cfg.get("delay_ms"),
                 fail_mode=cfg.get("fail_mode"),
                 fail_rate=cfg.get("fail_rate"),
-                policy_profile=cfg.get("policy_profile"),
+                authz_profile=cfg.get("authz_profile"),
                 rules=cfg.get("rules"),
                 client_roles=cfg.get("client_roles"),
                 ca_file=tls_ca,
@@ -2818,16 +2769,14 @@ def main(
             grants_default_enabled = not token_issuer_no_default_grants
 
         biscuit_only = bool(s.get("biscuit_attenuate") or s.get("biscuit_delegate"))
-        policy_complexity_kind = s.get("policy_complexity_kind")
-        policy_complexity_tier = s.get("policy_complexity_tier")
+        complexity_axis = s.get("complexity_axis")
+        complexity_level = s.get("complexity_level")
         policy_source = s.get("policy_source") or _infer_policy_source(s)
-        policy_profile = s.get("policy_profile")
-        if policy_profile is None and isinstance(s.get("authz"), dict):
-            policy_profile = cast(dict[str, Any], s["authz"]).get("policy_profile")
-        acl_read_full_authz = _infer_acl_read_full_authz(s)
-        acl_read_mode = s.get("acl_read_mode")
-        if acl_read_mode is None:
-            acl_read_mode = "strict" if acl_read_full_authz else "expiry_only"
+        authz_profile = s.get("authz_profile")
+        if authz_profile is None and isinstance(s.get("authz_config"), dict):
+            authz_profile = cast(dict[str, Any], s["authz_config"]).get("authz_profile")
+        authorizer_profile = s.get("authorizer_profile")
+        acl_read_enforcement = _infer_acl_read_enforcement(s)
         out_payload: dict[str, Any] = {
             "scenario": s["id"],
             "token_len": token_len,
@@ -2850,9 +2799,9 @@ def main(
             "capability_flags": {
                 "biscuit_only": biscuit_only,
             },
-            "policy_complexity": {
-                "kind": policy_complexity_kind,
-                "tier": policy_complexity_tier,
+            "complexity": {
+                "axis": complexity_axis,
+                "level": complexity_level,
             },
             "attenuation": s.get("biscuit_attenuate"),
             "delegation": s.get("biscuit_delegate"),
@@ -2863,13 +2812,13 @@ def main(
                 "qos_distribution": qos_distribution,
                 "token_issuer_no_default_roles": token_issuer_no_default_roles,
                 "token_issuer_no_default_grants": token_issuer_no_default_grants,
-                "mode": s.get("mode"),
+                "traffic_pattern": s.get("traffic_pattern"),
                 "fanout_topic": s.get("fanout_topic"),
                 "subscriber_count": s.get("subscriber_count"),
                 "policy_source": policy_source,
-                "policy_profile": policy_profile,
-                "acl_read_full_authz": acl_read_full_authz,
-                "acl_read_mode": acl_read_mode,
+                "authz_profile": authz_profile,
+                "authorizer_profile": authorizer_profile,
+                "acl_read_enforcement": acl_read_enforcement,
                 "fanout_churn_kind": s.get("fanout_churn_kind"),
                 "fanout_churn_after_messages": s.get("fanout_churn_after_messages"),
                 "fanout_churn_interval_messages": s.get("fanout_churn_interval_messages"),
@@ -2884,7 +2833,7 @@ def main(
                 "fanout_churn_sqlite_topic": s.get("fanout_churn_sqlite_topic"),
                 "fanout_churn_sqlite_subscribers": s.get("fanout_churn_sqlite_subscribers"),
                 "cache_context": {
-                    "acl_read_full_authz_expected": acl_read_full_authz,
+                    "acl_read_enforcement_expected": acl_read_enforcement,
                     "cache_ttl_seconds": 3600,
                     "note": (
                         "strict ACL_READ scenarios should enforce policy changes on fan-out "
@@ -2894,9 +2843,9 @@ def main(
             },
             "fanout_metrics": {
                 "subscriber_count": s.get(
-                    "subscriber_count", clients if s.get("mode") == "fanout" else None
+                    "subscriber_count", clients if s.get("traffic_pattern") == "fanout" else None
                 ),
-                "message_count": messages if s.get("mode") == "fanout" else None,
+                "message_count": messages if s.get("traffic_pattern") == "fanout" else None,
                 "acl_read_cost_per_subscriber_ms": None,  # Calculated from receive latencies
             },
             "network_baseline": {
@@ -2939,18 +2888,18 @@ def main(
             _compose(["restart", "mosquitto"], extra_env=extra_env)
             time.sleep(1)
 
-        _validate_dynsec_fanout_alignment(s["id"], s)
-        dynsec_baseline = _capture_dynsec_baseline()
+        _validate_dynamic_security_fanout_alignment(s["id"], s)
+        dynsec_baseline = _capture_dynamic_security_baseline()
         compose_project_name = extra_env.get("COMPOSE_PROJECT_NAME") or os.environ.get(
             "COMPOSE_PROJECT_NAME"
         )
         try:
             for idx in range(repeats):
-                if s.get("dynsec_config"):
-                    _apply_dynsec_config(s["dynsec_config"])
-                elif s.get("dynsec_churn"):
-                    churn_list = s["dynsec_churn"]
-                    _apply_dynsec_config(churn_list[idx % len(churn_list)])
+                if s.get("dynamic_security_config"):
+                    _apply_dynamic_security_config(s["dynamic_security_config"])
+                elif s.get("dynamic_security_churn"):
+                    churn_list = s["dynamic_security_churn"]
+                    _apply_dynamic_security_config(churn_list[idx % len(churn_list)])
                 if s.get("sqlite_seed_fanout"):
                     policy_churn.seed_sqlite_fanout_policy(
                         s.get("sqlite_seed_db", "docker/sqlite/policy.db"),
@@ -2987,7 +2936,7 @@ def main(
                         clients=scenario_clients,
                         messages=messages,
                         topic=s.get("topic", "sensors/{client_id}/temp"),
-                        mode=s.get("mode"),
+                        mode=s.get("traffic_pattern"),
                         fanout_topic=s.get("fanout_topic"),
                         qos=scenario_qos,
                         qos_distribution=scenario_qos_distribution,
@@ -3104,7 +3053,9 @@ def main(
                         fanout_churn_interval_messages=s.get("fanout_churn_interval_messages", 0),
                         fanout_churn_max_events=s.get("fanout_churn_max_events", 1),
                         fanout_churn_settle_ms=s.get("fanout_churn_settle_ms", 0),
-                        fanout_churn_dynsec_source=s.get("fanout_churn_dynsec_source"),
+                        fanout_churn_dynamic_security_source=s.get(
+                            "fanout_churn_dynamic_security_source"
+                        ),
                         fanout_churn_sqlite_db=s.get("fanout_churn_sqlite_db"),
                         fanout_churn_sqlite_topic=s.get("fanout_churn_sqlite_topic"),
                         fanout_churn_sqlite_subscribers=s.get("fanout_churn_sqlite_subscribers"),
@@ -3171,7 +3122,7 @@ def main(
                 if s.get("sleep_between"):
                     time.sleep(float(s["sleep_between"]))
         finally:
-            _restore_dynsec_baseline(dynsec_baseline)
+            _restore_dynamic_security_baseline(dynsec_baseline)
 
         # Issue 15: Run packet analysis if tcpdump was enabled for this scenario
         packet_analysis_result: dict[str, Any] = {"enabled": False}
@@ -3211,7 +3162,7 @@ def main(
 
         # Issue 19: Calculate ACL_READ cost per subscriber for fanout scenarios
         subscriber_count = s.get("subscriber_count")
-        if s.get("mode") == "fanout" and out_payload["runs"] and subscriber_count:
+        if s.get("traffic_pattern") == "fanout" and out_payload["runs"] and subscriber_count:
             total_receive_ms = 0.0
             total_receive_count = 0
             for run in out_payload["runs"]:

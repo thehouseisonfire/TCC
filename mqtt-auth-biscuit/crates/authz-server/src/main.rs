@@ -97,7 +97,7 @@ struct AppConfig {
     allow_mode: AllowMode,
     topic_prefix: String,
     #[serde(default)]
-    policy_profile: PolicyProfile,
+    authz_profile: PolicyProfile,
     #[serde(default)]
     rules: Vec<Rule>,
     #[serde(default)]
@@ -113,7 +113,7 @@ impl Default for AppConfig {
             fail_rate: 0.0,
             allow_mode: AllowMode::TopicPrefix,
             topic_prefix: "sensors/".to_string(),
-            policy_profile: PolicyProfile::LegacyPrefix,
+            authz_profile: PolicyProfile::LegacyPrefix,
             rules: Vec::new(),
             client_roles: HashMap::new(),
             max_conns: 1024,
@@ -156,7 +156,7 @@ impl AppConfig {
         let topic_prefix =
             env::var("AUTHZ_TOPIC_PREFIX").unwrap_or_else(|_| "sensors/".to_string());
 
-        let policy_profile = env::var("AUTHZ_POLICY_PROFILE")
+        let authz_profile = env::var("AUTHZ_PROFILE")
             .ok()
             .and_then(|s| match s.to_ascii_lowercase().as_str() {
                 "legacy_prefix" => Some(PolicyProfile::LegacyPrefix),
@@ -179,7 +179,7 @@ impl AppConfig {
             fail_rate,
             allow_mode,
             topic_prefix,
-            policy_profile,
+            authz_profile,
             rules: Vec::new(),
             client_roles: HashMap::new(),
             max_conns,
@@ -194,7 +194,7 @@ struct ConfigUpdate {
     fail_rate: Option<f64>,
     allow_mode: Option<AllowMode>,
     topic_prefix: Option<String>,
-    policy_profile: Option<PolicyProfile>,
+    authz_profile: Option<PolicyProfile>,
     rules: Option<Vec<Rule>>,
     client_roles: Option<HashMap<String, Vec<String>>>,
 }
@@ -215,8 +215,8 @@ fn apply_config_update(next: &mut AppConfig, update: ConfigUpdate) {
     if let Some(v) = update.topic_prefix {
         next.topic_prefix = v;
     }
-    if let Some(v) = update.policy_profile {
-        next.policy_profile = v;
+    if let Some(v) = update.authz_profile {
+        next.authz_profile = v;
     }
     if let Some(v) = update.rules {
         next.rules = v;
@@ -234,7 +234,7 @@ fn config_summary_body(next: &AppConfig) -> serde_json::Value {
         "fail_rate": next.fail_rate,
         "allow_mode": next.allow_mode,
         "topic_prefix": next.topic_prefix,
-        "policy_profile": next.policy_profile,
+        "authz_profile": next.authz_profile,
         "rules_count": effective_rules(next).len(),
         "client_roles_count": next.client_roles.len(),
     })
@@ -529,7 +529,7 @@ fn complex_profile_rules() -> Vec<Rule> {
 }
 
 fn effective_rules(cfg: &AppConfig) -> Vec<Rule> {
-    let mut rules = match cfg.policy_profile {
+    let mut rules = match cfg.authz_profile {
         PolicyProfile::LegacyPrefix => Vec::new(),
         PolicyProfile::Simple => simple_profile_rules(),
         PolicyProfile::Med => med_profile_rules(),
@@ -659,7 +659,7 @@ fn evaluate_authorization(cfg: &AppConfig, req: &AuthRequest) -> bool {
     }
 
     let rules = effective_rules(cfg);
-    if cfg.policy_profile == PolicyProfile::LegacyPrefix && rules.is_empty() {
+    if cfg.authz_profile == PolicyProfile::LegacyPrefix && rules.is_empty() {
         return match cfg.allow_mode {
             AllowMode::AllowAll => true,
             AllowMode::DenyAll => false,
@@ -786,7 +786,7 @@ async fn handle(
                 client_id = %ar.client_id,
                 access = ar.access,
                 operation = access_to_operation(ar.access),
-                profile = ?cfg.policy_profile,
+                profile = ?cfg.authz_profile,
                 allowed = allowed,
                 "authorize"
             );
@@ -1087,7 +1087,7 @@ mod tests {
             "roles": ["reader"]
         }));
         let mut cfg = base_cfg();
-        cfg.policy_profile = PolicyProfile::Custom;
+        cfg.authz_profile = PolicyProfile::Custom;
         cfg.rules = vec![make_rule(
             RuleEffect::Allow,
             &["read"],
@@ -1112,7 +1112,7 @@ mod tests {
             "roles": ["reader"]
         }));
         let mut cfg = base_cfg();
-        cfg.policy_profile = PolicyProfile::Custom;
+        cfg.authz_profile = PolicyProfile::Custom;
         cfg.rules = vec![make_rule(
             RuleEffect::Allow,
             &["read"],
@@ -1152,7 +1152,7 @@ mod tests {
     #[test]
     fn client_roles_map_can_satisfy_role_rule_without_token() {
         let mut cfg = base_cfg();
-        cfg.policy_profile = PolicyProfile::Custom;
+        cfg.authz_profile = PolicyProfile::Custom;
         cfg.rules = vec![make_rule(
             RuleEffect::Allow,
             &["read"],
@@ -1177,7 +1177,7 @@ mod tests {
     #[test]
     fn config_update_remains_incremental() {
         let mut cfg = base_cfg();
-        cfg.policy_profile = PolicyProfile::Complex;
+        cfg.authz_profile = PolicyProfile::Complex;
         cfg.client_roles
             .insert("client_1".to_string(), vec!["admin".to_string()]);
         apply_config_update(
@@ -1188,7 +1188,7 @@ mod tests {
                 fail_rate: Some(0.05),
                 allow_mode: None,
                 topic_prefix: None,
-                policy_profile: None,
+                authz_profile: None,
                 rules: None,
                 client_roles: None,
             },
@@ -1196,7 +1196,7 @@ mod tests {
         assert_eq!(cfg.delay_ms, 200);
         assert!(matches!(cfg.fail_mode, FailMode::Rate));
         assert_eq!(cfg.fail_rate, 0.05);
-        assert_eq!(cfg.policy_profile, PolicyProfile::Complex);
+        assert_eq!(cfg.authz_profile, PolicyProfile::Complex);
         assert_eq!(cfg.client_roles.len(), 1);
     }
 
@@ -1205,7 +1205,7 @@ mod tests {
         let baseline = AppConfig {
             allow_mode: AllowMode::DenyAll,
             topic_prefix: "private/".to_string(),
-            policy_profile: PolicyProfile::Simple,
+            authz_profile: PolicyProfile::Simple,
             max_conns: 2048,
             ..base_cfg()
         };
@@ -1213,7 +1213,7 @@ mod tests {
         cfg.delay_ms = 123;
         cfg.fail_mode = FailMode::Always;
         cfg.fail_rate = 0.8;
-        cfg.policy_profile = PolicyProfile::Complex;
+        cfg.authz_profile = PolicyProfile::Complex;
         cfg.rules = complex_profile_rules();
         cfg.client_roles
             .insert("client_2".to_string(), vec!["reader".to_string()]);
@@ -1225,7 +1225,7 @@ mod tests {
         assert_eq!(cfg.fail_rate, 0.0);
         assert!(matches!(cfg.allow_mode, AllowMode::DenyAll));
         assert_eq!(cfg.topic_prefix, "private/");
-        assert_eq!(cfg.policy_profile, PolicyProfile::Simple);
+        assert_eq!(cfg.authz_profile, PolicyProfile::Simple);
         assert!(cfg.rules.is_empty());
         assert!(cfg.client_roles.is_empty());
         assert_eq!(cfg.max_conns, 2048);

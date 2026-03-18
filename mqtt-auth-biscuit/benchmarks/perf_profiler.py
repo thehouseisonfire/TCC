@@ -699,19 +699,19 @@ def get_default_perf_scenarios() -> list[str]:
         List of scenario IDs that benefit from CPU profiling
     """
     return [
-        "BASE-01",  # Baseline for comparison
-        "JWT-01",  # JWT token verification cost
-        "BIS-01",  # Biscuit token verification cost
-        "POLICY-COMPLEX-1",  # Policy complexity baseline
-        "POLICY-COMPLEX-5",  # Medium complexity
-        "POLICY-COMPLEX-25",  # High block count
-        "POLICY-COMPLEX-LOW",  # Datalog complexity low
-        "POLICY-COMPLEX-MED",  # Datalog complexity medium
-        "POLICY-COMPLEX-HIGH",  # Datalog complexity high
-        "POLICY-AUTHZ-TEMPLATE-SIMPLE",  # Authorizer template baseline
-        "POLICY-AUTHZ-TEMPLATE-RBAC",  # Authorizer template with role derivation
-        "POLICY-AUTHZ-TEMPLATE-CONTEXTUAL",  # Authorizer template with contextual checks
-        "THUNDERING-HERD",  # Connection burst CPU load
+        "BASELINE-NO-AUTH",  # Baseline for comparison
+        "TOKEN-BASELINE-JWT",  # JWT token verification cost
+        "TOKEN-BASELINE-BISCUIT",  # Biscuit token verification cost
+        "TOKEN-COMPLEXITY-CHAIN-1-BISCUIT",  # Policy complexity baseline
+        "TOKEN-COMPLEXITY-CHAIN-5-BISCUIT",  # Medium complexity
+        "TOKEN-COMPLEXITY-CHAIN-25-BISCUIT",  # High block count
+        "TOKEN-COMPLEXITY-DATALOG-LOW-BISCUIT",  # Datalog complexity low
+        "TOKEN-COMPLEXITY-DATALOG-MED-BISCUIT",  # Datalog complexity medium
+        "TOKEN-COMPLEXITY-DATALOG-HIGH-BISCUIT",  # Datalog complexity high
+        "TOKEN-AUTHORIZER-PROFILE-SIMPLE-BISCUIT",  # Authorizer template baseline
+        "TOKEN-AUTHORIZER-PROFILE-RBAC-BISCUIT",  # Authorizer template with role derivation
+        "TOKEN-AUTHORIZER-PROFILE-CONTEXTUAL-BISCUIT",  # Authorizer template with contextual checks
+        "TOKEN-THUNDERING-HERD-BISCUIT",  # Connection burst CPU load
     ]
 
 

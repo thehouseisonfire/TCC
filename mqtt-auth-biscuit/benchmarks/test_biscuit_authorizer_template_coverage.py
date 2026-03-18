@@ -10,9 +10,9 @@ def _tokens() -> dict[str, str]:
 def test_biscuit_authorizer_template_scenario_ids_are_preserved() -> None:
     scenarios = rs._biscuit_authorizer_template_scenarios(_tokens())
     assert set(scenarios.keys()) == {
-        "POLICY-AUTHZ-TEMPLATE-SIMPLE",
-        "POLICY-AUTHZ-TEMPLATE-RBAC",
-        "POLICY-AUTHZ-TEMPLATE-CONTEXTUAL",
+        "TOKEN-AUTHORIZER-PROFILE-SIMPLE-BISCUIT",
+        "TOKEN-AUTHORIZER-PROFILE-RBAC-BISCUIT",
+        "TOKEN-AUTHORIZER-PROFILE-CONTEXTUAL-BISCUIT",
     }
 
 
@@ -25,16 +25,16 @@ def test_biscuit_authorizer_template_scenario_metadata_is_explicit() -> None:
     scenarios = rs._biscuit_authorizer_template_scenarios(_tokens())
 
     expected = {
-        "POLICY-AUTHZ-TEMPLATE-SIMPLE": ("simple", "simple"),
-        "POLICY-AUTHZ-TEMPLATE-RBAC": ("med", "rbac"),
-        "POLICY-AUTHZ-TEMPLATE-CONTEXTUAL": ("complex", "contextual"),
+        "TOKEN-AUTHORIZER-PROFILE-SIMPLE-BISCUIT": ("simple", "simple"),
+        "TOKEN-AUTHORIZER-PROFILE-RBAC-BISCUIT": ("med", "rbac"),
+        "TOKEN-AUTHORIZER-PROFILE-CONTEXTUAL-BISCUIT": ("complex", "contextual"),
     }
 
     for scenario_id, (tier, profile) in expected.items():
         scenario = scenarios[scenario_id]
-        assert scenario["policy_complexity_kind"] == "authorizer_template"
-        assert scenario["policy_complexity_tier"] == tier
-        assert scenario["policy_profile"] == profile
+        assert scenario["complexity_axis"] == "authorizer_template"
+        assert scenario["complexity_level"] == tier
+        assert scenario["authorizer_profile"] == profile
         assert scenario["topic"] == "sensors/{client_id}/temp"
         assert scenario["username"] == "biscuit"
 

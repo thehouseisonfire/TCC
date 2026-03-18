@@ -33,9 +33,9 @@ class _FakeClient:
 
 
 def test_expected_authz_state_for_http_policy_complex():
-    cfg = rs._http_policy_authz_config("complex")
+    cfg = rs._http_profile_authz_config("complex")
     expected = rs._expected_authz_state(cfg, dict(rs.AUTHZ_BASELINE_STATE))
-    assert expected["policy_profile"] == "complex"
+    assert expected["authz_profile"] == "complex"
     assert expected["rules_count"] == 10
     assert expected["client_roles_count"] == 3
     assert expected["allow_mode"] == "topic_prefix"
@@ -43,9 +43,9 @@ def test_expected_authz_state_for_http_policy_complex():
 
 
 def test_expected_authz_state_for_http_policy_med():
-    cfg = rs._http_policy_authz_config("med")
+    cfg = rs._http_profile_authz_config("med")
     expected = rs._expected_authz_state(cfg, dict(rs.AUTHZ_BASELINE_STATE))
-    assert expected["policy_profile"] == "med"
+    assert expected["authz_profile"] == "med"
     assert expected["rules_count"] == 6
     assert expected["client_roles_count"] == 3
     assert expected["allow_mode"] == "topic_prefix"
@@ -64,7 +64,7 @@ def test_profile_rule_counts_match_authz_profiles():
 
 def test_expected_authz_state_counts_profile_rules_plus_custom_rules():
     cfg: rs.AuthzConfig = {
-        "policy_profile": "med",
+        "authz_profile": "med",
         "rules": [{"effect": "allow", "ops": ["read"], "topics": ["#"]}],
         "client_roles": {"client_x": ["reader"]},
     }
@@ -80,7 +80,7 @@ def test_expected_authz_state_uses_runtime_baseline_for_non_default_startup():
         "fail_rate": 0.0,
         "allow_mode": "deny_all",
         "topic_prefix": "private/",
-        "policy_profile": "simple",
+        "authz_profile": "simple",
         "rules_count": 0,
         "client_roles_count": 0,
     }
@@ -93,7 +93,7 @@ def test_assert_authz_state_raises_on_mismatch():
         rs._assert_authz_state(
             "JWT-HTTP-1000MS",
             "authz config apply",
-            {**rs.AUTHZ_BASELINE_STATE, "policy_profile": "complex"},
+            {**rs.AUTHZ_BASELINE_STATE, "authz_profile": "complex"},
             rs._expected_authz_state(None, dict(rs.AUTHZ_BASELINE_STATE)),
         )
 
@@ -105,14 +105,14 @@ def test_validated_authz_state_baseline_accepts_non_default_values():
         "fail_rate": 0,
         "allow_mode": "deny_all",
         "topic_prefix": "private/",
-        "policy_profile": "simple",
+        "authz_profile": "simple",
         "rules_count": 0,
         "client_roles_count": 0,
     }
     baseline = rs._validated_authz_state_baseline("JWT-HTTP-1000MS", "authz reset", observed)
     assert baseline["allow_mode"] == "deny_all"
     assert baseline["topic_prefix"] == "private/"
-    assert baseline["policy_profile"] == "simple"
+    assert baseline["authz_profile"] == "simple"
     rs._assert_authz_state("JWT-HTTP-1000MS", "authz reset", observed, baseline)
 
 

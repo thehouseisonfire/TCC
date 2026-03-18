@@ -12,17 +12,17 @@ def test_sqlite_rbac_deep_toggle_scenario_ids_are_present() -> None:
     scenarios = rs._sqlite_rbac_deep_toggle_scenarios(_tokens())
     assert set(scenarios.keys()) == {
         "SQLITE-RBAC-DEEP-CONFLICT-JWT",
-        "SQLITE-RBAC-DEEP-CONFLICT-BIS",
+        "SQLITE-RBAC-DEEP-CONFLICT-BISCUIT",
         "SQLITE-RBAC-DEEP-CONTROL-JWT",
-        "SQLITE-RBAC-DEEP-CONTROL-BIS",
+        "SQLITE-RBAC-DEEP-CONTROL-BISCUIT",
     }
 
 
 def test_sqlite_rbac_deep_toggle_conflict_scenarios_use_private_deny_toggle() -> None:
     scenarios = rs._sqlite_rbac_deep_toggle_scenarios(_tokens())
-    for scenario_id in ["SQLITE-RBAC-DEEP-CONFLICT-JWT", "SQLITE-RBAC-DEEP-CONFLICT-BIS"]:
+    for scenario_id in ["SQLITE-RBAC-DEEP-CONFLICT-JWT", "SQLITE-RBAC-DEEP-CONFLICT-BISCUIT"]:
         scenario = scenarios[scenario_id]
-        assert scenario["mode"] == "fanout"
+        assert scenario["traffic_pattern"] == "fanout"
         assert scenario["fanout_topic"] == "sensors/private/broadcast"
         assert scenario["sqlite_seed_fanout"] is True
         assert scenario["sqlite_seed_profile"] == "rbac_deep"
@@ -34,7 +34,7 @@ def test_sqlite_rbac_deep_toggle_conflict_scenarios_use_private_deny_toggle() ->
 
 def test_sqlite_rbac_deep_toggle_control_scenarios_enable_control_mode() -> None:
     scenarios = rs._sqlite_rbac_deep_toggle_scenarios(_tokens())
-    for scenario_id in ["SQLITE-RBAC-DEEP-CONTROL-JWT", "SQLITE-RBAC-DEEP-CONTROL-BIS"]:
+    for scenario_id in ["SQLITE-RBAC-DEEP-CONTROL-JWT", "SQLITE-RBAC-DEEP-CONTROL-BISCUIT"]:
         scenario = scenarios[scenario_id]
         assert scenario["control_mode"] is True
         assert scenario["control_topic"] == "$CONTROL/dynamic-security/v1"

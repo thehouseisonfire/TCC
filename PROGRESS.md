@@ -204,12 +204,12 @@ Each file contains:
 End-to-end execution has now been performed for the Issue 33 parity slice:
 
 - HTTP policy parity matrix:
-  - `HTTP-POLICY-SIMPLE-JWT`, `HTTP-POLICY-MED-JWT`,
-    `HTTP-POLICY-COMPLEX-JWT`
-  - `HTTP-POLICY-SIMPLE-BIS`, `HTTP-POLICY-MED-BIS`,
-    `HTTP-POLICY-COMPLEX-BIS`
+  - `HTTP-PROFILE-SIMPLE-JWT`, `HTTP-PROFILE-MED-JWT`,
+    `HTTP-PROFILE-COMPLEX-JWT`
+  - `HTTP-PROFILE-SIMPLE-BISCUIT`, `HTTP-PROFILE-MED-BISCUIT`,
+    `HTTP-PROFILE-COMPLEX-BISCUIT`
 - Complexity comparator scenarios:
-  - `POLICY-COMPLEX-LOW`, `POLICY-COMPLEX-MED`, `POLICY-COMPLEX-HIGH`
+  - `TOKEN-COMPLEXITY-DATALOG-LOW-BISCUIT`, `TOKEN-COMPLEXITY-DATALOG-MED-BISCUIT`, `TOKEN-COMPLEXITY-DATALOG-HIGH-BISCUIT`
 
 Artifacts produced:
 
@@ -244,8 +244,8 @@ The actionable parity gaps are tracked here as backlog items:
 3. SQLite policy now uses RBAC tables (`users/roles/user_roles/role_acls`) with
    deterministic churn helpers; preserve this parity-grade model in new scenarios
    (implemented in Issue 22).
-4. `POLICY-COMPLEX-*` naming must stay explicit about what is being stressed
-   (`block_chain` vs Datalog complexity; tracked by Issue 33; Issue 21 now
+4. `TOKEN-COMPLEXITY-*` naming must stay explicit about which complexity axis is being stressed
+   (`chain_length` vs Datalog complexity; tracked by Issue 33; Issue 21 now
    adds separate authorizer-template scenarios).
 5. Dynamic-security parity should continue to prefer policy-source isolation
    (roles-only token variants; tracked by Issue 28/31/32).
@@ -386,13 +386,13 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
       - `--perf` flag to enable profiling
       - `--perf-duration`, `--perf-sample-rate`, `--perf-events` configuration
       - `--perf-scenarios` for selective profiling
-      - Default profiling for key scenarios (BASE-01, JWT-01, BIS-01, POLICY-COMPLEX-*)
+      - Default profiling for key scenarios (BASELINE-NO-AUTH, TOKEN-BASELINE-JWT, TOKEN-BASELINE-BISCUIT, TOKEN-COMPLEXITY-*)
     - Results included in scenario JSON output with structured perf data
     - `benchmarks/PERF_PROFILING.md`: Comprehensive documentation with methodology, interpretation guide, and troubleshooting
   - **Research Alignment**: Enables H₂/H₃ validation by quantifying computational costs of JWT vs Biscuit verification at instruction level, complementing container-level metrics with PMU hardware counters.
 
 - [x] **Issue 17: Implement comprehensive QoS configuration and mixing features**
-  - **Summary**: Added full QoS 0/1/2 support with per-QoS latency tracking. Implemented QoS distribution parsing (`0:0.6,1:0.3,2:0.1` format) in `loadgen.py` with `--qos-distribution` CLI option. `WorkerResult` now tracks `publish_ms_by_qos` per level; `aggregate_results.py` reports per-QoS statistics in JSON and CSV. Added scenarios: `QOS0-BASE-01`, `QOS2-JWT`, `QOS2-BISCUIT`, `QOS-MIXED-JWT`, `QOS-MIXED-BISCUIT`. Enables H₂/H₃ validation of latency differences across QoS levels.
+  - **Summary**: Added full QoS 0/1/2 support with per-QoS latency tracking. Implemented QoS distribution parsing (`0:0.6,1:0.3,2:0.1` format) in `loadgen.py` with `--qos-distribution` CLI option. `WorkerResult` now tracks `publish_ms_by_qos` per level; `aggregate_results.py` reports per-QoS statistics in JSON and CSV. Added scenarios: `QOS0-BASELINE-NO-AUTH`, `TOKEN-QOS2-JWT`, `TOKEN-QOS2-BISCUIT`, `TOKEN-QOS-MIXED-JWT`, `TOKEN-QOS-MIXED-BISCUIT`. Enables H₂/H₃ validation of latency differences across QoS levels.
 
 - [x] **Issue 18: Avoid Base64URL encoding for Biscuit tokens where possible (use native Protobuf format)** — **COMPLETED 2026-02-06**
   - **Summary**: Native Protobuf transport for Biscuit tokens is now used across MQTT transport. Initial authentication uses raw Biscuit bytes in `CONNECT.password` (via Mosquitto's password-length fix), and MQTT v5 reauthentication uses raw Authentication Data.
@@ -441,9 +441,9 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Added deterministic token fixture `biscuit_authorizer_template` in
       `gen-tokens` for constant-token-size authorizer-template runs.
     - Added dedicated scenarios in `benchmarks/run_scenarios.py`:
-      - `POLICY-AUTHZ-TEMPLATE-SIMPLE`
-      - `POLICY-AUTHZ-TEMPLATE-RBAC`
-      - `POLICY-AUTHZ-TEMPLATE-CONTEXTUAL`
+      - `TOKEN-AUTHORIZER-PROFILE-SIMPLE-BISCUIT`
+      - `TOKEN-AUTHORIZER-PROFILE-RBAC-BISCUIT`
+      - `TOKEN-AUTHORIZER-PROFILE-CONTEXTUAL-BISCUIT`
     - Added dedicated Mosquitto configs (plain + TLS):
       - `docker/mosquitto_biscuit_authz_{simple,rbac,contextual}.conf`
       - `docker/tls/mosquitto_biscuit_authz_{simple,rbac,contextual}.conf`
@@ -465,7 +465,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Strengthened demo seeding with realistic role/topic/action grants
       (publish/subscribe/read/control).
     - Added deterministic periodic SQLite churn scenarios
-      (`SQLITE-RBAC-CHURN-JWT`, `SQLITE-RBAC-CHURN-BIS`) using
+      (`SQLITE-RBAC-CHURN-JWT`, `SQLITE-RBAC-CHURN-BISCUIT`) using
       `sqlite_toggle_read`.
     - Added deep representative SQLite scenarios for conflict and control
       families (`SQLITE-RBAC-DEEP-CONFLICT-*`, `SQLITE-RBAC-DEEP-CONTROL-*`)
@@ -500,7 +500,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
   - Summary: Replaced brittle error-message parsing with structured Datalog query to extract the minimum `expires_at` from Biscuit tokens. Updated `TokenType::Biscuit` to cache the expiry timestamp per session, clamped cache TTL to token expiry with a 5-minute fallback, and rejected already-expired tokens at auth time. Token issuer and benchmark generators now embed `expires_at` facts in authority and attenuation blocks to support stable expiry extraction.
 
 - [x] **Issue 29: Anonymous flow scenario via anonymousGroup policy**
-  - **Completed**: Enabled anonymous MQTT clients using Mosquitto's `allow_anonymous true` with Dynamic Security `anonymousGroup` policy. Added `allow_anonymous_no_token=true` config option and `ANON-BASE` scenario with proper plugin defer logic for no-token clients.
+  - **Completed**: Enabled anonymous MQTT clients using Mosquitto's `allow_anonymous true` with Dynamic Security `anonymousGroup` policy. Added `allow_anonymous_no_token=true` config option and `DYNAMIC-SECURITY-ANONYMOUS-BASELINE` scenario with proper plugin defer logic for no-token clients.
 
 - [x] **Issue 30: Verify dynamic-policy coverage with ACL_READ fan-out checks** — **COMPLETED 2026-02-26**
   - **Summary**: Added deterministic mid-run fan-out churn scenarios that
@@ -512,13 +512,13 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
       - `docker/mosquitto_dynsec_acl_read.conf` (+ TLS variant)
       - `docker/mosquitto_sqlite_acl_read.conf` (+ TLS variant)
     - New scenario matrix with subscriber scaling (10/50/100), JWT+Biscuit:
-      - `DYNSEC-ACLREAD-FANOUT-CHURN-{JWT|BIS}-{10|50|100}`
-      - `SQLITE-ACLREAD-FANOUT-CHURN-{JWT|BIS}-{10|50|100}`
+      - `DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-{JWT|BISCUIT}-{10|50|100}`
+      - `SQLITE-ACL-READ-FANOUT-CHURN-{JWT|BISCUIT}-{10|50|100}`
     - Deterministic fan-out orchestration in `loadgen.py`:
       subscriber-ready barrier, mid-run churn trigger, and pre/post-churn
       receive counters in `fanout_churn` result metadata.
     - Dynamic-security churn snapshot:
-      `docker/dynamic-security-fanout-read-deny.json` (subscribe retained,
+      `docker/dynamic-security-fanout-read-deny-unpinned.json` (subscribe retained,
       fan-out read removed).
     - SQLite churn helpers in `benchmarks/policy_churn.py`:
       deterministic fan-out seed + `ACL_READ` revoke during active runs.
@@ -574,10 +574,10 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
       - Built-in profiles (`simple`, `med`, `complex`) and custom rules
     - Added HTTP policy complexity scenarios in
       `benchmarks/run_scenarios.py`:
-      - `HTTP-POLICY-SIMPLE-JWT`, `HTTP-POLICY-MED-JWT`,
-        `HTTP-POLICY-COMPLEX-JWT`
-      - `HTTP-POLICY-SIMPLE-BIS`, `HTTP-POLICY-MED-BIS`,
-        `HTTP-POLICY-COMPLEX-BIS`
+      - `HTTP-PROFILE-SIMPLE-JWT`, `HTTP-PROFILE-MED-JWT`,
+        `HTTP-PROFILE-COMPLEX-JWT`
+      - `HTTP-PROFILE-SIMPLE-BISCUIT`, `HTTP-PROFILE-MED-BISCUIT`,
+        `HTTP-PROFILE-COMPLEX-BISCUIT`
     - Updated `SCENARIO_POLICIES.md` to document HTTP policy capabilities and
       scenario mapping.
 
@@ -602,7 +602,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Added `--control-after-messages` CLI option to `loadgen.py` with full implementation in `_run_worker()`
     - Added `control_after_messages` field to `WorkerConfig` and `control_injection_delay_ms` to `WorkerResult`
     - Implemented message counter tracking that injects control messages after every N data messages
-    - Added `INTERLEAVED-CONTROL-DATA-JWT` and `INTERLEAVED-CONTROL-DATA-BISCUIT` scenarios to `run_scenarios.py`
+    - Added `CONTROL-INTERLEAVED-DATA-JWT` and `CONTROL-INTERLEAVED-DATA-BISCUIT` scenarios to `run_scenarios.py`
     - Captured three key metrics: data message latency (`publish`), control message latency (`control`), and control injection delay (`control_injection_delay`)
     - Added comprehensive documentation in RUNNING_BENCHMARKS.md with usage examples and research interpretation notes
   - **Research Alignment**: Enables measurement of broker behavior under realistic mixed data+control plane workloads, supporting H2/H3 validation by quantifying control plane overhead during active data traffic.
@@ -614,20 +614,20 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     broker runtime integration assertions.
   - **Deliverables**:
     - New strict scenario families in `benchmarks/run_scenarios.py`:
-      - `TOKEN-ACLREAD-FANOUT-ALLOW-{JWT|BIS}-{10,50,100}`
-      - `TOKEN-ACLREAD-FANOUT-DENY-{JWT|BIS}-10`
-      - `HTTP-ACLREAD-FANOUT-{SIMPLE|MED|COMPLEX}-{ALLOW|DENY}-{JWT|BIS}-10`
-      - `HTTP-ACLREAD-FANOUT-MED-ALLOW-{JWT|BIS}-{50,100}`
-      - `HYBRID-ACLREAD-FANOUT-{SIMPLE|MED|COMPLEX}-{ALLOW|DENY}-{JWT|BIS}-10`
-      - `HYBRID-ACLREAD-FANOUT-MED-ALLOW-{JWT|BIS}-{50,100}`
+      - `TOKEN-ACL-READ-FANOUT-STRICT-ALLOW-{JWT|BISCUIT}-{10,50,100}`
+      - `TOKEN-ACL-READ-FANOUT-STRICT-DENY-{JWT|BISCUIT}-10`
+      - `HTTP-ACL-READ-FANOUT-STRICT-{SIMPLE|MED|COMPLEX}-{ALLOW|DENY}-{JWT|BISCUIT}-10`
+      - `HTTP-ACL-READ-FANOUT-STRICT-MED-ALLOW-{JWT|BISCUIT}-{50,100}`
+      - `HYBRID-ACL-READ-FANOUT-STRICT-{SIMPLE|MED|COMPLEX}-{ALLOW|DENY}-{JWT|BISCUIT}-10`
+      - `HYBRID-ACL-READ-FANOUT-STRICT-MED-ALLOW-{JWT|BISCUIT}-{50,100}`
     - New strict Mosquitto configs:
       - `docker/mosquitto_http_acl_read.conf` (+ TLS variant)
       - `docker/mosquitto_hybrid_acl_read.conf` (+ TLS variant)
-    - Profile-aware fan-out allow/deny HTTP authz payload helper and additive
-      ID strategy preserving existing scenario compatibility.
+    - Profile-aware fan-out allow/deny HTTP authz payload helper and
+      canonical scenario IDs with no compatibility aliases.
     - Result metadata now records:
-      `policy_source`, `policy_profile`, `acl_read_full_authz`, and
-      `acl_read_mode` per scenario run.
+      `policy_source`, `authz_profile`, `acl_read_enforcement`, and
+      `subscriber_count` per scenario run.
     - Broker integration coverage in
       `tests/integration/test_acl_read_profiles_matrix.py`:
       strict token fan-out allow/deny semantics, full HTTP/hybrid tier matrix

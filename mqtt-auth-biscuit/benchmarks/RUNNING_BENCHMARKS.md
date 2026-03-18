@@ -29,7 +29,7 @@ python3 run_benchmarks.py
 To run a subset of scenarios or enable TLS, pass flags through:
 
 ```bash
-python3 run_benchmarks.py --scenarios JWT-01,BIS-01
+python3 run_benchmarks.py --scenarios TOKEN-BASELINE-JWT,TOKEN-BASELINE-BISCUIT
 python3 run_benchmarks.py --tls
 ```
 
@@ -73,7 +73,7 @@ Token claim/fact schema and deny-over-allow semantics are defined in
 ### Client-Side (Online) Attenuation
 
 To exercise **online attenuation** (client-side block append), use the new
-`biscuit-attenuate` helper and the `BIS-ATTENUATE-CLIENT` scenario.
+`biscuit-attenuate` helper and the `TOKEN-ATTENUATION-CLIENT-BISCUIT` scenario.
 
 **Requirement:** build the helper before running benchmarks:
 `cargo build -p gen-tokens --bin biscuit-attenuate`.
@@ -103,16 +103,16 @@ and `## 2.7`).
 The delegation benchmark now exercises **real client-side delegation** instead
 of pre-generated delegated tokens.
 
-- `DELEGATION-TEMP-ONLY` uses a base Biscuit token and delegates a restricted
+- `TOKEN-DELEGATION-TEMP-ONLY-BISCUIT` uses a base Biscuit token and delegates a restricted
   token per client at runtime (topic + operation + TTL). Delegation latency and
   resulting token length are recorded as `delegation` metrics.
-- `DELEGATION-HANDOFF` adds a broker-mediated handoff: a master client delegates
+- `TOKEN-DELEGATION-HANDOFF-BISCUIT` adds a broker-mediated handoff: a master client delegates
   tokens, then publishes them to `delegation/handoff` over MQTT. Workers
   subscribe with a handoff token (`biscuit_delegation_handoff` from
   `tokens.json`) to receive their delegated token before connecting with their
   actual publish credentials. The default handoff uses QoS 1 with retained
   messages.
-- `DELEGATION-SIMULATED` keeps the previous pre-generated delegated token to
+- `TOKEN-DELEGATION-SIMULATED-BISCUIT` keeps the previous pre-generated delegated token to
   compare runtime delegation against the simulated baseline.
 
 Handoff-specific knobs (loadgen):
@@ -195,13 +195,13 @@ Token-only Biscuit scenarios can now select plugin-side authorizer complexity wi
 
 Dedicated scenarios for this axis:
 
-- `POLICY-AUTHZ-TEMPLATE-SIMPLE`
-- `POLICY-AUTHZ-TEMPLATE-RBAC`
-- `POLICY-AUTHZ-TEMPLATE-CONTEXTUAL`
+- `TOKEN-AUTHORIZER-PROFILE-SIMPLE-BISCUIT`
+- `TOKEN-AUTHORIZER-PROFILE-RBAC-BISCUIT`
+- `TOKEN-AUTHORIZER-PROFILE-CONTEXTUAL-BISCUIT`
 
 Static scenario ACL coverage:
-- `STATIC-ACL-JWT`, `STATIC-ACL-BIS`: publish path (`ACL_WRITE`) with writer role tokens.
-- `STATIC-ACL-FANOUT`, `STATIC-ACL-FANOUT-BIS`: subscribe path (`ACL_SUBSCRIBE`) with reader subscribers and writer publisher; fan-out delivery invokes `ACL_READ` as documented above.
+- `STATIC-ACL-PUBLISH-JWT`, `STATIC-ACL-PUBLISH-BISCUIT`: publish path (`ACL_WRITE`) with writer role tokens.
+- `STATIC-ACL-FANOUT-JWT`, `STATIC-ACL-FANOUT-BISCUIT`: subscribe path (`ACL_SUBSCRIBE`) with reader subscribers and writer publisher; fan-out delivery invokes `ACL_READ` as documented above.
 - Static scenarios are wired to role-only token fixtures so ACL file rules remain authoritative.
 
 ### ACL_READ Fan-out Mode (`acl_read_full_authz`)
@@ -227,8 +227,8 @@ These scenarios validate that policy changes are enforced for **already subscrib
 clients during fan-out delivery (`MOSQ_ACL_READ`), not just at subscribe time.
 
 Dynamic Security (strict `ACL_READ`):
-- `DYNSEC-ACLREAD-FANOUT-CHURN-JWT-10/50/100`
-- `DYNSEC-ACLREAD-FANOUT-CHURN-BIS-10/50/100`
+- `DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-JWT-10/50/100`
+- `DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-BISCUIT-10/50/100`
 - Uses `mosquitto_dynsec_acl_read.conf` (`plugin_opt_acl_read_full_authz true`)
 - Seeds baseline from `dynamic-security-fanout-read-allow-unpinned.json`
   so one subscriber username can authorize all declared fan-out clients
@@ -236,8 +236,8 @@ Dynamic Security (strict `ACL_READ`):
   after message 5
 
 SQLite (strict `ACL_READ`):
-- `SQLITE-ACLREAD-FANOUT-CHURN-JWT-10/50/100`
-- `SQLITE-ACLREAD-FANOUT-CHURN-BIS-10/50/100`
+- `SQLITE-ACL-READ-FANOUT-CHURN-JWT-10/50/100`
+- `SQLITE-ACL-READ-FANOUT-CHURN-BISCUIT-10/50/100`
 - Uses `mosquitto_sqlite_acl_read.conf` (`policy_mode=sqlite`,
   `plugin_opt_acl_read_full_authz true`,
   `plugin_opt_sqlite_seed_demo_rules false`)
@@ -266,25 +266,25 @@ Strict config files:
 
 Scenario families:
 - Token strict fan-out:
-  - `TOKEN-ACLREAD-FANOUT-ALLOW-{JWT|BIS}-{10,50,100}`
-  - `TOKEN-ACLREAD-FANOUT-DENY-{JWT|BIS}-10`
+  - `TOKEN-ACL-READ-FANOUT-STRICT-ALLOW-{JWT|BISCUIT}-{10,50,100}`
+  - `TOKEN-ACL-READ-FANOUT-STRICT-DENY-{JWT|BISCUIT}-10`
 - HTTP strict fan-out:
-  - `HTTP-ACLREAD-FANOUT-{SIMPLE|MED|COMPLEX}-{ALLOW|DENY}-{JWT|BIS}-10`
-  - `HTTP-ACLREAD-FANOUT-MED-ALLOW-{JWT|BIS}-{50,100}`
+  - `HTTP-ACL-READ-FANOUT-STRICT-{SIMPLE|MED|COMPLEX}-{ALLOW|DENY}-{JWT|BISCUIT}-10`
+  - `HTTP-ACL-READ-FANOUT-STRICT-MED-ALLOW-{JWT|BISCUIT}-{50,100}`
 - Hybrid strict fan-out:
-  - `HYBRID-ACLREAD-FANOUT-{SIMPLE|MED|COMPLEX}-{ALLOW|DENY}-{JWT|BIS}-10`
-  - `HYBRID-ACLREAD-FANOUT-MED-ALLOW-{JWT|BIS}-{50,100}`
+  - `HYBRID-ACL-READ-FANOUT-STRICT-{SIMPLE|MED|COMPLEX}-{ALLOW|DENY}-{JWT|BISCUIT}-10`
+  - `HYBRID-ACL-READ-FANOUT-STRICT-MED-ALLOW-{JWT|BISCUIT}-{50,100}`
 
 Result metadata now records strict fan-out context per run:
 - `scenario_config.policy_source`
-- `scenario_config.policy_profile`
-- `scenario_config.acl_read_full_authz`
-- `scenario_config.acl_read_mode`
+- `scenario_config.authz_profile`
+- `scenario_config.acl_read_enforcement`
+- `scenario_config.subscriber_count`
 
 ### Issue 22: Periodic SQLite RBAC Churn Scenarios
 
 - `SQLITE-RBAC-CHURN-JWT`
-- `SQLITE-RBAC-CHURN-BIS`
+- `SQLITE-RBAC-CHURN-BISCUIT`
 
 These scenarios run strict `ACL_READ` fan-out with deterministic periodic SQLite
 policy updates (`sqlite_toggle_read`) to simulate runtime RBAC churn during an
@@ -294,9 +294,9 @@ active data-plane stream. Default cadence: first churn at message 4, then every
 ### Issue 22: Deep SQLite RBAC Profiles
 
 - `SQLITE-RBAC-DEEP-CONFLICT-JWT`
-- `SQLITE-RBAC-DEEP-CONFLICT-BIS`
+- `SQLITE-RBAC-DEEP-CONFLICT-BISCUIT`
 - `SQLITE-RBAC-DEEP-CONTROL-JWT`
-- `SQLITE-RBAC-DEEP-CONTROL-BIS`
+- `SQLITE-RBAC-DEEP-CONTROL-BISCUIT`
 
 Deep profiles add:
 - Explicit deny-over-allow conflicts at the same priority tier.
@@ -312,7 +312,7 @@ Example run:
 
 ```bash
 python3 benchmarks/run_scenarios.py \
-  --scenarios SQLITE-RBAC-DEEP-CONFLICT-JWT,SQLITE-RBAC-DEEP-CONTROL-BIS
+  --scenarios SQLITE-RBAC-DEEP-CONFLICT-JWT,SQLITE-RBAC-DEEP-CONTROL-BISCUIT
 ```
 
 Validation signal in scenario result JSON (`runs[].loadgen.fanout_churn`):
@@ -320,14 +320,14 @@ Validation signal in scenario result JSON (`runs[].loadgen.fanout_churn`):
 - `received_pre_churn > 0`
 - `received_post_churn` drops below `expected_post_churn`
 
-### Anonymous Flow Scenario (ANON-BASE)
+### Anonymous Flow Scenario (DYNAMIC-SECURITY-ANONYMOUS-BASELINE)
 
 Policy rationale and security trade-offs are documented in
 `../../SCENARIO_POLICIES.md` (`## 2.8`).
 
 **Usage:**
 ```bash
-python3 benchmarks/run_scenarios.py --scenarios ANON-BASE
+python3 benchmarks/run_scenarios.py --scenarios DYNAMIC-SECURITY-ANONYMOUS-BASELINE
 ```
 
 This run uses `docker/mosquitto_anon.conf` and `docker/dynamic-security-anon.json`.
@@ -577,7 +577,7 @@ The scenario runner includes automatic network capacity measurement using `iperf
 
 Run with default iperf3 baseline (enabled by default):
 ```bash
-python3 benchmarks/run_scenarios.py --scenarios BASE-01,JWT-01
+python3 benchmarks/run_scenarios.py --scenarios BASELINE-NO-AUTH,TOKEN-BASELINE-JWT
 ```
 
 Disable iperf3 baseline (faster startup, no network validation):
@@ -695,8 +695,8 @@ These scenarios measure **control plane latency under active data plane load** b
 
 ### Scenario Configuration
 
-- `INTERLEAVED-CONTROL-DATA-JWT` - JWT tokens with interleaved control messages
-- `INTERLEAVED-CONTROL-DATA-BISCUIT` - Biscuit tokens with interleaved control messages
+- `CONTROL-INTERLEAVED-DATA-JWT` - JWT tokens with interleaved control messages
+- `CONTROL-INTERLEAVED-DATA-BISCUIT` - Biscuit tokens with interleaved control messages
 
 Default configuration publishes **1 control message after every 10 data messages** (`--control-after-messages 10`).
 
@@ -750,7 +750,7 @@ Example output structure:
 
 ```bash
 # Run interleaved scenario via run_scenarios.py
-python3 benchmarks/run_scenarios.py --scenarios INTERLEAVED-CONTROL-DATA-JWT
+python3 benchmarks/run_scenarios.py --scenarios CONTROL-INTERLEAVED-DATA-JWT
 
 # Direct loadgen usage with interleaved control
 python3 benchmarks/loadgen.py \
@@ -765,7 +765,7 @@ python3 benchmarks/loadgen.py \
 ### Research Notes
 
 - **Control overhead**: Compare `control.mean_ms` between `INTERLEAVED-CONTROL-*` and `CONTROL-OVERHEAD-*` to measure the impact of concurrent data traffic
-- **Data impact**: Compare `publish.mean_ms` between baseline (`JWT-01`, `BIS-01`) and interleaved scenarios to quantify data plane degradation
+- **Data impact**: Compare `publish.mean_ms` between baseline (`TOKEN-BASELINE-JWT`, `TOKEN-BASELINE-BISCUIT`) and interleaved scenarios to quantify data plane degradation
 - **Injection efficiency**: `control_injection_delay` should remain low (<5ms); high values indicate broker contention
 
 ## Step 5: Cleanup
@@ -778,7 +778,7 @@ docker compose -f docker/docker-compose.yml down
 
 ## Packet Capture and Fragmentation Analysis (Issue 15)
 
-The benchmark suite includes automated packet capture using `tcpdump` to analyze TCP fragmentation behavior during MTU stress tests. This feature is automatically enabled for MTU scenarios (MTU-200-JWT, MTU-500-BIS-25, etc.) to provide quantitative insights into how token size affects network-level fragmentation.
+The benchmark suite includes automated packet capture using `tcpdump` to analyze TCP fragmentation behavior during MTU stress tests. This feature is automatically enabled for MTU scenarios (NETWORK-MTU-200-JWT, NETWORK-MTU-500-BISCUIT-CHAIN-25, etc.) to provide quantitative insights into how token size affects network-level fragmentation.
 
 ### How It Works
 
@@ -801,7 +801,7 @@ The benchmark suite includes automated packet capture using `tcpdump` to analyze
 
 Run with default tcpdump capture (auto-enabled for MTU scenarios):
 ```bash
-python3 benchmarks/run_scenarios.py --scenarios MTU-200-JWT,MTU-500-BIS-25
+python3 benchmarks/run_scenarios.py --scenarios NETWORK-MTU-200-JWT,NETWORK-MTU-500-BISCUIT-CHAIN-25
 ```
 
 Disable packet capture entirely:
@@ -827,7 +827,7 @@ Packet analysis results are included in scenario output JSON under `packet_analy
 {
   "packet_analysis_result": {
     "enabled": true,
-    "pcap_file": "benchmarks/results/pcap/MTU-200-JWT.pcap",
+    "pcap_file": "benchmarks/results/pcap/NETWORK-MTU-200-JWT.pcap",
     "metrics": {
       "total_packets": 1250,
       "total_bytes": 456780,

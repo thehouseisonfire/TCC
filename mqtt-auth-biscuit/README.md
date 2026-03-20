@@ -60,6 +60,11 @@ Progress tracking, open gaps, and implementation status are tracked in:
 See [benchmarks/RUNNING_BENCHMARKS.md](benchmarks/RUNNING_BENCHMARKS.md) for how
 to execute the scenario battery.
 
+For HTTP/hybrid benchmarking, the external authz server now resets to a neutral
+rule-engine baseline (`authz_profile=custom`, empty rules, default deny).
+Scenarios must apply an explicit profile or custom rule set; benchmark semantics
+are no longer inherited from implicit startup behavior.
+
 The main entrypoint is:
 
 `benchmarks/run_scenarios.py`

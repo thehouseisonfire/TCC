@@ -45,24 +45,13 @@ enum FailMode {
     Rate,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[derive(Default)]
-enum AllowMode {
-    AllowAll,
-    DenyAll,
-    #[default]
-    TopicPrefix,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum PolicyProfile {
-    #[default]
-    LegacyPrefix,
     Simple,
     Med,
     Complex,
+    #[default]
     Custom,
 }
 
@@ -94,8 +83,6 @@ struct AppConfig {
     delay_ms: u64,
     fail_mode: FailMode,
     fail_rate: f64,
-    allow_mode: AllowMode,
-    topic_prefix: String,
     #[serde(default)]
     authz_profile: PolicyProfile,
     #[serde(default)]
@@ -111,9 +98,7 @@ impl Default for AppConfig {
             delay_ms: 0,
             fail_mode: FailMode::None,
             fail_rate: 0.0,
-            allow_mode: AllowMode::TopicPrefix,
-            topic_prefix: "sensors/".to_string(),
-            authz_profile: PolicyProfile::LegacyPrefix,
+            authz_profile: PolicyProfile::Custom,
             rules: Vec::new(),
             client_roles: HashMap::new(),
             max_conns: 1024,
@@ -143,30 +128,16 @@ impl AppConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0.0);
 
-        let allow_mode = env::var("AUTHZ_ALLOW_MODE")
-            .ok()
-            .and_then(|s| match s.to_ascii_lowercase().as_str() {
-                "allow_all" => Some(AllowMode::AllowAll),
-                "deny_all" => Some(AllowMode::DenyAll),
-                "topic_prefix" => Some(AllowMode::TopicPrefix),
-                _ => None,
-            })
-            .unwrap_or_default();
-
-        let topic_prefix =
-            env::var("AUTHZ_TOPIC_PREFIX").unwrap_or_else(|_| "sensors/".to_string());
-
         let authz_profile = env::var("AUTHZ_PROFILE")
             .ok()
             .and_then(|s| match s.to_ascii_lowercase().as_str() {
-                "legacy_prefix" => Some(PolicyProfile::LegacyPrefix),
                 "simple" => Some(PolicyProfile::Simple),
                 "med" => Some(PolicyProfile::Med),
                 "complex" => Some(PolicyProfile::Complex),
                 "custom" => Some(PolicyProfile::Custom),
                 _ => None,
             })
-            .unwrap_or(PolicyProfile::LegacyPrefix);
+            .unwrap_or(PolicyProfile::Custom);
 
         let max_conns = env::var("AUTHZ_MAX_CONNS")
             .ok()
@@ -177,8 +148,6 @@ impl AppConfig {
             delay_ms,
             fail_mode,
             fail_rate,
-            allow_mode,
-            topic_prefix,
             authz_profile,
             rules: Vec::new(),
             client_roles: HashMap::new(),
@@ -192,8 +161,6 @@ struct ConfigUpdate {
     delay_ms: Option<u64>,
     fail_mode: Option<FailMode>,
     fail_rate: Option<f64>,
-    allow_mode: Option<AllowMode>,
-    topic_prefix: Option<String>,
     authz_profile: Option<PolicyProfile>,
     rules: Option<Vec<Rule>>,
     client_roles: Option<HashMap<String, Vec<String>>>,
@@ -208,12 +175,6 @@ fn apply_config_update(next: &mut AppConfig, update: ConfigUpdate) {
     }
     if let Some(v) = update.fail_rate {
         next.fail_rate = v;
-    }
-    if let Some(v) = update.allow_mode {
-        next.allow_mode = v;
-    }
-    if let Some(v) = update.topic_prefix {
-        next.topic_prefix = v;
     }
     if let Some(v) = update.authz_profile {
         next.authz_profile = v;
@@ -232,8 +193,6 @@ fn config_summary_body(next: &AppConfig) -> serde_json::Value {
         "delay_ms": next.delay_ms,
         "fail_mode": next.fail_mode,
         "fail_rate": next.fail_rate,
-        "allow_mode": next.allow_mode,
-        "topic_prefix": next.topic_prefix,
         "authz_profile": next.authz_profile,
         "rules_count": effective_rules(next).len(),
         "client_roles_count": next.client_roles.len(),
@@ -530,7 +489,6 @@ fn complex_profile_rules() -> Vec<Rule> {
 
 fn effective_rules(cfg: &AppConfig) -> Vec<Rule> {
     let mut rules = match cfg.authz_profile {
-        PolicyProfile::LegacyPrefix => Vec::new(),
         PolicyProfile::Simple => simple_profile_rules(),
         PolicyProfile::Med => med_profile_rules(),
         PolicyProfile::Complex => complex_profile_rules(),
@@ -659,14 +617,6 @@ fn evaluate_authorization(cfg: &AppConfig, req: &AuthRequest) -> bool {
     }
 
     let rules = effective_rules(cfg);
-    if cfg.authz_profile == PolicyProfile::LegacyPrefix && rules.is_empty() {
-        return match cfg.allow_mode {
-            AllowMode::AllowAll => true,
-            AllowMode::DenyAll => false,
-            AllowMode::TopicPrefix => req.topic.starts_with(&cfg.topic_prefix),
-        };
-    }
-
     let ctx = EvalContext {
         operation,
         topic: req.topic.trim(),
@@ -1131,22 +1081,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_mode_stays_backward_compatible() {
+    fn empty_custom_policy_denies_without_matching_rule() {
         let cfg = base_cfg();
-        let req_allow = AuthRequest {
+        let req = AuthRequest {
             client_id: "client_1".to_string(),
             topic: "sensors/client_1/temp".to_string(),
             access: 0x02,
             token: None,
         };
-        let req_deny = AuthRequest {
-            client_id: "client_1".to_string(),
-            topic: "devices/client_1/temp".to_string(),
-            access: 0x02,
-            token: None,
-        };
-        assert!(evaluate_authorization(&cfg, &req_allow));
-        assert!(!evaluate_authorization(&cfg, &req_deny));
+        assert!(!evaluate_authorization(&cfg, &req));
     }
 
     #[test]
@@ -1186,8 +1129,6 @@ mod tests {
                 delay_ms: Some(200),
                 fail_mode: Some(FailMode::Rate),
                 fail_rate: Some(0.05),
-                allow_mode: None,
-                topic_prefix: None,
                 authz_profile: None,
                 rules: None,
                 client_roles: None,
@@ -1203,8 +1144,6 @@ mod tests {
     #[test]
     fn config_reset_restores_startup_baseline() {
         let baseline = AppConfig {
-            allow_mode: AllowMode::DenyAll,
-            topic_prefix: "private/".to_string(),
             authz_profile: PolicyProfile::Simple,
             max_conns: 2048,
             ..base_cfg()
@@ -1223,8 +1162,6 @@ mod tests {
         assert_eq!(cfg.delay_ms, 0);
         assert!(matches!(cfg.fail_mode, FailMode::None));
         assert_eq!(cfg.fail_rate, 0.0);
-        assert!(matches!(cfg.allow_mode, AllowMode::DenyAll));
-        assert_eq!(cfg.topic_prefix, "private/");
         assert_eq!(cfg.authz_profile, PolicyProfile::Simple);
         assert!(cfg.rules.is_empty());
         assert!(cfg.client_roles.is_empty());

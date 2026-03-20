@@ -69,9 +69,7 @@ AUTHZ_BASELINE_STATE: dict[str, object] = {
     "delay_ms": 0,
     "fail_mode": "none",
     "fail_rate": 0.0,
-    "allow_mode": "topic_prefix",
-    "topic_prefix": "sensors/",
-    "authz_profile": "legacy_prefix",
+    "authz_profile": "custom",
     "rules_count": 0,
     "client_roles_count": 0,
 }
@@ -80,15 +78,12 @@ AUTHZ_STATE_KEYS: tuple[str, ...] = (
     "delay_ms",
     "fail_mode",
     "fail_rate",
-    "allow_mode",
-    "topic_prefix",
     "authz_profile",
     "rules_count",
     "client_roles_count",
 )
 
 AUTHZ_PROFILE_RULE_COUNT: dict[str, int] = {
-    "legacy_prefix": 0,
     "simple": 2,
     "med": 6,
     "complex": 10,
@@ -998,6 +993,21 @@ def _http_profile_authz_config(tier: Literal["simple", "med", "complex"]) -> Aut
     }
 
 
+def _tuned_profile_authz_config(
+    tier: Literal["simple", "med", "complex"],
+    *,
+    delay_ms: int,
+    fail_mode: str,
+    fail_rate: float | None = None,
+) -> AuthzConfig:
+    cfg = _http_profile_authz_config(tier)
+    cfg["delay_ms"] = delay_ms
+    cfg["fail_mode"] = fail_mode
+    if fail_rate is not None:
+        cfg["fail_rate"] = fail_rate
+    return cfg
+
+
 def _http_hybrid_fanout_authz_config_profile_matrix(
     tier: Literal["simple", "med", "complex"],
     *,
@@ -1828,7 +1838,11 @@ def _build_available_scenarios(
             "username": "jwt",
             "password": tokens["jwt"],
             "topic": "sensors/{client_id}/temp",
-            "authz_config": {"delay_ms": 200, "fail_mode": "none"},
+            "authz_config": _tuned_profile_authz_config(
+                "simple",
+                delay_ms=200,
+                fail_mode="none",
+            ),
             "netem": {"clear": True},
             "message_size": 0,
         },
@@ -1870,7 +1884,11 @@ def _build_available_scenarios(
             "username": "jwt",
             "password": tokens["jwt"],
             "topic": "sensors/{client_id}/temp",
-            "authz_config": {"delay_ms": 1000, "fail_mode": "none"},
+            "authz_config": _tuned_profile_authz_config(
+                "simple",
+                delay_ms=1000,
+                fail_mode="none",
+            ),
             "netem": {"clear": True},
             "message_size": 0,
         },
@@ -1879,7 +1897,11 @@ def _build_available_scenarios(
             "username": "jwt",
             "password": tokens["jwt"],
             "topic": "sensors/{client_id}/temp",
-            "authz_config": {"delay_ms": 0, "fail_mode": "always"},
+            "authz_config": _tuned_profile_authz_config(
+                "simple",
+                delay_ms=0,
+                fail_mode="always",
+            ),
             "netem": {"clear": True},
             "message_size": 0,
         },
@@ -1897,7 +1919,11 @@ def _build_available_scenarios(
             "username": "biscuit",
             "password": tokens["biscuit"],
             "topic": "sensors/{client_id}/temp",
-            "authz_config": {"delay_ms": 200, "fail_mode": "none"},
+            "authz_config": _tuned_profile_authz_config(
+                "simple",
+                delay_ms=200,
+                fail_mode="none",
+            ),
             "netem": {"clear": True},
             "message_size": 0,
         },
@@ -1939,7 +1965,12 @@ def _build_available_scenarios(
             "username": "jwt",
             "password": tokens["jwt"],
             "topic": "sensors/{client_id}/temp",
-            "authz_config": {"delay_ms": 200, "fail_mode": "rate", "fail_rate": 0.01},
+            "authz_config": _tuned_profile_authz_config(
+                "simple",
+                delay_ms=200,
+                fail_mode="rate",
+                fail_rate=0.01,
+            ),
             "netem": {"clear": True},
             "message_size": 0,
         },
@@ -1948,7 +1979,12 @@ def _build_available_scenarios(
             "username": "jwt",
             "password": tokens["jwt"],
             "topic": "sensors/{client_id}/temp",
-            "authz_config": {"delay_ms": 200, "fail_mode": "rate", "fail_rate": 0.05},
+            "authz_config": _tuned_profile_authz_config(
+                "simple",
+                delay_ms=200,
+                fail_mode="rate",
+                fail_rate=0.05,
+            ),
             "netem": {"clear": True},
             "message_size": 0,
         },

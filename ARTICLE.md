@@ -107,6 +107,11 @@ Due to the architectural characteristics of each technology, the PIP query flow 
 
 To ensure test parity and avoid bias, common scenarios in JWT usage, where the token performs only the identification role and the PDP fetches detailed permissions at access time, will also be replicated in the Biscuit architecture for direct comparison purposes.
 
+For reproducibility, HTTP/hybrid PDP experiments use an explicit rule-engine
+configuration per scenario. The authz-server reset state is a neutral baseline
+(`custom` profile with empty rules, default deny), so latency/failure slices do
+not inherit hidden allow semantics from startup defaults.
+
 ## Proposed Solution
 
 The proposed solution consists of developing an extension module for Mosquitto, developed in Rust. The choice is justified by Rust's memory safety and performance guarantees, in addition to the native availability of the Biscuit reference implementation. The final artifact will be a dynamic library (*Shared Object* - `.so`) loaded at runtime by Mosquitto.

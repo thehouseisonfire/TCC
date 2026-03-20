@@ -13,7 +13,7 @@ Execution commands and run workflow are documented in
 | Policy Source | Where Defined | Used By | Notes |
 | --- | --- | --- | --- |
 | Token-only rules | JWT claims (`grants`, `denies`), Biscuit facts (`right`, `deny`) | `policy_mode=token` | Same deny-over-allow semantics. JWT uses MQTT wildcard filters; Biscuit uses MQTT wildcard filters via topic matching. |
-| HTTP policy (introspection) | `crates/authz-server/src/main.rs` | `policy_mode=http` or `hybrid` | Rule engine with deny-over-allow semantics, operation/client/role/topic matching, MQTT wildcards, and optional legacy prefix mode. |
+| HTTP policy (introspection) | `crates/authz-server/src/main.rs` | `policy_mode=http` or `hybrid` | Rule engine with deny-over-allow semantics, operation/client/role/topic matching, MQTT wildcards, and explicit `simple`/`med`/`complex` or `custom` scenario policy. Reset baseline is neutral `custom` + empty rules (default deny). |
 | Static ACL file | `docker/static-acl.conf` | `policy_mode=static_acl` | Compound gate with token + Mosquitto native ACLs. Token allow short-circuits; token deny defers to ACL. |
 | Dynamic Security snapshot | `docker/dynamic-security*.json` | `policy_mode=dynamic_security` | Local snapshot of Mosquitto dynsec-like RBAC, reloaded on interval. |
 | SQLite policy | `sqlite_policy.rs` + `benchmarks/policy_churn.py` | `policy_mode=sqlite` | RBAC-aware SQLite backend (`users`, `roles`, `user_roles`, `role_acls`, `role_deny_acls`) with role priorities, deny-over-allow precedence, legacy `acl` fallback for compatibility, and deterministic fan-out seed/churn helpers. |
@@ -121,11 +121,11 @@ plugin-side authorizer template/rule complexity changes. Scenario outputs includ
 
 | Scenario | Token | Policy Source | Policy Detail | Expected Outcome |
 | --- | --- | --- | --- | --- |
-| HTTP-LATENCY-200MS-JWT | JWT | HTTP | Allow when topic starts with `sensors/` | Allows |
-| HTTP-LATENCY-1000MS-JWT | JWT | HTTP | Same allow policy, added latency | Allows |
-| HTTP-LATENCY-200MS-BISCUIT | Biscuit | HTTP | Same allow policy, no JWT token in request | Allows |
-| HTTP-LATENCY-200MS-JWT-LOSS1/LOSS5 | JWT | HTTP | Same allow policy, injected failures | Flaky by design |
-| HYBRID-FALLBACK-AUTHZ-DOWN-JWT | JWT | Hybrid | HTTP always fails, fallback to token-only | Allows (token-only) |
+| HTTP-LATENCY-200MS-JWT | JWT | HTTP | Explicit `simple` profile with 200 ms PDP delay | Allows |
+| HTTP-LATENCY-1000MS-JWT | JWT | HTTP | Explicit `simple` profile with 1000 ms PDP delay | Allows |
+| HTTP-LATENCY-200MS-BISCUIT | Biscuit | HTTP | Explicit `simple` profile with 200 ms PDP delay; no JWT passed to PDP | Allows |
+| HTTP-LATENCY-200MS-JWT-LOSS1/LOSS5 | JWT | HTTP | Explicit `simple` profile with injected failures | Flaky by design |
+| HYBRID-FALLBACK-AUTHZ-DOWN-JWT | JWT | Hybrid | Explicit `simple` profile; HTTP always fails, fallback to token-only | Allows (token-only) |
 | HTTP-PROFILE-SIMPLE-JWT/BIS | JWT/Biscuit | HTTP | Profile `simple`: operation-aware + wildcard allow/deny baseline | Allows |
 | HTTP-PROFILE-MED-JWT/BIS | JWT/Biscuit | HTTP | Profile `med`: adds deny rules and role-aware rules | Allows |
 | HTTP-PROFILE-COMPLEX-JWT/BIS | JWT/Biscuit | HTTP | Profile `complex`: deny-first with client/role/topic constraints | Allows |
@@ -134,6 +134,10 @@ HTTP server behavior is defined in `crates/authz-server/src/main.rs`.
 It now evaluates rules in this order: `deny` first, then `allow`, then default deny.
 Rule selectors include operation, MQTT filter topic, client ID, and roles
 (roles can come from static `client_roles` mapping and JWT claims when present).
+The authz server reset baseline is intentionally neutral: `authz_profile=custom`
+with empty rules, which denies by default until the scenario applies an
+explicit profile or `custom` rule set. Benchmark scenarios must not rely on
+startup/reset state to silently provide allow semantics.
 
 ### 2.3.1 Issue 37: Strict `ACL_READ` Fan-Out Across Policy Profiles
 

@@ -10,6 +10,19 @@ Policy semantics, parity constraints, and scenario meaning are documented in:
 - `../../SCENARIO_POLICIES.md`
 - `../../PROGRESS.md` (gap tracking and implementation status)
 
+## Authz Baseline
+
+For HTTP and hybrid benchmarks, the authz-server reset baseline is intentionally
+neutral:
+
+- `authz_profile=custom`
+- empty `rules`
+- default deny
+
+This means benchmark semantics must be applied explicitly per scenario after
+`/config/reset`. The harness no longer relies on an implicit prefix-based allow
+mode at startup or reset time.
+
 ## Prerequisites
 
 - **Rust**: For building the plugin and token generator.
@@ -69,6 +82,10 @@ by `gen-tokens` (see `docker/mosquitto.conf`).
 
 Token claim/fact schema and deny-over-allow semantics are defined in
 `../../SCENARIO_POLICIES.md` (`## 1` and `## 2.1`).
+
+For HTTP/hybrid scenarios, the scenario registry in `benchmarks/run_scenarios.py`
+is the source of truth for which authz profile or custom rules get applied to
+the external PDP before timing begins.
 
 ### Client-Side (Online) Attenuation
 
@@ -220,6 +237,20 @@ plugin_opt_acl_read_full_authz true
 Trade-off:
 - `false` minimizes per-subscriber callback cost.
 - `true` enforces full policy semantics per delivery and may significantly increase CPU/latency as subscriber count grows.
+
+### HTTP/Hybrid Scenario Configuration
+
+HTTP and hybrid scenarios should always declare one of:
+
+- `authz_profile: "simple" | "med" | "complex"`
+- `authz_profile: "custom"` with explicit `rules`
+
+Current baseline latency/failure slices use the `simple` profile explicitly so
+they exercise the rule engine rather than any implicit startup behavior.
+
+If an HTTP/hybrid scenario forgets to apply policy, the neutral reset state will
+deny requests. This is intentional and helps surface misconfigured benchmarks
+early.
 
 ### Issue 30: Dynamic-Policy `ACL_READ` Fan-Out Churn Coverage
 

@@ -2,7 +2,7 @@
 
 **Project**: Eclipse Mosquitto Auth Biscuit Plugin (Rust)\
 **Started**: 2026-01-04\
-**Last Updated**: 2026-03-11\
+**Last Updated**: 2026-03-19\
 
 ---
 
@@ -146,7 +146,16 @@ MQTT v5 reauthentication microbenchmark:
 - Prometheus + cAdvisor for container resource telemetry
 - HTTP authz service (`authz`) used for introspection/latency/failure scenarios
 - `netem` helper container joined to Mosquitto network namespace for tc/MTU
-  shaping
+
+### 3.5 HTTP Authz Benchmark Baseline
+
+- The authz-server benchmark reset baseline is now intentionally neutral:
+  `authz_profile=custom` with empty rules, which means default deny.
+- HTTP and hybrid scenarios are expected to apply their intended profile or
+  custom rules explicitly after `/config/reset`.
+- Legacy prefix-based startup/reset behavior has been removed from the
+  benchmarked authz path so latency/failure slices measure the modern rule
+  engine rather than a compatibility branch.
 
 **Key files**:
 
@@ -230,6 +239,14 @@ Runner reliability fixes applied during this execution pass:
   - added backward-compatible token alias fallback
     (`jwt_admin -> jwt`, `biscuit_admin -> biscuit`) so older fixtures run
     without manual compatibility files.
+
+Authz benchmark hygiene updates applied after this pass:
+
+- `authz-server` no longer exposes the legacy prefix-allow compatibility mode in
+  benchmark configuration; reset/startup baseline is `custom` + empty rules.
+- HTTP latency/failure and hybrid fallback scenarios now apply explicit
+  rule-engine profiles (`simple`) rather than inheriting implicit startup
+  behavior.
 
 ---
 

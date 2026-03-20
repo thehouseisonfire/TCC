@@ -1,4 +1,6 @@
 import json
+import re
+from pathlib import Path
 
 import pytest
 
@@ -32,14 +34,19 @@ class _FakeClient:
         return _FakeResponse(self.payload)
 
 
+def _placeholder_tokens() -> dict[str, str]:
+    source = Path(rs.__file__).read_text()
+    keys = set(re.findall(r'tokens\["([^"]+)"\]', source))
+    keys.update(re.findall(r'tokens\.get\("([^"]+)"', source))
+    return {key: f"{key}-fixture" for key in keys}
+
+
 def test_expected_authz_state_for_http_policy_complex():
     cfg = rs._http_profile_authz_config("complex")
     expected = rs._expected_authz_state(cfg, dict(rs.AUTHZ_BASELINE_STATE))
     assert expected["authz_profile"] == "complex"
     assert expected["rules_count"] == 10
     assert expected["client_roles_count"] == 3
-    assert expected["allow_mode"] == "topic_prefix"
-    assert expected["topic_prefix"] == "sensors/"
 
 
 def test_expected_authz_state_for_http_policy_med():
@@ -48,8 +55,6 @@ def test_expected_authz_state_for_http_policy_med():
     assert expected["authz_profile"] == "med"
     assert expected["rules_count"] == 6
     assert expected["client_roles_count"] == 3
-    assert expected["allow_mode"] == "topic_prefix"
-    assert expected["topic_prefix"] == "sensors/"
 
 
 def test_expected_authz_state_for_none_uses_baseline():
@@ -78,8 +83,6 @@ def test_expected_authz_state_uses_runtime_baseline_for_non_default_startup():
         "delay_ms": 0,
         "fail_mode": "none",
         "fail_rate": 0.0,
-        "allow_mode": "deny_all",
-        "topic_prefix": "private/",
         "authz_profile": "simple",
         "rules_count": 0,
         "client_roles_count": 0,
@@ -103,15 +106,11 @@ def test_validated_authz_state_baseline_accepts_non_default_values():
         "delay_ms": 0,
         "fail_mode": "none",
         "fail_rate": 0,
-        "allow_mode": "deny_all",
-        "topic_prefix": "private/",
         "authz_profile": "simple",
         "rules_count": 0,
         "client_roles_count": 0,
     }
     baseline = rs._validated_authz_state_baseline("JWT-HTTP-1000MS", "authz reset", observed)
-    assert baseline["allow_mode"] == "deny_all"
-    assert baseline["topic_prefix"] == "private/"
     assert baseline["authz_profile"] == "simple"
     rs._assert_authz_state("JWT-HTTP-1000MS", "authz reset", observed, baseline)
 
@@ -136,6 +135,27 @@ def test_authz_reset_posts_reset_path(monkeypatch):
     assert out == rs.AUTHZ_BASELINE_STATE
     assert len(fake.calls) == 1
     assert fake.calls[0]["url"].endswith("/config/reset")
+
+
+def test_http_latency_and_hybrid_scenarios_explicitly_set_simple_profile():
+    scenarios = rs._build_available_scenarios(
+        _placeholder_tokens(),
+        token_issuer_no_default_roles=False,
+        token_issuer_no_default_grants=False,
+    )
+    scenario_ids = (
+        "HTTP-LATENCY-200MS-JWT",
+        "HTTP-LATENCY-1000MS-JWT",
+        "HTTP-LATENCY-200MS-BISCUIT",
+        "HTTP-LATENCY-200MS-FAILURE-1PCT-JWT",
+        "HTTP-LATENCY-200MS-FAILURE-5PCT-JWT",
+        "HYBRID-FALLBACK-AUTHZ-DOWN-JWT",
+    )
+
+    for scenario_id in scenario_ids:
+        authz_config = scenarios[scenario_id]["authz_config"]
+        assert authz_config is not None
+        assert authz_config["authz_profile"] == "simple"
 
 
 def test_default_dynsec_snapshot_preserves_publish_and_fanout_baselines():

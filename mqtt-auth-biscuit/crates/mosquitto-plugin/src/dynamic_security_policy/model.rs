@@ -326,8 +326,7 @@ impl DynSecAcls {
             AclType::SubscribePattern => self.subscribe_pattern.push(acl),
             AclType::UnsubscribeLiteral => insert_literal_acl(&mut self.unsubscribe_literal, acl),
             AclType::UnsubscribePattern => self.unsubscribe_pattern.push(acl),
-            AclType::SubscribeGeneric => {}
-            AclType::UnsubscribeGeneric => {}
+            AclType::SubscribeGeneric | AclType::UnsubscribeGeneric => {}
         }
     }
 
@@ -446,7 +445,7 @@ pub enum AclType {
 }
 
 impl AclType {
-    pub const fn as_str(&self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::PublishClientSend => "publishClientSend",
             Self::PublishClientReceive => "publishClientReceive",
@@ -489,6 +488,7 @@ impl AclType {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default)]
 pub struct DefaultAclAccess {
     pub publish_client_send: bool,

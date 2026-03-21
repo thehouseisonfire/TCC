@@ -1,5 +1,5 @@
-use super::dyn_sec_model::{AclConfig, RoleRef};
-use super::dyn_sec_mutation::{PersistMutation, RoleAclMutation};
+use super::model::{AclConfig, RoleRef};
+use super::mutation::{PersistMutation, RoleAclMutation};
 use super::{DynSecError, DynSecResult};
 use serde_json::{Value, json};
 

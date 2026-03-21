@@ -2844,7 +2844,11 @@ fn check_preserves_cached_state_across_read_reload_failures() {
             .last_loaded
             .lock()
             .expect("reload lock should succeed");
-        *last_loaded = Some(Instant::now() - Duration::from_secs(120));
+        *last_loaded = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(120))
+                .expect("test offset should be representable"),
+        );
     }
 
     let last_loaded_before_failure = policy
@@ -3129,7 +3133,11 @@ fn check_preserves_cached_state_across_parse_reload_failures() {
             .last_loaded
             .lock()
             .expect("reload lock should succeed");
-        *last_loaded = Some(Instant::now() - Duration::from_secs(120));
+        *last_loaded = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(120))
+                .expect("test offset should be representable"),
+        );
     }
 
     let last_loaded_before_failure = policy

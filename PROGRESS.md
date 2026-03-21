@@ -551,8 +551,9 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Control payload processing in `control_callback` for
       `$CONTROL/dynamic-security/v1` after successful control authorization.
     - Dynamic-security runtime mutation path in
-      `dynamic_security_policy.rs` (`disableClient`) with best-effort file
-      persistence to keep behavior stable across reload windows.
+      `dynamic_security_policy/` (`mod.rs`, `mutation.rs`, `persist.rs`) for
+      `disableClient`, with best-effort file persistence to keep behavior
+      stable across reload windows.
     - Session cache explicit removal API (`SessionCache::remove`) used by
       control-triggered enforcement before kicking affected clients.
     - Session-index stale pruning against live cache state to prevent unbounded

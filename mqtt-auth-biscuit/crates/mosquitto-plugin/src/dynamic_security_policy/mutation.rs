@@ -1,4 +1,4 @@
-use super::dyn_sec_model::{
+use super::model::{
     AccessKind, AclConfig, AclEntry, AclType, DynSecClient, DynSecGroup, DynSecRole, DynSecState,
     RoleAclKey, RoleRef, RuntimeRoleAclOverride, group_member_usernames, role_member_usernames,
 };

@@ -6,27 +6,23 @@ use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
-// Structural sub-modules (logically part of this module)
-#[path = "dyn_sec_model.rs"]
-mod dyn_sec_model;
-#[path = "dyn_sec_mutation.rs"]
-mod dyn_sec_mutation;
-#[path = "dyn_sec_persist.rs"]
-mod dyn_sec_persist;
+mod model;
+mod mutation;
+mod persist;
 #[cfg(test)]
-use dyn_sec_model::{ACL_READ, ACL_SUBSCRIBE, ACL_WRITE};
-use dyn_sec_model::{
+use model::{ACL_READ, ACL_SUBSCRIBE, ACL_WRITE};
+use model::{
     AccessKind, AclConfig, AclEntry, AclType, DynSecClient, DynSecConfig, DynSecGroup, DynSecRole,
     DynSecState, RoleAclKey, RoleRef, RuntimeRoleAclOverride,
 };
-use dyn_sec_mutation::{
+use mutation::{
     ControlCommand, ControlCommandKind, ControlMutationDraft, ControlPayload, PersistMutation,
     RetryIntentReducer, RoleAclMutation,
 };
-pub(crate) use dyn_sec_mutation::{ControlEnforcementTargets, ControlNotifyEvent};
-use dyn_sec_persist::apply_persist_mutations;
+pub(crate) use mutation::{ControlEnforcementTargets, ControlNotifyEvent};
+use persist::apply_persist_mutations;
 #[cfg(test)]
-use dyn_sec_persist::nested_array_missing_or_empty;
+use persist::nested_array_missing_or_empty;
 #[cfg(test)]
 use serde_json::json;
 
@@ -1026,5 +1022,4 @@ pub(crate) fn merge_persist_role_acls(
 }
 
 #[cfg(test)]
-#[path = "dynamic_security_policy_tests.rs"]
 mod tests;

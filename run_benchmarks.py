@@ -32,7 +32,7 @@ def check_paho() -> None:
         import paho.mqtt.client  # noqa: F401
     except ModuleNotFoundError as exc:
         raise SystemExit(
-            "Missing dependency 'paho-mqtt'. Install it with: pip install paho-mqtt"
+            "Missing dependency 'paho-mqtt'. Install it with: uv sync --locked"
         ) from exc
 
 
@@ -110,7 +110,10 @@ def main(
 
     if not skip_build:
         logger.info("Building plugin...")
-        run(["cargo", "build", "--release", "-p", "mosquitto-auth-biscuit"], cwd=WORKDIR)
+        run(
+            ["cargo", "build", "--locked", "--release", "-p", "mosquitto-auth-biscuit"],
+            cwd=WORKDIR,
+        )
     else:
         logger.info("Skipping build (per --skip-build)")
 
@@ -119,7 +122,7 @@ def main(
         token_env = os.environ.copy()
         token_env["GEN_TOKENS_FIXED_NOW"] = str(int(time.time()))
         run(
-            ["cargo", "run", "-p", "gen-tokens", "--bin", "gen-tokens"],
+            ["cargo", "run", "--locked", "-p", "gen-tokens", "--bin", "gen-tokens"],
             cwd=WORKDIR,
             env=token_env,
         )

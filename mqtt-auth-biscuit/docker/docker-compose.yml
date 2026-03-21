@@ -39,7 +39,7 @@ services:
       - mosquitto
 
   metrics-collector:
-    image: prom/prometheus
+    image: prom/prometheus:latest@sha256:4a61322ac1103a0e3aea2a61ef1718422a48fa046441f299d71e660a3bc71ae9
     ports:
       - "9090:9090"
     volumes:
@@ -81,7 +81,7 @@ services:
       - mqtt-net
 
   cadvisor:
-    image: ghcr.io/google/cadvisor:0.56.2
+    image: ghcr.io/google/cadvisor:0.56.2@sha256:5534ae91cbf3428998d60428d107cfdd97272d80658534ac6e54d8ce3b0c4d72
     ports:
       - "8080:8080"
     volumes:
@@ -93,7 +93,7 @@ services:
       - mqtt-net
 
   iperf3:
-    image: networkstatic/iperf3
+    image: networkstatic/iperf3:latest@sha256:07dcca91c0e47d82d83d91de8c3d46b840eef4180499456b4fa8d6dadb46b6c8
     command: ["-s", "-p", "5201"]
     ports:
       - "5201:5201"

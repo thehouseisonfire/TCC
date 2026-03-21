@@ -421,7 +421,7 @@ def check_pcap_parser_available() -> dict[str, Any]:
         return {
             "installed": False,
             "parser": None,
-            "error": "dpkt not available (install with: pip install dpkt)",
+            "error": "dpkt not available (install with: uv sync --locked)",
         }
 
 

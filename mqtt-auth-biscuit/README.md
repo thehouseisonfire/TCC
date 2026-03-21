@@ -16,9 +16,9 @@ both JWT and Biscuit tokens, intended as a reproducible research prototype.
 
 ### Prerequisites
 
-- Rust (v1.93+)
+- Rust 1.93.1
 - Docker and Docker Compose
-- Mosquitto development headers (provided in source if missing)
+- Python 3.14.2 + `uv 0.9.17`
 
 ### Building
 
@@ -70,7 +70,7 @@ The main entrypoint is:
 `benchmarks/run_scenarios.py`
 
 For running the benchmark scripts:
-  - Install dependencies: `uv pip install -r benchmarks/requirements.txt`
+  - Install dependencies: `uv sync --locked`
 
 `benchmarks/metrics_collector.py` remains available as a legacy single-run
 collector.

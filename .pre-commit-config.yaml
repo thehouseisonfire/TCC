@@ -3,7 +3,7 @@ repos:
     hooks:
       - id: cargo-clippy-fix
         name: cargo clippy --fix
-        entry: bash -c 'cargo clippy --fix --allow-dirty --allow-staged --manifest-path mqtt-auth-biscuit/Cargo.toml || true; cargo clippy --manifest-path mqtt-auth-biscuit/Cargo.toml'
+        entry: bash -c 'cargo clippy --fix --locked --allow-dirty --allow-staged --manifest-path mqtt-auth-biscuit/Cargo.toml || true; cargo clippy --locked --manifest-path mqtt-auth-biscuit/Cargo.toml'
         language: system
         pass_filenames: false
         stages: [commit, push]
@@ -16,25 +16,31 @@ repos:
         stages: [commit, push]
       - id: cargo-test
         name: cargo test
-        entry: cargo test --manifest-path mqtt-auth-biscuit/Cargo.toml
+        entry: cargo test --locked --manifest-path mqtt-auth-biscuit/Cargo.toml
         language: system
         pass_filenames: false
         stages: [commit, push]
       - id: ruff-check
         name: ruff check
-        entry: bash -c 'ruff check --fix --exit-zero . && ruff check .'
+        entry: bash -c 'uv run --locked --group dev ruff check --fix --exit-zero . && uv run --locked --group dev ruff check .'
         language: system
         pass_filenames: false
         stages: [commit, push]
       - id: black-check
         name: black
-        entry: bash -c 'black . || true'
+        entry: bash -c 'uv run --locked --group dev black . || true'
         language: system
         pass_filenames: false
         stages: [commit, push]
       - id: mypy
         name: mypy
-        entry: mypy mqtt-auth-biscuit
+        entry: uv run --locked --group dev mypy mqtt-auth-biscuit
+        language: system
+        pass_filenames: false
+        stages: [commit, push]
+      - id: pin-audit
+        name: reproducibility audit
+        entry: uv run --locked python scripts/check_pins.py
         language: system
         pass_filenames: false
         stages: [commit, push]

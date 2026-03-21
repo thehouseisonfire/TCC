@@ -27,8 +27,8 @@ mode at startup or reset time.
 
 - **Rust**: For building the plugin and token generator.
 - **Docker & Docker Compose**: For running the test environment.
-- **Python 3**: For running the benchmark scripts.
-  - Install dependencies: `uv pip install -r benchmarks/requirements.txt`
+- **Python 3.14.2 + uv 0.9.17**: For running the benchmark scripts.
+  - Install dependencies: `uv sync --locked`
 
 ## One-Command Run (Recommended)
 
@@ -36,14 +36,14 @@ From the repository root, you can run the full workflow (build, token generation
 scenario run, cleanup) with:
 
 ```bash
-python3 run_benchmarks.py
+uv run --locked python run_benchmarks.py
 ```
 
 To run a subset of scenarios or enable TLS, pass flags through:
 
 ```bash
-python3 run_benchmarks.py --scenarios TOKEN-BASELINE-JWT,TOKEN-BASELINE-BISCUIT
-python3 run_benchmarks.py --tls
+uv run --locked python run_benchmarks.py --scenarios TOKEN-BASELINE-JWT,TOKEN-BASELINE-BISCUIT
+uv run --locked python run_benchmarks.py --tls
 ```
 
 ## Step 1: Build the Plugin

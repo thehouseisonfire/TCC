@@ -18,9 +18,7 @@ import typer
 try:
     import paho.mqtt.client as mqtt
 except ModuleNotFoundError as exc:
-    raise SystemExit(
-        "Missing dependency 'paho-mqtt'. Install it with: pip install paho-mqtt"
-    ) from exc
+    raise SystemExit("Missing dependency 'paho-mqtt'. Install it with: uv sync --locked") from exc
 
 from benchmarks import policy_churn
 from benchmarks.logging_utils import get_logger, setup_logging

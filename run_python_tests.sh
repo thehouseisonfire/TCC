@@ -16,14 +16,14 @@ trap cleanup EXIT
 
 $COMPOSE_BIN "${COMPOSE_FILES[@]}" up --build -d "${SERVICES[@]}"
 
-(cd "$WORKDIR" && cargo run -p gen-tokens --bin gen-tokens)
+(cd "$WORKDIR" && cargo run --locked -p gen-tokens --bin gen-tokens)
 
 PYTHONPATH="$WORKDIR" \
-  pytest "$WORKDIR/benchmarks/test_qos_distribution.py" \
+  uv run --locked --group dev pytest "$WORKDIR/benchmarks/test_qos_distribution.py" \
   "$WORKDIR/benchmarks/test_resource_snapshot.py" \
   "$WORKDIR/benchmarks/test_packet_analysis.py"
 
-PYTHONPATH="$WORKDIR" python3 "$WORKDIR/benchmarks/smoke_test.py" --no-docker
+PYTHONPATH="$WORKDIR" uv run --locked python "$WORKDIR/benchmarks/smoke_test.py" --no-docker
 
 # Clean up generated files to prevent pre-commit hook from failing
 rm -f "$WORKDIR/benchmarks/tokens.json"

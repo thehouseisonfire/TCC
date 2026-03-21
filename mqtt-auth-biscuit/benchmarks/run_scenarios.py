@@ -895,7 +895,7 @@ def _ensure_paho_mqtt():
         import paho.mqtt.client as _  # noqa: F401
     except ModuleNotFoundError as exc:
         raise SystemExit(
-            "Missing dependency 'paho-mqtt'. Install it with: pip install paho-mqtt"
+            "Missing dependency 'paho-mqtt'. Install it with: uv sync --locked"
         ) from exc
 
 

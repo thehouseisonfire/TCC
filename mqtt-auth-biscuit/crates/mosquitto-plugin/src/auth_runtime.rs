@@ -45,7 +45,7 @@ pub(crate) fn cache_ttl_for_token(
         // Preserve a short post-expiry grace window so ACL_CHECK can still
         // observe expired sessions and force disconnect.
         let remaining_with_grace =
-            Duration::from_secs((remaining as u64) + EXPIRY_DISCONNECT_GRACE_SECONDS);
+            Duration::from_secs(remaining.cast_unsigned() + EXPIRY_DISCONNECT_GRACE_SECONDS);
         if remaining_with_grace < configured_ttl {
             remaining_with_grace
         } else {
@@ -73,8 +73,7 @@ pub(crate) const fn should_defer_no_token_basic_auth(
 ) -> bool {
     matches!(
         (mode, allow_anonymous_no_token),
-        (PolicyMode::StaticAcl, _)
-            | (PolicyMode::StaticAclStrict, _)
+        (PolicyMode::StaticAcl | PolicyMode::StaticAclStrict, _)
             | (PolicyMode::DynamicSecurity, true)
     )
 }

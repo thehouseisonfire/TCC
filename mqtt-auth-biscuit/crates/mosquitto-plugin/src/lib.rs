@@ -303,9 +303,7 @@ fn apply_dynamic_security_control_enforcement(
 }
 
 fn disconnect_expired_acl_client(client_id: &str) {
-    let client_id_cstr = if let Ok(value) = CString::new(client_id) {
-        value
-    } else {
+    let Ok(client_id_cstr) = CString::new(client_id) else {
         log_debug(&format!(
             "ACL expiry disconnect skipped: invalid client id '{client_id}'"
         ));
@@ -326,9 +324,7 @@ fn disconnect_expired_acl_client(client_id: &str) {
 }
 
 fn disconnect_control_enforcement_client(client_id: &str) {
-    let client_id_cstr = if let Ok(value) = CString::new(client_id) {
-        value
-    } else {
+    let Ok(client_id_cstr) = CString::new(client_id) else {
         log_debug(&format!(
             "Control enforcement kick skipped: invalid client id '{client_id}'"
         ));
@@ -412,17 +408,13 @@ fn publish_control_persist_warning(
 }
 
 fn publish_control_notification(client_id: &str, topic: &str, payload: &str) {
-    let client_id_cstr = if let Ok(value) = CString::new(client_id) {
-        value
-    } else {
+    let Ok(client_id_cstr) = CString::new(client_id) else {
         log_debug(&format!(
             "Control notify skipped: invalid client id '{client_id}'"
         ));
         return;
     };
-    let topic_cstr = if let Ok(value) = CString::new(topic) {
-        value
-    } else {
+    let Ok(topic_cstr) = CString::new(topic) else {
         log_debug(&format!("Control notify skipped: invalid topic '{topic}'"));
         return;
     };
@@ -482,9 +474,8 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
             return MOSQ_ERR_INVAL;
         }
 
-        let config = match parse_options(options, option_count) {
-            Ok(c) => c,
-            Err(_) => return MOSQ_ERR_INVAL,
+        let Ok(config) = parse_options(options, option_count) else {
+            return MOSQ_ERR_INVAL;
         };
 
         let sqlite_policy = match config.policy.mode {

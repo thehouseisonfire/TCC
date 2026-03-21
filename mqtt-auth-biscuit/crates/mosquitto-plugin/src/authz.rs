@@ -15,22 +15,60 @@ const MOSQ_ACL_WRITE: i32 = 0x02;
 
 // Mosquitto ACL access bitmask mapping:
 // MOSQ_ACL_READ=0x01, MOSQ_ACL_WRITE=0x02, MOSQ_ACL_SUBSCRIBE=0x04, MOSQ_ACL_CONTROL=0x08
-const fn access_to_operation(access: i32) -> &'static str {
-    if (access & 0x02) != 0 {
-        "publish"
-    } else if (access & 0x04) != 0 {
-        "subscribe"
-    } else if (access & 0x08) != 0 {
-        "control"
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum Operation {
+    Read,
+    Publish,
+    Subscribe,
+    Control,
+}
+
+impl Operation {
+    const fn from_access(access: i32) -> Self {
+        if (access & 0x02) != 0 {
+            Self::Publish
+        } else if (access & 0x04) != 0 {
+            Self::Subscribe
+        } else if (access & 0x08) != 0 {
+            Self::Control
+        } else {
+            Self::Read
+        }
+    }
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Publish => "publish",
+            Self::Subscribe => "subscribe",
+            Self::Control => "control",
+        }
+    }
+}
+
+const fn access_to_operation(access: i32) -> Operation {
+    Operation::from_access(access)
+}
+
+fn operation_matches_grant(operation: Operation, grant_operation: &str) -> bool {
+    match (operation, grant_operation.trim()) {
+        (Operation::Read, "read" | "subscribe") => true,
+        (expected, actual) => expected.as_str() == actual,
+    }
+}
+
+fn authz_outcome(allowed: bool) -> AuthzOutcome {
+    if allowed {
+        AuthzOutcome::Allowed
     } else {
-        "read"
+        AuthzOutcome::Denied
     }
 }
 
 fn dynamic_security_access(access: i32, is_control_request: bool) -> i32 {
     // Dynamic-security ACLs model $CONTROL publication as publish-send checks.
     // Preserve raw ACL bits for data-plane checks where 0x08 may represent unsubscribe.
-    if is_control_request && access_to_operation(access) == "control" {
+    if is_control_request && access_to_operation(access) == Operation::Control {
         MOSQ_ACL_WRITE
     } else {
         access
@@ -40,13 +78,13 @@ fn dynamic_security_access(access: i32, is_control_request: bool) -> i32 {
 #[derive(Debug, Copy, Clone)]
 pub struct AuthContext<'a> {
     pub topic: &'a str,
-    pub operation: &'a str, // "publish" or "subscribe"
+    pub operation: Operation,
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthContext, AuthzOutcome, AuthzParams, check_authorization, check_token_expiry,
+        AuthContext, AuthzOutcome, AuthzParams, Operation, check_authorization, check_token_expiry,
         topic_matches,
     };
     use crate::auth::TokenType;
@@ -123,21 +161,21 @@ mod tests {
         assert!(super::grants_allow(
             &grants,
             AuthContext {
-                operation: "read",
+                operation: Operation::Read,
                 topic
             }
         ));
         assert!(super::grants_allow(
             &grants,
             AuthContext {
-                operation: "subscribe",
+                operation: Operation::Subscribe,
                 topic
             }
         ));
         assert!(!super::grants_allow(
             &grants,
             AuthContext {
-                operation: "read",
+                operation: Operation::Read,
                 topic: "sensors/client_2/temp"
             }
         ));
@@ -155,14 +193,14 @@ mod tests {
         assert!(super::grants_allow(
             &read_grants,
             AuthContext {
-                operation: "read",
+                operation: Operation::Read,
                 topic
             }
         ));
         assert!(!super::grants_allow(
             &read_grants,
             AuthContext {
-                operation: "read",
+                operation: Operation::Read,
                 topic: "sensors/client_2/temp"
             }
         ));
@@ -191,21 +229,21 @@ mod tests {
         assert!(super::grants_allow(
             &grants,
             AuthContext {
-                operation: "read",
+                operation: Operation::Read,
                 topic
             }
         ));
         assert!(super::grants_deny(
             &denies,
             AuthContext {
-                operation: "read",
+                operation: Operation::Read,
                 topic
             }
         ));
         assert!(!super::grants_deny(
             &denies,
             AuthContext {
-                operation: "subscribe",
+                operation: Operation::Subscribe,
                 topic
             }
         ));
@@ -228,14 +266,14 @@ mod tests {
         assert!(super::grants_allow(
             &grants,
             AuthContext {
-                operation: "read",
+                operation: Operation::Read,
                 topic
             }
         ));
         assert!(super::grants_deny(
             &denies,
             AuthContext {
-                operation: "read",
+                operation: Operation::Read,
                 topic
             }
         ));
@@ -244,23 +282,32 @@ mod tests {
     #[test]
     fn access_to_operation_bitmask_priority() {
         // Test individual access types
-        assert_eq!(super::access_to_operation(0x01), "read"); // MOSQ_ACL_READ
-        assert_eq!(super::access_to_operation(0x02), "publish"); // MOSQ_ACL_WRITE
-        assert_eq!(super::access_to_operation(0x04), "subscribe"); // MOSQ_ACL_SUBSCRIBE
-        assert_eq!(super::access_to_operation(0x08), "control"); // MOSQ_ACL_CONTROL
+        assert_eq!(super::access_to_operation(0x01), Operation::Read); // MOSQ_ACL_READ
+        assert_eq!(super::access_to_operation(0x02), Operation::Publish); // MOSQ_ACL_WRITE
+        assert_eq!(super::access_to_operation(0x04), Operation::Subscribe); // MOSQ_ACL_SUBSCRIBE
+        assert_eq!(super::access_to_operation(0x08), Operation::Control); // MOSQ_ACL_CONTROL
 
         // Test priority: WRITE > SUBSCRIBE > CONTROL > READ
-        assert_eq!(super::access_to_operation(0x02 | 0x04), "publish"); // WRITE | SUBSCRIBE
-        assert_eq!(super::access_to_operation(0x04 | 0x01), "subscribe"); // SUBSCRIBE | READ
-        assert_eq!(super::access_to_operation(0x08 | 0x01), "control"); // CONTROL | READ
-        assert_eq!(super::access_to_operation(0x02 | 0x08), "publish"); // WRITE | CONTROL
-        assert_eq!(super::access_to_operation(0x04 | 0x08), "subscribe"); // SUBSCRIBE | CONTROL
-        assert_eq!(super::access_to_operation(0x02 | 0x04 | 0x08), "publish"); // All three
+        assert_eq!(super::access_to_operation(0x02 | 0x04), Operation::Publish); // WRITE | SUBSCRIBE
+        assert_eq!(
+            super::access_to_operation(0x04 | 0x01),
+            Operation::Subscribe
+        ); // SUBSCRIBE | READ
+        assert_eq!(super::access_to_operation(0x08 | 0x01), Operation::Control); // CONTROL | READ
+        assert_eq!(super::access_to_operation(0x02 | 0x08), Operation::Publish); // WRITE | CONTROL
+        assert_eq!(
+            super::access_to_operation(0x04 | 0x08),
+            Operation::Subscribe
+        ); // SUBSCRIBE | CONTROL
+        assert_eq!(
+            super::access_to_operation(0x02 | 0x04 | 0x08),
+            Operation::Publish
+        ); // All three
 
         // Test edge cases
-        assert_eq!(super::access_to_operation(0x00), "read"); // No access flags defaults to read
-        assert_eq!(super::access_to_operation(0x10), "read"); // Unknown flags default to read
-        assert_eq!(super::access_to_operation(0xFF), "publish"); // All flags including WRITE
+        assert_eq!(super::access_to_operation(0x00), Operation::Read); // No access flags defaults to read
+        assert_eq!(super::access_to_operation(0x10), Operation::Read); // Unknown flags default to read
+        assert_eq!(super::access_to_operation(0xFF), Operation::Publish); // All flags including WRITE
     }
 
     #[test]
@@ -376,21 +423,21 @@ mod tests {
         assert!(super::grants_allow(
             &grants,
             AuthContext {
-                operation: "control",
+                operation: Operation::Control,
                 topic: "$CONTROL/dynsec/v1"
             }
         ));
         assert!(!super::grants_allow(
             &grants,
             AuthContext {
-                operation: "control",
+                operation: Operation::Control,
                 topic: "sensors/temp"
             }
         ));
         assert!(super::grants_allow(
             &grants,
             AuthContext {
-                operation: "publish",
+                operation: Operation::Publish,
                 topic: "sensors/temp"
             }
         ));
@@ -506,40 +553,17 @@ pub fn topic_matches(filter: &str, topic: &str) -> bool {
 }
 
 fn grants_allow(grants: &[JwtGrant], auth_context: AuthContext) -> bool {
-    let op = auth_context.operation.trim();
-    if op == "read" {
-        let has_read = grants.iter().any(|grant| {
-            grant.op.trim() == "read" && topic_matches(grant.res.trim(), auth_context.topic)
-        });
-        if has_read {
-            return true;
-        }
-        return grants.iter().any(|grant| {
-            grant.op.trim() == "subscribe" && topic_matches(grant.res.trim(), auth_context.topic)
-        });
-    }
-
-    grants
-        .iter()
-        .any(|grant| grant.op.trim() == op && topic_matches(grant.res.trim(), auth_context.topic))
+    grants.iter().any(|grant| {
+        operation_matches_grant(auth_context.operation, grant.op.as_str())
+            && topic_matches(grant.res.trim(), auth_context.topic)
+    })
 }
 
 fn grants_deny(denies: &[JwtGrant], auth_context: AuthContext) -> bool {
-    let op = auth_context.operation.trim();
-    if op == "read" {
-        if denies.iter().any(|deny| {
-            deny.op.trim() == "read" && topic_matches(deny.res.trim(), auth_context.topic)
-        }) {
-            return true;
-        }
-        return denies.iter().any(|deny| {
-            deny.op.trim() == "subscribe" && topic_matches(deny.res.trim(), auth_context.topic)
-        });
-    }
-
-    denies
-        .iter()
-        .any(|deny| deny.op.trim() == op && topic_matches(deny.res.trim(), auth_context.topic))
+    denies.iter().any(|deny| {
+        operation_matches_grant(auth_context.operation, deny.op.as_str())
+            && topic_matches(deny.res.trim(), auth_context.topic)
+    })
 }
 
 /// Lightweight authorization parameters using references to avoid allocations
@@ -570,6 +594,71 @@ pub enum AuthzOutcome {
     Expired,
 }
 
+fn sqlite_backend_outcome(params: AuthzParams<'_>) -> AuthzOutcome {
+    let Some(sqlite_policy) = params.sqlite_policy else {
+        return AuthzOutcome::Denied;
+    };
+    authz_outcome(
+        sqlite_policy
+            .check(params.client_id, params.topic, params.access)
+            .unwrap_or(false),
+    )
+}
+
+fn dynamic_security_backend_outcome(params: AuthzParams<'_>) -> AuthzOutcome {
+    let Some(policy) = params.dynamic_security_policy else {
+        return AuthzOutcome::Denied;
+    };
+    authz_outcome(
+        policy
+            .check(
+                params.username,
+                Some(params.client_id),
+                params.topic,
+                dynamic_security_access(params.access, params.is_control_request),
+            )
+            .unwrap_or(false),
+    )
+}
+
+fn http_backend_outcome(params: AuthzParams<'_>, token: Option<&str>) -> Option<AuthzOutcome> {
+    let url = params.http_url?;
+    let allowed = http_policy::check_http(http_policy::HttpCheckParams {
+        http_url: url,
+        client_id: params.client_id,
+        topic: params.topic,
+        access: params.access,
+        token,
+        tls_config: http_policy::TlsConfig {
+            ca_file: params.http_ca_file,
+            tls_insecure: params.http_tls_insecure,
+        },
+        timeout_seconds: params.http_timeout_seconds,
+        max_response_bytes: params.http_max_response_bytes,
+    })
+    .ok()?;
+    Some(authz_outcome(allowed))
+}
+
+fn authorize_via_policy(
+    params: AuthzParams<'_>,
+    token: Option<&str>,
+    token_only: impl FnOnce(Operation) -> AuthzOutcome,
+) -> AuthzOutcome {
+    let operation = access_to_operation(params.access);
+    match params.policy_mode {
+        PolicyMode::TokenOnly | PolicyMode::StaticAcl | PolicyMode::StaticAclStrict => {
+            token_only(operation)
+        }
+        PolicyMode::Sqlite => sqlite_backend_outcome(params),
+        PolicyMode::Http => http_backend_outcome(params, token).unwrap_or(AuthzOutcome::Denied),
+        PolicyMode::Hybrid => {
+            http_backend_outcome(params, token).unwrap_or_else(|| token_only(operation))
+        }
+        PolicyMode::DynamicSecurity => dynamic_security_backend_outcome(params),
+    }
+}
+
 pub fn check_token_expiry(token_type: &TokenType) -> AuthzOutcome {
     let now = unix_timestamp_now();
     match token_type {
@@ -592,250 +681,72 @@ pub fn check_token_expiry(token_type: &TokenType) -> AuthzOutcome {
     }
 }
 
+fn jwt_token_only(
+    claims: &crate::jwt_handler::Claims,
+    topic: &str,
+    operation: Operation,
+) -> AuthzOutcome {
+    let Some(grants) = claims.grants.as_ref() else {
+        return AuthzOutcome::Denied;
+    };
+    let auth_context = AuthContext { topic, operation };
+    if let Some(denies) = claims.denies.as_ref()
+        && grants_deny(denies, auth_context)
+    {
+        return AuthzOutcome::Denied;
+    }
+    authz_outcome(grants_allow(grants, auth_context))
+}
+
+fn biscuit_token_only(
+    bytes: &[u8],
+    biscuit: Option<&std::sync::Arc<biscuit_auth::Biscuit>>,
+    params: AuthzParams<'_>,
+    operation: Operation,
+) -> AuthzOutcome {
+    let outcome = if let Some(biscuit) = biscuit {
+        authorize_biscuit_with_limits(
+            biscuit.as_ref(),
+            params.topic,
+            operation.as_str(),
+            params.biscuit_authorizer_profile,
+            params.biscuit_authorizer_max_time_ms,
+        )
+    } else {
+        verify_biscuit_token_with_limits(
+            bytes,
+            params.biscuit_root_key,
+            AuthContext {
+                topic: params.topic,
+                operation,
+            },
+            params.biscuit_authorizer_profile,
+            params.biscuit_authorizer_max_time_ms,
+        )
+    };
+
+    match outcome {
+        BiscuitAuthOutcome::Allowed => AuthzOutcome::Allowed,
+        BiscuitAuthOutcome::Denied | BiscuitAuthOutcome::Error(_) => AuthzOutcome::Denied,
+    }
+}
+
 pub fn check_authorization(token_type: &TokenType, params: AuthzParams<'_>) -> AuthzOutcome {
     if check_token_expiry(token_type) == AuthzOutcome::Expired {
         return AuthzOutcome::Expired;
     }
 
     match token_type {
-        TokenType::Jwt { claims, raw } => {
-            let token_only = || {
-                let Some(grants) = claims.grants.as_ref() else {
-                    return AuthzOutcome::Denied;
-                };
-                let operation = access_to_operation(params.access);
-                let auth_context = AuthContext {
-                    topic: params.topic,
-                    operation,
-                };
-                if let Some(denies) = claims.denies.as_ref()
-                    && grants_deny(denies, auth_context)
-                {
-                    return AuthzOutcome::Denied;
-                }
-                if grants_allow(grants, auth_context) {
-                    AuthzOutcome::Allowed
-                } else {
-                    AuthzOutcome::Denied
-                }
-            };
-
-            match params.policy_mode {
-                PolicyMode::TokenOnly => token_only(),
-                PolicyMode::StaticAcl => token_only(),
-                PolicyMode::StaticAclStrict => token_only(),
-                PolicyMode::Sqlite => {
-                    let Some(sqlite_policy) = params.sqlite_policy else {
-                        return AuthzOutcome::Denied;
-                    };
-                    if sqlite_policy
-                        .check(params.client_id, params.topic, params.access)
-                        .unwrap_or(false)
-                    {
-                        AuthzOutcome::Allowed
-                    } else {
-                        AuthzOutcome::Denied
-                    }
-                }
-                PolicyMode::Http => {
-                    let Some(url) = params.http_url else {
-                        return AuthzOutcome::Denied;
-                    };
-                    let allowed = http_policy::check_http(http_policy::HttpCheckParams {
-                        http_url: url,
-                        client_id: params.client_id,
-                        topic: params.topic,
-                        access: params.access,
-                        token: Some(raw),
-                        tls_config: http_policy::TlsConfig {
-                            ca_file: params.http_ca_file,
-                            tls_insecure: params.http_tls_insecure,
-                        },
-                        timeout_seconds: params.http_timeout_seconds,
-                        max_response_bytes: params.http_max_response_bytes,
-                    })
-                    .unwrap_or(false);
-                    if allowed {
-                        AuthzOutcome::Allowed
-                    } else {
-                        AuthzOutcome::Denied
-                    }
-                }
-                PolicyMode::Hybrid => {
-                    let Some(url) = params.http_url else {
-                        return token_only();
-                    };
-
-                    match http_policy::check_http(http_policy::HttpCheckParams {
-                        http_url: url,
-                        client_id: params.client_id,
-                        topic: params.topic,
-                        access: params.access,
-                        token: Some(raw),
-                        tls_config: http_policy::TlsConfig {
-                            ca_file: params.http_ca_file,
-                            tls_insecure: params.http_tls_insecure,
-                        },
-                        timeout_seconds: params.http_timeout_seconds,
-                        max_response_bytes: params.http_max_response_bytes,
-                    }) {
-                        Ok(allowed) => {
-                            if allowed {
-                                AuthzOutcome::Allowed
-                            } else {
-                                AuthzOutcome::Denied
-                            }
-                        }
-                        Err(_) => token_only(),
-                    }
-                }
-                PolicyMode::DynamicSecurity => {
-                    let Some(policy) = params.dynamic_security_policy else {
-                        return AuthzOutcome::Denied;
-                    };
-                    if policy
-                        .check(
-                            params.username,
-                            Some(params.client_id),
-                            params.topic,
-                            dynamic_security_access(params.access, params.is_control_request),
-                        )
-                        .unwrap_or(false)
-                    {
-                        AuthzOutcome::Allowed
-                    } else {
-                        AuthzOutcome::Denied
-                    }
-                }
-            }
-        }
+        TokenType::Jwt { claims, raw } => authorize_via_policy(params, Some(raw), |operation| {
+            jwt_token_only(claims, params.topic, operation)
+        }),
         TokenType::Biscuit {
             bytes,
             expires_at: _,
             roles: _,
             biscuit,
-        } => {
-            let operation = access_to_operation(params.access);
-
-            let token_only = || {
-                let outcome = if let Some(biscuit) = biscuit {
-                    authorize_biscuit_with_limits(
-                        biscuit.as_ref(),
-                        params.topic,
-                        operation,
-                        params.biscuit_authorizer_profile,
-                        params.biscuit_authorizer_max_time_ms,
-                    )
-                } else {
-                    verify_biscuit_token_with_limits(
-                        bytes,
-                        params.biscuit_root_key,
-                        AuthContext {
-                            topic: params.topic,
-                            operation,
-                        },
-                        params.biscuit_authorizer_profile,
-                        params.biscuit_authorizer_max_time_ms,
-                    )
-                };
-                match outcome {
-                    BiscuitAuthOutcome::Allowed => AuthzOutcome::Allowed,
-                    BiscuitAuthOutcome::Denied => AuthzOutcome::Denied,
-                    BiscuitAuthOutcome::Error(err) => {
-                        let _ = err;
-                        AuthzOutcome::Denied
-                    }
-                }
-            };
-
-            match params.policy_mode {
-                PolicyMode::TokenOnly => token_only(),
-                PolicyMode::StaticAcl => token_only(),
-                PolicyMode::StaticAclStrict => token_only(),
-                PolicyMode::Sqlite => {
-                    let Some(sqlite_policy) = params.sqlite_policy else {
-                        return AuthzOutcome::Denied;
-                    };
-                    if sqlite_policy
-                        .check(params.client_id, params.topic, params.access)
-                        .unwrap_or(false)
-                    {
-                        AuthzOutcome::Allowed
-                    } else {
-                        AuthzOutcome::Denied
-                    }
-                }
-                PolicyMode::Http => {
-                    let Some(url) = params.http_url else {
-                        return AuthzOutcome::Denied;
-                    };
-                    let allowed = http_policy::check_http(http_policy::HttpCheckParams {
-                        http_url: url,
-                        client_id: params.client_id,
-                        topic: params.topic,
-                        access: params.access,
-                        token: None,
-                        tls_config: http_policy::TlsConfig {
-                            ca_file: params.http_ca_file,
-                            tls_insecure: params.http_tls_insecure,
-                        },
-                        timeout_seconds: params.http_timeout_seconds,
-                        max_response_bytes: params.http_max_response_bytes,
-                    })
-                    .unwrap_or(false);
-                    if allowed {
-                        AuthzOutcome::Allowed
-                    } else {
-                        AuthzOutcome::Denied
-                    }
-                }
-                PolicyMode::Hybrid => {
-                    let Some(url) = params.http_url else {
-                        return token_only();
-                    };
-
-                    match http_policy::check_http(http_policy::HttpCheckParams {
-                        http_url: url,
-                        client_id: params.client_id,
-                        topic: params.topic,
-                        access: params.access,
-                        token: None,
-                        tls_config: http_policy::TlsConfig {
-                            ca_file: params.http_ca_file,
-                            tls_insecure: params.http_tls_insecure,
-                        },
-                        timeout_seconds: params.http_timeout_seconds,
-                        max_response_bytes: params.http_max_response_bytes,
-                    }) {
-                        Ok(allowed) => {
-                            if allowed {
-                                AuthzOutcome::Allowed
-                            } else {
-                                AuthzOutcome::Denied
-                            }
-                        }
-                        Err(_) => token_only(),
-                    }
-                }
-                PolicyMode::DynamicSecurity => {
-                    let Some(policy) = params.dynamic_security_policy else {
-                        return AuthzOutcome::Denied;
-                    };
-                    if policy
-                        .check(
-                            params.username,
-                            Some(params.client_id),
-                            params.topic,
-                            dynamic_security_access(params.access, params.is_control_request),
-                        )
-                        .unwrap_or(false)
-                    {
-                        AuthzOutcome::Allowed
-                    } else {
-                        AuthzOutcome::Denied
-                    }
-                }
-            }
-        }
+        } => authorize_via_policy(params, None, |operation| {
+            biscuit_token_only(bytes, biscuit.as_ref(), params, operation)
+        }),
     }
 }

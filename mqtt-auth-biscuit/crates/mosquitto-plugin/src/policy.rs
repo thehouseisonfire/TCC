@@ -1,3 +1,6 @@
+use std::str::FromStr;
+use thiserror::Error;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PolicyMode {
     TokenOnly,
@@ -7,6 +10,31 @@ pub enum PolicyMode {
     Http,
     Hybrid,
     DynamicSecurity,
+}
+
+#[derive(Debug, Error)]
+#[error("Invalid policy_mode: {value}")]
+pub struct ParsePolicyModeError {
+    value: String,
+}
+
+impl FromStr for PolicyMode {
+    type Err = ParsePolicyModeError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "token" => Ok(Self::TokenOnly),
+            "static_acl" => Ok(Self::StaticAcl),
+            "static_acl_strict" => Ok(Self::StaticAclStrict),
+            "sqlite" => Ok(Self::Sqlite),
+            "http" => Ok(Self::Http),
+            "hybrid" => Ok(Self::Hybrid),
+            "dynamic_security" => Ok(Self::DynamicSecurity),
+            _ => Err(ParsePolicyModeError {
+                value: value.to_string(),
+            }),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

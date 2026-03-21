@@ -11,14 +11,14 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
-use serde::Deserialize;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
@@ -30,6 +30,79 @@ use webpki_roots::TLS_SERVER_ROOTS;
 #[serde(deny_unknown_fields)]
 struct AuthzResponse {
     allow: bool,
+}
+
+type HttpPolicyResult<T> = Result<T, HttpPolicyError>;
+
+#[derive(Debug, Error)]
+pub enum HttpPolicyError {
+    #[error("parse CA file failed: {0}")]
+    ParseCaFile(String),
+    #[error("invalid CA cert: {0}")]
+    InvalidCaCert(String),
+    #[error("dns cache poisoned")]
+    DnsCachePoisoned,
+    #[error("http resolve failed: {0}")]
+    ResolveFailed(String),
+    #[error("http resolve failed: no addresses")]
+    ResolveNoAddresses,
+    #[error("connection pool empty")]
+    ConnectionPoolEmpty,
+    #[error("sender readiness timeout")]
+    SenderReadinessTimeout,
+    #[error("sender not ready: {0}")]
+    SenderNotReady(String),
+    #[error("http response timeout")]
+    ResponseTimeout,
+    #[error("response error: {0}")]
+    ResponseError(String),
+    #[error("Only http:// or https:// URLs are supported")]
+    UnsupportedScheme,
+    #[error("http max response bytes too large")]
+    MaxResponseBytesTooLarge,
+    #[error("http request build failed: {0}")]
+    RequestBuildFailed(String),
+    #[error("http2 request failed: {0}")]
+    RequestFailed(String),
+    #[error("http2 request failed on retry: {0}")]
+    RetryRequestFailed(String),
+    #[error("http non-200 response: {0}")]
+    Non200Response(String),
+    #[error("http body read failed: {0}")]
+    BodyReadFailed(String),
+    #[error("http response too large")]
+    ResponseTooLarge,
+    #[error("http invalid json: {0}")]
+    InvalidJson(String),
+    #[error("http json encode failed: {0}")]
+    JsonEncodeFailed(String),
+    #[error("http connect timeout")]
+    ConnectTimeout,
+    #[error("http connect failed: {0}")]
+    ConnectFailed(String),
+    #[error("invalid TLS server name")]
+    InvalidTlsServerName,
+    #[error("tls handshake timeout")]
+    TlsHandshakeTimeout,
+    #[error("tls connect failed: {0}")]
+    TlsConnectFailed(String),
+    #[error("http2 tls handshake failed: {0}")]
+    Http2TlsHandshakeFailed(String),
+    #[error("http2 handshake failed: {0}")]
+    Http2HandshakeFailed(String),
+    #[error("invalid host")]
+    InvalidHost,
+    #[error("invalid port")]
+    InvalidPort,
+}
+
+#[derive(Clone, Copy, Serialize)]
+struct AuthzRequestBody<'a> {
+    client_id: &'a str,
+    topic: &'a str,
+    access: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token: Option<&'a str>,
 }
 
 /// TLS session store implementation that enables session resumption across connections.
@@ -128,18 +201,18 @@ struct TlsConfigKey {
 fn build_tls_config_with_resumption(
     ca_file: Option<&str>,
     tls_insecure: bool,
-) -> Result<Arc<ClientConfig>, String> {
+) -> HttpPolicyResult<Arc<ClientConfig>> {
     let mut root_store = RootCertStore::empty();
     if let Some(path) = ca_file {
         let certs = CertificateDer::pem_file_iter(path)
-            .map_err(|e| format!("parse CA file failed: {e}"))?
+            .map_err(|err| HttpPolicyError::ParseCaFile(err.to_string()))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("parse CA file failed: {e}"))?;
+            .map_err(|err| HttpPolicyError::ParseCaFile(err.to_string()))?;
         for cert in certs {
             let cert: CertificateDer<'static> = cert;
             root_store
                 .add(cert)
-                .map_err(|e| format!("invalid CA cert: {e}"))?;
+                .map_err(|err| HttpPolicyError::InvalidCaCert(err.to_string()))?;
         }
     } else {
         root_store.extend(TLS_SERVER_ROOTS.iter().cloned());
@@ -215,7 +288,7 @@ static TLS_CONFIG_CACHE: OnceLock<tokio::sync::Mutex<HashMap<TlsConfigKey, Arc<C
 async fn get_tls_config(
     ca_file: Option<&str>,
     tls_insecure: bool,
-) -> Result<Arc<ClientConfig>, String> {
+) -> HttpPolicyResult<Arc<ClientConfig>> {
     let key = TlsConfigKey {
         ca_file: ca_file.map(std::string::ToString::to_string),
         tls_insecure,
@@ -401,17 +474,17 @@ fn release_buffer(mut buf: Vec<u8>) {
 }
 
 /// Serialize JSON value to a pooled buffer.
-fn serialize_to_buffer(value: &Value) -> Result<Vec<u8>, String> {
+fn serialize_to_buffer<T: Serialize>(value: &T) -> HttpPolicyResult<Vec<u8>> {
     let mut buf = acquire_buffer();
-    if let Err(e) = serde_json::to_writer(&mut buf, value) {
+    if let Err(err) = serde_json::to_writer(&mut buf, value) {
         release_buffer(buf);
-        return Err(format!("http json encode failed: {e}"));
+        return Err(HttpPolicyError::JsonEncodeFailed(err.to_string()));
     }
     Ok(buf)
 }
 
 /// Resolve host:port to `SocketAddr` with caching and TTL.
-fn resolve_with_cache(host: &str, port: u16) -> Result<SocketAddr, String> {
+fn resolve_with_cache(host: &str, port: u16) -> HttpPolicyResult<SocketAddr> {
     let cache_key = (host.to_string(), port);
     let dns_cache = DNS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
@@ -419,7 +492,7 @@ fn resolve_with_cache(host: &str, port: u16) -> Result<SocketAddr, String> {
     {
         let cache_guard = dns_cache
             .lock()
-            .map_err(|_| "dns cache poisoned".to_string())?;
+            .map_err(|_| HttpPolicyError::DnsCachePoisoned)?;
         if let Some(entry) = cache_guard.get(&cache_key)
             && entry.created_at.elapsed() < Duration::from_secs(DNS_CACHE_TTL_SECONDS)
         {
@@ -431,14 +504,14 @@ fn resolve_with_cache(host: &str, port: u16) -> Result<SocketAddr, String> {
     // Perform DNS lookup
     let addr = (host, port)
         .to_socket_addrs()
-        .map_err(|e| format!("http resolve failed: {e}"))?
+        .map_err(|err| HttpPolicyError::ResolveFailed(err.to_string()))?
         .next()
-        .ok_or_else(|| "http resolve failed: no addresses".to_string())?;
+        .ok_or(HttpPolicyError::ResolveNoAddresses)?;
 
     // Store in cache
     let mut cache_guard = dns_cache
         .lock()
-        .map_err(|_| "dns cache poisoned".to_string())?;
+        .map_err(|_| HttpPolicyError::DnsCachePoisoned)?;
     cache_guard.insert(
         cache_key,
         DnsEntry {
@@ -474,7 +547,7 @@ async fn acquire_connection_with_capacity(
     conn_key: &ConnKey,
     pool: &ConnectionPool,
     params: &ConnectionParams<'_>,
-) -> Result<(SendRequest<Full<Bytes>>, usize), String> {
+) -> HttpPolicyResult<(SendRequest<Full<Bytes>>, usize)> {
     let mut existing = Vec::new();
     {
         let pool_guard = pool.lock().await;
@@ -487,13 +560,11 @@ async fn acquire_connection_with_capacity(
     for conn in &existing {
         if let Ok(mut guard) = conn.sender.try_lock() {
             let ready_future = std::future::poll_fn(|cx| guard.poll_ready(cx));
-            match tokio::time::timeout(Duration::from_millis(10), ready_future).await {
-                Ok(Ok(())) => {
-                    let sender = guard.clone();
-                    drop(guard);
-                    return Ok((sender, conn.id));
-                }
-                Ok(Err(_)) | Err(_) => continue,
+            if let Ok(Ok(())) = tokio::time::timeout(Duration::from_millis(10), ready_future).await
+            {
+                let sender = guard.clone();
+                drop(guard);
+                return Ok((sender, conn.id));
             }
         }
     }
@@ -504,13 +575,12 @@ async fn acquire_connection_with_capacity(
         for conn in &existing {
             if let Ok(mut guard) = conn.sender.try_lock() {
                 let ready_future = std::future::poll_fn(|cx| guard.poll_ready(cx));
-                match tokio::time::timeout(Duration::from_millis(10), ready_future).await {
-                    Ok(Ok(())) => {
-                        let sender = guard.clone();
-                        drop(guard);
-                        return Ok((sender, conn.id));
-                    }
-                    Ok(Err(_)) | Err(_) => continue,
+                if let Ok(Ok(())) =
+                    tokio::time::timeout(Duration::from_millis(10), ready_future).await
+                {
+                    let sender = guard.clone();
+                    drop(guard);
+                    return Ok((sender, conn.id));
                 }
             }
         }
@@ -520,13 +590,13 @@ async fn acquire_connection_with_capacity(
     if existing.len() >= MAX_POOL_SIZE {
         let conn = existing
             .first()
-            .ok_or_else(|| "connection pool empty".to_string())?;
+            .ok_or(HttpPolicyError::ConnectionPoolEmpty)?;
         let mut guard = conn.sender.lock().await;
         let ready_future = std::future::poll_fn(|cx| guard.poll_ready(cx));
         tokio::time::timeout(Duration::from_millis(50), ready_future)
             .await
-            .map_err(|_| "sender readiness timeout".to_string())?
-            .map_err(|e| format!("sender not ready: {e}"))?;
+            .map_err(|_| HttpPolicyError::SenderReadinessTimeout)?
+            .map_err(|err| HttpPolicyError::SenderNotReady(err.to_string()))?;
         let sender = guard.clone();
         drop(guard);
         return Ok((sender, conn.id));
@@ -559,15 +629,15 @@ async fn send_request_with_timeout(
     sender: &mut SendRequest<Full<Bytes>>,
     request: Request<Full<Bytes>>,
     timeout_duration: Duration,
-) -> Result<hyper::Response<hyper::body::Incoming>, String> {
+) -> HttpPolicyResult<hyper::Response<hyper::body::Incoming>> {
     // Wait for sender to be ready (has capacity for new stream)
     tokio::time::timeout(
         timeout_duration,
         std::future::poll_fn(|cx| sender.poll_ready(cx)),
     )
     .await
-    .map_err(|_| "sender readiness timeout".to_string())?
-    .map_err(|e| format!("sender not ready: {e}"))?;
+    .map_err(|_| HttpPolicyError::SenderReadinessTimeout)?
+    .map_err(|err| HttpPolicyError::SenderNotReady(err.to_string()))?;
 
     // Send request - returns ResponseFuture
     let response_future = sender.send_request(request);
@@ -575,8 +645,51 @@ async fn send_request_with_timeout(
     // Await the actual response with timeout
     tokio::time::timeout(timeout_duration, response_future)
         .await
-        .map_err(|_| "http response timeout".to_string())?
-        .map_err(|e| format!("response error: {e}"))
+        .map_err(|_| HttpPolicyError::ResponseTimeout)?
+        .map_err(|err| HttpPolicyError::ResponseError(err.to_string()))
+}
+
+#[derive(Clone)]
+struct ParsedEndpoint<'a> {
+    scheme: &'a str,
+    host: String,
+    port: u16,
+    path: String,
+}
+
+fn parse_endpoint(url: &str) -> HttpPolicyResult<ParsedEndpoint<'_>> {
+    let (scheme, rest) = if let Some(stripped) = url.strip_prefix("https://") {
+        ("https", stripped)
+    } else if let Some(stripped) = url.strip_prefix("http://") {
+        ("http", stripped)
+    } else {
+        return Err(HttpPolicyError::UnsupportedScheme);
+    };
+
+    let (host_port, path) = match rest.split_once('/') {
+        Some((hp, path)) => (hp, format!("/{path}")),
+        None => (rest, "/".to_string()),
+    };
+    let default_port = if scheme == "https" { 443 } else { 80 };
+    let (host, port) = split_host_port(host_port, default_port)?;
+
+    Ok(ParsedEndpoint {
+        scheme,
+        host,
+        port,
+        path,
+    })
+}
+
+fn build_http_request(path: &str, body: Vec<u8>) -> HttpPolicyResult<Request<Full<Bytes>>> {
+    let body_len = body.len();
+    Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(CONTENT_TYPE, "application/json")
+        .header(CONTENT_LENGTH, body_len)
+        .body(Full::new(Bytes::from(body)))
+        .map_err(|err| HttpPolicyError::RequestBuildFailed(err.to_string()))
 }
 
 // Thread-local Tokio runtime to avoid per-request runtime creation overhead.
@@ -589,52 +702,33 @@ thread_local! {
 
 /// Synchronous wrapper for HTTP/2 request using hyper with connection pooling.
 /// Uses a thread-local runtime and reuses HTTP/2 connections for efficiency.
-pub fn check_http(params: HttpCheckParams) -> Result<bool, String> {
+pub fn check_http(params: HttpCheckParams) -> HttpPolicyResult<bool> {
     HTTP_RUNTIME.with(|rt| rt.borrow().block_on(check_http_pooled(params)))
 }
 /// Check HTTP authorization using connection pooling for HTTP/2 multiplexing.
 /// Reuses existing connections when available, creating new ones only when necessary.
 /// Implements connection health checking with transparent retry on dead connections.
-async fn check_http_pooled(params: HttpCheckParams<'_>) -> Result<bool, String> {
-    let (scheme, rest) = if let Some(url) = params.http_url.strip_prefix("https://") {
-        ("https", url)
-    } else if let Some(url) = params.http_url.strip_prefix("http://") {
-        ("http", url)
-    } else {
-        return Err("Only http:// or https:// URLs are supported".to_string());
+async fn check_http_pooled(params: HttpCheckParams<'_>) -> HttpPolicyResult<bool> {
+    let endpoint = parse_endpoint(params.http_url)?;
+    let payload = AuthzRequestBody {
+        client_id: params.client_id,
+        topic: params.topic,
+        access: params.access,
+        token: params.token,
     };
-
-    let (host_port, path) = match rest.split_once('/') {
-        Some((hp, p)) => (hp, format!("/{p}")),
-        None => (rest, "/".to_string()),
-    };
-
-    let default_port = if scheme == "https" { 443 } else { 80 };
-    let (host, port) = split_host_port(host_port, default_port)?;
-
-    // Build request body (store payload for potential retry)
-    let mut payload = serde_json::Map::from_iter([
-        (
-            "client_id".to_string(),
-            Value::String(params.client_id.to_string()),
-        ),
-        ("topic".to_string(), Value::String(params.topic.to_string())),
-        ("access".to_string(), Value::Number(params.access.into())),
-    ]);
-    if let Some(t) = params.token {
-        payload.insert("token".to_string(), Value::String(t.to_string()));
-    }
-    let payload_clone = payload.clone();
-    let body_bytes = serialize_to_buffer(&Value::Object(payload))?;
-    let body_len = body_bytes.len();
+    let body_bytes = serialize_to_buffer(&payload)?;
 
     let max_bytes = usize::try_from(params.max_response_bytes)
-        .map_err(|_| "http max response bytes too large".to_string())?;
+        .map_err(|_| HttpPolicyError::MaxResponseBytesTooLarge)?;
 
-    let conn_key = (host.clone(), port, scheme == "https");
+    let conn_key = (
+        endpoint.host.clone(),
+        endpoint.port,
+        endpoint.scheme == "https",
+    );
 
     // Ensure http:// paths remain plaintext by ignoring any TLS config.
-    let (ca_file, tls_insecure) = if scheme == "https" {
+    let (ca_file, tls_insecure) = if endpoint.scheme == "https" {
         (params.tls_config.ca_file, params.tls_config.tls_insecure)
     } else {
         (None, false)
@@ -645,9 +739,9 @@ async fn check_http_pooled(params: HttpCheckParams<'_>) -> Result<bool, String> 
     // Acquire a connection with available capacity using poll_ready.
     // This allows parallel request initiation across multiple connections.
     let conn_params = ConnectionParams {
-        host: &host,
-        port,
-        scheme,
+        host: &endpoint.host,
+        port: endpoint.port,
+        scheme: endpoint.scheme,
         ca_file,
         tls_insecure,
         timeout_seconds: params.timeout_seconds,
@@ -656,13 +750,7 @@ async fn check_http_pooled(params: HttpCheckParams<'_>) -> Result<bool, String> 
         acquire_connection_with_capacity(&conn_key, pool, &conn_params).await?;
 
     // Build and send request
-    let request = Request::builder()
-        .method("POST")
-        .uri(&path)
-        .header(CONTENT_TYPE, "application/json")
-        .header(CONTENT_LENGTH, body_len)
-        .body(Full::new(Bytes::from(body_bytes.clone())))
-        .map_err(|e| format!("http request build failed: {e}"))?;
+    let request = build_http_request(&endpoint.path, body_bytes)?;
 
     // Send request using the acquired connection
     let response_result = send_request_with_timeout(
@@ -673,11 +761,11 @@ async fn check_http_pooled(params: HttpCheckParams<'_>) -> Result<bool, String> 
     .await;
 
     let response = match response_result {
-        Ok(resp) => resp,
-        Err(e) => {
+        Ok(response) => response,
+        Err(err) => {
             // Connection might be dead, try to detect and retry once
-            let err_str = e.clone();
-            if is_connection_error(&err_str) {
+            let err_text = err.to_string();
+            if is_connection_error(&err_text) {
                 // Remove dead connection from pool
                 let mut pool_guard = pool.lock().await;
                 if let Some(connections) = pool_guard.get_mut(&conn_key)
@@ -697,15 +785,9 @@ async fn check_http_pooled(params: HttpCheckParams<'_>) -> Result<bool, String> 
                     .or_insert_with(Vec::new)
                     .push(retry_conn);
 
-                // Retry request once (rebuild body from payload_clone)
-                let retry_body = serialize_to_buffer(&Value::Object(payload_clone))?;
-                let retry_request = Request::builder()
-                    .method("POST")
-                    .uri(path)
-                    .header(CONTENT_TYPE, "application/json")
-                    .header(CONTENT_LENGTH, retry_body.len())
-                    .body(Full::new(Bytes::from(retry_body)))
-                    .map_err(|e| format!("http request build failed: {e}"))?;
+                // Retry request once (rebuild body from payload)
+                let retry_body = serialize_to_buffer(&payload)?;
+                let retry_request = build_http_request(&endpoint.path, retry_body)?;
 
                 send_request_with_timeout(
                     &mut fresh_sender,
@@ -713,16 +795,18 @@ async fn check_http_pooled(params: HttpCheckParams<'_>) -> Result<bool, String> 
                     Duration::from_secs(params.timeout_seconds),
                 )
                 .await
-                .map_err(|e| format!("http2 request failed on retry: {e}"))?
+                .map_err(|retry_err| HttpPolicyError::RetryRequestFailed(retry_err.to_string()))?
             } else {
-                return Err(format!("http2 request failed: {e}"));
+                return Err(HttpPolicyError::RequestFailed(err.to_string()));
             }
         }
     };
 
     // Check status
     if response.status().as_u16() != 200 {
-        return Err(format!("http non-200 response: {}", response.status()));
+        return Err(HttpPolicyError::Non200Response(
+            response.status().to_string(),
+        ));
     }
 
     // Collect body with size limit
@@ -730,16 +814,16 @@ async fn check_http_pooled(params: HttpCheckParams<'_>) -> Result<bool, String> 
         .into_body()
         .collect()
         .await
-        .map_err(|e| format!("http body read failed: {e}"))?;
+        .map_err(|err| HttpPolicyError::BodyReadFailed(err.to_string()))?;
 
     let body_bytes = body.to_bytes();
     if body_bytes.len() > max_bytes {
-        return Err("http response too large".to_string());
+        return Err(HttpPolicyError::ResponseTooLarge);
     }
 
     // Parse JSON response
-    let authz: AuthzResponse =
-        serde_json::from_slice(&body_bytes).map_err(|e| format!("http invalid json: {e}"))?;
+    let authz: AuthzResponse = serde_json::from_slice(&body_bytes)
+        .map_err(|err| HttpPolicyError::InvalidJson(err.to_string()))?;
 
     Ok(authz.allow)
 }
@@ -747,7 +831,7 @@ async fn check_http_pooled(params: HttpCheckParams<'_>) -> Result<bool, String> 
 /// Create a pooled HTTP/2 connection with background task.
 async fn create_pooled_connection(
     params: &ConnectionParams<'_>,
-) -> Result<Arc<PooledConnection>, String> {
+) -> HttpPolicyResult<Arc<PooledConnection>> {
     // Resolve address using cached DNS lookup
     let addr = resolve_with_cache(params.host, params.port)?;
 
@@ -756,12 +840,12 @@ async fn create_pooled_connection(
         TcpStream::connect(addr),
     )
     .await
-    .map_err(|_| "http connect timeout".to_string())?
-    .map_err(|e| format!("http connect failed: {e}"))?;
+    .map_err(|_| HttpPolicyError::ConnectTimeout)?
+    .map_err(|err| HttpPolicyError::ConnectFailed(err.to_string()))?;
 
     if params.scheme == "https" {
         let server_name: ServerName<'static> = ServerName::try_from(params.host.to_string())
-            .map_err(|_| "invalid TLS server name".to_string())?;
+            .map_err(|_| HttpPolicyError::InvalidTlsServerName)?;
         let tls_config = get_tls_config(params.ca_file, params.tls_insecure).await?;
         let connector = tokio_rustls::TlsConnector::from(tls_config);
         let tls_stream: TlsStream<TcpStream> = timeout(
@@ -769,13 +853,13 @@ async fn create_pooled_connection(
             connector.connect(server_name, tcp_stream),
         )
         .await
-        .map_err(|_| "tls handshake timeout".to_string())?
-        .map_err(|e| format!("tls connect failed: {e}"))?;
+        .map_err(|_| HttpPolicyError::TlsHandshakeTimeout)?
+        .map_err(|err| HttpPolicyError::TlsConnectFailed(err.to_string()))?;
 
         let (sender, conn) = Http2Builder::new(TokioExecutor::new())
             .handshake(TokioIo::new(tls_stream))
             .await
-            .map_err(|e| format!("http2 tls handshake failed: {e}"))?;
+            .map_err(|err| HttpPolicyError::Http2TlsHandshakeFailed(err.to_string()))?;
 
         let conn_handle = tokio::spawn(conn);
 
@@ -788,7 +872,7 @@ async fn create_pooled_connection(
         let (sender, conn) = Http2Builder::new(TokioExecutor::new())
             .handshake(TokioIo::new(tcp_stream))
             .await
-            .map_err(|e| format!("http2 handshake failed: {e}"))?;
+            .map_err(|err| HttpPolicyError::Http2HandshakeFailed(err.to_string()))?;
 
         let conn_handle = tokio::spawn(conn);
 
@@ -814,29 +898,25 @@ fn is_connection_error(err_str: &str) -> bool {
     conn_error_patterns.iter().any(|pat| lower.contains(pat))
 }
 
-fn split_host_port(host_port: &str, default_port: u16) -> Result<(String, u16), String> {
+fn split_host_port(host_port: &str, default_port: u16) -> HttpPolicyResult<(String, u16)> {
     if host_port.starts_with('[') {
-        let end = host_port
-            .find(']')
-            .ok_or_else(|| "invalid host".to_string())?;
+        let end = host_port.find(']').ok_or(HttpPolicyError::InvalidHost)?;
         let host = &host_port[1..end];
         let rest = &host_port[end + 1..];
         if rest.is_empty() {
             return Ok((host.to_string(), default_port));
         }
-        let port_str = rest
-            .strip_prefix(':')
-            .ok_or_else(|| "invalid host".to_string())?;
+        let port_str = rest.strip_prefix(':').ok_or(HttpPolicyError::InvalidHost)?;
         let port = port_str
             .parse::<u16>()
-            .map_err(|_| "invalid port".to_string())?;
+            .map_err(|_| HttpPolicyError::InvalidPort)?;
         return Ok((host.to_string(), port));
     }
 
     if let Some((host, port_str)) = host_port.rsplit_once(':') {
         let port = port_str
             .parse::<u16>()
-            .map_err(|_| "invalid port".to_string())?;
+            .map_err(|_| HttpPolicyError::InvalidPort)?;
         return Ok((host.to_string(), port));
     }
 

@@ -732,7 +732,7 @@ fn apply_control_payload_rejects_invalid_json() {
     let err = policy
         .apply_control_payload(br#"{"commands":[{"command":"disableClient"}"#)
         .expect_err("invalid payload should fail");
-    assert!(err.contains("invalid control payload"));
+    assert!(err.to_string().contains("invalid control payload"));
     let _ = fs::remove_file(path);
 }
 
@@ -2895,7 +2895,7 @@ fn new_fails_when_dynsec_file_is_missing() {
 
     let err = DynamicSecurityPolicy::new(path, Duration::from_secs(60))
         .expect_err("missing dynsec file must fail startup");
-    assert!(err.contains("dynsec config read failed"));
+    assert!(err.to_string().contains("dynsec config read failed"));
 }
 
 #[test]
@@ -2905,7 +2905,7 @@ fn new_fails_when_dynsec_file_is_malformed() {
 
     let err = DynamicSecurityPolicy::new(path.clone(), Duration::from_secs(60))
         .expect_err("malformed dynsec file must fail startup");
-    assert!(err.contains("dynsec config parse failed"));
+    assert!(err.to_string().contains("dynsec config parse failed"));
 
     let _ = fs::remove_file(path);
 }

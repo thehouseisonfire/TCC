@@ -1,8 +1,10 @@
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::sync::{Mutex, RwLock};
+use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
+use thiserror::Error;
 
 // Structural sub-modules (logically part of this module)
 #[path = "dyn_sec_model.rs"]
@@ -16,9 +18,86 @@ use dyn_sec_mutation::{
 };
 pub(crate) use dyn_sec_mutation::{ControlEnforcementTargets, ControlNotifyEvent};
 
+type DynSecResult<T> = Result<T, DynSecError>;
+const PENDING_PERSIST_WARN_THRESHOLD: usize = 256;
+
+#[derive(Debug, Error)]
+pub enum DynSecError {
+    #[error("dynsec {name} lock poisoned")]
+    LockPoisoned { name: &'static str },
+
+    #[error("invalid control payload: {source}")]
+    InvalidControlPayload {
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("dynsec config read failed: {source}")]
+    ConfigRead {
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("dynsec config parse failed: {source}")]
+    ConfigParse {
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("dynsec config serialize failed: {source}")]
+    ConfigSerialize {
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("dynsec config write failed: {source}")]
+    ConfigWrite {
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("dynsec config schema invalid: missing '{field}'")]
+    MissingField { field: String },
+
+    #[error("dynsec config schema invalid: expected '{field}' to be an array")]
+    ExpectedArray { field: String },
+
+    #[error("dynsec config root is not an object")]
+    RootNotObject,
+
+    #[error("dynsec config persistence blocked by divergent state")]
+    PersistenceBlocked,
+}
+
+impl DynSecError {
+    const fn lock_poisoned(name: &'static str) -> Self {
+        Self::LockPoisoned { name }
+    }
+}
+
+fn lock_mutex<'a, T>(mutex: &'a Mutex<T>, name: &'static str) -> DynSecResult<MutexGuard<'a, T>> {
+    mutex.lock().map_err(|_| DynSecError::lock_poisoned(name))
+}
+
+fn read_lock<'a, T>(
+    rw_lock: &'a RwLock<T>,
+    name: &'static str,
+) -> DynSecResult<RwLockReadGuard<'a, T>> {
+    rw_lock.read().map_err(|_| DynSecError::lock_poisoned(name))
+}
+
+fn write_lock<'a, T>(
+    rw_lock: &'a RwLock<T>,
+    name: &'static str,
+) -> DynSecResult<RwLockWriteGuard<'a, T>> {
+    rw_lock
+        .write()
+        .map_err(|_| DynSecError::lock_poisoned(name))
+}
+
 #[derive(Debug)]
 pub struct DynamicSecurityPolicy {
-    config_path: String,
+    config_path: PathBuf,
     reload_interval: Duration,
     control_apply_lock: Mutex<()>,
     last_loaded: Mutex<Option<Instant>>,
@@ -29,7 +108,7 @@ pub struct DynamicSecurityPolicy {
 }
 
 impl DynamicSecurityPolicy {
-    pub fn new(config_path: impl Into<String>, reload_interval: Duration) -> Result<Self, String> {
+    pub fn new(config_path: impl Into<PathBuf>, reload_interval: Duration) -> DynSecResult<Self> {
         let policy = Self {
             config_path: config_path.into(),
             reload_interval,
@@ -50,19 +129,13 @@ impl DynamicSecurityPolicy {
         client_id: Option<&str>,
         topic: &str,
         access: i32,
-    ) -> Result<bool, String> {
+    ) -> DynSecResult<bool> {
         self.reload_if_needed(false)?;
-        let state = self
-            .state
-            .read()
-            .map_err(|_| "dynsec state lock poisoned".to_string())?;
+        let state = read_lock(&self.state, "state")?;
         let is_runtime_disabled = if let Some(name) = username {
             // Keep the lock order consistent with the control path, but drop the
             // runtime-disable mutex before the ACL walk.
-            let runtime_disabled = self
-                .runtime_disabled_usernames
-                .lock()
-                .map_err(|_| "dynsec runtime disable lock poisoned".to_string())?;
+            let runtime_disabled = lock_mutex(&self.runtime_disabled_usernames, "runtime disable")?;
             runtime_disabled.contains(name)
         } else {
             false
@@ -80,16 +153,13 @@ impl DynamicSecurityPolicy {
         ))
     }
 
-    pub fn apply_control_payload(
-        &self,
-        payload: &[u8],
-    ) -> Result<ControlEnforcementTargets, String> {
+    pub fn apply_control_payload(&self, payload: &[u8]) -> DynSecResult<ControlEnforcementTargets> {
         if payload.is_empty() {
             return Ok(ControlEnforcementTargets::default());
         }
 
-        let parsed: ControlPayload =
-            serde_json::from_slice(payload).map_err(|e| format!("invalid control payload: {e}"))?;
+        let parsed: ControlPayload = serde_json::from_slice(payload)
+            .map_err(|source| DynSecError::InvalidControlPayload { source })?;
         if parsed.commands.is_empty() {
             return Ok(ControlEnforcementTargets::default());
         }
@@ -100,20 +170,15 @@ impl DynamicSecurityPolicy {
         // reload_if_needed calls. This is a deliberate correctness-over-latency trade-off;
         // the research benchmark environment uses local tmpfs so this is not exercised in
         // normal throughput/latency measurements.
-        let _control_guard = self
-            .control_apply_lock
-            .lock()
-            .map_err(|_| "dynsec control lock poisoned".to_string())?;
+        let _control_guard = lock_mutex(&self.control_apply_lock, "control")?;
         let state = match self.load_current_control_state() {
             Ok(state) => {
                 self.refresh_cached_state(state.clone())?;
                 state
             }
-            Err(err) if is_dynsec_load_read_or_parse_error(&err) => self
-                .state
-                .read()
-                .map_err(|_| "dynsec state lock poisoned".to_string())?
-                .clone(),
+            Err(err) if is_dynsec_load_read_or_parse_error(&err) => {
+                read_lock(&self.state, "state")?.clone()
+            }
             Err(err) => return Err(err),
         };
 
@@ -123,16 +188,10 @@ impl DynamicSecurityPolicy {
         // allocation pressure on every control command; acceptable for the bounded
         // entity counts in the research benchmark scenarios.
         let draft = {
-            let runtime_disabled_usernames = self
-                .runtime_disabled_usernames
-                .lock()
-                .map_err(|_| "dynsec runtime disable lock poisoned".to_string())?
-                .clone();
-            let runtime_role_acl_overrides = self
-                .runtime_role_acl_overrides
-                .lock()
-                .map_err(|_| "dynsec runtime role-acl lock poisoned".to_string())?
-                .clone();
+            let runtime_disabled_usernames =
+                lock_mutex(&self.runtime_disabled_usernames, "runtime disable")?.clone();
+            let runtime_role_acl_overrides =
+                lock_mutex(&self.runtime_role_acl_overrides, "runtime role-acl")?.clone();
             let mut draft = ControlMutationDraft::new(
                 state,
                 runtime_disabled_usernames,
@@ -145,11 +204,8 @@ impl DynamicSecurityPolicy {
             draft
         };
 
-        let pending_persist_mutations = self
-            .pending_persist_mutations
-            .lock()
-            .map_err(|_| "dynsec pending persist lock poisoned".to_string())?
-            .clone();
+        let pending_persist_mutations =
+            lock_mutex(&self.pending_persist_mutations, "pending persist")?.clone();
         let current_persist_mutations = draft.persist_mutations.clone();
         let current_persist_repairs = collect_current_persist_repairs(
             &parsed.commands,
@@ -168,12 +224,10 @@ impl DynamicSecurityPolicy {
             return Ok(targets);
         }
 
-        let mut pending_guard = match self.pending_persist_mutations.lock() {
-            Ok(guard) => guard,
-            Err(_) => {
-                targets.persist_warning = Some("dynsec pending persist lock poisoned".to_string());
-                return Ok(targets);
-            }
+        let Ok(mut pending_guard) = self.pending_persist_mutations.lock() else {
+            targets.persist_warning =
+                Some(DynSecError::lock_poisoned("pending persist").to_string());
+            return Ok(targets);
         };
 
         // The threshold below detects a persistently broken config file. The queue is
@@ -182,13 +236,6 @@ impl DynamicSecurityPolicy {
         // unwritable — not by raw command count. Exceeding the threshold means many
         // distinct roles/groups/clients have been mutated without any successful flush.
         //
-        // **Limitation**: The queue is not hard-capped. Under a permanently unwritable
-        // config file with a sustained stream of distinct structural mutations, memory
-        // usage grows without bound. In the research benchmark environment the number
-        // of distinct entities is small and bounded by scenario design, so this does
-        // not manifest in practice.
-        const PENDING_PERSIST_WARN_THRESHOLD: usize = 256;
-
         match self.persist_control_mutations(&retry_persist_mutations) {
             Ok(()) => pending_guard.clear(),
             Err(err) => {
@@ -200,7 +247,7 @@ impl DynamicSecurityPolicy {
                         pending_guard.len(),
                     ));
                 }
-                targets.persist_warning = Some(err);
+                targets.persist_warning = Some(err.to_string());
             }
         }
 
@@ -212,28 +259,22 @@ impl DynamicSecurityPolicy {
     /// concurrent callers can both observe `reload_is_due() == true` and then serialise
     /// on the lock — the second thread will perform a redundant (but harmless) reload
     /// because `reload_if_needed_locked` re-checks the timer under the lock.
-    fn reload_if_needed(&self, force: bool) -> Result<(), String> {
+    fn reload_if_needed(&self, force: bool) -> DynSecResult<()> {
         if !self.reload_is_due(force)? {
             return Ok(());
         }
 
-        let _control_guard = self
-            .control_apply_lock
-            .lock()
-            .map_err(|_| "dynsec control lock poisoned".to_string())?;
+        let _control_guard = lock_mutex(&self.control_apply_lock, "control")?;
         self.reload_if_needed_locked(force)
     }
 
-    fn reload_is_due(&self, force: bool) -> Result<bool, String> {
+    fn reload_is_due(&self, force: bool) -> DynSecResult<bool> {
         if force {
             return Ok(true);
         }
 
         let now = Instant::now();
-        let last_loaded = self
-            .last_loaded
-            .lock()
-            .map_err(|_| "dynsec reload lock poisoned".to_string())?;
+        let last_loaded = lock_mutex(&self.last_loaded, "reload")?;
 
         if let Some(last) = *last_loaded
             && now.duration_since(last) < self.reload_interval
@@ -244,12 +285,9 @@ impl DynamicSecurityPolicy {
         Ok(true)
     }
 
-    fn reload_if_needed_locked(&self, force: bool) -> Result<(), String> {
+    fn reload_if_needed_locked(&self, force: bool) -> DynSecResult<()> {
         let now = Instant::now();
-        let mut last_loaded = self
-            .last_loaded
-            .lock()
-            .map_err(|_| "dynsec reload lock poisoned".to_string())?;
+        let mut last_loaded = lock_mutex(&self.last_loaded, "reload")?;
 
         if !force
             && let Some(last) = *last_loaded
@@ -261,10 +299,7 @@ impl DynamicSecurityPolicy {
         let has_valid_cached_state = last_loaded.is_some();
         match self.load_current_control_state() {
             Ok(state) => {
-                let mut guard = self
-                    .state
-                    .write()
-                    .map_err(|_| "dynsec state lock poisoned".to_string())?;
+                let mut guard = write_lock(&self.state, "state")?;
                 *guard = state;
                 *last_loaded = Some(now);
             }
@@ -277,7 +312,7 @@ impl DynamicSecurityPolicy {
         Ok(())
     }
 
-    fn load_current_control_state(&self) -> Result<DynSecState, String> {
+    fn load_current_control_state(&self) -> DynSecResult<DynSecState> {
         let mut state = self.load_base_control_state()?;
         let replay_summary = self.apply_pending_reload_mutations_best_effort(&mut state)?;
         if replay_summary.blocked > 0 {
@@ -290,33 +325,24 @@ impl DynamicSecurityPolicy {
         Ok(state)
     }
 
-    fn load_base_control_state(&self) -> Result<DynSecState, String> {
+    fn load_base_control_state(&self) -> DynSecResult<DynSecState> {
         let raw = fs::read_to_string(&self.config_path)
-            .map_err(|e| format!("dynsec config read failed: {e}"))?;
+            .map_err(|source| DynSecError::ConfigRead { source })?;
         let cfg: DynSecConfig =
-            serde_json::from_str(&raw).map_err(|e| format!("dynsec config parse failed: {e}"))?;
+            serde_json::from_str(&raw).map_err(|source| DynSecError::ConfigParse { source })?;
         Ok(DynSecState::from_config(cfg))
     }
 
-    fn refresh_cached_state(&self, state: DynSecState) -> Result<(), String> {
-        let mut guard = self
-            .state
-            .write()
-            .map_err(|_| "dynsec state lock poisoned".to_string())?;
+    fn refresh_cached_state(&self, state: DynSecState) -> DynSecResult<()> {
+        let mut guard = write_lock(&self.state, "state")?;
         *guard = state;
-        let mut last_loaded = self
-            .last_loaded
-            .lock()
-            .map_err(|_| "dynsec reload lock poisoned".to_string())?;
+        let mut last_loaded = lock_mutex(&self.last_loaded, "reload")?;
         *last_loaded = Some(Instant::now());
         Ok(())
     }
 
-    fn apply_runtime_role_acl_overrides(&self, state: &mut DynSecState) -> Result<(), String> {
-        let overrides = self
-            .runtime_role_acl_overrides
-            .lock()
-            .map_err(|_| "dynsec runtime role-acl lock poisoned".to_string())?;
+    fn apply_runtime_role_acl_overrides(&self, state: &mut DynSecState) -> DynSecResult<()> {
+        let overrides = lock_mutex(&self.runtime_role_acl_overrides, "runtime role-acl")?;
         if overrides.is_empty() {
             return Ok(());
         }
@@ -345,12 +371,9 @@ impl DynamicSecurityPolicy {
     fn apply_pending_reload_mutations_best_effort(
         &self,
         state: &mut DynSecState,
-    ) -> Result<PendingReplaySummary, String> {
+    ) -> DynSecResult<PendingReplaySummary> {
         let mut summary = PendingReplaySummary::default();
-        let pending = self
-            .pending_persist_mutations
-            .lock()
-            .map_err(|_| "dynsec pending persist lock poisoned".to_string())?;
+        let pending = lock_mutex(&self.pending_persist_mutations, "pending persist")?;
         for mutation in pending
             .iter()
             .filter(|mutation| mutation.is_replayed_on_reload())
@@ -369,11 +392,11 @@ impl DynamicSecurityPolicy {
     /// this process, but cannot guard against an external process (e.g. the Mosquitto
     /// Dynamic Security plugin) writing to the same file between our read and write.
     /// Such a race would silently overwrite the external change.
-    fn persist_control_mutations(&self, mutations: &[PersistMutation]) -> Result<(), String> {
+    fn persist_control_mutations(&self, mutations: &[PersistMutation]) -> DynSecResult<()> {
         let raw = fs::read_to_string(&self.config_path)
-            .map_err(|e| format!("dynsec config read failed: {e}"))?;
+            .map_err(|source| DynSecError::ConfigRead { source })?;
         let mut root: Value =
-            serde_json::from_str(&raw).map_err(|e| format!("dynsec config parse failed: {e}"))?;
+            serde_json::from_str(&raw).map_err(|source| DynSecError::ConfigParse { source })?;
 
         let mut changed = false;
         let mut blocked = false;
@@ -384,7 +407,7 @@ impl DynamicSecurityPolicy {
         }
 
         if blocked {
-            return Err("dynsec config persistence blocked by divergent state".to_string());
+            return Err(DynSecError::PersistenceBlocked);
         }
 
         if !changed {
@@ -392,9 +415,9 @@ impl DynamicSecurityPolicy {
         }
 
         let serialized = serde_json::to_string_pretty(&root)
-            .map_err(|e| format!("dynsec config serialize failed: {e}"))?;
+            .map_err(|source| DynSecError::ConfigSerialize { source })?;
         fs::write(&self.config_path, format!("{serialized}\n"))
-            .map_err(|e| format!("dynsec config write failed: {e}"))?;
+            .map_err(|source| DynSecError::ConfigWrite { source })?;
         Ok(())
     }
 
@@ -402,7 +425,7 @@ impl DynamicSecurityPolicy {
         &self,
         draft: ControlMutationDraft,
         persist_warning: Option<String>,
-    ) -> Result<ControlEnforcementTargets, String> {
+    ) -> DynSecResult<ControlEnforcementTargets> {
         let ControlMutationDraft {
             initial_state: _,
             state: next_state,
@@ -419,14 +442,9 @@ impl DynamicSecurityPolicy {
 
         if changed {
             {
-                let mut state = self
-                    .state
-                    .write()
-                    .map_err(|_| "dynsec state lock poisoned".to_string())?;
-                let mut runtime_disabled = self
-                    .runtime_disabled_usernames
-                    .lock()
-                    .map_err(|_| "dynsec runtime disable lock poisoned".to_string())?;
+                let mut state = write_lock(&self.state, "state")?;
+                let mut runtime_disabled =
+                    lock_mutex(&self.runtime_disabled_usernames, "runtime disable")?;
                 *state = next_state;
                 *runtime_disabled = runtime_disabled_usernames;
             }
@@ -439,16 +457,11 @@ impl DynamicSecurityPolicy {
             // read at worst applies a conservative deny that will self-correct on the
             // next check() after this scope exits.
             {
-                let mut overrides = self
-                    .runtime_role_acl_overrides
-                    .lock()
-                    .map_err(|_| "dynsec runtime role-acl lock poisoned".to_string())?;
+                let mut overrides =
+                    lock_mutex(&self.runtime_role_acl_overrides, "runtime role-acl")?;
                 *overrides = runtime_role_acl_overrides;
             }
-            let mut last_loaded = self
-                .last_loaded
-                .lock()
-                .map_err(|_| "dynsec reload lock poisoned".to_string())?;
+            let mut last_loaded = lock_mutex(&self.last_loaded, "reload")?;
             *last_loaded = Some(Instant::now());
         }
 
@@ -555,8 +568,11 @@ pub(crate) fn state_allows_username_access(
     )
 }
 
-fn is_dynsec_load_read_or_parse_error(err: &str) -> bool {
-    err.starts_with("dynsec config read failed:") || err.starts_with("dynsec config parse failed:")
+fn is_dynsec_load_read_or_parse_error(err: &DynSecError) -> bool {
+    matches!(
+        err,
+        DynSecError::ConfigRead { .. } | DynSecError::ConfigParse { .. }
+    )
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -768,7 +784,7 @@ impl PersistApplyOutcome {
 fn apply_persist_mutation(
     root: &mut Value,
     mutation: &PersistMutation,
-) -> Result<PersistApplyOutcome, String> {
+) -> DynSecResult<PersistApplyOutcome> {
     match mutation {
         PersistMutation::SetClientDisabled { username, disabled } => {
             let clients = ensure_array(root, "clients")?;
@@ -885,9 +901,7 @@ fn apply_persist_mutation(
                 }
             }
             if root.get("anonymousGroup").and_then(Value::as_str) == Some(groupname.as_str()) {
-                let object = root
-                    .as_object_mut()
-                    .ok_or_else(|| "dynsec config root is not an object".to_string())?;
+                let object = root.as_object_mut().ok_or(DynSecError::RootNotObject)?;
                 changed |= object.remove("anonymousGroup").is_some();
             }
             Ok(PersistApplyOutcome::from_changed(changed))
@@ -1037,12 +1051,14 @@ fn apply_persist_mutation(
     }
 }
 
-fn ensure_array<'a>(root: &'a mut Value, key: &str) -> Result<&'a mut Vec<Value>, String> {
+fn ensure_array<'a>(root: &'a mut Value, key: &str) -> DynSecResult<&'a mut Vec<Value>> {
     if root.get(key).is_none() {
         root[key] = Value::Array(Vec::new());
     }
     let Some(value) = root.get_mut(key) else {
-        return Err(format!("dynsec config schema invalid: missing '{key}'"));
+        return Err(DynSecError::MissingField {
+            field: key.to_string(),
+        });
     };
     expect_array(value, key)
 }
@@ -1194,25 +1210,21 @@ pub(crate) fn merge_persist_role_acls(
     role.to_control_acls()
 }
 
-fn get_array_field<'a>(
-    root: &'a mut Value,
-    key: &str,
-) -> Result<Option<&'a mut Vec<Value>>, String> {
+fn get_array_field<'a>(root: &'a mut Value, key: &str) -> DynSecResult<Option<&'a mut Vec<Value>>> {
     let Some(value) = root.get_mut(key) else {
         return Ok(None);
     };
     expect_array(value, key).map(Some)
 }
 
-fn ensure_nested_array<'a>(
-    parent: &'a mut Value,
-    field: &str,
-) -> Result<&'a mut Vec<Value>, String> {
+fn ensure_nested_array<'a>(parent: &'a mut Value, field: &str) -> DynSecResult<&'a mut Vec<Value>> {
     if parent.get(field).is_none() {
         parent[field] = Value::Array(Vec::new());
     }
     let Some(value) = parent.get_mut(field) else {
-        return Err(format!("dynsec config schema invalid: missing '{field}'"));
+        return Err(DynSecError::MissingField {
+            field: field.to_string(),
+        });
     };
     expect_array(value, field)
 }
@@ -1220,17 +1232,19 @@ fn ensure_nested_array<'a>(
 fn get_nested_array_field<'a>(
     parent: &'a mut Value,
     field: &str,
-) -> Result<Option<&'a mut Vec<Value>>, String> {
+) -> DynSecResult<Option<&'a mut Vec<Value>>> {
     let Some(value) = parent.get_mut(field) else {
         return Ok(None);
     };
     expect_array(value, field).map(Some)
 }
 
-fn expect_array<'a>(value: &'a mut Value, field: &str) -> Result<&'a mut Vec<Value>, String> {
+fn expect_array<'a>(value: &'a mut Value, field: &str) -> DynSecResult<&'a mut Vec<Value>> {
     value
         .as_array_mut()
-        .ok_or_else(|| format!("dynsec config schema invalid: expected '{field}' to be an array"))
+        .ok_or_else(|| DynSecError::ExpectedArray {
+            field: field.to_string(),
+        })
 }
 
 fn remove_named_ref(
@@ -1238,7 +1252,7 @@ fn remove_named_ref(
     field: &str,
     name_field: &str,
     target: &str,
-) -> Result<PersistApplyOutcome, String> {
+) -> DynSecResult<PersistApplyOutcome> {
     let Some(list) = get_nested_array_field(parent, field)? else {
         return Ok(PersistApplyOutcome::AlreadySatisfied);
     };
@@ -1250,7 +1264,7 @@ fn remove_named_ref(
 fn prune_persisted_placeholder_client(
     clients: &mut Vec<Value>,
     username: &str,
-) -> Result<PersistApplyOutcome, String> {
+) -> DynSecResult<PersistApplyOutcome> {
     let Some(index) = clients
         .iter()
         .position(|client| client.get("username").and_then(Value::as_str) == Some(username))
@@ -1276,7 +1290,7 @@ fn persist_disabled_placeholder_client(clients: &mut Vec<Value>, username: &str)
     true
 }
 
-fn is_prunable_persisted_placeholder_client(client: &Value) -> Result<bool, String> {
+fn is_prunable_persisted_placeholder_client(client: &Value) -> DynSecResult<bool> {
     if client.get("username").and_then(Value::as_str).is_none() {
         return Ok(false);
     }
@@ -1295,14 +1309,14 @@ fn is_prunable_persisted_placeholder_client(client: &Value) -> Result<bool, Stri
     Ok(!has_client_id && roles_empty && groups_empty && !disabled)
 }
 
-fn nested_array_missing_or_empty(parent: &Value, field: &str) -> Result<bool, String> {
+fn nested_array_missing_or_empty(parent: &Value, field: &str) -> DynSecResult<bool> {
     let Some(value) = parent.get(field) else {
         return Ok(true);
     };
     let Some(array) = value.as_array() else {
-        return Err(format!(
-            "dynsec config schema invalid: expected '{field}' to be an array"
-        ));
+        return Err(DynSecError::ExpectedArray {
+            field: field.to_string(),
+        });
     };
     Ok(array.is_empty())
 }
@@ -1313,7 +1327,7 @@ fn upsert_named_priority_ref(
     name_field: &str,
     target: &str,
     priority: i32,
-) -> Result<PersistApplyOutcome, String> {
+) -> DynSecResult<PersistApplyOutcome> {
     let list = ensure_nested_array(parent, field)?;
 
     for entry in list.iter_mut() {
@@ -1339,7 +1353,7 @@ fn upsert_named_priority_ref(
     Ok(PersistApplyOutcome::Changed)
 }
 
-fn upsert_acl_ref(parent: &mut Value, acl: &AclConfig) -> Result<PersistApplyOutcome, String> {
+fn upsert_acl_ref(parent: &mut Value, acl: &AclConfig) -> DynSecResult<PersistApplyOutcome> {
     let acls = ensure_nested_array(parent, "acls")?;
 
     for entry in acls.iter_mut() {

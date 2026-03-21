@@ -42,6 +42,7 @@ fn cached_role_query(role_fact: &str) -> Arc<str> {
 pub enum BiscuitAuthOutcome {
     Allowed,
     Denied,
+    #[allow(dead_code)]
     Error(biscuit_auth::error::Token),
 }
 
@@ -343,7 +344,7 @@ pub fn verify_biscuit_token_with_limits(
     authorize_biscuit_with_limits(
         &biscuit,
         auth_context.topic,
-        auth_context.operation,
+        auth_context.operation.as_str(),
         profile,
         max_time_ms,
     )
@@ -498,6 +499,7 @@ pub fn authorize_biscuit_with_limits(
 
 #[cfg(test)]
 mod tests {
+    use crate::authz::Operation;
     use crate::config::BiscuitAuthorizerProfile;
 
     use super::extract_min_expiry;
@@ -562,7 +564,7 @@ mod tests {
             &keypair.public(),
             AuthContext {
                 topic: "sensors/client_1/temp",
-                operation: "read",
+                operation: Operation::Read,
             },
             BiscuitAuthorizerProfile::Simple,
         );
@@ -588,7 +590,7 @@ mod tests {
             &keypair.public(),
             AuthContext {
                 topic: "sensors/client_1/temp",
-                operation: "read",
+                operation: Operation::Read,
             },
             BiscuitAuthorizerProfile::Simple,
         );
@@ -616,7 +618,7 @@ mod tests {
             &keypair.public(),
             AuthContext {
                 topic: "sensors/client_1/temp",
-                operation: "read",
+                operation: Operation::Read,
             },
             BiscuitAuthorizerProfile::Simple,
         );
@@ -642,7 +644,7 @@ mod tests {
             &keypair.public(),
             AuthContext {
                 topic: "sensors/client_1/temp",
-                operation: "publish",
+                operation: Operation::Publish,
             },
             BiscuitAuthorizerProfile::Simple,
         );
@@ -672,7 +674,7 @@ mod tests {
             &keypair.public(),
             AuthContext {
                 topic: "sensors/client_1/temp",
-                operation: "publish",
+                operation: Operation::Publish,
             },
             BiscuitAuthorizerProfile::Simple,
         );
@@ -702,7 +704,7 @@ mod tests {
             &keypair.public(),
             AuthContext {
                 topic: "sensors/client_1/temp",
-                operation: "publish",
+                operation: Operation::Publish,
             },
             BiscuitAuthorizerProfile::Rbac,
         );
@@ -734,7 +736,7 @@ mod tests {
             &keypair.public(),
             AuthContext {
                 topic: "sensors/client_1/temp",
-                operation: "publish",
+                operation: Operation::Publish,
             },
             BiscuitAuthorizerProfile::Contextual,
         );
@@ -760,7 +762,7 @@ mod tests {
             &keypair.public(),
             AuthContext {
                 topic: "sensors/client_1/temp",
-                operation: "publish",
+                operation: Operation::Publish,
             },
             BiscuitAuthorizerProfile::Contextual,
         );
@@ -794,7 +796,7 @@ mod tests {
             &keypair.public(),
             AuthContext {
                 topic: "sensors/client_1/temp",
-                operation: "publish",
+                operation: Operation::Publish,
             },
             BiscuitAuthorizerProfile::Contextual,
         );
@@ -828,7 +830,7 @@ mod tests {
             &keypair.public(),
             AuthContext {
                 topic: "sensors/client_1/temp",
-                operation: "read",
+                operation: Operation::Read,
             },
             BiscuitAuthorizerProfile::Contextual,
         );
@@ -862,7 +864,7 @@ mod tests {
             &keypair.public(),
             AuthContext {
                 topic: "sensors/client_1/temp",
-                operation: "publish",
+                operation: Operation::Publish,
             },
             BiscuitAuthorizerProfile::Contextual,
         );

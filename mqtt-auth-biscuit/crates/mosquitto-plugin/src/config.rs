@@ -4,6 +4,8 @@ use std::collections::HashSet;
 use std::ffi::CStr;
 #[cfg(not(miri))]
 use std::fs;
+use std::num::ParseIntError;
+use std::str::{FromStr, ParseBoolError};
 use thiserror::Error;
 
 const MIN_HTTP_TIMEOUT_SECONDS: u64 = 1;
@@ -14,6 +16,12 @@ const MIN_BISCUIT_AUTHORIZER_MAX_TIME_MS: u64 = 1;
 /// Configuration errors using thiserror for better error handling
 #[derive(Debug, Error)]
 pub enum ConfigError {
+    #[error("Invalid option_count")]
+    InvalidOptionCount,
+
+    #[error("Invalid options pointer")]
+    InvalidOptionsPointer,
+
     #[error("JWT algorithm is required")]
     MissingJwtAlgorithm,
 
@@ -62,6 +70,37 @@ pub enum ConfigError {
     #[allow(dead_code)]
     #[error("Invalid cache TTL seconds: {0}")]
     InvalidCacheTtl(String),
+
+    #[error("Invalid {option}: {source}")]
+    InvalidBooleanOption {
+        option: &'static str,
+        #[source]
+        source: ParseBoolError,
+    },
+
+    #[error("Invalid {option}: {source}")]
+    InvalidIntegerOption {
+        option: &'static str,
+        #[source]
+        source: ParseIntError,
+    },
+
+    #[error("{option} must be >= {minimum}")]
+    OptionBelowMinimum { option: &'static str, minimum: u64 },
+
+    #[error("{option} must be > 0")]
+    OptionMustBePositive { option: &'static str },
+
+    #[error("{option} must be <= {maximum}")]
+    OptionAboveMaximum { option: &'static str, maximum: u64 },
+
+    #[error("Invalid biscuit_authorizer_profile: {value}. Use 'simple', 'rbac' or 'contextual'")]
+    InvalidBiscuitAuthorizerProfile { value: String },
+
+    #[error(
+        "biscuit_transport={value} is no longer supported; Biscuit now uses raw bytes on MQTT transport"
+    )]
+    UnsupportedBiscuitTransport { value: String },
 }
 
 #[derive(Clone)]
@@ -108,6 +147,21 @@ pub enum BiscuitAuthorizerProfile {
     Simple,
     Rbac,
     Contextual,
+}
+
+impl FromStr for BiscuitAuthorizerProfile {
+    type Err = ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "simple" => Ok(Self::Simple),
+            "rbac" => Ok(Self::Rbac),
+            "contextual" => Ok(Self::Contextual),
+            _ => Err(ConfigError::InvalidBiscuitAuthorizerProfile {
+                value: value.to_string(),
+            }),
+        }
+    }
 }
 
 /// Builder for `PluginConfig` with fluent interface and validation
@@ -296,64 +350,17 @@ impl PluginConfigBuilder {
 
     pub fn build(self) -> Result<PluginConfig, ConfigError> {
         let jwt_alg = self.jwt_alg.ok_or(ConfigError::MissingJwtAlgorithm)?;
+        let alg = parse_jwt_algorithm(&jwt_alg)?;
+        let decoding_key = build_decoding_key(
+            alg,
+            self.jwt_key_file
+                .ok_or_else(|| ConfigError::MissingJwtKey(jwt_alg.clone()))?,
+            &jwt_alg,
+        )?;
+        let validation = build_validation(alg, self.jwt_issuer, self.jwt_audience);
 
-        let alg = match jwt_alg.as_str() {
-            "ES256" => Algorithm::ES256,
-            _ => return Err(ConfigError::InvalidJwtAlgorithm(jwt_alg)),
-        };
-
-        let jwt_key_file = self
-            .jwt_key_file
-            .ok_or_else(|| ConfigError::MissingJwtKey(jwt_alg.clone()))?;
-
-        #[cfg(not(miri))]
-        let decoding_key = match alg {
-            Algorithm::ES256 => {
-                let pem = fs::read(&jwt_key_file).map_err(|e| ConfigError::JwtKeyFileError {
-                    path: jwt_key_file,
-                    source: e,
-                })?;
-                DecodingKey::from_ec_pem(&pem)
-                    .map_err(|e| ConfigError::InvalidJwtPem(e.to_string()))?
-            }
-            _ => return Err(ConfigError::InvalidJwtAlgorithm(jwt_alg)),
-        };
-
-        #[cfg(miri)]
-        let decoding_key = {
-            let _ = jwt_key_file;
-            DecodingKey::from_secret(b"miri_dummy_key".as_slice())
-        };
-
-        let mut validation = Validation::new(alg);
-        if let Some(iss) = self.jwt_issuer {
-            validation.iss = Some(HashSet::from([iss]));
-        }
-        if let Some(aud) = self.jwt_audience {
-            validation.aud = Some(HashSet::from([aud]));
-        }
-
-        let pub_hex = match self.biscuit_root_key_file {
-            #[cfg(not(miri))]
-            Some(path) => {
-                let raw = fs::read_to_string(&path)
-                    .map_err(|e| ConfigError::BiscuitKeyFileError { path, source: e })?;
-                raw.trim().to_string()
-            }
-            #[cfg(miri)]
-            Some(_) => {
-                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string()
-            }
-            None => return Err(ConfigError::MissingBiscuitKey),
-        };
-        let bytes =
-            hex::decode(pub_hex).map_err(|e| ConfigError::InvalidBiscuitKeyHex(e.to_string()))?;
-        if bytes.len() != 32 {
-            return Err(ConfigError::InvalidBiscuitKeyLength(bytes.len()));
-        }
         let biscuit_root_public_key =
-            biscuit_auth::PublicKey::from_bytes(&bytes, biscuit_auth::Algorithm::Ed25519)
-                .map_err(|e| ConfigError::InvalidBiscuitPublicKey(e.to_string()))?;
+            read_biscuit_root_public_key(self.biscuit_root_key_file.as_deref())?;
 
         let policy = PolicyBackendConfig {
             mode: self.policy_mode.unwrap_or(PolicyMode::TokenOnly),
@@ -380,13 +387,8 @@ impl PluginConfigBuilder {
         let biscuit_authorizer_max_time_ms = self
             .biscuit_authorizer_max_time_ms
             .unwrap_or(DEFAULT_BISCUIT_AUTHORIZER_MAX_TIME_MS);
-        let control_notify_topic_prefix = self
-            .control_notify_topic_prefix
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or("system_notification")
-            .to_string();
+        let control_notify_topic_prefix =
+            normalize_control_notify_topic_prefix(self.control_notify_topic_prefix.as_deref());
 
         Ok(PluginConfig {
             jwt: JwtConfig {
@@ -413,6 +415,92 @@ impl PluginConfigBuilder {
     }
 }
 
+fn parse_jwt_algorithm(jwt_alg: &str) -> Result<Algorithm, ConfigError> {
+    match jwt_alg {
+        "ES256" => Ok(Algorithm::ES256),
+        _ => Err(ConfigError::InvalidJwtAlgorithm(jwt_alg.to_string())),
+    }
+}
+
+fn build_decoding_key(
+    alg: Algorithm,
+    jwt_key_file: String,
+    jwt_alg: &str,
+) -> Result<DecodingKey, ConfigError> {
+    #[cfg(not(miri))]
+    {
+        match alg {
+            Algorithm::ES256 => {
+                let pem =
+                    fs::read(&jwt_key_file).map_err(|source| ConfigError::JwtKeyFileError {
+                        path: jwt_key_file,
+                        source,
+                    })?;
+                DecodingKey::from_ec_pem(&pem)
+                    .map_err(|err| ConfigError::InvalidJwtPem(err.to_string()))
+            }
+            _ => Err(ConfigError::InvalidJwtAlgorithm(jwt_alg.to_string())),
+        }
+    }
+
+    #[cfg(miri)]
+    {
+        let _ = (alg, jwt_key_file, jwt_alg);
+        Ok(DecodingKey::from_secret(b"miri_dummy_key".as_slice()))
+    }
+}
+
+fn build_validation(
+    alg: Algorithm,
+    jwt_issuer: Option<String>,
+    jwt_audience: Option<String>,
+) -> Validation {
+    let mut validation = Validation::new(alg);
+    if let Some(iss) = jwt_issuer {
+        validation.iss = Some(HashSet::from([iss]));
+    }
+    if let Some(aud) = jwt_audience {
+        validation.aud = Some(HashSet::from([aud]));
+    }
+    validation
+}
+
+fn read_biscuit_root_public_key(
+    biscuit_root_key_file: Option<&str>,
+) -> Result<biscuit_auth::PublicKey, ConfigError> {
+    let pub_hex = match biscuit_root_key_file {
+        #[cfg(not(miri))]
+        Some(path) => {
+            let raw =
+                fs::read_to_string(path).map_err(|source| ConfigError::BiscuitKeyFileError {
+                    path: path.to_string(),
+                    source,
+                })?;
+            raw.trim().to_string()
+        }
+        #[cfg(miri)]
+        Some(_) => "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
+        None => return Err(ConfigError::MissingBiscuitKey),
+    };
+
+    let bytes =
+        hex::decode(pub_hex).map_err(|err| ConfigError::InvalidBiscuitKeyHex(err.to_string()))?;
+    if bytes.len() != 32 {
+        return Err(ConfigError::InvalidBiscuitKeyLength(bytes.len()));
+    }
+
+    biscuit_auth::PublicKey::from_bytes(&bytes, biscuit_auth::Algorithm::Ed25519)
+        .map_err(|err| ConfigError::InvalidBiscuitPublicKey(err.to_string()))
+}
+
+fn normalize_control_notify_topic_prefix(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("system_notification")
+        .to_string()
+}
+
 fn opt_kv(opt: *mut crate::MosquittoOpt) -> Option<(String, String)> {
     if opt.is_null() {
         return None;
@@ -432,140 +520,139 @@ fn opt_kv(opt: *mut crate::MosquittoOpt) -> Option<(String, String)> {
 pub fn parse_options(
     options: *mut crate::MosquittoOpt,
     option_count: i32,
-) -> Result<PluginConfig, String> {
+) -> Result<PluginConfig, ConfigError> {
     let mut builder = PluginConfigBuilder::new();
 
     if option_count < 0 {
-        return Err("Invalid option_count".to_string());
+        return Err(ConfigError::InvalidOptionCount);
     }
     if option_count > 0 && options.is_null() {
-        return Err("Invalid options pointer".to_string());
+        return Err(ConfigError::InvalidOptionsPointer);
     }
 
+    let option_count =
+        usize::try_from(option_count).map_err(|_| ConfigError::InvalidOptionCount)?;
     for i in 0..option_count {
-        let opt_ptr = unsafe { options.add(i as usize) };
+        let opt_ptr = unsafe { options.add(i) };
         let Some((key, value)) = opt_kv(opt_ptr) else {
             continue;
         };
-
-        builder = match key.as_str() {
-            "jwt_alg" => builder.jwt_algorithm(value),
-            "jwt_key_file" => builder.jwt_key_file(value),
-            "jwt_issuer" => builder.jwt_issuer(value),
-            "jwt_audience" => builder.jwt_audience(value),
-            "biscuit_root_key_file" => builder.biscuit_root_key_file(value),
-            "policy_mode" => {
-                let mode = match value.as_str() {
-                    "token" => PolicyMode::TokenOnly,
-                    "static_acl" => PolicyMode::StaticAcl,
-                    "static_acl_strict" => PolicyMode::StaticAclStrict,
-                    "sqlite" => PolicyMode::Sqlite,
-                    "http" => PolicyMode::Http,
-                    "hybrid" => PolicyMode::Hybrid,
-                    "dynamic_security" => PolicyMode::DynamicSecurity,
-                    _ => return Err(format!("Invalid policy_mode: {value}")),
-                };
-                builder.policy_mode(mode)
-            }
-            "sqlite_path" => builder.sqlite_path(value),
-            "sqlite_seed_demo_rules" => {
-                let enabled = value
-                    .parse::<bool>()
-                    .map_err(|e| format!("Invalid sqlite_seed_demo_rules: {e}"))?;
-                builder.sqlite_seed_demo_rules(enabled)
-            }
-            "http_url" => builder.http_url(value),
-            "http_ca_file" => builder.http_ca_file(value),
-            "http_tls_insecure" => {
-                let enabled = value
-                    .parse::<bool>()
-                    .map_err(|e| format!("Invalid http_tls_insecure: {e}"))?;
-                builder.http_tls_insecure(enabled)
-            }
-            "http_timeout_seconds" => {
-                let seconds = value
-                    .parse::<u64>()
-                    .map_err(|e| format!("Invalid http_timeout_seconds: {e}"))?;
-                if seconds < MIN_HTTP_TIMEOUT_SECONDS {
-                    return Err("http_timeout_seconds must be >= 1".to_string());
-                }
-                builder.http_timeout_seconds(seconds)
-            }
-            "http_max_response_bytes" => {
-                let bytes = value
-                    .parse::<u64>()
-                    .map_err(|e| format!("Invalid http_max_response_bytes: {e}"))?;
-                if bytes == 0 {
-                    return Err("http_max_response_bytes must be > 0".to_string());
-                }
-                if bytes > MAX_HTTP_RESPONSE_BYTES {
-                    return Err(format!(
-                        "http_max_response_bytes must be <= {MAX_HTTP_RESPONSE_BYTES}"
-                    ));
-                }
-                builder.http_max_response_bytes(bytes)
-            }
-            "dynamic_security_url" => builder.dynamic_security_url(value),
-            "dynamic_security_reload_interval_seconds" => {
-                let seconds = value.parse::<u64>().map_err(|e| {
-                    format!("Invalid dynamic_security_reload_interval_seconds: {e}")
-                })?;
-                builder.dynamic_security_reload_interval_seconds(seconds)
-            }
-            "cache_ttl_seconds" => {
-                let ttl = value
-                    .parse::<u64>()
-                    .map_err(|e| format!("Invalid cache_ttl_seconds: {e}"))?;
-                builder.cache_ttl_seconds(ttl)
-            }
-            "allow_anonymous_no_token" => {
-                let enabled = value
-                    .parse::<bool>()
-                    .map_err(|e| format!("Invalid allow_anonymous_no_token: {e}"))?;
-                builder.allow_anonymous_no_token(enabled)
-            }
-            "acl_read_full_authz" => {
-                let enabled = value
-                    .parse::<bool>()
-                    .map_err(|e| format!("Invalid acl_read_full_authz: {e}"))?;
-                builder.acl_read_full_authz(enabled)
-            }
-            "control_notify_topic_prefix" => builder.control_notify_topic_prefix(value),
-            "ext_auth_method" => builder.ext_auth_method(value),
-            "role_username_prefix" => builder.role_username_prefix(value),
-            "biscuit_role_fact" => builder.biscuit_role_fact(value),
-            "biscuit_authorizer_profile" => {
-                let profile = match value.as_str() {
-                    "simple" => BiscuitAuthorizerProfile::Simple,
-                    "rbac" => BiscuitAuthorizerProfile::Rbac,
-                    "contextual" => BiscuitAuthorizerProfile::Contextual,
-                    _ => {
-                        return Err(format!(
-                            "Invalid biscuit_authorizer_profile: {value}. Use 'simple', 'rbac' or 'contextual'"
-                        ));
-                    }
-                };
-                builder.biscuit_authorizer_profile(profile)
-            }
-            "biscuit_authorizer_max_time_ms" => {
-                let millis = value
-                    .parse::<u64>()
-                    .map_err(|e| format!("Invalid biscuit_authorizer_max_time_ms: {e}"))?;
-                if millis < MIN_BISCUIT_AUTHORIZER_MAX_TIME_MS {
-                    return Err("biscuit_authorizer_max_time_ms must be >= 1".to_string());
-                }
-                builder.biscuit_authorizer_max_time_ms(millis)
-            }
-            "biscuit_transport" => {
-                return Err(format!(
-                    "biscuit_transport={value} is no longer supported; Biscuit now uses raw bytes on MQTT transport"
-                ));
-            }
-            _ => builder,
-        };
+        builder = apply_option(builder, key.as_str(), value)?;
     }
 
-    builder.build().map_err(|e| e.to_string())
+    builder.build()
+}
+
+fn apply_option(
+    builder: PluginConfigBuilder,
+    key: &str,
+    value: String,
+) -> Result<PluginConfigBuilder, ConfigError> {
+    match key {
+        "jwt_alg" => Ok(builder.jwt_algorithm(value)),
+        "jwt_key_file" => Ok(builder.jwt_key_file(value)),
+        "jwt_issuer" => Ok(builder.jwt_issuer(value)),
+        "jwt_audience" => Ok(builder.jwt_audience(value)),
+        "biscuit_root_key_file" => Ok(builder.biscuit_root_key_file(value)),
+        "policy_mode" => Ok(builder.policy_mode(
+            value
+                .parse::<PolicyMode>()
+                .map_err(|err| ConfigError::InvalidPolicyMode(err.to_string()))?,
+        )),
+        "sqlite_path" => Ok(builder.sqlite_path(value)),
+        "sqlite_seed_demo_rules" => Ok(
+            builder.sqlite_seed_demo_rules(parse_bool_option("sqlite_seed_demo_rules", &value)?)
+        ),
+        "http_url" => Ok(builder.http_url(value)),
+        "http_ca_file" => Ok(builder.http_ca_file(value)),
+        "http_tls_insecure" => {
+            Ok(builder.http_tls_insecure(parse_bool_option("http_tls_insecure", &value)?))
+        }
+        "http_timeout_seconds" => Ok(builder.http_timeout_seconds(parse_min_u64_option(
+            "http_timeout_seconds",
+            &value,
+            MIN_HTTP_TIMEOUT_SECONDS,
+        )?)),
+        "http_max_response_bytes" => Ok(builder.http_max_response_bytes(parse_bounded_u64_option(
+            "http_max_response_bytes",
+            &value,
+            1,
+            MAX_HTTP_RESPONSE_BYTES,
+        )?)),
+        "dynamic_security_url" => Ok(builder.dynamic_security_url(value)),
+        "dynamic_security_reload_interval_seconds" => Ok(builder
+            .dynamic_security_reload_interval_seconds(parse_u64_option(
+                "dynamic_security_reload_interval_seconds",
+                &value,
+            )?)),
+        "cache_ttl_seconds" => {
+            Ok(builder.cache_ttl_seconds(parse_u64_option("cache_ttl_seconds", &value)?))
+        }
+        "allow_anonymous_no_token" => Ok(builder
+            .allow_anonymous_no_token(parse_bool_option("allow_anonymous_no_token", &value)?)),
+        "acl_read_full_authz" => {
+            Ok(builder.acl_read_full_authz(parse_bool_option("acl_read_full_authz", &value)?))
+        }
+        "control_notify_topic_prefix" => Ok(builder.control_notify_topic_prefix(value)),
+        "ext_auth_method" => Ok(builder.ext_auth_method(value)),
+        "role_username_prefix" => Ok(builder.role_username_prefix(value)),
+        "biscuit_role_fact" => Ok(builder.biscuit_role_fact(value)),
+        "biscuit_authorizer_profile" => {
+            Ok(builder.biscuit_authorizer_profile(value.parse::<BiscuitAuthorizerProfile>()?))
+        }
+        "biscuit_authorizer_max_time_ms" => {
+            Ok(builder.biscuit_authorizer_max_time_ms(parse_min_u64_option(
+                "biscuit_authorizer_max_time_ms",
+                &value,
+                MIN_BISCUIT_AUTHORIZER_MAX_TIME_MS,
+            )?))
+        }
+        "biscuit_transport" => Err(ConfigError::UnsupportedBiscuitTransport { value }),
+        _ => Ok(builder),
+    }
+}
+
+fn parse_bool_option(option: &'static str, value: &str) -> Result<bool, ConfigError> {
+    value
+        .parse::<bool>()
+        .map_err(|source| ConfigError::InvalidBooleanOption { option, source })
+}
+
+fn parse_u64_option(option: &'static str, value: &str) -> Result<u64, ConfigError> {
+    value
+        .parse::<u64>()
+        .map_err(|source| ConfigError::InvalidIntegerOption { option, source })
+}
+
+fn parse_min_u64_option(
+    option: &'static str,
+    value: &str,
+    minimum: u64,
+) -> Result<u64, ConfigError> {
+    let parsed = parse_u64_option(option, value)?;
+    if parsed < minimum {
+        return Err(ConfigError::OptionBelowMinimum { option, minimum });
+    }
+    Ok(parsed)
+}
+
+fn parse_bounded_u64_option(
+    option: &'static str,
+    value: &str,
+    minimum: u64,
+    maximum: u64,
+) -> Result<u64, ConfigError> {
+    let parsed = parse_u64_option(option, value)?;
+    if parsed == 0 {
+        return Err(ConfigError::OptionMustBePositive { option });
+    }
+    if parsed < minimum {
+        return Err(ConfigError::OptionBelowMinimum { option, minimum });
+    }
+    if parsed > maximum {
+        return Err(ConfigError::OptionAboveMaximum { option, maximum });
+    }
+    Ok(parsed)
 }
 
 #[cfg(test)]
@@ -748,7 +835,10 @@ mod tests {
             i32::try_from(opts.len()).expect("opts len fits i32"),
         ) {
             Ok(_) => panic!("must fail"),
-            Err(err) => assert!(err.contains("Invalid biscuit_authorizer_profile")),
+            Err(err) => assert!(
+                err.to_string()
+                    .contains("Invalid biscuit_authorizer_profile")
+            ),
         }
     }
 
@@ -841,7 +931,12 @@ mod tests {
             i32::try_from(opts.len()).expect("opts len fits i32"),
         ) {
             Ok(_) => panic!("must fail"),
-            Err(err) => assert!(err.contains("biscuit_authorizer_max_time_ms must be >= 1")),
+            Err(err) => {
+                assert!(
+                    err.to_string()
+                        .contains("biscuit_authorizer_max_time_ms must be >= 1")
+                );
+            }
         }
     }
 

@@ -83,7 +83,10 @@ mod time;
 mod mosquitto_ffi;
 #[cfg(test)]
 use auth_runtime::{is_acl_read_only, normalize_username, should_defer_no_token_basic_auth};
-use callbacks::*;
+use callbacks::{
+    acl_check_callback, basic_auth_callback, control_callback, ext_auth_continue_callback,
+    ext_auth_start_callback, message_callback,
+};
 use mosquitto_ffi::mosquitto_abi::{
     MOSQ_ACL_CONTROL, MOSQ_ERR_INVAL, MOSQ_ERR_SUCCESS, MOSQ_EVT_ACL_CHECK, MOSQ_EVT_BASIC_AUTH,
     MOSQ_EVT_CONTROL, MOSQ_EVT_EXT_AUTH_CONTINUE, MOSQ_EVT_EXT_AUTH_START, MOSQ_EVT_MESSAGE,
@@ -101,7 +104,11 @@ use mosquitto_ffi::mosquitto_runtime::{
     broker_publish_copy_raw, kick_client_by_clientid_raw, log_debug, log_info,
 };
 mod session;
-use session::*;
+use session::{
+    SessionIndex, plugin_state, remove_session_username, session_client_ids_for_username,
+};
+#[cfg(test)]
+use session::{bind_session_username, plugin_state_mut};
 mod callbacks;
 mod token_utils;
 #[cfg(test)]

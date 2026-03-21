@@ -1,4 +1,7 @@
-use super::dyn_sec_model::*;
+use super::dyn_sec_model::{
+    AccessKind, AclConfig, AclEntry, AclType, DynSecClient, DynSecGroup, DynSecRole, DynSecState,
+    RoleAclKey, RoleRef, RuntimeRoleAclOverride, group_member_usernames, role_member_usernames,
+};
 use super::{
     delete_group_from_state, merge_persist_group_roles, merge_persist_role_acls,
     prune_placeholder_client, state_allows_username_access,
@@ -33,6 +36,53 @@ pub(crate) struct ControlCommand {
     pub priority: Option<i32>,
     #[serde(default)]
     pub allow: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ControlCommandKind {
+    DisableClient,
+    EnableClient,
+    CreateRole,
+    DeleteRole,
+    CreateGroup,
+    DeleteGroup,
+    AddGroupClient,
+    RemoveGroupClient,
+    AddRoleAcl,
+    RemoveRoleAcl,
+}
+
+impl ControlCommandKind {
+    pub(crate) fn parse(command: &str) -> Option<Self> {
+        match command.trim() {
+            "disableClient" => Some(Self::DisableClient),
+            "enableClient" => Some(Self::EnableClient),
+            "createRole" => Some(Self::CreateRole),
+            "deleteRole" => Some(Self::DeleteRole),
+            "createGroup" => Some(Self::CreateGroup),
+            "deleteGroup" => Some(Self::DeleteGroup),
+            "addGroupClient" => Some(Self::AddGroupClient),
+            "removeGroupClient" => Some(Self::RemoveGroupClient),
+            "addRoleACL" => Some(Self::AddRoleAcl),
+            "removeRoleACL" => Some(Self::RemoveRoleAcl),
+            _ => None,
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::DisableClient => "disableClient",
+            Self::EnableClient => "enableClient",
+            Self::CreateRole => "createRole",
+            Self::DeleteRole => "deleteRole",
+            Self::CreateGroup => "createGroup",
+            Self::DeleteGroup => "deleteGroup",
+            Self::AddGroupClient => "addGroupClient",
+            Self::RemoveGroupClient => "removeGroupClient",
+            Self::AddRoleAcl => "addRoleACL",
+            Self::RemoveRoleAcl => "removeRoleACL",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -81,127 +131,136 @@ impl ControlMutationDraft {
     }
 
     pub(crate) fn apply_command(&mut self, cmd: &ControlCommand) {
-        let command = cmd.command.as_str();
-        if command == "disableClient" || command == "enableClient" {
-            self.apply_client_disable_command(command, cmd);
+        let Some(command) = ControlCommandKind::parse(&cmd.command) else {
             return;
-        }
+        };
 
-        if command == "createRole" {
-            let Some(rolename) = cmd
-                .rolename
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            else {
-                return;
-            };
-
-            if self.state.roles.contains_key(rolename) {
-                return;
+        match command {
+            ControlCommandKind::DisableClient | ControlCommandKind::EnableClient => {
+                self.apply_client_disable_command(command, cmd);
             }
-
-            self.state.roles.insert(
-                rolename.to_string(),
-                DynSecRole::from_control_acls(cmd.acls.clone()),
-            );
-            self.persist_mutations.push(PersistMutation::CreateRole {
-                rolename: rolename.to_string(),
-                acls: cmd.acls.clone().unwrap_or_default(),
-            });
-            self.changed = true;
-            return;
-        }
-
-        if command == "deleteRole" {
-            let Some(rolename) = cmd
-                .rolename
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            else {
-                return;
-            };
-
-            if self.state.roles.remove(rolename).is_none() {
-                return;
+            ControlCommandKind::CreateRole => self.apply_create_role_command(cmd),
+            ControlCommandKind::DeleteRole => self.apply_delete_role_command(cmd),
+            ControlCommandKind::CreateGroup => self.apply_create_group_command(cmd),
+            ControlCommandKind::DeleteGroup => self.apply_delete_group_command(cmd),
+            ControlCommandKind::AddGroupClient | ControlCommandKind::RemoveGroupClient => {
+                self.apply_group_client_command(command, cmd);
             }
-            for client in self.state.clients.values_mut() {
-                client.remove_role(rolename);
+            ControlCommandKind::AddRoleAcl | ControlCommandKind::RemoveRoleAcl => {
+                self.apply_role_acl_command(command, cmd);
             }
-            for group in self.state.groups.values_mut() {
-                group.remove_role(rolename);
-            }
-            let before_len = self.runtime_role_acl_overrides.len();
-            self.runtime_role_acl_overrides
-                .retain(|key, _| key.rolename != rolename);
-            self.changed |= self.runtime_role_acl_overrides.len() != before_len;
-            self.persist_mutations.push(PersistMutation::DeleteRole {
-                rolename: rolename.to_string(),
-            });
-            self.queue_role_publish_receive_revocation_candidates(command, rolename, None);
-            self.changed = true;
-            return;
-        }
-
-        if command == "createGroup" {
-            let Some(groupname) = cmd
-                .groupname
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            else {
-                return;
-            };
-
-            if self.state.groups.contains_key(groupname) {
-                return;
-            }
-
-            self.state.groups.insert(
-                groupname.to_string(),
-                DynSecGroup::from_control_roles(cmd.roles.clone()),
-            );
-            self.persist_mutations.push(PersistMutation::CreateGroup {
-                groupname: groupname.to_string(),
-                roles: cmd.roles.clone().unwrap_or_default(),
-            });
-            self.changed = true;
-            return;
-        }
-
-        if command == "deleteGroup" {
-            let Some(groupname) = cmd
-                .groupname
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            else {
-                return;
-            };
-
-            if !delete_group_from_state(&mut self.state, groupname) {
-                return;
-            }
-            self.persist_mutations.push(PersistMutation::DeleteGroup {
-                groupname: groupname.to_string(),
-            });
-            self.queue_group_publish_receive_revocation_candidates(command, groupname, None);
-            self.changed = true;
-            return;
-        }
-
-        if command == "addGroupClient" || command == "removeGroupClient" {
-            self.apply_group_client_command(command, cmd);
-            return;
-        }
-
-        if command == "removeRoleACL" || command == "addRoleACL" {
-            self.apply_role_acl_command(command, cmd);
         }
     }
 
-    fn apply_client_disable_command(&mut self, command: &str, cmd: &ControlCommand) {
+    fn apply_create_role_command(&mut self, cmd: &ControlCommand) {
+        let Some(rolename) = cmd
+            .rolename
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return;
+        };
+
+        if self.state.roles.contains_key(rolename) {
+            return;
+        }
+
+        self.state.roles.insert(
+            rolename.to_string(),
+            DynSecRole::from_control_acls(cmd.acls.clone()),
+        );
+        self.persist_mutations.push(PersistMutation::CreateRole {
+            rolename: rolename.to_string(),
+            acls: cmd.acls.clone().unwrap_or_default(),
+        });
+        self.changed = true;
+    }
+
+    fn apply_delete_role_command(&mut self, cmd: &ControlCommand) {
+        let Some(rolename) = cmd
+            .rolename
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return;
+        };
+
+        if self.state.roles.remove(rolename).is_none() {
+            return;
+        }
+        for client in self.state.clients.values_mut() {
+            client.remove_role(rolename);
+        }
+        for group in self.state.groups.values_mut() {
+            group.remove_role(rolename);
+        }
+        let before_len = self.runtime_role_acl_overrides.len();
+        self.runtime_role_acl_overrides
+            .retain(|key, _| key.rolename != rolename);
+        self.changed |= self.runtime_role_acl_overrides.len() != before_len;
+        self.persist_mutations.push(PersistMutation::DeleteRole {
+            rolename: rolename.to_string(),
+        });
+        self.queue_role_publish_receive_revocation_candidates(
+            ControlCommandKind::DeleteRole,
+            rolename,
+            None,
+        );
+        self.changed = true;
+    }
+
+    fn apply_create_group_command(&mut self, cmd: &ControlCommand) {
+        let Some(groupname) = cmd
+            .groupname
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return;
+        };
+
+        if self.state.groups.contains_key(groupname) {
+            return;
+        }
+
+        self.state.groups.insert(
+            groupname.to_string(),
+            DynSecGroup::from_control_roles(cmd.roles.clone()),
+        );
+        self.persist_mutations.push(PersistMutation::CreateGroup {
+            groupname: groupname.to_string(),
+            roles: cmd.roles.clone().unwrap_or_default(),
+        });
+        self.changed = true;
+    }
+
+    fn apply_delete_group_command(&mut self, cmd: &ControlCommand) {
+        let Some(groupname) = cmd
+            .groupname
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return;
+        };
+
+        if !delete_group_from_state(&mut self.state, groupname) {
+            return;
+        }
+        self.persist_mutations.push(PersistMutation::DeleteGroup {
+            groupname: groupname.to_string(),
+        });
+        self.queue_group_publish_receive_revocation_candidates(
+            ControlCommandKind::DeleteGroup,
+            groupname,
+            None,
+        );
+        self.changed = true;
+    }
+
+    fn apply_client_disable_command(&mut self, command: ControlCommandKind, cmd: &ControlCommand) {
         let Some(username) = cmd
             .username
             .as_deref()
@@ -211,7 +270,7 @@ impl ControlMutationDraft {
             return;
         };
 
-        if command == "enableClient" {
+        if command == ControlCommandKind::EnableClient {
             self.persist_mutations
                 .push(PersistMutation::SetClientDisabled {
                     username: username.to_string(),
@@ -220,13 +279,13 @@ impl ControlMutationDraft {
         }
 
         let Some(client) = self.state.clients.get_mut(username) else {
-            if command == "enableClient" {
+            if command == ControlCommandKind::EnableClient {
                 self.changed |= self.runtime_disabled_usernames.remove(username);
             }
             return;
         };
 
-        if command == "disableClient" {
+        if command == ControlCommandKind::DisableClient {
             if client.disabled {
                 return;
             }
@@ -255,7 +314,7 @@ impl ControlMutationDraft {
         }
     }
 
-    fn apply_group_client_command(&mut self, command: &str, cmd: &ControlCommand) {
+    fn apply_group_client_command(&mut self, command: ControlCommandKind, cmd: &ControlCommand) {
         let Some(groupname) = cmd
             .groupname
             .as_deref()
@@ -274,7 +333,7 @@ impl ControlMutationDraft {
         };
 
         let mut changed = false;
-        if command == "addGroupClient" {
+        if command == ControlCommandKind::AddGroupClient {
             let priority = cmd.priority.unwrap_or(0);
             let Some(group) = self.state.groups.get_mut(groupname) else {
                 return;
@@ -324,7 +383,7 @@ impl ControlMutationDraft {
 
     pub fn queue_role_publish_receive_revocation_candidates(
         &mut self,
-        command: &str,
+        command: ControlCommandKind,
         rolename: &str,
         usernames: Option<Vec<String>>,
     ) {
@@ -351,16 +410,17 @@ impl ControlMutationDraft {
 
     pub fn queue_group_publish_receive_revocation_candidates(
         &mut self,
-        command: &str,
+        command: ControlCommandKind,
         groupname: &str,
         username: Option<&str>,
     ) {
         let Some(group) = self.initial_state.groups.get(groupname) else {
             return;
         };
-        let usernames = username
-            .map(|value| vec![value.to_string()])
-            .unwrap_or_else(|| group_member_usernames(&self.initial_state, groupname));
+        let usernames = username.map_or_else(
+            || group_member_usernames(&self.initial_state, groupname),
+            |value| vec![value.to_string()],
+        );
         if usernames.is_empty() {
             return;
         }
@@ -381,7 +441,7 @@ impl ControlMutationDraft {
 
     pub fn queue_publish_receive_revocation_candidate(
         &mut self,
-        command: &str,
+        command: ControlCommandKind,
         rolename: &str,
         topic: &str,
         candidate_usernames: &[String],
@@ -393,7 +453,7 @@ impl ControlMutationDraft {
         }
 
         self.pending_notify_candidates.push(PendingNotifyCandidate {
-            command: command.to_string(),
+            command: command.as_str().to_string(),
             rolename: rolename.to_string(),
             topic: topic.to_string(),
             usernames,
@@ -475,7 +535,7 @@ impl ControlMutationDraft {
         self.pending_notify_candidates.clear();
     }
 
-    fn apply_role_acl_command(&mut self, command: &str, cmd: &ControlCommand) {
+    fn apply_role_acl_command(&mut self, command: ControlCommandKind, cmd: &ControlCommand) {
         let Some(rolename) = cmd
             .rolename
             .as_deref()
@@ -500,7 +560,7 @@ impl ControlMutationDraft {
         else {
             return;
         };
-        let Some(acl_type) = AclType::from_control_str(acltype) else {
+        let Some(parsed_acl_type) = AclType::from_control_str(acltype) else {
             return;
         };
 
@@ -508,8 +568,8 @@ impl ControlMutationDraft {
             return;
         };
 
-        if command == "removeRoleACL" {
-            let removed_acl = role.acls.remove_acl_entry(acl_type, topic);
+        if command == ControlCommandKind::RemoveRoleAcl {
+            let removed_acl = role.acls.remove_acl_entry(parsed_acl_type, topic);
             if let Some(removed_acl) = removed_acl {
                 self.changed = true;
                 self.persist_mutations
@@ -519,7 +579,7 @@ impl ControlMutationDraft {
                         topic: topic.to_string(),
                     }));
                 self.runtime_role_acl_overrides.insert(
-                    RoleAclKey::new(rolename, acl_type, topic),
+                    RoleAclKey::new(rolename, parsed_acl_type, topic),
                     RuntimeRoleAclOverride::Remove,
                 );
                 if removed_acl.allow
@@ -538,7 +598,7 @@ impl ControlMutationDraft {
         let allow = cmd.allow.unwrap_or(false);
         let priority = cmd.priority.unwrap_or(0);
         let changed = role.acls.upsert_acl_entry(AclEntry {
-            acl_type,
+            acl_type: parsed_acl_type,
             topic: topic.to_string(),
             allow,
             priority,
@@ -557,10 +617,13 @@ impl ControlMutationDraft {
                 allow,
             }));
         self.runtime_role_acl_overrides.insert(
-            RoleAclKey::new(rolename, acl_type, topic),
+            RoleAclKey::new(rolename, parsed_acl_type, topic),
             RuntimeRoleAclOverride::Add { priority, allow },
         );
-        if !allow && acl_type == AclType::PublishClientReceive && !topic.starts_with("$CONTROL/") {
+        if !allow
+            && parsed_acl_type == AclType::PublishClientReceive
+            && !topic.starts_with("$CONTROL/")
+        {
             let usernames = role_member_usernames(&self.initial_state, rolename);
             self.queue_publish_receive_revocation_candidate(command, rolename, topic, &usernames);
         }
@@ -659,7 +722,7 @@ impl PersistMutation {
     /// and a subsequent `deleteRole` removes the runtime override, the ACL change is
     /// lost from both the file and the override map. This is acceptable because the
     /// `deleteRole` semantics intentionally discard all ACLs for that role, and the
-    /// pending persist queue's RetryIntentReducer will also drop orphaned ACL intents
+    /// pending persist queue's `RetryIntentReducer` will also drop orphaned ACL intents
     /// when it sees the role deletion.
     pub(crate) const fn is_replayed_on_reload(&self) -> bool {
         matches!(
@@ -751,7 +814,7 @@ impl RetryIntentReducer {
                 self.client_disabled.insert(username.clone(), *disabled);
             }
             PersistMutation::CreateRole { rolename, acls } => {
-                self.apply_role_create(rolename, acls)
+                self.apply_role_create(rolename, acls);
             }
             PersistMutation::DeleteRole { rolename } => self.apply_role_delete(rolename),
             PersistMutation::CreateGroup {
@@ -798,7 +861,12 @@ impl RetryIntentReducer {
                 acltype,
                 topic,
             }) => {
-                self.apply_role_acl_intent(rolename, acltype, topic, PendingRoleAclMutation::Remove)
+                self.apply_role_acl_intent(
+                    rolename,
+                    acltype,
+                    topic,
+                    PendingRoleAclMutation::Remove,
+                );
             }
         }
     }

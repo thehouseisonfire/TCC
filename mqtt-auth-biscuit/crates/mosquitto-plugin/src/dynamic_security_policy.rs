@@ -1,4 +1,4 @@
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
@@ -11,12 +11,24 @@ use thiserror::Error;
 mod dyn_sec_model;
 #[path = "dyn_sec_mutation.rs"]
 mod dyn_sec_mutation;
-use dyn_sec_model::*;
+#[path = "dyn_sec_persist.rs"]
+mod dyn_sec_persist;
+#[cfg(test)]
+use dyn_sec_model::{ACL_READ, ACL_SUBSCRIBE, ACL_WRITE};
+use dyn_sec_model::{
+    AccessKind, AclConfig, AclEntry, AclType, DynSecClient, DynSecConfig, DynSecGroup, DynSecRole,
+    DynSecState, RoleAclKey, RoleRef, RuntimeRoleAclOverride,
+};
 use dyn_sec_mutation::{
-    ControlCommand, ControlMutationDraft, ControlPayload, PersistMutation, RetryIntentReducer,
-    RoleAclMutation,
+    ControlCommand, ControlCommandKind, ControlMutationDraft, ControlPayload, PersistMutation,
+    RetryIntentReducer, RoleAclMutation,
 };
 pub(crate) use dyn_sec_mutation::{ControlEnforcementTargets, ControlNotifyEvent};
+use dyn_sec_persist::apply_persist_mutations;
+#[cfg(test)]
+use dyn_sec_persist::nested_array_missing_or_empty;
+#[cfg(test)]
+use serde_json::json;
 
 type DynSecResult<T> = Result<T, DynSecError>;
 const PENDING_PERSIST_WARN_THRESHOLD: usize = 256;
@@ -154,15 +166,9 @@ impl DynamicSecurityPolicy {
     }
 
     pub fn apply_control_payload(&self, payload: &[u8]) -> DynSecResult<ControlEnforcementTargets> {
-        if payload.is_empty() {
+        let Some(parsed) = Self::parse_control_payload(payload)? else {
             return Ok(ControlEnforcementTargets::default());
-        }
-
-        let parsed: ControlPayload = serde_json::from_slice(payload)
-            .map_err(|source| DynSecError::InvalidControlPayload { source })?;
-        if parsed.commands.is_empty() {
-            return Ok(ControlEnforcementTargets::default());
-        }
+        };
 
         // **Limitation**: `control_apply_lock` is held for the entire apply_control_payload
         // scope, including file I/O in load_current_control_state and persist_control_mutations.
@@ -171,86 +177,13 @@ impl DynamicSecurityPolicy {
         // the research benchmark environment uses local tmpfs so this is not exercised in
         // normal throughput/latency measurements.
         let _control_guard = lock_mutex(&self.control_apply_lock, "control")?;
-        let state = match self.load_current_control_state() {
-            Ok(state) => {
-                self.refresh_cached_state(state.clone())?;
-                state
-            }
-            Err(err) if is_dynsec_load_read_or_parse_error(&err) => {
-                read_lock(&self.state, "state")?.clone()
-            }
-            Err(err) => return Err(err),
-        };
-
-        // **Limitation**: The full runtime state, disabled-username set, and role-ACL
-        // override map are cloned into the ControlMutationDraft so mutations can be
-        // computed without holding the read locks. For large deployments this adds
-        // allocation pressure on every control command; acceptable for the bounded
-        // entity counts in the research benchmark scenarios.
-        let draft = {
-            let runtime_disabled_usernames =
-                lock_mutex(&self.runtime_disabled_usernames, "runtime disable")?.clone();
-            let runtime_role_acl_overrides =
-                lock_mutex(&self.runtime_role_acl_overrides, "runtime role-acl")?.clone();
-            let mut draft = ControlMutationDraft::new(
-                state,
-                runtime_disabled_usernames,
-                runtime_role_acl_overrides,
-            );
-            for cmd in &parsed.commands {
-                draft.apply_command(cmd);
-            }
-            draft.finalize_notify_events();
-            draft
-        };
-
-        let pending_persist_mutations =
-            lock_mutex(&self.pending_persist_mutations, "pending persist")?.clone();
-        let current_persist_mutations = draft.persist_mutations.clone();
-        let current_persist_repairs = collect_current_persist_repairs(
-            &parsed.commands,
-            &draft.state,
-            &pending_persist_mutations,
-            &current_persist_mutations,
-        );
-        let retry_persist_mutations = build_retry_persist_mutations(
-            &pending_persist_mutations,
-            &current_persist_repairs,
-            &current_persist_mutations,
-        );
+        let state = self.load_state_for_control_payload()?;
+        let draft = self.build_control_mutation_draft(state, &parsed.commands)?;
+        let retry_persist_mutations =
+            self.collect_retry_persist_mutations(&parsed.commands, &draft)?;
 
         let mut targets = self.commit_control_mutation_draft(draft, None)?;
-        if retry_persist_mutations.is_empty() {
-            return Ok(targets);
-        }
-
-        let Ok(mut pending_guard) = self.pending_persist_mutations.lock() else {
-            targets.persist_warning =
-                Some(DynSecError::lock_poisoned("pending persist").to_string());
-            return Ok(targets);
-        };
-
-        // The threshold below detects a persistently broken config file. The queue is
-        // already collapsed by RetryIntentReducer, so its size is bounded by the number
-        // of distinct (entity, operation) combinations mutated while the file was
-        // unwritable — not by raw command count. Exceeding the threshold means many
-        // distinct roles/groups/clients have been mutated without any successful flush.
-        //
-        match self.persist_control_mutations(&retry_persist_mutations) {
-            Ok(()) => pending_guard.clear(),
-            Err(err) => {
-                *pending_guard = retry_persist_mutations;
-                if pending_guard.len() >= PENDING_PERSIST_WARN_THRESHOLD {
-                    crate::log_info(&format!(
-                        "dynsec: pending persist queue has {} unflushed mutations — \
-                         config file may be permanently unwritable",
-                        pending_guard.len(),
-                    ));
-                }
-                targets.persist_warning = Some(err.to_string());
-            }
-        }
-
+        self.flush_retry_persist_mutations(retry_persist_mutations, &mut targets);
         Ok(targets)
     }
 
@@ -310,6 +243,118 @@ impl DynamicSecurityPolicy {
         }
 
         Ok(())
+    }
+
+    fn parse_control_payload(payload: &[u8]) -> DynSecResult<Option<ControlPayload>> {
+        if payload.is_empty() {
+            return Ok(None);
+        }
+
+        let parsed: ControlPayload = serde_json::from_slice(payload)
+            .map_err(|source| DynSecError::InvalidControlPayload { source })?;
+        if parsed.commands.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(parsed))
+    }
+
+    fn load_state_for_control_payload(&self) -> DynSecResult<DynSecState> {
+        match self.load_current_control_state() {
+            Ok(state) => {
+                self.refresh_cached_state(state.clone())?;
+                Ok(state)
+            }
+            Err(err) if is_dynsec_load_read_or_parse_error(&err) => {
+                Ok(read_lock(&self.state, "state")?.clone())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn build_control_mutation_draft(
+        &self,
+        state: DynSecState,
+        commands: &[ControlCommand],
+    ) -> DynSecResult<ControlMutationDraft> {
+        // **Limitation**: The full runtime state, disabled-username set, and role-ACL
+        // override map are cloned into the ControlMutationDraft so mutations can be
+        // computed without holding the read locks. For large deployments this adds
+        // allocation pressure on every control command; acceptable for the bounded
+        // entity counts in the research benchmark scenarios.
+        let runtime_disabled_usernames =
+            lock_mutex(&self.runtime_disabled_usernames, "runtime disable")?.clone();
+        let runtime_role_acl_overrides =
+            lock_mutex(&self.runtime_role_acl_overrides, "runtime role-acl")?.clone();
+        let mut draft = ControlMutationDraft::new(
+            state,
+            runtime_disabled_usernames,
+            runtime_role_acl_overrides,
+        );
+        for command in commands {
+            draft.apply_command(command);
+        }
+        draft.finalize_notify_events();
+        Ok(draft)
+    }
+
+    fn collect_retry_persist_mutations(
+        &self,
+        commands: &[ControlCommand],
+        draft: &ControlMutationDraft,
+    ) -> DynSecResult<Vec<PersistMutation>> {
+        let pending_persist_mutations =
+            lock_mutex(&self.pending_persist_mutations, "pending persist")?.clone();
+        let current_persist_mutations = draft.persist_mutations.clone();
+        let current_persist_repairs = collect_current_persist_repairs(
+            commands,
+            &draft.state,
+            &pending_persist_mutations,
+            &current_persist_mutations,
+        );
+
+        Ok(build_retry_persist_mutations(
+            &pending_persist_mutations,
+            &current_persist_repairs,
+            &current_persist_mutations,
+        ))
+    }
+
+    fn flush_retry_persist_mutations(
+        &self,
+        retry_persist_mutations: Vec<PersistMutation>,
+        targets: &mut ControlEnforcementTargets,
+    ) {
+        if retry_persist_mutations.is_empty() {
+            return;
+        }
+
+        let Ok(mut pending_guard) = self.pending_persist_mutations.lock() else {
+            targets.persist_warning =
+                Some(DynSecError::lock_poisoned("pending persist").to_string());
+            return;
+        };
+
+        // The threshold below detects a persistently broken config file. The queue is
+        // already collapsed by RetryIntentReducer, so its size is bounded by the number
+        // of distinct (entity, operation) combinations mutated while the file was
+        // unwritable — not by raw command count. Exceeding the threshold means many
+        // distinct roles/groups/clients have been mutated without any successful flush.
+        //
+        match self.persist_control_mutations(&retry_persist_mutations) {
+            Ok(()) => pending_guard.clear(),
+            Err(err) => {
+                *pending_guard = retry_persist_mutations;
+                if pending_guard.len() >= PENDING_PERSIST_WARN_THRESHOLD {
+                    crate::log_info(&format!(
+                        "dynsec: pending persist queue has {} unflushed mutations — \
+                         config file may be permanently unwritable",
+                        pending_guard.len(),
+                    ));
+                }
+                targets.persist_warning = Some(err.to_string());
+            }
+        }
     }
 
     fn load_current_control_state(&self) -> DynSecResult<DynSecState> {
@@ -393,32 +438,18 @@ impl DynamicSecurityPolicy {
     /// Dynamic Security plugin) writing to the same file between our read and write.
     /// Such a race would silently overwrite the external change.
     fn persist_control_mutations(&self, mutations: &[PersistMutation]) -> DynSecResult<()> {
-        let raw = fs::read_to_string(&self.config_path)
-            .map_err(|source| DynSecError::ConfigRead { source })?;
-        let mut root: Value =
-            serde_json::from_str(&raw).map_err(|source| DynSecError::ConfigParse { source })?;
+        let mut root = self.read_config_root()?;
+        let outcome = apply_persist_mutations(&mut root, mutations)?;
 
-        let mut changed = false;
-        let mut blocked = false;
-        for mutation in mutations {
-            let outcome = apply_persist_mutation(&mut root, mutation)?;
-            changed |= outcome.changed();
-            blocked |= outcome.blocked();
-        }
-
-        if blocked {
+        if outcome.blocked() {
             return Err(DynSecError::PersistenceBlocked);
         }
 
-        if !changed {
+        if !outcome.changed() {
             return Ok(());
         }
 
-        let serialized = serde_json::to_string_pretty(&root)
-            .map_err(|source| DynSecError::ConfigSerialize { source })?;
-        fs::write(&self.config_path, format!("{serialized}\n"))
-            .map_err(|source| DynSecError::ConfigWrite { source })?;
-        Ok(())
+        self.write_config_root(&root)
     }
 
     fn commit_control_mutation_draft(
@@ -475,6 +506,20 @@ impl DynamicSecurityPolicy {
             notify_events,
             persist_warning,
         })
+    }
+
+    fn read_config_root(&self) -> DynSecResult<Value> {
+        let raw = fs::read_to_string(&self.config_path)
+            .map_err(|source| DynSecError::ConfigRead { source })?;
+        serde_json::from_str(&raw).map_err(|source| DynSecError::ConfigParse { source })
+    }
+
+    fn write_config_root(&self, root: &Value) -> DynSecResult<()> {
+        let serialized = serde_json::to_string_pretty(root)
+            .map_err(|source| DynSecError::ConfigSerialize { source })?;
+        fs::write(&self.config_path, format!("{serialized}\n"))
+            .map_err(|source| DynSecError::ConfigWrite { source })?;
+        Ok(())
     }
 }
 
@@ -605,44 +650,14 @@ fn apply_state_persist_mutation(
 ) -> StateApplyOutcome {
     match mutation {
         PersistMutation::SetClientDisabled { username, disabled } => {
-            let Some(client) = state.clients.get_mut(username) else {
-                return StateApplyOutcome::Blocked;
-            };
-            if client.disabled == *disabled {
-                return StateApplyOutcome::AlreadySatisfied;
-            }
-            client.disabled = *disabled;
-            StateApplyOutcome::Changed
+            apply_state_set_client_disabled(state, username, *disabled)
         }
         PersistMutation::CreateRole { rolename, acls } => {
-            if let Some(role) = state.roles.get_mut(rolename) {
-                return StateApplyOutcome::from_changed(role.merge_control_acls(acls));
-            }
-            state.roles.insert(
-                rolename.clone(),
-                DynSecRole::from_control_acls(Some(acls.clone())),
-            );
-            StateApplyOutcome::Changed
+            apply_state_create_role(state, rolename, acls)
         }
-        PersistMutation::DeleteRole { rolename } => {
-            let mut changed = state.roles.remove(rolename).is_some();
-            for client in state.clients.values_mut() {
-                changed |= client.remove_role(rolename);
-            }
-            for group in state.groups.values_mut() {
-                changed |= group.remove_role(rolename);
-            }
-            StateApplyOutcome::from_changed(changed)
-        }
+        PersistMutation::DeleteRole { rolename } => apply_state_delete_role(state, rolename),
         PersistMutation::CreateGroup { groupname, roles } => {
-            if let Some(group) = state.groups.get_mut(groupname) {
-                return StateApplyOutcome::from_changed(group.merge_control_roles(roles));
-            }
-            state.groups.insert(
-                groupname.clone(),
-                DynSecGroup::from_control_roles(Some(roles.clone())),
-            );
-            StateApplyOutcome::Changed
+            apply_state_create_group(state, groupname, roles)
         }
         PersistMutation::DeleteGroup { groupname } => {
             StateApplyOutcome::from_changed(delete_group_from_state(state, groupname))
@@ -651,66 +666,151 @@ fn apply_state_persist_mutation(
             groupname,
             username,
             priority,
-        } => {
-            let Some(group) = state.groups.get_mut(groupname) else {
-                return StateApplyOutcome::Blocked;
-            };
-            let mut changed = group.add_client(username, *priority);
-            let client = state
-                .clients
-                .entry(username.clone())
-                .or_insert_with(|| DynSecClient::placeholder(username));
-            changed |= client.add_group(groupname, *priority);
-            StateApplyOutcome::from_changed(changed)
-        }
+        } => apply_state_add_group_client(state, groupname, username, *priority),
         PersistMutation::RemoveGroupClient {
             groupname,
             username,
-        } => {
-            let mut changed = false;
-            if let Some(group) = state.groups.get_mut(groupname) {
-                changed |= group.remove_client(username);
-            }
-            if let Some(client) = state.clients.get_mut(username) {
-                changed |= client.remove_group(groupname);
-            }
-            changed |= prune_placeholder_client(state, username);
-            StateApplyOutcome::from_changed(changed)
-        }
+        } => apply_state_remove_group_client(state, groupname, username),
         PersistMutation::RoleAcl(RoleAclMutation::Add {
             rolename,
             acltype,
             topic,
             priority,
             allow,
-        }) => {
-            let Some(acl_type) = AclType::from_control_str(acltype) else {
-                return StateApplyOutcome::Blocked;
-            };
-            let Some(role) = state.roles.get_mut(rolename) else {
-                return StateApplyOutcome::Blocked;
-            };
-            StateApplyOutcome::from_changed(role.acls.upsert_acl_entry(AclEntry {
-                acl_type,
-                topic: topic.clone(),
-                allow: *allow,
-                priority: *priority,
-            }))
-        }
+        }) => apply_state_add_role_acl(state, rolename, acltype, topic, *priority, *allow),
         PersistMutation::RoleAcl(RoleAclMutation::Remove {
             rolename,
             acltype,
             topic,
-        }) => {
-            let Some(acl_type) = AclType::from_control_str(acltype) else {
-                return StateApplyOutcome::AlreadySatisfied;
-            };
-            let Some(role) = state.roles.get_mut(rolename) else {
-                return StateApplyOutcome::AlreadySatisfied;
-            };
-            StateApplyOutcome::from_changed(role.acls.remove_acl_entry(acl_type, topic).is_some())
-        }
+        }) => apply_state_remove_role_acl(state, rolename, acltype, topic),
     }
+}
+
+fn apply_state_set_client_disabled(
+    state: &mut DynSecState,
+    username: &str,
+    disabled: bool,
+) -> StateApplyOutcome {
+    let Some(client) = state.clients.get_mut(username) else {
+        return StateApplyOutcome::Blocked;
+    };
+    if client.disabled == disabled {
+        return StateApplyOutcome::AlreadySatisfied;
+    }
+    client.disabled = disabled;
+    StateApplyOutcome::Changed
+}
+
+fn apply_state_create_role(
+    state: &mut DynSecState,
+    rolename: &str,
+    acls: &[AclConfig],
+) -> StateApplyOutcome {
+    if let Some(role) = state.roles.get_mut(rolename) {
+        return StateApplyOutcome::from_changed(role.merge_control_acls(acls));
+    }
+    state.roles.insert(
+        rolename.to_string(),
+        DynSecRole::from_control_acls(Some(acls.to_vec())),
+    );
+    StateApplyOutcome::Changed
+}
+
+fn apply_state_delete_role(state: &mut DynSecState, rolename: &str) -> StateApplyOutcome {
+    let mut changed = state.roles.remove(rolename).is_some();
+    for client in state.clients.values_mut() {
+        changed |= client.remove_role(rolename);
+    }
+    for group in state.groups.values_mut() {
+        changed |= group.remove_role(rolename);
+    }
+    StateApplyOutcome::from_changed(changed)
+}
+
+fn apply_state_create_group(
+    state: &mut DynSecState,
+    groupname: &str,
+    roles: &[RoleRef],
+) -> StateApplyOutcome {
+    if let Some(group) = state.groups.get_mut(groupname) {
+        return StateApplyOutcome::from_changed(group.merge_control_roles(roles));
+    }
+    state.groups.insert(
+        groupname.to_string(),
+        DynSecGroup::from_control_roles(Some(roles.to_vec())),
+    );
+    StateApplyOutcome::Changed
+}
+
+fn apply_state_add_group_client(
+    state: &mut DynSecState,
+    groupname: &str,
+    username: &str,
+    priority: i32,
+) -> StateApplyOutcome {
+    let Some(group) = state.groups.get_mut(groupname) else {
+        return StateApplyOutcome::Blocked;
+    };
+    let mut changed = group.add_client(username, priority);
+    let client = state
+        .clients
+        .entry(username.to_string())
+        .or_insert_with(|| DynSecClient::placeholder(username));
+    changed |= client.add_group(groupname, priority);
+    StateApplyOutcome::from_changed(changed)
+}
+
+fn apply_state_remove_group_client(
+    state: &mut DynSecState,
+    groupname: &str,
+    username: &str,
+) -> StateApplyOutcome {
+    let mut changed = false;
+    if let Some(group) = state.groups.get_mut(groupname) {
+        changed |= group.remove_client(username);
+    }
+    if let Some(client) = state.clients.get_mut(username) {
+        changed |= client.remove_group(groupname);
+    }
+    changed |= prune_placeholder_client(state, username);
+    StateApplyOutcome::from_changed(changed)
+}
+
+fn apply_state_add_role_acl(
+    state: &mut DynSecState,
+    rolename: &str,
+    acltype: &str,
+    topic: &str,
+    priority: i32,
+    allow: bool,
+) -> StateApplyOutcome {
+    let Some(parsed_acl_type) = AclType::from_control_str(acltype) else {
+        return StateApplyOutcome::Blocked;
+    };
+    let Some(role) = state.roles.get_mut(rolename) else {
+        return StateApplyOutcome::Blocked;
+    };
+    StateApplyOutcome::from_changed(role.acls.upsert_acl_entry(AclEntry {
+        acl_type: parsed_acl_type,
+        topic: topic.to_string(),
+        allow,
+        priority,
+    }))
+}
+
+fn apply_state_remove_role_acl(
+    state: &mut DynSecState,
+    rolename: &str,
+    acltype: &str,
+    topic: &str,
+) -> StateApplyOutcome {
+    let Some(parsed_acl_type) = AclType::from_control_str(acltype) else {
+        return StateApplyOutcome::AlreadySatisfied;
+    };
+    let Some(role) = state.roles.get_mut(rolename) else {
+        return StateApplyOutcome::AlreadySatisfied;
+    };
+    StateApplyOutcome::from_changed(role.acls.remove_acl_entry(parsed_acl_type, topic).is_some())
 }
 
 pub(crate) fn prune_placeholder_client(state: &mut DynSecState, username: &str) -> bool {
@@ -756,351 +856,49 @@ fn prune_unlinked_placeholder_clients(state: &mut DynSecState) -> bool {
     changed
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PersistApplyOutcome {
-    Changed,
-    AlreadySatisfied,
-    Blocked,
-}
-
-impl PersistApplyOutcome {
-    const fn from_changed(changed: bool) -> Self {
-        if changed {
-            Self::Changed
-        } else {
-            Self::AlreadySatisfied
-        }
-    }
-
-    const fn changed(self) -> bool {
-        matches!(self, Self::Changed)
-    }
-
-    const fn blocked(self) -> bool {
-        matches!(self, Self::Blocked)
-    }
-}
-
-fn apply_persist_mutation(
-    root: &mut Value,
-    mutation: &PersistMutation,
-) -> DynSecResult<PersistApplyOutcome> {
-    match mutation {
-        PersistMutation::SetClientDisabled { username, disabled } => {
-            let clients = ensure_array(root, "clients")?;
-            let mut changed = false;
-            let mut found = false;
-            for client in &mut *clients {
-                let Some(current_username) = client.get("username").and_then(Value::as_str) else {
-                    continue;
-                };
-                if current_username == username {
-                    found = true;
-                    let current_disabled = client
-                        .get("disabled")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    if current_disabled != *disabled {
-                        client["disabled"] = Value::Bool(*disabled);
-                        changed = true;
-                    }
-                }
-            }
-            if !found && *disabled {
-                changed |= persist_disabled_placeholder_client(clients, username);
-            }
-            Ok(PersistApplyOutcome::from_changed(changed))
-        }
-        PersistMutation::CreateRole { rolename, acls } => {
-            let roles = ensure_array(root, "roles")?;
-            if let Some(role) = roles.iter_mut().find(|role| {
-                role.get("rolename").and_then(Value::as_str) == Some(rolename.as_str())
-            }) {
-                let mut changed = false;
-                for acl in acls {
-                    changed |= upsert_acl_ref(role, acl)?.changed();
-                }
-                return Ok(PersistApplyOutcome::from_changed(changed));
-            }
-
-            let mut role = json!({ "rolename": rolename });
-            if !acls.is_empty() {
-                role["acls"] = Value::Array(acls.iter().map(acl_to_value).collect());
-            }
-            roles.push(role);
-            Ok(PersistApplyOutcome::Changed)
-        }
-        PersistMutation::DeleteRole { rolename } => {
-            let mut changed = false;
-            if let Some(roles) = get_array_field(root, "roles")? {
-                let before_len = roles.len();
-                roles.retain(|role| {
-                    role.get("rolename").and_then(Value::as_str) != Some(rolename.as_str())
-                });
-                changed |= roles.len() != before_len;
-            }
-            if let Some(groups) = get_array_field(root, "groups")? {
-                for group in groups {
-                    changed |= remove_named_ref(group, "roles", "rolename", rolename)?.changed();
-                }
-            }
-            if let Some(clients) = get_array_field(root, "clients")? {
-                for client in clients {
-                    changed |= remove_named_ref(client, "roles", "rolename", rolename)?.changed();
-                }
-            }
-            Ok(PersistApplyOutcome::from_changed(changed))
-        }
-        PersistMutation::CreateGroup { groupname, roles } => {
-            let groups = ensure_array(root, "groups")?;
-            if let Some(group) = groups.iter_mut().find(|group| {
-                group.get("groupname").and_then(Value::as_str) == Some(groupname.as_str())
-            }) {
-                let mut changed = false;
-                for role in roles {
-                    changed |= upsert_named_priority_ref(
-                        group,
-                        "roles",
-                        "rolename",
-                        &role.rolename,
-                        role.priority.unwrap_or(-1),
-                    )?
-                    .changed();
-                }
-                return Ok(PersistApplyOutcome::from_changed(changed));
-            }
-
-            let mut group = json!({ "groupname": groupname });
-            if !roles.is_empty() {
-                group["roles"] = Value::Array(roles.iter().map(role_ref_to_value).collect());
-            }
-            groups.push(group);
-            Ok(PersistApplyOutcome::Changed)
-        }
-        PersistMutation::DeleteGroup { groupname } => {
-            let mut changed = false;
-            if let Some(groups) = get_array_field(root, "groups")? {
-                let before_len = groups.len();
-                groups.retain(|group| {
-                    group.get("groupname").and_then(Value::as_str) != Some(groupname.as_str())
-                });
-                changed |= groups.len() != before_len;
-            }
-            if let Some(clients) = get_array_field(root, "clients")? {
-                let mut index = 0;
-                while index < clients.len() {
-                    changed |=
-                        remove_named_ref(&mut clients[index], "groups", "groupname", groupname)?
-                            .changed();
-                    if is_prunable_persisted_placeholder_client(&clients[index])? {
-                        clients.remove(index);
-                        changed = true;
-                        continue;
-                    }
-                    index += 1;
-                }
-            }
-            if root.get("anonymousGroup").and_then(Value::as_str) == Some(groupname.as_str()) {
-                let object = root.as_object_mut().ok_or(DynSecError::RootNotObject)?;
-                changed |= object.remove("anonymousGroup").is_some();
-            }
-            Ok(PersistApplyOutcome::from_changed(changed))
-        }
-        PersistMutation::AddGroupClient {
-            groupname,
-            username,
-            priority,
-        } => {
-            let mut changed = false;
-
-            {
-                let Some(groups) = get_array_field(root, "groups")? else {
-                    return Ok(PersistApplyOutcome::Blocked);
-                };
-                let Some(group) = groups.iter_mut().find(|group| {
-                    group.get("groupname").and_then(Value::as_str) == Some(groupname.as_str())
-                }) else {
-                    return Ok(PersistApplyOutcome::Blocked);
-                };
-
-                changed |=
-                    upsert_named_priority_ref(group, "clients", "username", username, *priority)?
-                        .changed();
-            }
-
-            let Some(clients) = get_array_field(root, "clients")? else {
-                return Ok(PersistApplyOutcome::from_changed(changed));
-            };
-            if let Some(client) = clients.iter_mut().find(|client| {
-                client.get("username").and_then(Value::as_str) == Some(username.as_str())
-            }) {
-                changed |=
-                    upsert_named_priority_ref(client, "groups", "groupname", groupname, *priority)?
-                        .changed();
-            }
-
-            Ok(PersistApplyOutcome::from_changed(changed))
-        }
-        PersistMutation::RemoveGroupClient {
-            groupname,
-            username,
-        } => {
-            let mut changed = false;
-            if let Some(groups) = get_array_field(root, "groups")? {
-                for group in groups {
-                    let Some(current_groupname) = group.get("groupname").and_then(Value::as_str)
-                    else {
-                        continue;
-                    };
-                    if current_groupname == groupname {
-                        changed |=
-                            remove_named_ref(group, "clients", "username", username)?.changed();
-                    }
-                }
-            }
-            if let Some(clients) = get_array_field(root, "clients")? {
-                for client in &mut *clients {
-                    let Some(current_username) = client.get("username").and_then(Value::as_str)
-                    else {
-                        continue;
-                    };
-                    if current_username == username {
-                        changed |=
-                            remove_named_ref(client, "groups", "groupname", groupname)?.changed();
-                    }
-                }
-                changed |= prune_persisted_placeholder_client(clients, username)?.changed();
-            }
-            Ok(PersistApplyOutcome::from_changed(changed))
-        }
-        PersistMutation::RoleAcl(RoleAclMutation::Add {
-            rolename,
-            acltype,
-            topic,
-            priority,
-            allow,
-        }) => {
-            let Some(roles) = get_array_field(root, "roles")? else {
-                return Ok(PersistApplyOutcome::Blocked);
-            };
-
-            for role in roles {
-                let Some(current_rolename) = role.get("rolename").and_then(Value::as_str) else {
-                    continue;
-                };
-                if current_rolename != rolename {
-                    continue;
-                }
-                let acls = ensure_nested_array(role, "acls")?;
-                for acl in acls.iter_mut() {
-                    let acl_acltype = acl.get("acltype").and_then(Value::as_str);
-                    let acl_topic = acl.get("topic").and_then(Value::as_str);
-                    if acl_acltype == Some(acltype.as_str()) && acl_topic == Some(topic.as_str()) {
-                        let current_priority =
-                            acl.get("priority").and_then(Value::as_i64).unwrap_or(0);
-                        let current_allow =
-                            acl.get("allow").and_then(Value::as_bool).unwrap_or(false);
-                        if current_priority == i64::from(*priority) && current_allow == *allow {
-                            return Ok(PersistApplyOutcome::AlreadySatisfied);
-                        }
-                        acl["priority"] = Value::Number((*priority).into());
-                        acl["allow"] = Value::Bool(*allow);
-                        return Ok(PersistApplyOutcome::Changed);
-                    }
-                }
-                acls.push(json!({
-                    "acltype": acltype,
-                    "topic": topic,
-                    "priority": priority,
-                    "allow": allow,
-                }));
-                return Ok(PersistApplyOutcome::Changed);
-            }
-            Ok(PersistApplyOutcome::Blocked)
-        }
-        PersistMutation::RoleAcl(RoleAclMutation::Remove {
-            rolename,
-            acltype,
-            topic,
-        }) => {
-            let Some(roles) = get_array_field(root, "roles")? else {
-                return Ok(PersistApplyOutcome::AlreadySatisfied);
-            };
-
-            let mut changed = false;
-            for role in roles {
-                let Some(current_rolename) = role.get("rolename").and_then(Value::as_str) else {
-                    continue;
-                };
-                if current_rolename != rolename {
-                    continue;
-                }
-                if let Some(acls) = get_nested_array_field(role, "acls")? {
-                    let before_len = acls.len();
-                    acls.retain(|acl| {
-                        let acl_acltype = acl.get("acltype").and_then(Value::as_str);
-                        let acl_topic = acl.get("topic").and_then(Value::as_str);
-                        !(acl_acltype == Some(acltype.as_str())
-                            && acl_topic == Some(topic.as_str()))
-                    });
-                    changed |= acls.len() != before_len;
-                }
-            }
-            Ok(PersistApplyOutcome::from_changed(changed))
-        }
-    }
-}
-
-fn ensure_array<'a>(root: &'a mut Value, key: &str) -> DynSecResult<&'a mut Vec<Value>> {
-    if root.get(key).is_none() {
-        root[key] = Value::Array(Vec::new());
-    }
-    let Some(value) = root.get_mut(key) else {
-        return Err(DynSecError::MissingField {
-            field: key.to_string(),
-        });
-    };
-    expect_array(value, key)
-}
-
 fn collect_current_persist_repairs(
     commands: &[ControlCommand],
     state: &DynSecState,
     pending_mutations: &[PersistMutation],
     current_mutations: &[PersistMutation],
 ) -> Vec<PersistMutation> {
+    let (requested_roles, requested_groups) = collect_requested_create_entities(commands);
+    let (needed_roles, needed_groups) = collect_needed_create_repairs(
+        pending_mutations,
+        current_mutations,
+        &requested_roles,
+        &requested_groups,
+    );
+    build_create_repairs(commands, state, &needed_roles, &needed_groups)
+}
+
+fn collect_requested_create_entities(
+    commands: &[ControlCommand],
+) -> (HashSet<String>, HashSet<String>) {
     let mut requested_roles = HashSet::new();
     let mut requested_groups = HashSet::new();
-    for cmd in commands {
-        match cmd.command.trim() {
-            "createRole" => {
-                let Some(rolename) = cmd
-                    .rolename
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                else {
-                    continue;
-                };
-                requested_roles.insert(rolename.to_string());
-            }
-            "createGroup" => {
-                let Some(groupname) = cmd
-                    .groupname
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                else {
-                    continue;
-                };
-                requested_groups.insert(groupname.to_string());
-            }
-            _ => {}
+
+    for command in commands {
+        if let Some(rolename) = create_role_name(command) {
+            requested_roles.insert(rolename.to_string());
+        }
+        if let Some(groupname) = create_group_name(command) {
+            requested_groups.insert(groupname.to_string());
         }
     }
 
+    (requested_roles, requested_groups)
+}
+
+fn collect_needed_create_repairs(
+    pending_mutations: &[PersistMutation],
+    current_mutations: &[PersistMutation],
+    requested_roles: &HashSet<String>,
+    requested_groups: &HashSet<String>,
+) -> (HashSet<String>, HashSet<String>) {
     let mut needed_roles = HashSet::new();
     let mut needed_groups = HashSet::new();
+
     for mutation in pending_mutations.iter().chain(current_mutations.iter()) {
         match mutation {
             PersistMutation::AddGroupClient { groupname, .. }
@@ -1117,57 +915,74 @@ fn collect_current_persist_repairs(
         }
     }
 
+    (needed_roles, needed_groups)
+}
+
+fn build_create_repairs(
+    commands: &[ControlCommand],
+    state: &DynSecState,
+    needed_roles: &HashSet<String>,
+    needed_groups: &HashSet<String>,
+) -> Vec<PersistMutation> {
     let mut repairs = Vec::new();
     let mut emitted_roles = HashSet::new();
     let mut emitted_groups = HashSet::new();
-    for cmd in commands {
-        match cmd.command.trim() {
-            "createRole" => {
-                let Some(rolename) = cmd
-                    .rolename
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                else {
-                    continue;
-                };
-                if !needed_roles.contains(rolename) || !emitted_roles.insert(rolename.to_string()) {
-                    continue;
-                }
-                let Some(role) = state.roles.get(rolename) else {
-                    continue;
-                };
+
+    for command in commands {
+        if let Some(rolename) = create_role_name(command) {
+            if needed_roles.contains(rolename)
+                && emitted_roles.insert(rolename.to_string())
+                && let Some(role) = state.roles.get(rolename)
+            {
                 repairs.push(PersistMutation::CreateRole {
                     rolename: rolename.to_string(),
                     acls: role.to_control_acls(),
                 });
             }
-            "createGroup" => {
-                let Some(groupname) = cmd
-                    .groupname
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                else {
-                    continue;
-                };
-                if !needed_groups.contains(groupname)
-                    || !emitted_groups.insert(groupname.to_string())
-                {
-                    continue;
-                }
-                let Some(group) = state.groups.get(groupname) else {
-                    continue;
-                };
-                repairs.push(PersistMutation::CreateGroup {
-                    groupname: groupname.to_string(),
-                    roles: group.to_control_roles(),
-                });
-            }
-            _ => {}
+            continue;
+        }
+
+        let Some(groupname) = create_group_name(command) else {
+            continue;
+        };
+        if needed_groups.contains(groupname)
+            && emitted_groups.insert(groupname.to_string())
+            && let Some(group) = state.groups.get(groupname)
+        {
+            repairs.push(PersistMutation::CreateGroup {
+                groupname: groupname.to_string(),
+                roles: group.to_control_roles(),
+            });
         }
     }
+
     repairs
+}
+
+fn create_role_name(command: &ControlCommand) -> Option<&str> {
+    matches!(
+        ControlCommandKind::parse(&command.command),
+        Some(ControlCommandKind::CreateRole)
+    )
+    .then_some(())?;
+    command
+        .rolename
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn create_group_name(command: &ControlCommand) -> Option<&str> {
+    matches!(
+        ControlCommandKind::parse(&command.command),
+        Some(ControlCommandKind::CreateGroup)
+    )
+    .then_some(())?;
+    command
+        .groupname
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn build_retry_persist_mutations(
@@ -1208,208 +1023,6 @@ pub(crate) fn merge_persist_role_acls(
     let mut role = DynSecRole::from_control_acls(Some(existing_acls.to_vec()));
     let _ = role.merge_control_acls(next_acls);
     role.to_control_acls()
-}
-
-fn get_array_field<'a>(root: &'a mut Value, key: &str) -> DynSecResult<Option<&'a mut Vec<Value>>> {
-    let Some(value) = root.get_mut(key) else {
-        return Ok(None);
-    };
-    expect_array(value, key).map(Some)
-}
-
-fn ensure_nested_array<'a>(parent: &'a mut Value, field: &str) -> DynSecResult<&'a mut Vec<Value>> {
-    if parent.get(field).is_none() {
-        parent[field] = Value::Array(Vec::new());
-    }
-    let Some(value) = parent.get_mut(field) else {
-        return Err(DynSecError::MissingField {
-            field: field.to_string(),
-        });
-    };
-    expect_array(value, field)
-}
-
-fn get_nested_array_field<'a>(
-    parent: &'a mut Value,
-    field: &str,
-) -> DynSecResult<Option<&'a mut Vec<Value>>> {
-    let Some(value) = parent.get_mut(field) else {
-        return Ok(None);
-    };
-    expect_array(value, field).map(Some)
-}
-
-fn expect_array<'a>(value: &'a mut Value, field: &str) -> DynSecResult<&'a mut Vec<Value>> {
-    value
-        .as_array_mut()
-        .ok_or_else(|| DynSecError::ExpectedArray {
-            field: field.to_string(),
-        })
-}
-
-fn remove_named_ref(
-    parent: &mut Value,
-    field: &str,
-    name_field: &str,
-    target: &str,
-) -> DynSecResult<PersistApplyOutcome> {
-    let Some(list) = get_nested_array_field(parent, field)? else {
-        return Ok(PersistApplyOutcome::AlreadySatisfied);
-    };
-    let before_len = list.len();
-    list.retain(|entry| entry.get(name_field).and_then(Value::as_str) != Some(target));
-    Ok(PersistApplyOutcome::from_changed(list.len() != before_len))
-}
-
-fn prune_persisted_placeholder_client(
-    clients: &mut Vec<Value>,
-    username: &str,
-) -> DynSecResult<PersistApplyOutcome> {
-    let Some(index) = clients
-        .iter()
-        .position(|client| client.get("username").and_then(Value::as_str) == Some(username))
-    else {
-        return Ok(PersistApplyOutcome::AlreadySatisfied);
-    };
-
-    if !is_prunable_persisted_placeholder_client(&clients[index])? {
-        return Ok(PersistApplyOutcome::AlreadySatisfied);
-    }
-
-    clients.remove(index);
-    Ok(PersistApplyOutcome::Changed)
-}
-
-fn persist_disabled_placeholder_client(clients: &mut Vec<Value>, username: &str) -> bool {
-    // Disabled synthetic users must remain durable even after their final
-    // group reference is removed, so persist a minimal stub.
-    clients.push(json!({
-        "username": username,
-        "disabled": true,
-    }));
-    true
-}
-
-fn is_prunable_persisted_placeholder_client(client: &Value) -> DynSecResult<bool> {
-    if client.get("username").and_then(Value::as_str).is_none() {
-        return Ok(false);
-    }
-
-    let has_client_id = client
-        .get("clientid")
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.is_empty());
-    let roles_empty = nested_array_missing_or_empty(client, "roles")?;
-    let groups_empty = nested_array_missing_or_empty(client, "groups")?;
-    let disabled = client
-        .get("disabled")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-
-    Ok(!has_client_id && roles_empty && groups_empty && !disabled)
-}
-
-fn nested_array_missing_or_empty(parent: &Value, field: &str) -> DynSecResult<bool> {
-    let Some(value) = parent.get(field) else {
-        return Ok(true);
-    };
-    let Some(array) = value.as_array() else {
-        return Err(DynSecError::ExpectedArray {
-            field: field.to_string(),
-        });
-    };
-    Ok(array.is_empty())
-}
-
-fn upsert_named_priority_ref(
-    parent: &mut Value,
-    field: &str,
-    name_field: &str,
-    target: &str,
-    priority: i32,
-) -> DynSecResult<PersistApplyOutcome> {
-    let list = ensure_nested_array(parent, field)?;
-
-    for entry in list.iter_mut() {
-        let Some(current_target) = entry.get(name_field).and_then(Value::as_str) else {
-            continue;
-        };
-        if current_target != target {
-            continue;
-        }
-
-        let current_priority = entry.get("priority").and_then(Value::as_i64).unwrap_or(-1);
-        if current_priority != i64::from(priority) {
-            entry["priority"] = Value::Number(priority.into());
-            return Ok(PersistApplyOutcome::Changed);
-        }
-        return Ok(PersistApplyOutcome::AlreadySatisfied);
-    }
-
-    list.push(json!({
-        name_field: target,
-        "priority": priority,
-    }));
-    Ok(PersistApplyOutcome::Changed)
-}
-
-fn upsert_acl_ref(parent: &mut Value, acl: &AclConfig) -> DynSecResult<PersistApplyOutcome> {
-    let acls = ensure_nested_array(parent, "acls")?;
-
-    for entry in acls.iter_mut() {
-        let current_acltype = entry.get("acltype").and_then(Value::as_str);
-        let current_topic = entry.get("topic").and_then(Value::as_str);
-        if current_acltype != Some(acl.acltype.as_str())
-            || current_topic != Some(acl.topic.as_str())
-        {
-            continue;
-        }
-
-        let current_priority = entry.get("priority").and_then(Value::as_i64);
-        let current_allow = entry.get("allow").and_then(Value::as_bool);
-        let next_priority = acl.priority.map(i64::from);
-        let next_allow = acl.allow;
-        if current_priority == next_priority && current_allow == next_allow {
-            return Ok(PersistApplyOutcome::AlreadySatisfied);
-        }
-
-        if let Some(priority) = acl.priority {
-            entry["priority"] = Value::Number(priority.into());
-        } else {
-            let _ = entry.as_object_mut().map(|obj| obj.remove("priority"));
-        }
-        if let Some(allow) = acl.allow {
-            entry["allow"] = Value::Bool(allow);
-        } else {
-            let _ = entry.as_object_mut().map(|obj| obj.remove("allow"));
-        }
-        return Ok(PersistApplyOutcome::Changed);
-    }
-
-    acls.push(acl_to_value(acl));
-    Ok(PersistApplyOutcome::Changed)
-}
-
-fn role_ref_to_value(role: &RoleRef) -> Value {
-    let mut out = json!({ "rolename": role.rolename });
-    if let Some(priority) = role.priority {
-        out["priority"] = Value::Number(priority.into());
-    }
-    out
-}
-
-fn acl_to_value(acl: &AclConfig) -> Value {
-    let mut out = json!({
-        "acltype": acl.acltype,
-        "topic": acl.topic,
-    });
-    if let Some(priority) = acl.priority {
-        out["priority"] = Value::Number(priority.into());
-    }
-    if let Some(allow) = acl.allow {
-        out["allow"] = Value::Bool(allow);
-    }
-    out
 }
 
 #[cfg(test)]

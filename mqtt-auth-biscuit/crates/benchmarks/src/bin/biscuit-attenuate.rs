@@ -100,7 +100,6 @@ fn parse_args() -> Args {
             }
             "--public-key-hex" => out.public_key_hex = args.next(),
             "--public-key-file" => out.public_key_file = args.next(),
-            "--help" | "-h" => usage(),
             _ => usage(),
         }
     }

@@ -101,7 +101,7 @@ fn enable_dynamic_security_control_mode_with_client_id(
     let unique = TEST_DYNSEC_COUNTER.fetch_add(1, Ordering::Relaxed);
     let prefix = unique_test_prefix();
     let dynsec_path =
-        std::env::temp_dir().join(format!("dynsec-control-lib-{}-{}.json", prefix, unique));
+        std::env::temp_dir().join(format!("dynsec-control-lib-{prefix}-{unique}.json"));
     let client_id_line = if include_client_id {
         "\"clientid\": \"test_client\","
     } else {
@@ -432,7 +432,7 @@ fn basic_auth_callback_accepts_binary_biscuit_password_with_nul_bytes() {
     let (userdata, _identifier) = setup_plugin_with_config();
     let keypair = root_keypair();
     unsafe {
-        (*(userdata as *mut PluginState))
+        (*userdata.cast::<PluginState>())
             .config
             .biscuit
             .root_public_key = keypair.public();
@@ -1339,6 +1339,7 @@ fn control_callback_remove_role_acl_publishes_notification_without_kick() {
     teardown_plugin(userdata);
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn control_callback_group_membership_churn_publishes_notify_without_kick() {
     reset_kick_client_call();

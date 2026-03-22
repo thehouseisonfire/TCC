@@ -86,6 +86,7 @@ pub struct MosquittoEvtControl {
 }
 
 #[repr(C)]
+#[allow(clippy::pub_underscore_fields)]
 pub struct MosquittoPluginId {
     pub _unused: [u8; 0],
 }

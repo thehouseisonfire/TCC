@@ -470,6 +470,7 @@ pub const extern "C" fn mosquitto_plugin_version(
 /// - The caller ensures all pointers are valid and properly aligned
 /// - This function initializes global plugin state and registers callbacks
 #[unsafe(no_mangle)]
+#[allow(clippy::too_many_lines)]
 pub unsafe extern "C" fn mosquitto_plugin_init(
     identifier: *mut MosquittoPluginId,
     userdata: *mut *mut c_void,

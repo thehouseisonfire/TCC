@@ -366,17 +366,17 @@ pub fn authorize_biscuit(
     )
 }
 
-pub fn authorize_biscuit_with_limits(
+fn build_profile_authorizer(
     biscuit: &Biscuit,
     topic: &str,
     operation: &str,
     profile: BiscuitAuthorizerProfile,
     max_time_ms: u64,
-) -> BiscuitAuthOutcome {
+    now: i64,
+) -> Result<biscuit_auth::Authorizer, biscuit_auth::error::Token> {
     use biscuit_auth::macros::authorizer;
-    let now = unix_timestamp_now();
 
-    let authorizer = match profile {
+    match profile {
         BiscuitAuthorizerProfile::Simple => authorizer!(
             r#"
             resource({topic});
@@ -438,20 +438,11 @@ pub fn authorize_biscuit_with_limits(
         .set_limits(authorizer_limits(max_time_ms))
         .build(biscuit),
     }
-    .map_err(|_| biscuit_auth::error::Token::InternalError);
-    let mut authorizer = match authorizer {
-        Ok(authorizer) => authorizer,
-        Err(err) => return BiscuitAuthOutcome::Error(err),
-    };
+    .map_err(|_| biscuit_auth::error::Token::InternalError)
+}
 
-    // Enforce Biscuit checks (time-based, block checks, etc.). We intentionally
-    // ignore authorize()'s allow/deny decision here and perform allow/deny logic
-    // manually below to support MQTT wildcard matching.
-    if let Err(_err) = authorizer.authorize() {
-        return BiscuitAuthOutcome::Denied; // Check failures should deny, not error
-    }
-
-    let (rights_query, denies_query) = match profile {
+const fn authorizer_queries(profile: BiscuitAuthorizerProfile) -> (&'static str, &'static str) {
+    match profile {
         BiscuitAuthorizerProfile::Simple => (
             "data($op, $res) <- right($op, $res)",
             "data($op, $res) <- deny($op, $res)",
@@ -460,12 +451,44 @@ pub fn authorize_biscuit_with_limits(
             "data($op, $res) <- right_eval($op, $res)",
             "data($op, $res) <- deny_eval($op, $res)",
         ),
-    };
-    let rights: Vec<(String, String)> = match authorizer.query_all(rights_query) {
+    }
+}
+
+fn query_authorizer_pairs(
+    authorizer: &mut biscuit_auth::Authorizer,
+    query: &str,
+) -> Result<Vec<(String, String)>, biscuit_auth::error::Token> {
+    authorizer.query_all(query)
+}
+
+pub fn authorize_biscuit_with_limits(
+    biscuit: &Biscuit,
+    topic: &str,
+    operation: &str,
+    profile: BiscuitAuthorizerProfile,
+    max_time_ms: u64,
+) -> BiscuitAuthOutcome {
+    let now = unix_timestamp_now();
+
+    let mut authorizer =
+        match build_profile_authorizer(biscuit, topic, operation, profile, max_time_ms, now) {
+            Ok(authorizer) => authorizer,
+            Err(err) => return BiscuitAuthOutcome::Error(err),
+        };
+
+    // Enforce Biscuit checks (time-based, block checks, etc.). We intentionally
+    // ignore authorize()'s allow/deny decision here and perform allow/deny logic
+    // manually below to support MQTT wildcard matching.
+    if let Err(_err) = authorizer.authorize() {
+        return BiscuitAuthOutcome::Denied; // Check failures should deny, not error
+    }
+
+    let (rights_query, denies_query) = authorizer_queries(profile);
+    let rights = match query_authorizer_pairs(&mut authorizer, rights_query) {
         Ok(rights) => rights,
         Err(err) => return BiscuitAuthOutcome::Error(err),
     };
-    let denies: Vec<(String, String)> = match authorizer.query_all(denies_query) {
+    let denies = match query_authorizer_pairs(&mut authorizer, denies_query) {
         Ok(denies) => denies,
         Err(err) => return BiscuitAuthOutcome::Error(err),
     };

@@ -142,17 +142,17 @@ pub fn record_debug_log(message: &str) {
 
 #[cfg(test)]
 pub fn record_kick_client_call(clientid: *const c_char, with_will: bool) {
-    let client_id = cstr_to_string(clientid);
+    let client_id_text = cstr_to_string(clientid);
     TEST_KICK_CLIENT_CALL.with(|call| {
         let mut state = call.borrow_mut();
         state.count += 1;
-        state.last_client_id = client_id.clone();
+        state.last_client_id = client_id_text.clone();
         state.last_with_will = Some(with_will);
     });
     TEST_CONTROL_ACTIONS.with(|actions| {
-        actions
-            .borrow_mut()
-            .push(TestControlAction::Kick { client_id });
+        actions.borrow_mut().push(TestControlAction::Kick {
+            client_id: client_id_text,
+        });
     });
 }
 
@@ -165,7 +165,7 @@ pub fn record_broker_publish_call(
     qos: c_int,
     retain: bool,
 ) {
-    let client_id = cstr_to_string(clientid);
+    let client_id_text = cstr_to_string(clientid);
     let payload_text = if payload.is_null() {
         Some(String::new())
     } else {
@@ -177,15 +177,15 @@ pub fn record_broker_publish_call(
     TEST_BROKER_PUBLISH_CALL.with(|call| {
         let mut state = call.borrow_mut();
         state.count += 1;
-        state.last_client_id = client_id.clone();
+        state.last_client_id = client_id_text.clone();
         state.last_topic = cstr_to_string(topic);
         state.last_payload = payload_text;
         state.last_qos = Some(qos);
         state.last_retain = Some(retain);
     });
     TEST_CONTROL_ACTIONS.with(|actions| {
-        actions
-            .borrow_mut()
-            .push(TestControlAction::Publish { client_id });
+        actions.borrow_mut().push(TestControlAction::Publish {
+            client_id: client_id_text,
+        });
     });
 }

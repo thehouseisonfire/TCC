@@ -603,27 +603,27 @@ fn evaluate_rules(rules: &[Rule], ctx: &EvalContext<'_>) -> bool {
 
 fn evaluate_authorization(cfg: &AppConfig, req: &AuthRequest) -> bool {
     let operation = access_to_operation(req.access);
-    let mut roles = HashSet::new();
+    let mut effective_roles = HashSet::new();
     if let Some(role_list) = cfg.client_roles.get(req.client_id.trim()) {
         for role in role_list {
             let normalized = role.trim().to_ascii_lowercase();
             if !normalized.is_empty() {
-                roles.insert(normalized);
+                effective_roles.insert(normalized);
             }
         }
     }
     if let Some(token) = req.token.as_deref() {
-        roles.extend(extract_token_roles(token, req.client_id.trim()));
+        effective_roles.extend(extract_token_roles(token, req.client_id.trim()));
     }
 
-    let rules = effective_rules(cfg);
+    let policy_rules = effective_rules(cfg);
     let ctx = EvalContext {
         operation,
         topic: req.topic.trim(),
         client_id: req.client_id.trim(),
-        roles: &roles,
+        roles: &effective_roles,
     };
-    evaluate_rules(&rules, &ctx)
+    evaluate_rules(&policy_rules, &ctx)
 }
 
 // ------------------- Request handler -------------------
@@ -785,6 +785,7 @@ fn make_rustls_config(
 // ------------------- Main -------------------
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
     let log_level = env::var("AUTHZ_LOG").unwrap_or_else(|_| "warn".to_string());
     tracing_subscriber::fmt().with_env_filter(log_level).init();
@@ -942,12 +943,12 @@ mod tests {
         AppConfig::default()
     }
 
-    fn make_token(payload: serde_json::Value) -> String {
+    fn make_token(payload: &serde_json::Value) -> String {
         let header = serde_json::json!({"alg":"none","typ":"JWT"});
         let h = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&header).expect("header json"));
         let p = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(&payload).expect("payload json"));
+            .encode(serde_json::to_vec(payload).expect("payload json"));
         format!("{h}.{p}.signature")
     }
 
@@ -993,12 +994,12 @@ mod tests {
                 "deny",
             ),
         ];
-        let roles = HashSet::new();
+        let active_roles = HashSet::new();
         let ctx = EvalContext {
             operation: "publish",
             topic: "sensors/client_1/temp",
             client_id: "client_1",
-            roles: &roles,
+            roles: &active_roles,
         };
         assert!(!evaluate_rules(&rules, &ctx));
     }
@@ -1013,18 +1014,18 @@ mod tests {
             &[],
             "allow_client7",
         )];
-        let roles = HashSet::new();
+        let active_roles = HashSet::new();
         let allow_ctx = EvalContext {
             operation: "publish",
             topic: "sensors/client_7/temp",
             client_id: "client_7",
-            roles: &roles,
+            roles: &active_roles,
         };
         let deny_ctx = EvalContext {
             operation: "publish",
             topic: "sensors/client_8/temp",
             client_id: "client_8",
-            roles: &roles,
+            roles: &active_roles,
         };
         assert!(evaluate_rules(&rules, &allow_ctx));
         assert!(!evaluate_rules(&rules, &deny_ctx));
@@ -1032,7 +1033,7 @@ mod tests {
 
     #[test]
     fn token_roles_are_extracted_and_applied() {
-        let token = make_token(serde_json::json!({
+        let token = make_token(&serde_json::json!({
             "sub": "client_1",
             "roles": ["reader"]
         }));
@@ -1057,7 +1058,7 @@ mod tests {
 
     #[test]
     fn token_roles_are_ignored_when_client_binding_mismatches() {
-        let token = make_token(serde_json::json!({
+        let token = make_token(&serde_json::json!({
             "sub": "client_2",
             "roles": ["reader"]
         }));
@@ -1136,7 +1137,7 @@ mod tests {
         );
         assert_eq!(cfg.delay_ms, 200);
         assert!(matches!(cfg.fail_mode, FailMode::Rate));
-        assert_eq!(cfg.fail_rate, 0.05);
+        assert!((cfg.fail_rate - 0.05).abs() < f64::EPSILON);
         assert_eq!(cfg.authz_profile, PolicyProfile::Complex);
         assert_eq!(cfg.client_roles.len(), 1);
     }
@@ -1161,7 +1162,7 @@ mod tests {
 
         assert_eq!(cfg.delay_ms, 0);
         assert!(matches!(cfg.fail_mode, FailMode::None));
-        assert_eq!(cfg.fail_rate, 0.0);
+        assert!(cfg.fail_rate.abs() < f64::EPSILON);
         assert_eq!(cfg.authz_profile, PolicyProfile::Simple);
         assert!(cfg.rules.is_empty());
         assert!(cfg.client_roles.is_empty());

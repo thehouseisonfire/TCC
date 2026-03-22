@@ -49,6 +49,7 @@ where
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     pub fn insert(&self, key: K, value: V, ttl: Duration) {
         let expiry = Instant::now() + ttl;
         self.cache.insert(key.clone(), CacheValue { value, expiry });

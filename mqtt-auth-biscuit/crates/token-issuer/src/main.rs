@@ -118,6 +118,21 @@ struct BinaryTokenResponse {
     size_bytes: usize,
 }
 
+#[derive(Serialize)]
+struct JwtClaims {
+    sub: String,
+    exp: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    roles: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    grants: Option<Vec<JwtGrant>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    denies: Option<Vec<JwtGrant>>,
+    iss: Option<String>,
+    aud: Option<String>,
+    client_id: Option<String>,
+}
+
 struct IssuerConfig {
     host: String,
     port: u16,
@@ -225,21 +240,6 @@ fn handle_jwt(req: JwtIssueRequest, cfg: &IssuerConfig) -> Result<TokenResponse,
         .or(req.client_id.clone())
         .unwrap_or_else(|| "client_1".to_string());
 
-    #[derive(Serialize)]
-    struct Claims {
-        sub: String,
-        exp: i64,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        roles: Option<Vec<String>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        grants: Option<Vec<JwtGrant>>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        denies: Option<Vec<JwtGrant>>,
-        iss: Option<String>,
-        aud: Option<String>,
-        client_id: Option<String>,
-    }
-
     let no_default_roles = req.no_default_roles.unwrap_or(cfg.jwt_no_default_roles);
     let roles = if no_default_roles {
         req.roles
@@ -268,7 +268,7 @@ fn handle_jwt(req: JwtIssueRequest, cfg: &IssuerConfig) -> Result<TokenResponse,
 
     let denies = req.denies;
 
-    let claims = Claims {
+    let claims = JwtClaims {
         sub: subject,
         exp,
         roles,
@@ -358,8 +358,8 @@ fn build_biscuit_core(
     Ok((bytes, exp, now))
 }
 
-fn handle_biscuit(req: BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<TokenResponse, String> {
-    let (bytes, exp, now) = build_biscuit_core(&req, cfg)?;
+fn handle_biscuit(req: &BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<TokenResponse, String> {
+    let (bytes, exp, now) = build_biscuit_core(req, cfg)?;
     let token = general_purpose::URL_SAFE_NO_PAD.encode(&bytes);
 
     Ok(TokenResponse {
@@ -373,10 +373,10 @@ fn handle_biscuit(req: BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<TokenR
 /// Generate a Biscuit token and return it in binary format (raw Protobuf)
 /// for MQTT transport without `Base64URL` overhead.
 fn handle_biscuit_binary(
-    req: BiscuitIssueRequest,
+    req: &BiscuitIssueRequest,
     cfg: &IssuerConfig,
 ) -> Result<BinaryTokenResponse, String> {
-    let (bytes, exp, now) = build_biscuit_core(&req, cfg)?;
+    let (bytes, exp, now) = build_biscuit_core(req, cfg)?;
 
     // Return raw binary data (base64-encoded for JSON transport, but represents raw Protobuf)
     let size_bytes = bytes.len();
@@ -441,7 +441,7 @@ async fn handle_request(
         "/biscuit" => {
             let parsed: Result<BiscuitIssueRequest, _> = serde_json::from_slice(&body);
             match parsed {
-                Ok(req) => handle_biscuit(req, &cfg)
+                Ok(req) => handle_biscuit(&req, &cfg)
                     .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err)),
                 Err(e) => Err((StatusCode::BAD_REQUEST, format!("invalid json: {e}"))),
             }
@@ -450,7 +450,7 @@ async fn handle_request(
             let parsed: Result<BiscuitIssueRequest, _> = serde_json::from_slice(&body);
             match parsed {
                 Ok(req) => {
-                    match handle_biscuit_binary(req, &cfg) {
+                    match handle_biscuit_binary(&req, &cfg) {
                         Ok(binary_resp) => {
                             // Return as JSON with base64-encoded data
                             let body =

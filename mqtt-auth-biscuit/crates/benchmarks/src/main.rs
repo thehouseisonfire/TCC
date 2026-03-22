@@ -1,3 +1,4 @@
+use base64::{Engine as _, engine::general_purpose};
 use biscuit_auth::{Biscuit, BlockBuilder, KeyPair, PrivateKey};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use p256::SecretKey;
@@ -37,6 +38,7 @@ struct JwtGrant {
     res: String,
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() {
     let now = if let Ok(val) = env::var("GEN_TOKENS_FIXED_NOW") {
         val.parse::<i64>()
@@ -241,7 +243,7 @@ fn main() {
 
     let biscuit_1_block = biscuit_base.clone();
 
-    let biscuit_5_blocks = {
+    let biscuit_medium_blocks = {
         let mut t = biscuit_base.clone();
         for _ in 0..(BISCUIT_BLOCKS_MEDIUM - 1) {
             let b = BlockBuilder::new();
@@ -250,7 +252,7 @@ fn main() {
         t
     };
 
-    let biscuit_25_blocks = {
+    let biscuit_large_blocks = {
         let mut t = biscuit_base.clone();
         for _ in 0..(BISCUIT_BLOCKS_LARGE - 1) {
             let b = BlockBuilder::new();
@@ -348,9 +350,7 @@ fn main() {
         .unwrap()
         .rule(r#"allow_res($res) <- resource_group($res, "telemetry"), allow_group("telemetry")"#)
         .unwrap()
-        .rule(
-            r#"right($op, $res) <- allow_op($op), allow_res($res), operation($op), resource($res)"#,
-        )
+        .rule(r"right($op, $res) <- allow_op($op), allow_res($res), operation($op), resource($res)")
         .unwrap()
         .build(&root_keypair)
         .unwrap();
@@ -366,7 +366,7 @@ fn main() {
             .unwrap()
             .fact(r#"allow_scope("client_1")"#)
             .unwrap()
-            .rule(r#"scoped_res($res) <- owner($res, $c), allow_scope($c)"#)
+            .rule(r"scoped_res($res) <- owner($res, $c), allow_scope($c)")
             .unwrap()
             .rule(r#"allow_res($res) <- scoped_res($res), resource_group($res, "telemetry")"#)
             .unwrap();
@@ -397,9 +397,9 @@ fn main() {
             .unwrap()
             .fact(r#"topic_region("sensors/client_1/temp", "lab")"#)
             .unwrap()
-            .rule(r#"regional_res($res) <- topic_region($res, $r), region_allow($r)"#)
+            .rule(r"regional_res($res) <- topic_region($res, $r), region_allow($r)")
             .unwrap()
-            .rule(r#"allow_res($res) <- scoped_res($res), regional_res($res)"#)
+            .rule(r"allow_res($res) <- scoped_res($res), regional_res($res)")
             .unwrap();
         t = t.append(block_region).unwrap();
 
@@ -413,7 +413,7 @@ fn main() {
             .fact(r#"class_op("telemetry", "subscribe")"#)
             .unwrap()
             .rule(
-                r#"device_op($op) <- device($c, $class), device_class($class, $group), class_op($group, $op)"#,
+                r"device_op($op) <- device($c, $class), device_class($class, $group), class_op($group, $op)",
             )
             .unwrap()
             .rule(r#"allow_op($op) <- device_op($op), role("sensor")"#)
@@ -458,12 +458,12 @@ fn main() {
     // Store Biscuit fixtures as Base64URL text for JSON/file transport.
     // MQTT clients decode these fixtures back to raw serialized bytes.
     let biscuit_bytes = biscuit_1_block.to_vec().unwrap();
-    use base64::{Engine as _, engine::general_purpose};
     let biscuit_b64 = general_purpose::URL_SAFE_NO_PAD.encode(&biscuit_bytes);
 
-    let biscuit_5_b64 = general_purpose::URL_SAFE_NO_PAD.encode(biscuit_5_blocks.to_vec().unwrap());
-    let biscuit_25_b64 =
-        general_purpose::URL_SAFE_NO_PAD.encode(biscuit_25_blocks.to_vec().unwrap());
+    let biscuit_medium_b64 =
+        general_purpose::URL_SAFE_NO_PAD.encode(biscuit_medium_blocks.to_vec().unwrap());
+    let biscuit_large_b64 =
+        general_purpose::URL_SAFE_NO_PAD.encode(biscuit_large_blocks.to_vec().unwrap());
     let biscuit_delegated_b64 =
         general_purpose::URL_SAFE_NO_PAD.encode(biscuit_delegated.to_vec().unwrap());
     let biscuit_deny_b64 = general_purpose::URL_SAFE_NO_PAD.encode(biscuit_deny.to_vec().unwrap());
@@ -519,8 +519,8 @@ fn main() {
         "jwt_grants_schema": jwt_grants_schema,
         "jwt_denies_schema": jwt_denies_schema,
         "biscuit": biscuit_b64,
-        "biscuit_5": biscuit_5_b64,
-        "biscuit_25": biscuit_25_b64,
+        "biscuit_5": biscuit_medium_b64,
+        "biscuit_25": biscuit_large_b64,
         "biscuit_delegated": biscuit_delegated_b64,
         "biscuit_deny": biscuit_deny_b64,
         "biscuit_fanout_allow": biscuit_fanout_allow_b64,

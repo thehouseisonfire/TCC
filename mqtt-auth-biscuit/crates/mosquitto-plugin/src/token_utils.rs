@@ -40,7 +40,7 @@ pub(crate) fn attach_biscuit_expiry(
                 biscuit: Some(biscuit),
             })
         }
-        other => Ok(other),
+        other @ TokenType::Jwt { .. } => Ok(other),
     }
 }
 
@@ -76,7 +76,7 @@ pub(crate) fn attach_biscuit_roles(token_type: TokenType, config: &PluginConfig)
                 biscuit,
             }
         }
-        other => other,
+        other @ TokenType::Jwt { .. } => other,
     }
 }
 

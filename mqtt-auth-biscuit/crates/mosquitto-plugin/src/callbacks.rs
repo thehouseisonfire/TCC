@@ -186,12 +186,12 @@ pub extern "C" fn ext_auth_start_callback(
 }
 
 pub extern "C" fn ext_auth_continue_callback(
-    _event: c_int,
+    event: c_int,
     event_data: *mut c_void,
     userdata: *mut c_void,
 ) -> c_int {
     // For this plugin, we treat auth as single-step: new token in data_in.
-    ext_auth_start_callback(_event, event_data, userdata)
+    ext_auth_start_callback(event, event_data, userdata)
 }
 
 pub extern "C" fn acl_check_callback(

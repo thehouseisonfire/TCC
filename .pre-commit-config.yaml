@@ -3,7 +3,9 @@ repos:
     hooks:
       - id: cargo-clippy-fix
         name: cargo clippy --fix
-        entry: bash -c 'cargo clippy --fix --locked --allow-dirty --allow-staged --manifest-path mqtt-auth-biscuit/Cargo.toml || true; cargo clippy --locked --manifest-path mqtt-auth-biscuit/Cargo.toml'
+        entry: >
+          bash -c 'cargo clippy --fix --locked --allow-dirty --allow-staged --manifest-path mqtt-auth-biscuit/Cargo.toml || true;
+          cargo clippy --locked --all-targets --manifest-path mqtt-auth-biscuit/Cargo.toml -- -W clippy::pedantic -W clippy::nursery'
         language: system
         pass_filenames: false
         stages: [commit, push]

@@ -2,14 +2,14 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub(crate) struct RoleAclKey {
+pub struct RoleAclKey {
     pub rolename: String,
     pub acl_type: AclType,
     pub topic: String,
 }
 
 impl RoleAclKey {
-    pub(crate) fn new(rolename: &str, acl_type: AclType, topic: &str) -> Self {
+    pub fn new(rolename: &str, acl_type: AclType, topic: &str) -> Self {
         Self {
             rolename: rolename.to_string(),
             acl_type,
@@ -19,13 +19,13 @@ impl RoleAclKey {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum RuntimeRoleAclOverride {
+pub enum RuntimeRoleAclOverride {
     Remove,
     Add { priority: i32, allow: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AccessKind {
+pub enum AccessKind {
     PublishSend,
     PublishReceive,
     Subscribe,
@@ -34,7 +34,7 @@ pub(crate) enum AccessKind {
 }
 
 impl AccessKind {
-    pub(crate) const fn from_access(access: i32) -> Self {
+    pub const fn from_access(access: i32) -> Self {
         if (access & ACL_WRITE) != 0 {
             Self::PublishSend
         } else if (access & ACL_SUBSCRIBE) != 0 {
@@ -49,13 +49,13 @@ impl AccessKind {
     }
 }
 
-pub(crate) const ACL_READ: i32 = 0x01;
-pub(crate) const ACL_WRITE: i32 = 0x02;
-pub(crate) const ACL_SUBSCRIBE: i32 = 0x04;
-pub(crate) const ACL_UNSUBSCRIBE: i32 = 0x08;
+pub const ACL_READ: i32 = 0x01;
+pub const ACL_WRITE: i32 = 0x02;
+pub const ACL_SUBSCRIBE: i32 = 0x04;
+pub const ACL_UNSUBSCRIBE: i32 = 0x08;
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct DynSecState {
+pub struct DynSecState {
     pub clients: HashMap<String, DynSecClient>,
     pub groups: HashMap<String, DynSecGroup>,
     pub roles: HashMap<String, DynSecRole>,
@@ -64,7 +64,7 @@ pub(crate) struct DynSecState {
 }
 
 impl DynSecState {
-    pub(crate) fn from_config(cfg: DynSecConfig) -> Self {
+    pub fn from_config(cfg: DynSecConfig) -> Self {
         let mut roles = HashMap::new();
         if let Some(list) = cfg.roles {
             for role in list {
@@ -105,7 +105,7 @@ impl DynSecState {
     }
 }
 
-pub(crate) fn role_member_usernames(state: &DynSecState, rolename: &str) -> Vec<String> {
+pub fn role_member_usernames(state: &DynSecState, rolename: &str) -> Vec<String> {
     let mut usernames = HashSet::new();
     for (username, client) in &state.clients {
         let has_direct_role = client.roles.iter().any(|role| role.name == rolename);
@@ -124,7 +124,7 @@ pub(crate) fn role_member_usernames(state: &DynSecState, rolename: &str) -> Vec<
     out
 }
 
-pub(crate) fn group_member_usernames(state: &DynSecState, groupname: &str) -> Vec<String> {
+pub fn group_member_usernames(state: &DynSecState, groupname: &str) -> Vec<String> {
     let mut usernames = HashSet::new();
     if let Some(group) = state.groups.get(groupname) {
         for client_ref in &group.clients {
@@ -146,7 +146,7 @@ pub(crate) fn group_member_usernames(state: &DynSecState, groupname: &str) -> Ve
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct DynSecClient {
+pub struct DynSecClient {
     pub client_id: Option<String>,
     pub roles: Vec<NamePriority>,
     pub groups: Vec<NamePriority>,
@@ -155,7 +155,7 @@ pub(crate) struct DynSecClient {
 }
 
 impl DynSecClient {
-    pub(crate) fn from_config(cfg: ClientConfig) -> Self {
+    pub fn from_config(cfg: ClientConfig) -> Self {
         let roles = NamePriority::from_role_refs(cfg.roles);
         let groups = NamePriority::from_group_refs(cfg.groups);
         Self {
@@ -167,7 +167,7 @@ impl DynSecClient {
         }
     }
 
-    pub(crate) fn placeholder(_username: &str) -> Self {
+    pub const fn placeholder(_username: &str) -> Self {
         Self {
             client_id: None,
             roles: Vec::new(),
@@ -177,19 +177,19 @@ impl DynSecClient {
         }
     }
 
-    pub(crate) fn add_group(&mut self, group_name: &str, priority: i32) -> bool {
+    pub fn add_group(&mut self, group_name: &str, priority: i32) -> bool {
         upsert_name_priority(&mut self.groups, group_name, priority)
     }
 
-    pub(crate) fn remove_group(&mut self, group_name: &str) -> bool {
+    pub fn remove_group(&mut self, group_name: &str) -> bool {
         remove_name_priority(&mut self.groups, group_name)
     }
 
-    pub(crate) fn remove_role(&mut self, rolename: &str) -> bool {
+    pub fn remove_role(&mut self, rolename: &str) -> bool {
         remove_name_priority(&mut self.roles, rolename)
     }
 
-    pub(crate) fn is_prunable_placeholder(&self) -> bool {
+    pub const fn is_prunable_placeholder(&self) -> bool {
         self.synthetic
             && self.client_id.is_none()
             && self.roles.is_empty()
@@ -199,20 +199,20 @@ impl DynSecClient {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct DynSecGroup {
+pub struct DynSecGroup {
     pub roles: Vec<NamePriority>,
     pub clients: Vec<NamePriority>,
 }
 
 impl DynSecGroup {
-    pub(crate) fn from_config(cfg: GroupConfig) -> Self {
+    pub fn from_config(cfg: GroupConfig) -> Self {
         Self {
             roles: NamePriority::from_role_refs(cfg.roles),
             clients: NamePriority::from_client_refs(cfg.clients),
         }
     }
 
-    pub(crate) fn from_control_roles(roles: Option<Vec<RoleRef>>) -> Self {
+    pub fn from_control_roles(roles: Option<Vec<RoleRef>>) -> Self {
         Self {
             roles: NamePriority::from_role_refs(roles),
             clients: Vec::new(),
@@ -499,22 +499,23 @@ pub struct DefaultAclAccess {
 
 impl DefaultAclAccess {
     pub fn from_config(cfg: Option<DefaultAclAccessConfig>) -> Self {
-        if let Some(cfg) = cfg {
-            Self {
+        cfg.map_or_else(
+            || {
+                eprintln!("dynsec: missing defaultACLAccess; defaulting to all deny");
+                Self {
+                    publish_client_send: false,
+                    publish_client_receive: false,
+                    subscribe: false,
+                    unsubscribe: false,
+                }
+            },
+            |cfg| Self {
                 publish_client_send: cfg.publish_client_send.unwrap_or(false),
                 publish_client_receive: cfg.publish_client_receive.unwrap_or(false),
                 subscribe: cfg.subscribe.unwrap_or(false),
                 unsubscribe: cfg.unsubscribe.unwrap_or(false),
-            }
-        } else {
-            eprintln!("dynsec: missing defaultACLAccess; defaulting to all deny");
-            Self {
-                publish_client_send: false,
-                publish_client_receive: false,
-                subscribe: false,
-                unsubscribe: false,
-            }
-        }
+            },
+        )
     }
 
     pub const fn allow_for(&self, access: AccessKind) -> bool {
@@ -690,7 +691,7 @@ pub fn match_acl_sub(acls: &[AclEntry], topic: &str) -> Option<bool> {
 }
 
 pub fn insert_literal_acl(map: &mut HashMap<String, AclEntry>, acl: AclEntry) {
-    let entry = map.entry(acl.topic.clone()).or_insert(acl.clone());
+    let entry = map.entry(acl.topic.clone()).or_insert_with(|| acl.clone());
     if acl.priority > entry.priority {
         *entry = acl;
     }
@@ -702,11 +703,10 @@ pub fn upsert_acl_in_literal_map(map: &mut HashMap<String, AclEntry>, acl: AclEn
             return false;
         }
         *existing = acl;
-        true
     } else {
         map.insert(acl.topic.clone(), acl);
-        true
     }
+    true
 }
 
 pub fn upsert_acl_in_vec(list: &mut Vec<AclEntry>, acl: AclEntry) -> bool {

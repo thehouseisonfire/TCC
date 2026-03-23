@@ -14,7 +14,7 @@ const FALLBACK_CACHE_TTL_SECONDS: u64 = 300;
 const EXPIRY_DISCONNECT_GRACE_SECONDS: u64 = 10;
 
 #[derive(Debug)]
-pub(crate) enum CacheTtlError {
+pub enum CacheTtlError {
     Expired,
 }
 
@@ -26,7 +26,7 @@ impl std::fmt::Display for CacheTtlError {
     }
 }
 
-pub(crate) fn cache_ttl_for_token(
+pub fn cache_ttl_for_token(
     token_type: &TokenType,
     configured_ttl_seconds: u64,
 ) -> Result<Duration, CacheTtlError> {
@@ -63,11 +63,11 @@ pub(crate) fn cache_ttl_for_token(
     Ok(ttl)
 }
 
-pub(crate) fn normalize_username(username: Option<String>) -> Option<String> {
+pub fn normalize_username(username: Option<String>) -> Option<String> {
     username.and_then(|u| if u.is_empty() { None } else { Some(u) })
 }
 
-pub(crate) const fn should_defer_no_token_basic_auth(
+pub const fn should_defer_no_token_basic_auth(
     mode: PolicyMode,
     allow_anonymous_no_token: bool,
 ) -> bool {
@@ -78,7 +78,7 @@ pub(crate) const fn should_defer_no_token_basic_auth(
     )
 }
 
-pub(crate) const fn is_acl_read_only(access: c_int) -> bool {
+pub const fn is_acl_read_only(access: c_int) -> bool {
     (access & MOSQ_ACL_READ) != 0
         && (access & (MOSQ_ACL_WRITE | MOSQ_ACL_SUBSCRIBE | MOSQ_ACL_CONTROL)) == 0
 }

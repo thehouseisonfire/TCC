@@ -57,7 +57,7 @@ fn operation_matches_grant(operation: Operation, grant_operation: &str) -> bool 
     }
 }
 
-fn authz_outcome(allowed: bool) -> AuthzOutcome {
+const fn authz_outcome(allowed: bool) -> AuthzOutcome {
     if allowed {
         AuthzOutcome::Allowed
     } else {
@@ -704,26 +704,29 @@ fn biscuit_token_only(
     params: AuthzParams<'_>,
     operation: Operation,
 ) -> AuthzOutcome {
-    let outcome = if let Some(biscuit) = biscuit {
-        authorize_biscuit_with_limits(
-            biscuit.as_ref(),
-            params.topic,
-            operation.as_str(),
-            params.biscuit_authorizer_profile,
-            params.biscuit_authorizer_max_time_ms,
-        )
-    } else {
-        verify_biscuit_token_with_limits(
-            bytes,
-            params.biscuit_root_key,
-            AuthContext {
-                topic: params.topic,
-                operation,
-            },
-            params.biscuit_authorizer_profile,
-            params.biscuit_authorizer_max_time_ms,
-        )
-    };
+    let outcome = biscuit.map_or_else(
+        || {
+            verify_biscuit_token_with_limits(
+                bytes,
+                params.biscuit_root_key,
+                AuthContext {
+                    topic: params.topic,
+                    operation,
+                },
+                params.biscuit_authorizer_profile,
+                params.biscuit_authorizer_max_time_ms,
+            )
+        },
+        |biscuit| {
+            authorize_biscuit_with_limits(
+                biscuit.as_ref(),
+                params.topic,
+                operation.as_str(),
+                params.biscuit_authorizer_profile,
+                params.biscuit_authorizer_max_time_ms,
+            )
+        },
+    );
 
     match outcome {
         BiscuitAuthOutcome::Allowed => AuthzOutcome::Allowed,

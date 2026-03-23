@@ -3707,16 +3707,19 @@ fn from_config_keeps_highest_priority_for_duplicate_group_memberships() {
     policy
         .reload_if_needed(true)
         .expect("forced reload should preserve max-priority merge semantics");
-    let reloaded_state = policy
-        .state
-        .read()
-        .expect("dynsec state lock should succeed");
-    let reloaded_membership = reloaded_state
-        .clients
-        .get("test_user")
-        .and_then(|client| client.groups.iter().find(|group| group.name == "high_deny"))
-        .expect("client should keep duplicated high_deny membership after reload");
-    assert_eq!(reloaded_membership.priority, 10);
+    let reloaded_priority = {
+        let reloaded_state = policy
+            .state
+            .read()
+            .expect("dynsec state lock should succeed");
+        reloaded_state
+            .clients
+            .get("test_user")
+            .and_then(|client| client.groups.iter().find(|group| group.name == "high_deny"))
+            .map(|membership| membership.priority)
+            .expect("client should keep duplicated high_deny membership after reload")
+    };
+    assert_eq!(reloaded_priority, 10);
 
     let _ = fs::remove_file(path);
 }

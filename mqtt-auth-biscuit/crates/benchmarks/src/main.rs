@@ -40,18 +40,21 @@ struct JwtGrant {
 
 #[allow(clippy::too_many_lines)]
 fn main() {
-    let now = if let Ok(val) = env::var("GEN_TOKENS_FIXED_NOW") {
-        val.parse::<i64>()
-            .expect("GEN_TOKENS_FIXED_NOW must be int")
-    } else {
-        i64::try_from(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        )
-        .expect("unix timestamp must fit in i64")
-    };
+    let now = env::var("GEN_TOKENS_FIXED_NOW").map_or_else(
+        |_| {
+            i64::try_from(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            )
+            .expect("unix timestamp must fit in i64")
+        },
+        |val| {
+            val.parse::<i64>()
+                .expect("GEN_TOKENS_FIXED_NOW must be int")
+        },
+    );
     // JWT (ES256)
     // Deterministic private key material for reproducible tokens.
     // This private key is held by the token issuer (this generator) and is
@@ -358,7 +361,6 @@ fn main() {
     let biscuit_complex_low = biscuit_complex_base.clone();
 
     let biscuit_complex_med = {
-        let mut t = biscuit_complex_base.clone();
         let block_scope = BlockBuilder::new()
             .fact(r#"scope("client_1")"#)
             .unwrap()
@@ -370,7 +372,7 @@ fn main() {
             .unwrap()
             .rule(r#"allow_res($res) <- scoped_res($res), resource_group($res, "telemetry")"#)
             .unwrap();
-        t = t.append(block_scope).unwrap();
+        let t = biscuit_complex_base.append(block_scope).unwrap();
 
         let block_caps = BlockBuilder::new()
             .fact(r#"capability("sensor", "pubsub")"#)
@@ -389,7 +391,6 @@ fn main() {
     };
 
     let biscuit_complex_high = {
-        let mut t = biscuit_complex_med.clone();
         let block_region = BlockBuilder::new()
             .fact(r#"region("client_1", "lab")"#)
             .unwrap()
@@ -401,7 +402,7 @@ fn main() {
             .unwrap()
             .rule(r"allow_res($res) <- scoped_res($res), regional_res($res)")
             .unwrap();
-        t = t.append(block_region).unwrap();
+        let t = biscuit_complex_med.append(block_region).unwrap();
 
         let block_device = BlockBuilder::new()
             .fact(r#"device("client_1", "sensor")"#)

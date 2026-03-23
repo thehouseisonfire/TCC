@@ -10,13 +10,13 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct ControlPayload {
+pub struct ControlPayload {
     #[serde(default)]
     pub commands: Vec<ControlCommand>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct ControlCommand {
+pub struct ControlCommand {
     pub command: String,
     #[serde(default)]
     pub username: Option<String>,
@@ -39,7 +39,7 @@ pub(crate) struct ControlCommand {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ControlCommandKind {
+pub enum ControlCommandKind {
     DisableClient,
     EnableClient,
     CreateRole,
@@ -53,7 +53,7 @@ pub(crate) enum ControlCommandKind {
 }
 
 impl ControlCommandKind {
-    pub(crate) fn parse(command: &str) -> Option<Self> {
+    pub fn parse(command: &str) -> Option<Self> {
         match command.trim() {
             "disableClient" => Some(Self::DisableClient),
             "enableClient" => Some(Self::EnableClient),
@@ -86,7 +86,7 @@ impl ControlCommandKind {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct ControlEnforcementTargets {
+pub struct ControlEnforcementTargets {
     pub kick_client_ids: Vec<String>,
     pub kick_usernames: Vec<String>,
     pub notify_events: Vec<ControlNotifyEvent>,
@@ -94,7 +94,7 @@ pub(crate) struct ControlEnforcementTargets {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ControlMutationDraft {
+pub struct ControlMutationDraft {
     // Notify events are computed as a net revocation diff across the whole payload.
     pub initial_state: DynSecState,
     pub state: DynSecState,
@@ -110,7 +110,7 @@ pub(crate) struct ControlMutationDraft {
 }
 
 impl ControlMutationDraft {
-    pub(crate) fn new(
+    pub fn new(
         state: DynSecState,
         runtime_disabled_usernames: HashSet<String>,
         runtime_role_acl_overrides: HashMap<RoleAclKey, RuntimeRoleAclOverride>,
@@ -130,7 +130,7 @@ impl ControlMutationDraft {
         }
     }
 
-    pub(crate) fn apply_command(&mut self, cmd: &ControlCommand) {
+    pub fn apply_command(&mut self, cmd: &ControlCommand) {
         let Some(command) = ControlCommandKind::parse(&cmd.command) else {
             return;
         };
@@ -631,7 +631,7 @@ impl ControlMutationDraft {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ControlNotifyEvent {
+pub struct ControlNotifyEvent {
     pub command: String,
     pub rolename: Option<String>,
     pub acltype: Option<String>,
@@ -640,7 +640,7 @@ pub(crate) struct ControlNotifyEvent {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PendingNotifyCandidate {
+pub struct PendingNotifyCandidate {
     pub command: String,
     pub rolename: String,
     pub topic: String,
@@ -648,7 +648,7 @@ pub(crate) struct PendingNotifyCandidate {
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub(crate) struct NotifyEventKey {
+pub struct NotifyEventKey {
     pub command: String,
     pub rolename: String,
     pub topic: String,
@@ -665,7 +665,7 @@ impl NotifyEventKey {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum RoleAclMutation {
+pub enum RoleAclMutation {
     Add {
         rolename: String,
         acltype: String,
@@ -681,7 +681,7 @@ pub(crate) enum RoleAclMutation {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum PersistMutation {
+pub enum PersistMutation {
     SetClientDisabled {
         username: String,
         disabled: bool,
@@ -724,7 +724,7 @@ impl PersistMutation {
     /// `deleteRole` semantics intentionally discard all ACLs for that role, and the
     /// pending persist queue's `RetryIntentReducer` will also drop orphaned ACL intents
     /// when it sees the role deletion.
-    pub(crate) const fn is_replayed_on_reload(&self) -> bool {
+    pub const fn is_replayed_on_reload(&self) -> bool {
         matches!(
             self,
             Self::SetClientDisabled { .. }
@@ -739,14 +739,14 @@ impl PersistMutation {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum PendingRoleLifecycle {
+pub enum PendingRoleLifecycle {
     Create { acls: Vec<AclConfig> },
     Delete,
     DeleteThenCreate { acls: Vec<AclConfig> },
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum PendingGroupLifecycle {
+pub enum PendingGroupLifecycle {
     Create { roles: Vec<RoleRef> },
     Delete,
     DeleteThenCreate { roles: Vec<RoleRef> },
@@ -760,11 +760,11 @@ impl PendingRoleLifecycle {
         }
     }
 
-    fn requires_delete_persist(&self) -> bool {
+    const fn requires_delete_persist(&self) -> bool {
         matches!(self, Self::Delete | Self::DeleteThenCreate { .. })
     }
 
-    fn is_delete_only(&self) -> bool {
+    const fn is_delete_only(&self) -> bool {
         matches!(self, Self::Delete)
     }
 }
@@ -777,29 +777,29 @@ impl PendingGroupLifecycle {
         }
     }
 
-    fn requires_delete_persist(&self) -> bool {
+    const fn requires_delete_persist(&self) -> bool {
         matches!(self, Self::Delete | Self::DeleteThenCreate { .. })
     }
 
-    fn is_delete_only(&self) -> bool {
+    const fn is_delete_only(&self) -> bool {
         matches!(self, Self::Delete)
     }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum PendingGroupClientMutation {
+pub enum PendingGroupClientMutation {
     Add { priority: i32 },
     Remove,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum PendingRoleAclMutation {
+pub enum PendingRoleAclMutation {
     Add { priority: i32, allow: bool },
     Remove,
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct RetryIntentReducer {
+pub struct RetryIntentReducer {
     pub client_disabled: BTreeMap<String, bool>,
     pub roles: BTreeMap<String, PendingRoleLifecycle>,
     pub groups: BTreeMap<String, PendingGroupLifecycle>,
@@ -808,7 +808,7 @@ pub(crate) struct RetryIntentReducer {
 }
 
 impl RetryIntentReducer {
-    pub(crate) fn apply(&mut self, mutation: &PersistMutation) {
+    pub fn apply(&mut self, mutation: &PersistMutation) {
         match mutation {
             PersistMutation::SetClientDisabled { username, disabled } => {
                 self.client_disabled.insert(username.clone(), *disabled);
@@ -950,8 +950,8 @@ impl RetryIntentReducer {
         );
     }
 
-    pub(crate) fn into_persist_mutations(self) -> Vec<PersistMutation> {
-        let RetryIntentReducer {
+    pub fn into_persist_mutations(self) -> Vec<PersistMutation> {
+        let Self {
             client_disabled,
             roles,
             groups,

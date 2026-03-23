@@ -158,12 +158,13 @@ fn main() -> Result<(), String> {
 
     if let Some(restrict_topic) = args.restrict_topic.as_deref() {
         let topic = escape_datalog_str(restrict_topic);
-        let check = if let Some(op) = args.restrict_operation.as_deref() {
-            let op = escape_datalog_str(op);
-            format!("check if operation(\"{op}\"), resource(\"{topic}\")")
-        } else {
-            format!("check if resource(\"{topic}\")")
-        };
+        let check = args.restrict_operation.as_deref().map_or_else(
+            || format!("check if resource(\"{topic}\")"),
+            |op| {
+                let op = escape_datalog_str(op);
+                format!("check if operation(\"{op}\"), resource(\"{topic}\")")
+            },
+        );
         block = block
             .check(check.as_str())
             .map_err(|e| format!("restrict check failed: {e}"))?;

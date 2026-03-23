@@ -239,10 +239,10 @@ fn json_response_bytes(status: StatusCode, bytes: Bytes) -> Response<Full<Bytes>
 }
 
 fn json_response<T: Serialize>(status: StatusCode, payload: &T) -> Response<Full<Bytes>> {
-    match serde_json::to_vec(payload) {
-        Ok(body) => json_response_bytes(status, Bytes::from(body)),
-        Err(_) => json_response_bytes(StatusCode::INTERNAL_SERVER_ERROR, Bytes::from_static(b"{}")),
-    }
+    serde_json::to_vec(payload).map_or_else(
+        |_| json_response_bytes(StatusCode::INTERNAL_SERVER_ERROR, Bytes::from_static(b"{}")),
+        |body| json_response_bytes(status, Bytes::from(body)),
+    )
 }
 
 const fn access_to_operation(access: i32) -> &'static str {

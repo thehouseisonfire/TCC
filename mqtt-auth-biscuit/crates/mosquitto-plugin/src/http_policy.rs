@@ -302,6 +302,7 @@ async fn get_tls_config(
 
     let config = build_tls_config_with_resumption(ca_file, tls_insecure)?;
     guard.insert(key, Arc::clone(&config));
+    drop(guard);
     Ok(config)
 }
 
@@ -519,6 +520,7 @@ fn resolve_with_cache(host: &str, port: u16) -> HttpPolicyResult<SocketAddr> {
             created_at: Instant::now(),
         },
     );
+    drop(cache_guard);
 
     Ok(addr)
 }
@@ -560,8 +562,10 @@ async fn acquire_connection_with_capacity(
     for conn in &existing {
         if let Ok(mut guard) = conn.sender.try_lock() {
             let ready_future = std::future::poll_fn(|cx| guard.poll_ready(cx));
-            if let Ok(Ok(())) = tokio::time::timeout(Duration::from_millis(10), ready_future).await
-            {
+            if matches!(
+                tokio::time::timeout(Duration::from_millis(10), ready_future).await,
+                Ok(Ok(()))
+            ) {
                 let sender = guard.clone();
                 drop(guard);
                 return Ok((sender, conn.id));
@@ -575,9 +579,10 @@ async fn acquire_connection_with_capacity(
         for conn in &existing {
             if let Ok(mut guard) = conn.sender.try_lock() {
                 let ready_future = std::future::poll_fn(|cx| guard.poll_ready(cx));
-                if let Ok(Ok(())) =
-                    tokio::time::timeout(Duration::from_millis(10), ready_future).await
-                {
+                if matches!(
+                    tokio::time::timeout(Duration::from_millis(10), ready_future).await,
+                    Ok(Ok(()))
+                ) {
                     let sender = guard.clone();
                     drop(guard);
                     return Ok((sender, conn.id));
@@ -617,6 +622,7 @@ async fn acquire_connection_with_capacity(
 
     let id = pooled_conn.id;
     connections.push(pooled_conn);
+    drop(pool_guard);
 
     Ok((sender, id))
 }
@@ -773,6 +779,7 @@ async fn check_http_pooled(params: HttpCheckParams<'_>) -> HttpPolicyResult<bool
                 {
                     connections.remove(pos);
                 }
+                drop(pool_guard);
 
                 // Create fresh connection for retry
                 let retry_conn = create_pooled_connection(&conn_params).await?;
@@ -784,6 +791,7 @@ async fn check_http_pooled(params: HttpCheckParams<'_>) -> HttpPolicyResult<bool
                     .entry(conn_key)
                     .or_insert_with(Vec::new)
                     .push(retry_conn);
+                drop(pool_guard);
 
                 // Retry request once (rebuild body from payload)
                 let retry_body = serialize_to_buffer(&payload)?;

@@ -1,5 +1,5 @@
-pub(crate) mod ffi_utils;
-pub(crate) mod mosquitto_abi;
-pub(crate) mod mosquitto_runtime;
+pub mod ffi_utils;
+pub mod mosquitto_abi;
+pub mod mosquitto_runtime;
 #[cfg(any(test, miri, kani))]
-pub(crate) mod mosquitto_test_api;
+pub mod mosquitto_test_api;

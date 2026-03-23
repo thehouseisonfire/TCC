@@ -10,7 +10,7 @@ use crate::mosquitto_ffi::mosquitto_runtime::{log_debug, set_username_raw};
 use crate::policy::PolicyMode;
 use std::ffi::{CString, c_void};
 
-pub(crate) fn attach_biscuit_expiry(
+pub fn attach_biscuit_expiry(
     token_type: TokenType,
     root_public_key: &biscuit_auth::PublicKey,
     biscuit_authorizer_max_time_ms: u64,
@@ -44,7 +44,7 @@ pub(crate) fn attach_biscuit_expiry(
     }
 }
 
-pub(crate) fn attach_biscuit_roles(token_type: TokenType, config: &PluginConfig) -> TokenType {
+pub fn attach_biscuit_roles(token_type: TokenType, config: &PluginConfig) -> TokenType {
     match token_type {
         TokenType::Biscuit {
             bytes,
@@ -60,15 +60,14 @@ pub(crate) fn attach_biscuit_roles(token_type: TokenType, config: &PluginConfig)
                     biscuit,
                 };
             }
-            let roles = match biscuit.as_ref() {
-                Some(token) => extract_roles_from_biscuit_with_limits(
+            let roles = biscuit.as_ref().and_then(|token| {
+                extract_roles_from_biscuit_with_limits(
                     token.as_ref(),
                     &config.biscuit_role_fact,
                     config.biscuit_authorizer_max_time_ms,
                 )
-                .ok(),
-                None => None,
-            };
+                .ok()
+            });
             TokenType::Biscuit {
                 bytes,
                 expires_at,
@@ -80,7 +79,7 @@ pub(crate) fn attach_biscuit_roles(token_type: TokenType, config: &PluginConfig)
     }
 }
 
-pub(crate) fn select_preferred_role(roles: &[String]) -> Option<String> {
+pub fn select_preferred_role(roles: &[String]) -> Option<String> {
     if roles.is_empty() {
         return None;
     }
@@ -95,7 +94,7 @@ pub(crate) fn select_preferred_role(roles: &[String]) -> Option<String> {
     roles.iter().find(|r| !r.trim().is_empty()).cloned()
 }
 
-pub(crate) fn role_to_username(token_type: &TokenType, config: &PluginConfig) -> Option<String> {
+pub fn role_to_username(token_type: &TokenType, config: &PluginConfig) -> Option<String> {
     match token_type {
         TokenType::Jwt { claims, .. } => claims
             .roles
@@ -139,7 +138,7 @@ pub(crate) fn role_to_username(token_type: &TokenType, config: &PluginConfig) ->
 }
 
 /// Synthetic usernames are derived once during auth callbacks for static ACLs.
-pub(crate) fn set_synthetic_username(
+pub fn set_synthetic_username(
     client: *mut c_void,
     token_type: &TokenType,
     config: &PluginConfig,

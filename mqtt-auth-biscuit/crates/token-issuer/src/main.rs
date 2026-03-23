@@ -237,7 +237,7 @@ fn handle_jwt(req: JwtIssueRequest, cfg: &IssuerConfig) -> Result<TokenResponse,
     let exp = now + ttl;
     let subject = req
         .subject
-        .or(req.client_id.clone())
+        .or_else(|| req.client_id.clone())
         .unwrap_or_else(|| "client_1".to_string());
 
     let no_default_roles = req.no_default_roles.unwrap_or(cfg.jwt_no_default_roles);

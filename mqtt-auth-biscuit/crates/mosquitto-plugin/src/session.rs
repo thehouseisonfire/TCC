@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 
 #[derive(Debug, Default)]
-pub(crate) struct SessionIndex {
+pub struct SessionIndex {
     usernames_by_client_id: HashMap<String, String>,
     client_ids_by_username: HashMap<String, HashSet<String>>,
 }
@@ -36,7 +36,7 @@ impl SessionIndex {
         true
     }
 
-    pub(crate) fn client_ids_for_username(&self, username: &str) -> Vec<String> {
+    pub fn client_ids_for_username(&self, username: &str) -> Vec<String> {
         self.client_ids_by_username
             .get(username)
             .map(|ids| ids.iter().cloned().collect())
@@ -49,27 +49,27 @@ impl SessionIndex {
 }
 
 #[inline]
-pub(crate) unsafe fn plugin_state<'a>(userdata: *mut c_void) -> &'a PluginState {
+pub unsafe fn plugin_state<'a>(userdata: *mut c_void) -> &'a PluginState {
     unsafe { &*userdata.cast::<PluginState>() }
 }
 
 #[inline]
 #[cfg(any(test, miri, kani))]
-pub(crate) unsafe fn plugin_state_mut<'a>(userdata: *mut c_void) -> &'a mut PluginState {
+pub unsafe fn plugin_state_mut<'a>(userdata: *mut c_void) -> &'a mut PluginState {
     unsafe { &mut *userdata.cast::<PluginState>() }
 }
 
 #[inline]
-pub(crate) unsafe fn event_ref<'a, T>(event_data: *mut c_void) -> &'a T {
+pub unsafe fn event_ref<'a, T>(event_data: *mut c_void) -> &'a T {
     unsafe { &*event_data.cast::<T>() }
 }
 
 #[inline]
-pub(crate) unsafe fn event_mut<'a, T>(event_data: *mut c_void) -> &'a mut T {
+pub unsafe fn event_mut<'a, T>(event_data: *mut c_void) -> &'a mut T {
     unsafe { &mut *event_data.cast::<T>() }
 }
 
-pub(crate) fn bind_session_username(state: &PluginState, client_id: &str, username: Option<&str>) {
+pub fn bind_session_username(state: &PluginState, client_id: &str, username: Option<&str>) {
     if let Ok(mut session_index) = state.session_index.lock() {
         session_index.bind(client_id, username);
     } else {
@@ -77,16 +77,17 @@ pub(crate) fn bind_session_username(state: &PluginState, client_id: &str, userna
     }
 }
 
-pub(crate) fn remove_session_username(state: &PluginState, client_id: &str) -> bool {
-    if let Ok(mut session_index) = state.session_index.lock() {
-        session_index.remove_client_id(client_id)
-    } else {
-        log_debug("Session index removal skipped: lock poisoned");
-        false
-    }
+pub fn remove_session_username(state: &PluginState, client_id: &str) -> bool {
+    state.session_index.lock().map_or_else(
+        |_| {
+            log_debug("Session index removal skipped: lock poisoned");
+            false
+        },
+        |mut session_index| session_index.remove_client_id(client_id),
+    )
 }
 
-pub(crate) fn prune_session_index_against_cache(state: &PluginState) {
+pub fn prune_session_index_against_cache(state: &PluginState) {
     let indexed_client_ids = if let Ok(session_index) = state.session_index.lock() {
         session_index.all_client_ids()
     } else {
@@ -114,7 +115,7 @@ pub(crate) fn prune_session_index_against_cache(state: &PluginState) {
     }
 }
 
-pub(crate) fn session_client_ids_for_username(state: &PluginState, username: &str) -> Vec<String> {
+pub fn session_client_ids_for_username(state: &PluginState, username: &str) -> Vec<String> {
     let candidate_ids = if let Ok(session_index) = state.session_index.lock() {
         session_index.client_ids_for_username(username)
     } else {

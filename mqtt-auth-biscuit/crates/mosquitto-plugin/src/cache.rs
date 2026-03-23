@@ -82,12 +82,16 @@ where
         if let Some(entry) = self.cache.get(key) {
             if entry.expiry > Instant::now() {
                 self.metrics.hits.fetch_add(1, Ordering::Relaxed);
-                let mut lru = match self.lru.lock() {
-                    Ok(guard) => guard,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                lru.get(key);
-                return Some(entry.value.clone());
+                let value = entry.value.clone();
+                drop(entry);
+                {
+                    let mut lru = match self.lru.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    lru.get(key);
+                }
+                return Some(value);
             }
             self.metrics.misses.fetch_add(1, Ordering::Relaxed);
             drop(entry);
@@ -107,11 +111,14 @@ where
     pub fn contains_live(&self, key: &K) -> bool {
         if let Some(entry) = self.cache.get(key) {
             if entry.expiry > Instant::now() {
-                let mut lru = match self.lru.lock() {
-                    Ok(guard) => guard,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                lru.get(key);
+                drop(entry);
+                {
+                    let mut lru = match self.lru.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    lru.get(key);
+                }
                 return true;
             }
             drop(entry);

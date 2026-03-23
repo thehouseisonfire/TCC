@@ -502,9 +502,7 @@ pub fn authorize_biscuit_with_limits(
     };
 
     // Short-circuit: if no rights match, check denies for errors and final decision
-    let matching_rights: Vec<_> = rights.iter().filter(|(op, res)| matches(op, res)).collect();
-
-    if matching_rights.is_empty() {
+    if !rights.iter().any(|(op, res)| matches(op, res)) {
         // Still run deny query to surface errors and handle explicit denies
         if denies.iter().any(|(op, res)| matches(op, res)) {
             return BiscuitAuthOutcome::Denied;

@@ -19,7 +19,7 @@ use mutation::{
     ControlCommand, ControlCommandKind, ControlMutationDraft, ControlPayload, PersistMutation,
     RetryIntentReducer, RoleAclMutation,
 };
-pub(crate) use mutation::{ControlEnforcementTargets, ControlNotifyEvent};
+pub use mutation::{ControlEnforcementTargets, ControlNotifyEvent};
 use persist::apply_persist_mutations;
 #[cfg(test)]
 use persist::nested_array_missing_or_empty;
@@ -203,15 +203,15 @@ impl DynamicSecurityPolicy {
         }
 
         let now = Instant::now();
-        let last_loaded = lock_mutex(&self.last_loaded, "reload")?;
+        let reload_due = {
+            let last_loaded = lock_mutex(&self.last_loaded, "reload")?;
+            !matches!(
+                *last_loaded,
+                Some(last) if now.duration_since(last) < self.reload_interval
+            )
+        };
 
-        if let Some(last) = *last_loaded
-            && now.duration_since(last) < self.reload_interval
-        {
-            return Ok(false);
-        }
-
-        Ok(true)
+        Ok(reload_due)
     }
 
     fn reload_if_needed_locked(&self, force: bool) -> DynSecResult<()> {
@@ -228,9 +228,12 @@ impl DynamicSecurityPolicy {
         let has_valid_cached_state = last_loaded.is_some();
         match self.load_current_control_state() {
             Ok(state) => {
-                let mut guard = write_lock(&self.state, "state")?;
-                *guard = state;
+                {
+                    let mut state_guard = write_lock(&self.state, "state")?;
+                    *state_guard = state;
+                }
                 *last_loaded = Some(now);
+                drop(last_loaded);
             }
             Err(err) if has_valid_cached_state && is_dynsec_load_read_or_parse_error(&err) => {
                 return Ok(());
@@ -375,10 +378,13 @@ impl DynamicSecurityPolicy {
     }
 
     fn refresh_cached_state(&self, state: DynSecState) -> DynSecResult<()> {
-        let mut guard = write_lock(&self.state, "state")?;
-        *guard = state;
+        {
+            let mut state_guard = write_lock(&self.state, "state")?;
+            *state_guard = state;
+        }
         let mut last_loaded = lock_mutex(&self.last_loaded, "reload")?;
         *last_loaded = Some(Instant::now());
+        drop(last_loaded);
         Ok(())
     }
 
@@ -406,6 +412,7 @@ impl DynamicSecurityPolicy {
                 }
             }
         }
+        drop(overrides);
         Ok(())
     }
 
@@ -414,15 +421,17 @@ impl DynamicSecurityPolicy {
         state: &mut DynSecState,
     ) -> DynSecResult<PendingReplaySummary> {
         let mut summary = PendingReplaySummary::default();
-        let pending = lock_mutex(&self.pending_persist_mutations, "pending persist")?;
-        for mutation in pending
-            .iter()
-            .filter(|mutation| mutation.is_replayed_on_reload())
         {
-            match apply_state_persist_mutation(state, mutation) {
-                StateApplyOutcome::Changed => summary.changed += 1,
-                StateApplyOutcome::AlreadySatisfied => summary.already_satisfied += 1,
-                StateApplyOutcome::Blocked => summary.blocked += 1,
+            let pending = lock_mutex(&self.pending_persist_mutations, "pending persist")?;
+            for mutation in pending
+                .iter()
+                .filter(|mutation| mutation.is_replayed_on_reload())
+            {
+                match apply_state_persist_mutation(state, mutation) {
+                    StateApplyOutcome::Changed => summary.changed += 1,
+                    StateApplyOutcome::AlreadySatisfied => summary.already_satisfied += 1,
+                    StateApplyOutcome::Blocked => summary.blocked += 1,
+                }
             }
         }
         Ok(summary)
@@ -474,6 +483,8 @@ impl DynamicSecurityPolicy {
                     lock_mutex(&self.runtime_disabled_usernames, "runtime disable")?;
                 *state = next_state;
                 *runtime_disabled = runtime_disabled_usernames;
+                drop(runtime_disabled);
+                drop(state);
             }
             // The runtime_role_acl_overrides update is in a separate lock scope from
             // state + runtime_disabled above. A concurrent check() call that acquires
@@ -588,7 +599,7 @@ fn state_allows_access_with_runtime_disabled(
     state_allows_access(state, username, client_id, topic, access_kind)
 }
 
-pub(crate) fn state_allows_username_access(
+pub fn state_allows_username_access(
     state: &DynSecState,
     runtime_disabled_usernames: &HashSet<String>,
     username: &str,
@@ -609,7 +620,7 @@ pub(crate) fn state_allows_username_access(
     )
 }
 
-fn is_dynsec_load_read_or_parse_error(err: &DynSecError) -> bool {
+const fn is_dynsec_load_read_or_parse_error(err: &DynSecError) -> bool {
     matches!(
         err,
         DynSecError::ConfigRead { .. } | DynSecError::ConfigParse { .. }
@@ -809,7 +820,7 @@ fn apply_state_remove_role_acl(
     StateApplyOutcome::from_changed(role.acls.remove_acl_entry(parsed_acl_type, topic).is_some())
 }
 
-pub(crate) fn prune_placeholder_client(state: &mut DynSecState, username: &str) -> bool {
+pub fn prune_placeholder_client(state: &mut DynSecState, username: &str) -> bool {
     let should_prune = state
         .clients
         .get(username)
@@ -820,12 +831,13 @@ pub(crate) fn prune_placeholder_client(state: &mut DynSecState, username: &str) 
     state.clients.remove(username).is_some()
 }
 
-pub(crate) fn delete_group_from_state(state: &mut DynSecState, groupname: &str) -> bool {
-    let mut changed = state.groups.remove(groupname).is_some();
-    if state.anonymous_group.as_deref() == Some(groupname) {
+pub fn delete_group_from_state(state: &mut DynSecState, groupname: &str) -> bool {
+    let removed_group = state.groups.remove(groupname).is_some();
+    let clear_anonymous_group = state.anonymous_group.as_deref() == Some(groupname);
+    if clear_anonymous_group {
         state.anonymous_group = None;
-        changed = true;
     }
+    let mut changed = removed_group || clear_anonymous_group;
     for client in state.clients.values_mut() {
         changed |= client.remove_group(groupname);
     }
@@ -1003,7 +1015,7 @@ fn collapse_retry_intents(mutations: &[PersistMutation]) -> Vec<PersistMutation>
     reducer.into_persist_mutations()
 }
 
-pub(crate) fn merge_persist_group_roles(
+pub fn merge_persist_group_roles(
     existing_roles: &[RoleRef],
     next_roles: &[RoleRef],
 ) -> Vec<RoleRef> {
@@ -1012,7 +1024,7 @@ pub(crate) fn merge_persist_group_roles(
     group.to_control_roles()
 }
 
-pub(crate) fn merge_persist_role_acls(
+pub fn merge_persist_role_acls(
     existing_acls: &[AclConfig],
     next_acls: &[AclConfig],
 ) -> Vec<AclConfig> {

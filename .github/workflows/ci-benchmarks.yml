@@ -4,38 +4,84 @@ on:
   push:
     branches: [master, main]
     paths:
+      - 'infra/**'
       - 'mqtt-auth-biscuit/benchmarks/**'
       - 'mqtt-auth-biscuit/docker/**'
       - 'mqtt-auth-biscuit/crates/**'
       - 'mqtt-auth-biscuit/tests/**'
       - 'mqtt-auth-biscuit/pytest.ini'
       - '.github/workflows/ci-benchmarks.yml'
+      - 'TODO2.md'
       - 'pyproject.toml'
       - 'uv.lock'
       - 'requirements.txt'
       - 'run_benchmarks.py'
       - 'run_python_tests.sh'
-      - 'scripts/check_pins.py'
+      - 'scripts/**'
+      - 'tests/**'
   pull_request:
     branches: [master, main]
     paths:
+      - 'infra/**'
       - 'mqtt-auth-biscuit/benchmarks/**'
       - 'mqtt-auth-biscuit/docker/**'
       - 'mqtt-auth-biscuit/crates/**'
       - 'mqtt-auth-biscuit/tests/**'
       - 'mqtt-auth-biscuit/pytest.ini'
       - '.github/workflows/ci-benchmarks.yml'
+      - 'TODO2.md'
       - 'pyproject.toml'
       - 'uv.lock'
       - 'requirements.txt'
       - 'run_benchmarks.py'
       - 'run_python_tests.sh'
-      - 'scripts/check_pins.py'
+      - 'scripts/**'
+      - 'tests/**'
   schedule:
     - cron: '0 3 * * *'
   workflow_dispatch:
 
 jobs:
+  infra-contract:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Set up Python 3.14.2
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: '3.14.2'
+
+      - name: Install uv 0.9.17
+        run: python -m pip install uv==0.9.17
+
+      - name: Sync Python dependencies
+        run: uv sync --locked
+
+      - name: Install Terraform 1.13.5
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_version: 1.13.5
+
+      - name: Test benchmark-host helper
+        run: uv run --locked --group dev pytest -q tests/test_benchmark_host_helper.py
+
+      - name: Check Terraform formatting
+        run: terraform -chdir=infra/terraform fmt -check
+
+      - name: Initialize Terraform provider lockfile
+        run: terraform -chdir=infra/terraform init -backend=false -lockfile=readonly
+
+      - name: Run Terraform label regression tests
+        run: terraform -chdir=infra/terraform test
+
+      - name: Validate Terraform configuration
+        run: terraform -chdir=infra/terraform validate
+
   test-benchmark-infrastructure:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-24.04

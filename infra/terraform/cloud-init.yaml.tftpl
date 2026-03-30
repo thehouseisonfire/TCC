@@ -1,0 +1,16 @@
+#cloud-config
+ssh_pwauth: false
+disable_root: true
+
+users:
+  - default
+  - name: ${operator_username}
+    gecos: Benchmark Operator
+    shell: /bin/bash
+    groups:
+      - sudo
+    sudo:
+      - ALL=(ALL) NOPASSWD:ALL
+    lock_passwd: true
+    ssh_authorized_keys:
+      - ${operator_ssh_public_key}

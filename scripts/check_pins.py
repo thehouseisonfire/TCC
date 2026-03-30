@@ -104,12 +104,45 @@ def check_workflows() -> None:
                     fail(f"{path} has floating toolchain: {line}")
 
 
+def check_terraform() -> None:
+    versions_path = ROOT / "infra" / "terraform" / "versions.tf"
+    if not versions_path.is_file():
+        fail("infra/terraform/versions.tf is missing")
+
+    versions_text = versions_path.read_text()
+    if 'required_version = "= 1.13.5"' not in versions_text:
+        fail("infra/terraform/versions.tf must pin Terraform to = 1.13.5")
+    if 'source  = "hetznercloud/hcloud"' not in versions_text:
+        fail("infra/terraform/versions.tf must use the hetznercloud/hcloud provider")
+    if 'version = "= 1.60.1"' not in versions_text:
+        fail("infra/terraform/versions.tf must pin hcloud to = 1.60.1")
+
+    lock_path = ROOT / "infra" / "terraform" / ".terraform.lock.hcl"
+    if not lock_path.is_file():
+        fail("infra/terraform/.terraform.lock.hcl is missing")
+
+    tfvars_example = ROOT / "infra" / "terraform" / "terraform.tfvars.example"
+    if not tfvars_example.is_file():
+        fail("infra/terraform/terraform.tfvars.example is missing")
+
+    tfvars_text = tfvars_example.read_text()
+    secret_patterns = [
+        re.compile(r"HCLOUD_TOKEN"),
+        re.compile(r"(?im)^\s*(?:token|api_token|secret|password|private_key)\s*="),
+        re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    ]
+    for pattern in secret_patterns:
+        if pattern.search(tfvars_text):
+            fail("infra/terraform/terraform.tfvars.example must not contain secrets")
+
+
 def main() -> None:
     check_pyproject()
     check_requirements()
     check_cargo()
     check_docker_refs()
     check_workflows()
+    check_terraform()
     print("Pinned dependency audit passed.")
 
 

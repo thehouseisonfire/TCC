@@ -10,6 +10,9 @@ Policy semantics, parity constraints, and scenario meaning are documented in:
 - `../../SCENARIO_POLICIES.md`
 - `../../PROGRESS.md` (gap tracking and implementation status)
 
+For paid-server benchmark host preparation, use the canonical infra path in
+`../../infra/README.md`.
+
 ## Authz Baseline
 
 For HTTP and hybrid benchmarks, the authz-server reset baseline is intentionally

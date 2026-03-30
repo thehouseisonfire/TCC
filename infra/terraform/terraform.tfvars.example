@@ -1,0 +1,6 @@
+location = "fsn1"
+server_type = "cpx21"
+operator_ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEBENCHMARKPUBLICKEY benchmark@example"
+allowed_ssh_cidrs = [
+  "203.0.113.10/32",
+]

@@ -168,6 +168,7 @@ class ScenarioConfig(TypedDict, total=False):
     sleep_between: int
     token_refresh: TokenRefreshConfig
     dynamic_security_config: str
+    dynamic_security_generated_profile: str
     dynamic_security_churn: list[str]
     fanout_churn_kind: str
     fanout_churn_after_messages: int
@@ -175,6 +176,8 @@ class ScenarioConfig(TypedDict, total=False):
     fanout_churn_max_events: int
     fanout_churn_settle_ms: int
     fanout_churn_dynamic_security_source: str
+    fanout_churn_control_topic: str
+    fanout_churn_control_payload: dict[str, Any]
     fanout_churn_sqlite_db: str
     fanout_churn_sqlite_topic: str
     fanout_churn_sqlite_subscribers: int
@@ -195,6 +198,7 @@ class ScenarioConfig(TypedDict, total=False):
     control_after_messages: int
     # Issue 19: ACL_READ fan-out subscriber count
     subscriber_count: int
+    client_count: int
     # Issue 37: ACL_READ fan-out source/profile metadata
     policy_source: str
     authz_profile: str
@@ -601,6 +605,8 @@ def _run_loadgen(
     fanout_churn_max_events: int = 1,
     fanout_churn_settle_ms: int = 0,
     fanout_churn_dynamic_security_source: str | None = None,
+    fanout_churn_control_topic: str | None = None,
+    fanout_churn_control_payload: dict[str, Any] | None = None,
     fanout_churn_sqlite_db: str | None = None,
     fanout_churn_sqlite_topic: str | None = None,
     fanout_churn_sqlite_subscribers: int | None = None,
@@ -742,6 +748,10 @@ def _run_loadgen(
                 fanout_churn_dynamic_security_source,
             ]
         )
+    if fanout_churn_control_topic:
+        cmd.extend(["--fanout-churn-control-topic", fanout_churn_control_topic])
+    if fanout_churn_control_payload:
+        cmd.extend(["--fanout-churn-control-payload", json.dumps(fanout_churn_control_payload)])
     if fanout_churn_sqlite_db:
         cmd.extend(["--fanout-churn-sqlite-db", fanout_churn_sqlite_db])
     if fanout_churn_sqlite_topic:
@@ -755,6 +765,10 @@ def _run_loadgen(
 
 def _apply_dynamic_security_config(source_path: str):
     policy_churn.apply_dynsec_snapshot(source_path)
+
+
+def _generate_dynamic_security_config(profile: str) -> str:
+    return policy_churn.generate_dynsec_snapshot(profile)
 
 
 def _capture_dynamic_security_baseline() -> bytes | None:
@@ -796,75 +810,141 @@ def _load_dynamic_security_snapshot(path: str) -> dict[str, Any]:
     return payload
 
 
-def _validate_dynamic_security_snapshot_supports_fanout_subscribers(
+def _effective_scenario_client_count(scenario: ScenarioConfig, default_clients: int) -> int:
+    return int(scenario.get("client_count", scenario.get("subscriber_count", default_clients)))
+
+
+def _find_dynamic_security_client(
+    snapshot: dict[str, Any],
     *,
     scenario_id: str,
     snapshot_path: str,
-    subscriber_username: str,
-    subscriber_count: int,
-) -> None:
-    snapshot = _load_dynamic_security_snapshot(snapshot_path)
+    username: str,
+) -> dict[str, Any]:
     clients = snapshot.get("clients")
     if not isinstance(clients, list):
         raise ValueError(
             f"{scenario_id}: dynamic security snapshot missing clients list: {snapshot_path}"
         )
 
-    matching_client: dict[str, Any] | None = None
     for client in clients:
-        if isinstance(client, dict) and client.get("username") == subscriber_username:
-            matching_client = client
-            break
+        if isinstance(client, dict) and client.get("username") == username:
+            return client
 
-    if matching_client is None:
-        raise ValueError(
-            f"{scenario_id}: dynamic security snapshot '{snapshot_path}' has no client for "
-            f"username '{subscriber_username}'"
-        )
+    raise ValueError(
+        f"{scenario_id}: dynamic security snapshot '{snapshot_path}' has no client for "
+        f"username '{username}'"
+    )
 
+
+def _validate_dynamic_security_snapshot_supports_principal(
+    *,
+    scenario_id: str,
+    snapshot_path: str,
+    username: str,
+    principal_label: str,
+    required_clientid: str | None = None,
+    disallow_pinned_clientid: bool = False,
+    effective_client_count: int | None = None,
+) -> None:
+    snapshot = _load_dynamic_security_snapshot(snapshot_path)
+    matching_client = _find_dynamic_security_client(
+        snapshot,
+        scenario_id=scenario_id,
+        snapshot_path=snapshot_path,
+        username=username,
+    )
     pinned_client_id = matching_client.get("clientid")
-    if isinstance(pinned_client_id, str) and pinned_client_id:
+    if (
+        required_clientid
+        and isinstance(pinned_client_id, str)
+        and pinned_client_id
+        and pinned_client_id != required_clientid
+    ):
         raise ValueError(
-            f"{scenario_id}: dynamic security snapshot '{snapshot_path}' pins username "
-            f"'{subscriber_username}' to clientid '{pinned_client_id}' but scenario "
-            f"declares subscriber_count={subscriber_count}. Remove clientid pinning or "
-            "expand identities to match subscriber_count."
+            f"{scenario_id}: dynamic security snapshot '{snapshot_path}' pins "
+            f"{principal_label} '{username}' to clientid '{pinned_client_id}' but "
+            f"benchmark expects '{required_clientid}'"
         )
+    if disallow_pinned_clientid and isinstance(pinned_client_id, str) and pinned_client_id:
+        raise ValueError(
+            f"{scenario_id}: dynamic security snapshot '{snapshot_path}' pins {principal_label} "
+            f"'{username}' to clientid '{pinned_client_id}' but scenario declares "
+            f"effective_client_count={effective_client_count}. Remove clientid pinning or "
+            "expand identities to match the benchmark worker count."
+        )
+
+
+def _validate_dynamic_security_alignment(
+    scenario_id: str,
+    scenario: ScenarioConfig,
+    *,
+    default_clients: int,
+) -> None:
+    dynamic_security_config = scenario.get("dynamic_security_config")
+    generated_snapshot_path: str | None = None
+    if not dynamic_security_config and scenario.get("dynamic_security_generated_profile"):
+        generated_snapshot_path = _generate_dynamic_security_config(
+            cast(str, scenario["dynamic_security_generated_profile"])
+        )
+        dynamic_security_config = generated_snapshot_path
+    if not dynamic_security_config:
+        return
+
+    effective_client_count = _effective_scenario_client_count(scenario, default_clients)
+    is_fanout = scenario.get("traffic_pattern") == "fanout"
+    subscriber_username = scenario.get("username")
+    publisher_username = scenario.get("fanout_publisher_username")
+
+    try:
+        if subscriber_username:
+            _validate_dynamic_security_snapshot_supports_principal(
+                scenario_id=scenario_id,
+                snapshot_path=dynamic_security_config,
+                username=subscriber_username,
+                principal_label="username",
+                disallow_pinned_clientid=is_fanout and effective_client_count > 1,
+                effective_client_count=effective_client_count,
+            )
+        if publisher_username:
+            _validate_dynamic_security_snapshot_supports_principal(
+                scenario_id=scenario_id,
+                snapshot_path=dynamic_security_config,
+                username=publisher_username,
+                principal_label="fanout_publisher_username",
+                required_clientid="fanout_publisher",
+            )
+
+        if scenario.get("fanout_churn_kind") == "dynamic_security_swap":
+            churn_snapshot = scenario.get("fanout_churn_dynamic_security_source")
+            if not churn_snapshot:
+                raise ValueError(
+                    f"{scenario_id}: fanout_churn_kind=dynamic_security_swap requires "
+                    "fanout_churn_dynamic_security_source"
+                )
+            if subscriber_username:
+                _validate_dynamic_security_snapshot_supports_principal(
+                    scenario_id=scenario_id,
+                    snapshot_path=churn_snapshot,
+                    username=subscriber_username,
+                    principal_label="username",
+                    disallow_pinned_clientid=is_fanout and effective_client_count > 1,
+                    effective_client_count=effective_client_count,
+                )
+            if publisher_username:
+                _validate_dynamic_security_snapshot_supports_principal(
+                    scenario_id=scenario_id,
+                    snapshot_path=churn_snapshot,
+                    username=publisher_username,
+                    principal_label="fanout_publisher_username",
+                    required_clientid="fanout_publisher",
+                )
+    finally:
+        policy_churn.cleanup_dynsec_snapshot(generated_snapshot_path)
 
 
 def _validate_dynamic_security_fanout_alignment(scenario_id: str, scenario: ScenarioConfig) -> None:
-    if scenario.get("traffic_pattern") != "fanout":
-        return
-
-    subscriber_count = int(scenario.get("subscriber_count", 0) or 0)
-    if subscriber_count <= 1:
-        return
-
-    dynamic_security_config = scenario.get("dynamic_security_config")
-    subscriber_username = scenario.get("username")
-    if not dynamic_security_config or not subscriber_username:
-        return
-
-    _validate_dynamic_security_snapshot_supports_fanout_subscribers(
-        scenario_id=scenario_id,
-        snapshot_path=dynamic_security_config,
-        subscriber_username=subscriber_username,
-        subscriber_count=subscriber_count,
-    )
-
-    if scenario.get("fanout_churn_kind") == "dynamic_security_swap":
-        churn_snapshot = scenario.get("fanout_churn_dynamic_security_source")
-        if not churn_snapshot:
-            raise ValueError(
-                f"{scenario_id}: fanout_churn_kind=dynamic_security_swap requires "
-                "fanout_churn_dynamic_security_source"
-            )
-        _validate_dynamic_security_snapshot_supports_fanout_subscribers(
-            scenario_id=scenario_id,
-            snapshot_path=churn_snapshot,
-            subscriber_username=subscriber_username,
-            subscriber_count=subscriber_count,
-        )
+    _validate_dynamic_security_alignment(scenario_id, scenario, default_clients=0)
 
 
 def _expand_tls_matrix(
@@ -919,12 +999,38 @@ def _generate_control_churn_payload(scenario_id: str, client_id: str) -> dict[st
         return None
 
     # Extract churn type from scenario ID
-    if "CREATE-ROLE" in scenario_id:
+    if "NOOP-GROUP-CLIENT" in scenario_id:
+        sequence_type = "noop_group_client"
+    elif "LARGE-STATE-GROUP-CLIENT" in scenario_id:
+        return dynsec_commands.generate_command_payload(
+            dynsec_commands.generate_churn_sequence(
+                sequence_type="group_client",
+                base_id="large_state_control",
+                client_id="bulk_user_1",
+            )
+        )
+    elif "CREATE-ROLE" in scenario_id:
         sequence_type = "role"
     elif "GROUP-CLIENT" in scenario_id:
         sequence_type = "group_client"
     elif "ACL-MODIFY" in scenario_id:
         sequence_type = "acl"
+    elif "REPEAT-SAME-ENTITY" in scenario_id:
+        return dynsec_commands.generate_command_payload(
+            dynsec_commands.generate_churn_sequence(
+                sequence_type="role",
+                base_id="shared_control_entity",
+                client_id="shared_control_entity",
+            )
+        )
+    elif "REPEAT-DISTINCT-ENTITY" in scenario_id or "CONCURRENT-CONTROLLERS" in scenario_id:
+        return dynsec_commands.generate_command_payload(
+            dynsec_commands.generate_churn_sequence(
+                sequence_type="role",
+                base_id="{client_id}",
+                client_id="{client_id}",
+            )
+        )
     else:
         logger.warning(f"Unknown CONTROL-CHURN type in scenario: {scenario_id}")
         return None
@@ -935,6 +1041,46 @@ def _generate_control_churn_payload(scenario_id: str, client_id: str) -> dict[st
         client_id=client_id,
     )
     return dynsec_commands.generate_command_payload(commands)
+
+
+def _require_control_churn_payload(scenario_id: str, client_id: str) -> dict[str, Any]:
+    payload = _generate_control_churn_payload(scenario_id, client_id)
+    if payload is None:
+        raise ValueError(f"scenario {scenario_id} does not define a control churn payload")
+    return payload
+
+
+def _control_churn_scenario(
+    *,
+    scenario_id: str,
+    token: str,
+    client_count: int,
+    control_repeat: int,
+    dynamic_security_config: str | None = None,
+    dynamic_security_generated_profile: str | None = "control_admin_base",
+) -> ScenarioConfig:
+    scenario: ScenarioConfig = {
+        "mosquitto_conf": "./mosquitto_dynsec.conf",
+        "username": "admin",
+        "password": token,
+        "topic": "sensors/{client_id}/temp",
+        "control_topic": "$CONTROL/dynamic-security/v1",
+        "control_mode": True,
+        "control_repeat": control_repeat,
+        "authz_config": None,
+        "netem": {"clear": True},
+        "message_size": 256,
+        "qos": 1,
+        "repeat": 2,
+        "sleep_between": 3,
+        "client_count": client_count,
+    }
+    scenario["control_payload"] = _require_control_churn_payload(scenario_id, "admin")
+    if dynamic_security_config:
+        scenario["dynamic_security_config"] = dynamic_security_config
+    if dynamic_security_generated_profile:
+        scenario["dynamic_security_generated_profile"] = dynamic_security_generated_profile
+    return scenario
 
 
 def _run_mqtt5_auth(
@@ -1215,6 +1361,112 @@ def _acl_read_fanout_churn_scenarios(tokens: dict[str, Any]) -> dict[str, Scenar
             "fanout_churn_dynamic_security_source": (
                 "docker/dynamic-security-fanout-read-deny-unpinned.json"
             ),
+        }
+        scenarios[f"DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-REVOKE-JWT-{subscribers}"] = {
+            "mosquitto_conf": "./mosquitto_dynsec_acl_read.conf",
+            "username": "dynsec_client_1",
+            "password": tokens["jwt"],
+            "fanout_publisher_username": "dynsec_publisher",
+            "fanout_publisher_password": tokens["jwt"],
+            "topic": base_topic,
+            "traffic_pattern": "fanout",
+            "subscriber_count": subscribers,
+            "fanout_topic": base_topic,
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "dynamic_security_generated_profile": "fanout_control_allow",
+            "fanout_churn_kind": "dynamic_security_control",
+            "fanout_churn_after_messages": 5,
+            "fanout_churn_settle_ms": 1200,
+            "fanout_churn_control_topic": "$CONTROL/dynamic-security/v1",
+            "fanout_churn_control_payload": {
+                "commands": [
+                    {
+                        "command": "removeRoleACL",
+                        "rolename": "fanout_reader",
+                        "acltype": "publishClientReceive",
+                        "topic": base_topic,
+                    }
+                ]
+            },
+        }
+        scenarios[f"DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-REVOKE-BISCUIT-{subscribers}"] = {
+            "mosquitto_conf": "./mosquitto_dynsec_acl_read.conf",
+            "username": "dynsec_client_1",
+            "password": tokens["biscuit"],
+            "fanout_publisher_username": "dynsec_publisher",
+            "fanout_publisher_password": tokens["biscuit"],
+            "topic": base_topic,
+            "traffic_pattern": "fanout",
+            "subscriber_count": subscribers,
+            "fanout_topic": base_topic,
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "dynamic_security_generated_profile": "fanout_control_allow",
+            "fanout_churn_kind": "dynamic_security_control",
+            "fanout_churn_after_messages": 5,
+            "fanout_churn_settle_ms": 1200,
+            "fanout_churn_control_topic": "$CONTROL/dynamic-security/v1",
+            "fanout_churn_control_payload": {
+                "commands": [
+                    {
+                        "command": "removeRoleACL",
+                        "rolename": "fanout_reader",
+                        "acltype": "publishClientReceive",
+                        "topic": base_topic,
+                    }
+                ]
+            },
+        }
+        scenarios[f"DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-DISABLE-JWT-{subscribers}"] = {
+            "mosquitto_conf": "./mosquitto_dynsec_acl_read.conf",
+            "username": "dynsec_client_1",
+            "password": tokens["jwt"],
+            "fanout_publisher_username": "dynsec_publisher",
+            "fanout_publisher_password": tokens["jwt"],
+            "topic": base_topic,
+            "traffic_pattern": "fanout",
+            "subscriber_count": subscribers,
+            "fanout_topic": base_topic,
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "dynamic_security_generated_profile": "fanout_control_allow",
+            "fanout_churn_kind": "dynamic_security_control",
+            "fanout_churn_after_messages": 5,
+            "fanout_churn_settle_ms": 1200,
+            "fanout_churn_control_topic": "$CONTROL/dynamic-security/v1",
+            "fanout_churn_control_payload": {
+                "commands": [{"command": "disableClient", "username": "dynsec_client_1"}]
+            },
+        }
+        scenarios[f"DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-DISABLE-BISCUIT-{subscribers}"] = {
+            "mosquitto_conf": "./mosquitto_dynsec_acl_read.conf",
+            "username": "dynsec_client_1",
+            "password": tokens["biscuit"],
+            "fanout_publisher_username": "dynsec_publisher",
+            "fanout_publisher_password": tokens["biscuit"],
+            "topic": base_topic,
+            "traffic_pattern": "fanout",
+            "subscriber_count": subscribers,
+            "fanout_topic": base_topic,
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 256,
+            "qos": 1,
+            "dynamic_security_generated_profile": "fanout_control_allow",
+            "fanout_churn_kind": "dynamic_security_control",
+            "fanout_churn_after_messages": 5,
+            "fanout_churn_settle_ms": 1200,
+            "fanout_churn_control_topic": "$CONTROL/dynamic-security/v1",
+            "fanout_churn_control_payload": {
+                "commands": [{"command": "disableClient", "username": "dynsec_client_1"}]
+            },
         }
 
         scenarios[f"SQLITE-ACL-READ-FANOUT-CHURN-JWT-{subscribers}"] = {
@@ -1589,6 +1841,7 @@ def _sqlite_rbac_deep_toggle_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
             "control_repeat": 5,
             "control_topic": "$CONTROL/dynamic-security/v1",
             "control_payload": {"commands": [{"command": "listClients"}]},
+            "client_count": 1,
         },
         "SQLITE-RBAC-DEEP-CONTROL-BISCUIT": {
             "mosquitto_conf": "./mosquitto_sqlite_acl_read.conf",
@@ -1609,6 +1862,7 @@ def _sqlite_rbac_deep_toggle_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
             "control_repeat": 5,
             "control_topic": "$CONTROL/dynamic-security/v1",
             "control_payload": {"commands": [{"command": "listClients"}]},
+            "client_count": 1,
         },
     }
 
@@ -2119,6 +2373,7 @@ def _build_available_scenarios(
             "netem": {"clear": True},
             "message_size": 0,
             "dynamic_security_config": "docker/dynamic-security.json",
+            "subscriber_count": 1,
         },
         "DYNAMIC-SECURITY-READ-FANOUT-CHURN": {
             "mosquitto_conf": "./mosquitto_dynsec.conf",
@@ -2244,9 +2499,10 @@ def _build_available_scenarios(
             "netem": {"clear": True},
             "message_size": 256,
             "qos": 1,
-            "dynamic_security_config": "docker/dynamic-security.json",
+            "dynamic_security_generated_profile": "control_admin_base",
             "repeat": 2,
             "sleep_between": 3,
+            "client_count": 1,
         },
         "CONTROL-OVERHEAD-KICK-REAUTH-BISCUIT": {
             "mosquitto_conf": "./mosquitto_dynsec.conf",
@@ -2257,9 +2513,10 @@ def _build_available_scenarios(
             "netem": {"clear": True},
             "message_size": 256,
             "qos": 1,
-            "dynamic_security_config": "docker/dynamic-security.json",
+            "dynamic_security_generated_profile": "control_admin_base",
             "repeat": 2,
             "sleep_between": 3,
+            "client_count": 1,
         },
         "CONTROL-OVERHEAD-ACL-READ-NOTIFY-JWT": {
             "mosquitto_conf": "./mosquitto_dynsec.conf",
@@ -2274,9 +2531,10 @@ def _build_available_scenarios(
             "fanout_publisher_password": tokens["jwt_admin"],
             "traffic_pattern": "fanout",
             "fanout_topic": "system/notifications/acl-change",
-            "dynamic_security_config": "docker/dynamic-security.json",
+            "dynamic_security_generated_profile": "control_admin_base",
             "repeat": 2,
             "sleep_between": 3,
+            "client_count": 1,
         },
         "CONTROL-OVERHEAD-ACL-READ-NOTIFY-BISCUIT": {
             "mosquitto_conf": "./mosquitto_dynsec.conf",
@@ -2291,108 +2549,127 @@ def _build_available_scenarios(
             "fanout_publisher_password": tokens["biscuit_admin"],
             "traffic_pattern": "fanout",
             "fanout_topic": "system/notifications/acl-change",
-            "dynamic_security_config": "docker/dynamic-security.json",
+            "dynamic_security_generated_profile": "control_admin_base",
             "repeat": 2,
             "sleep_between": 3,
+            "client_count": 1,
         },
         # Issue 35: CONTROL-CHURN scenarios with actual Dynamic Security command payloads
         # These scenarios exercise actual policy modifications via Dynamic Security commands
-        "CONTROL-CHURN-CREATE-ROLE-JWT": {
-            "mosquitto_conf": "./mosquitto_dynsec.conf",
-            "username": "admin",
-            "password": tokens["jwt_admin"],
-            "topic": "sensors/{client_id}/temp",
-            "control_topic": "$CONTROL/dynamic-security/v1",
-            "control_mode": True,
-            "control_repeat": 3,
-            "authz_config": None,
-            "netem": {"clear": True},
-            "message_size": 256,
-            "qos": 1,
-            "dynamic_security_config": "docker/dynamic-security.json",
-            "repeat": 2,
-            "sleep_between": 3,
+        "CONTROL-CHURN-CREATE-ROLE-JWT": _control_churn_scenario(
+            scenario_id="CONTROL-CHURN-CREATE-ROLE-JWT",
+            token=tokens["jwt_admin"],
+            client_count=1,
+            control_repeat=3,
+        ),
+        "CONTROL-CHURN-CREATE-ROLE-BISCUIT": _control_churn_scenario(
+            scenario_id="CONTROL-CHURN-CREATE-ROLE-BISCUIT",
+            token=tokens["biscuit_admin"],
+            client_count=1,
+            control_repeat=3,
+        ),
+        "CONTROL-CHURN-GROUP-CLIENT-JWT": _control_churn_scenario(
+            scenario_id="CONTROL-CHURN-GROUP-CLIENT-JWT",
+            token=tokens["jwt_admin"],
+            client_count=1,
+            control_repeat=2,
+        ),
+        "CONTROL-CHURN-GROUP-CLIENT-BISCUIT": _control_churn_scenario(
+            scenario_id="CONTROL-CHURN-GROUP-CLIENT-BISCUIT",
+            token=tokens["biscuit_admin"],
+            client_count=1,
+            control_repeat=2,
+        ),
+        "CONTROL-CHURN-ACL-MODIFY-JWT": _control_churn_scenario(
+            scenario_id="CONTROL-CHURN-ACL-MODIFY-JWT",
+            token=tokens["jwt_admin"],
+            client_count=1,
+            control_repeat=2,
+        ),
+        "CONTROL-CHURN-ACL-MODIFY-BISCUIT": _control_churn_scenario(
+            scenario_id="CONTROL-CHURN-ACL-MODIFY-BISCUIT",
+            token=tokens["biscuit_admin"],
+            client_count=1,
+            control_repeat=2,
+        ),
+        "CONTROL-CHURN-LARGE-STATE-GROUP-CLIENT-JWT": _control_churn_scenario(
+            scenario_id="CONTROL-CHURN-LARGE-STATE-GROUP-CLIENT-JWT",
+            token=tokens["jwt_admin"],
+            client_count=1,
+            control_repeat=1,
+            dynamic_security_config=None,
+            dynamic_security_generated_profile="large_state_control",
+        ),
+        "CONTROL-CHURN-LARGE-STATE-GROUP-CLIENT-BISCUIT": _control_churn_scenario(
+            scenario_id="CONTROL-CHURN-LARGE-STATE-GROUP-CLIENT-BISCUIT",
+            token=tokens["biscuit_admin"],
+            client_count=1,
+            control_repeat=1,
+            dynamic_security_config=None,
+            dynamic_security_generated_profile="large_state_control",
+        ),
+        "CONTROL-CHURN-NOOP-GROUP-CLIENT-JWT": {
+            **_control_churn_scenario(
+                scenario_id="CONTROL-CHURN-NOOP-GROUP-CLIENT-JWT",
+                token=tokens["jwt_admin"],
+                client_count=1,
+                control_repeat=1,
+                dynamic_security_config=None,
+                dynamic_security_generated_profile="fanout_control_noop_group",
+            ),
+            "control_payload": _require_control_churn_payload(
+                "CONTROL-CHURN-NOOP-GROUP-CLIENT-JWT", "dynsec_client_1"
+            ),
         },
-        "CONTROL-CHURN-CREATE-ROLE-BISCUIT": {
-            "mosquitto_conf": "./mosquitto_dynsec.conf",
-            "username": "admin",
-            "password": tokens["biscuit_admin"],
-            "topic": "sensors/{client_id}/temp",
-            "control_topic": "$CONTROL/dynamic-security/v1",
-            "control_mode": True,
-            "control_repeat": 3,
-            "authz_config": None,
-            "netem": {"clear": True},
-            "message_size": 256,
-            "qos": 1,
-            "dynamic_security_config": "docker/dynamic-security.json",
-            "repeat": 2,
-            "sleep_between": 3,
+        "CONTROL-CHURN-NOOP-GROUP-CLIENT-BISCUIT": {
+            **_control_churn_scenario(
+                scenario_id="CONTROL-CHURN-NOOP-GROUP-CLIENT-BISCUIT",
+                token=tokens["biscuit_admin"],
+                client_count=1,
+                control_repeat=1,
+                dynamic_security_config=None,
+                dynamic_security_generated_profile="fanout_control_noop_group",
+            ),
+            "control_payload": _require_control_churn_payload(
+                "CONTROL-CHURN-NOOP-GROUP-CLIENT-BISCUIT", "dynsec_client_1"
+            ),
         },
-        "CONTROL-CHURN-GROUP-CLIENT-JWT": {
-            "mosquitto_conf": "./mosquitto_dynsec.conf",
-            "username": "admin",
-            "password": tokens["jwt_admin"],
-            "topic": "sensors/{client_id}/temp",
-            "control_topic": "$CONTROL/dynamic-security/v1",
-            "control_mode": True,
-            "control_repeat": 2,
-            "authz_config": None,
-            "netem": {"clear": True},
-            "message_size": 256,
-            "qos": 1,
-            "dynamic_security_config": "docker/dynamic-security.json",
-            "repeat": 2,
-            "sleep_between": 3,
-        },
-        "CONTROL-CHURN-GROUP-CLIENT-BISCUIT": {
-            "mosquitto_conf": "./mosquitto_dynsec.conf",
-            "username": "admin",
-            "password": tokens["biscuit_admin"],
-            "topic": "sensors/{client_id}/temp",
-            "control_topic": "$CONTROL/dynamic-security/v1",
-            "control_mode": True,
-            "control_repeat": 2,
-            "authz_config": None,
-            "netem": {"clear": True},
-            "message_size": 256,
-            "qos": 1,
-            "dynamic_security_config": "docker/dynamic-security.json",
-            "repeat": 2,
-            "sleep_between": 3,
-        },
-        "CONTROL-CHURN-ACL-MODIFY-JWT": {
-            "mosquitto_conf": "./mosquitto_dynsec.conf",
-            "username": "admin",
-            "password": tokens["jwt_admin"],
-            "topic": "sensors/{client_id}/temp",
-            "control_topic": "$CONTROL/dynamic-security/v1",
-            "control_mode": True,
-            "control_repeat": 2,
-            "authz_config": None,
-            "netem": {"clear": True},
-            "message_size": 256,
-            "qos": 1,
-            "dynamic_security_config": "docker/dynamic-security.json",
-            "repeat": 2,
-            "sleep_between": 3,
-        },
-        "CONTROL-CHURN-ACL-MODIFY-BISCUIT": {
-            "mosquitto_conf": "./mosquitto_dynsec.conf",
-            "username": "admin",
-            "password": tokens["biscuit_admin"],
-            "topic": "sensors/{client_id}/temp",
-            "control_topic": "$CONTROL/dynamic-security/v1",
-            "control_mode": True,
-            "control_repeat": 2,
-            "authz_config": None,
-            "netem": {"clear": True},
-            "message_size": 256,
-            "qos": 1,
-            "dynamic_security_config": "docker/dynamic-security.json",
-            "repeat": 2,
-            "sleep_between": 3,
-        },
+        "CONTROL-CHURN-REPEAT-SAME-ENTITY-JWT": _control_churn_scenario(
+            scenario_id="CONTROL-CHURN-REPEAT-SAME-ENTITY-JWT",
+            token=tokens["jwt_admin"],
+            client_count=10,
+            control_repeat=3,
+        ),
+        "CONTROL-CHURN-REPEAT-SAME-ENTITY-BISCUIT": _control_churn_scenario(
+            scenario_id="CONTROL-CHURN-REPEAT-SAME-ENTITY-BISCUIT",
+            token=tokens["biscuit_admin"],
+            client_count=10,
+            control_repeat=3,
+        ),
+        "CONTROL-CHURN-REPEAT-DISTINCT-ENTITY-JWT": _control_churn_scenario(
+            scenario_id="CONTROL-CHURN-REPEAT-DISTINCT-ENTITY-JWT",
+            token=tokens["jwt_admin"],
+            client_count=10,
+            control_repeat=3,
+        ),
+        "CONTROL-CHURN-REPEAT-DISTINCT-ENTITY-BISCUIT": _control_churn_scenario(
+            scenario_id="CONTROL-CHURN-REPEAT-DISTINCT-ENTITY-BISCUIT",
+            token=tokens["biscuit_admin"],
+            client_count=10,
+            control_repeat=3,
+        ),
+        "CONTROL-CHURN-CONCURRENT-CONTROLLERS-JWT": _control_churn_scenario(
+            scenario_id="CONTROL-CHURN-CONCURRENT-CONTROLLERS-JWT",
+            token=tokens["jwt_admin"],
+            client_count=50,
+            control_repeat=1,
+        ),
+        "CONTROL-CHURN-CONCURRENT-CONTROLLERS-BISCUIT": _control_churn_scenario(
+            scenario_id="CONTROL-CHURN-CONCURRENT-CONTROLLERS-BISCUIT",
+            token=tokens["biscuit_admin"],
+            client_count=50,
+            control_repeat=1,
+        ),
         # Issue 36: Interleaved control message scenarios
         # These scenarios publish control messages interleaved with data messages
         # to measure control plane latency under active data plane load.
@@ -2409,7 +2686,7 @@ def _build_available_scenarios(
             "netem": {"clear": True},
             "message_size": 256,
             "qos": 1,
-            "dynamic_security_config": "docker/dynamic-security.json",
+            "dynamic_security_generated_profile": "control_interleaved_base",
         },
         "CONTROL-INTERLEAVED-DATA-BISCUIT": {
             "mosquitto_conf": "./mosquitto_dynsec.conf",
@@ -2424,7 +2701,7 @@ def _build_available_scenarios(
             "netem": {"clear": True},
             "message_size": 256,
             "qos": 1,
-            "dynamic_security_config": "docker/dynamic-security.json",
+            "dynamic_security_generated_profile": "control_interleaved_base",
         },
         # Issue 29: Anonymous flow scenario using Dynamic Security anonymousGroup
         # Demonstrates how Dynamic Security can enforce policies for unauthenticated clients
@@ -2813,6 +3090,7 @@ def main(
             authz_profile = cast(dict[str, Any], s["authz_config"]).get("authz_profile")
         authorizer_profile = s.get("authorizer_profile")
         acl_read_enforcement = _infer_acl_read_enforcement(s)
+        effective_client_count = _effective_scenario_client_count(s, clients)
         out_payload: dict[str, Any] = {
             "scenario": s["id"],
             "token_len": token_len,
@@ -2842,7 +3120,8 @@ def main(
             "attenuation": s.get("biscuit_attenuate"),
             "delegation": s.get("biscuit_delegate"),
             "scenario_config": {
-                "clients": s.get("subscriber_count", clients),
+                "clients": effective_client_count,
+                "client_count": s.get("client_count"),
                 "messages": messages,
                 "qos": qos,
                 "qos_distribution": qos_distribution,
@@ -2860,6 +3139,8 @@ def main(
                 "fanout_churn_interval_messages": s.get("fanout_churn_interval_messages"),
                 "fanout_churn_max_events": s.get("fanout_churn_max_events"),
                 "fanout_churn_settle_ms": s.get("fanout_churn_settle_ms"),
+                "fanout_churn_control_topic": s.get("fanout_churn_control_topic"),
+                "fanout_churn_control_payload": s.get("fanout_churn_control_payload"),
                 "sqlite_seed_fanout": s.get("sqlite_seed_fanout"),
                 "sqlite_seed_profile": s.get("sqlite_seed_profile"),
                 "sqlite_seed_db": s.get("sqlite_seed_db"),
@@ -2878,8 +3159,8 @@ def main(
                 },
             },
             "fanout_metrics": {
-                "subscriber_count": s.get(
-                    "subscriber_count", clients if s.get("traffic_pattern") == "fanout" else None
+                "subscriber_count": (
+                    effective_client_count if s.get("traffic_pattern") == "fanout" else None
                 ),
                 "message_count": messages if s.get("traffic_pattern") == "fanout" else None,
                 "acl_read_cost_per_subscriber_ms": None,  # Calculated from receive latencies
@@ -2924,178 +3205,198 @@ def main(
             _compose(["restart", "mosquitto"], extra_env=extra_env)
             time.sleep(1)
 
-        _validate_dynamic_security_fanout_alignment(s["id"], s)
+        _validate_dynamic_security_alignment(s["id"], s, default_clients=clients)
         dynsec_baseline = _capture_dynamic_security_baseline()
         compose_project_name = extra_env.get("COMPOSE_PROJECT_NAME") or os.environ.get(
             "COMPOSE_PROJECT_NAME"
         )
         try:
             for idx in range(repeats):
-                if s.get("dynamic_security_config"):
-                    _apply_dynamic_security_config(s["dynamic_security_config"])
-                elif s.get("dynamic_security_churn"):
-                    churn_list = s["dynamic_security_churn"]
-                    _apply_dynamic_security_config(churn_list[idx % len(churn_list)])
-                if s.get("sqlite_seed_fanout"):
-                    policy_churn.seed_sqlite_fanout_policy(
-                        s.get("sqlite_seed_db", "docker/sqlite/policy.db"),
-                        topic=s.get("sqlite_seed_topic", s.get("fanout_topic", "fanout/broadcast")),
-                        subscriber_count=int(
-                            s.get("sqlite_seed_subscribers", s.get("subscriber_count", clients))
-                        ),
-                        profile=str(s.get("sqlite_seed_profile", "fanout_basic")),
-                    )
-                mqtt5_cfg = s.get("mqtt5_auth")
-                if mqtt5_cfg is not None:
-                    res = _run_mqtt5_auth(
-                        mqtt_host,
-                        mqtt_port,
-                        mqtt5_cfg["token1"],
-                        mqtt5_cfg["token2"],
-                        scenario_tls,
-                        tls_ca,
-                        tls_insecure,
-                    )
-                else:
-                    token_refresh = s.get("token_refresh")
-                    scenario_qos = int(s.get("qos", qos))
-                    scenario_qos_distribution = s.get("qos_distribution", qos_distribution)
-                    scenario_clients = int(s.get("subscriber_count", clients))
-                    res = _run_loadgen(
-                        tokens=tokens,
-                        host=mqtt_host,
-                        port=mqtt_port,
-                        username=s.get("username", ""),
-                        password=s.get("password", ""),
-                        fanout_publisher_username=s.get("fanout_publisher_username"),
-                        fanout_publisher_password=s.get("fanout_publisher_password"),
-                        clients=scenario_clients,
-                        messages=messages,
-                        topic=s.get("topic", "sensors/{client_id}/temp"),
-                        mode=s.get("traffic_pattern"),
-                        fanout_topic=s.get("fanout_topic"),
-                        qos=scenario_qos,
-                        qos_distribution=scenario_qos_distribution,
-                        message_size=int(s.get("message_size", 0)),
-                        sync_connect=bool(s.get("sync_connect", False)),
-                        token_issuer_url=token_issuer_base if token_refresh else None,
-                        token_issuer_kind=(token_refresh.get("kind") if token_refresh else None),
-                        token_issuer_ttl=(
-                            token_refresh.get("ttl_seconds") if token_refresh else None
-                        ),
-                        token_issuer_no_default_roles=token_issuer_no_default_roles,
-                        token_issuer_no_default_grants=token_issuer_no_default_grants,
-                        token_refresh_codes=token_refresh_codes,
-                        tls_enabled=scenario_tls,
-                        tls_ca_file=tls_ca,
-                        tls_insecure=tls_insecure,
-                        biscuit_attenuate=bool(s.get("biscuit_attenuate")),
-                        biscuit_attenuate_denies=(
-                            s.get("biscuit_attenuate", {}).get("denies")
-                            if s.get("biscuit_attenuate")
-                            else None
-                        ),
-                        biscuit_attenuate_checks=(
-                            s.get("biscuit_attenuate", {}).get("checks")
-                            if s.get("biscuit_attenuate")
-                            else None
-                        ),
-                        biscuit_attenuate_topic=(
-                            s.get("biscuit_attenuate", {}).get("topic")
-                            if s.get("biscuit_attenuate")
-                            else None
-                        ),
-                        biscuit_attenuate_op=(
-                            s.get("biscuit_attenuate", {}).get("op")
-                            if s.get("biscuit_attenuate")
-                            else None
-                        ),
-                        biscuit_attenuate_ttl=(
-                            s.get("biscuit_attenuate", {}).get("ttl_seconds")
-                            if s.get("biscuit_attenuate")
-                            else None
-                        ),
-                        biscuit_public_key_hex=s.get("biscuit_public_key_hex"),
-                        biscuit_public_key_file=s.get(
-                            "biscuit_public_key_file", "docker/biscuit_public.key"
-                        ),
-                        biscuit_attenuate_bin=s.get("biscuit_attenuate_bin"),
-                        biscuit_delegate=bool(s.get("biscuit_delegate")),
-                        biscuit_delegate_denies=(
-                            s.get("biscuit_delegate", {}).get("denies")
-                            if s.get("biscuit_delegate")
-                            else None
-                        ),
-                        biscuit_delegate_checks=(
-                            s.get("biscuit_delegate", {}).get("checks")
-                            if s.get("biscuit_delegate")
-                            else None
-                        ),
-                        biscuit_delegate_topic=(
-                            s.get("biscuit_delegate", {}).get("topic")
-                            if s.get("biscuit_delegate")
-                            else None
-                        ),
-                        biscuit_delegate_op=(
-                            s.get("biscuit_delegate", {}).get("op")
-                            if s.get("biscuit_delegate")
-                            else None
-                        ),
-                        biscuit_delegate_ttl=(
-                            s.get("biscuit_delegate", {}).get("ttl_seconds")
-                            if s.get("biscuit_delegate")
-                            else None
-                        ),
-                        biscuit_delegate_public_key_hex=s.get("biscuit_delegate_public_key_hex"),
-                        biscuit_delegate_public_key_file=s.get(
-                            "biscuit_delegate_public_key_file", "docker/biscuit_public.key"
-                        ),
-                        biscuit_delegate_bin=s.get("biscuit_delegate_bin"),
-                        biscuit_delegate_handoff=bool(
-                            s.get("biscuit_delegate", {}).get("handoff")
-                            if s.get("biscuit_delegate")
-                            else False
-                        ),
-                        biscuit_delegate_handoff_topic=(
-                            s.get("biscuit_delegate", {}).get("handoff", {}).get("topic")
-                            if s.get("biscuit_delegate")
-                            else None
-                        ),
-                        biscuit_delegate_handoff_token=(
-                            s.get("biscuit_delegate", {}).get("handoff", {}).get("token")
-                            if s.get("biscuit_delegate")
-                            else None
-                        ),
-                        biscuit_delegate_handoff_qos=(
-                            s.get("biscuit_delegate", {}).get("handoff", {}).get("qos")
-                            if s.get("biscuit_delegate")
-                            else None
-                        ),
-                        biscuit_delegate_handoff_retain=(
-                            s.get("biscuit_delegate", {}).get("handoff", {}).get("retain")
-                            if s.get("biscuit_delegate")
-                            else None
-                        ),
-                        # Issue 35: CONTROL message parameters
-                        control_topic=s.get("control_topic"),
-                        control_payload=s.get("control_payload")
-                        or _generate_control_churn_payload(s["id"], "admin"),
-                        control_mode=bool(s.get("control_mode", False)),
-                        control_repeat=s.get("control_repeat", 1),
-                        # Issue 36: Interleaved control message parameter
-                        control_after_messages=s.get("control_after_messages", 0),
-                        fanout_churn_kind=s.get("fanout_churn_kind"),
-                        fanout_churn_after_messages=s.get("fanout_churn_after_messages", 0),
-                        fanout_churn_interval_messages=s.get("fanout_churn_interval_messages", 0),
-                        fanout_churn_max_events=s.get("fanout_churn_max_events", 1),
-                        fanout_churn_settle_ms=s.get("fanout_churn_settle_ms", 0),
-                        fanout_churn_dynamic_security_source=s.get(
-                            "fanout_churn_dynamic_security_source"
-                        ),
-                        fanout_churn_sqlite_db=s.get("fanout_churn_sqlite_db"),
-                        fanout_churn_sqlite_topic=s.get("fanout_churn_sqlite_topic"),
-                        fanout_churn_sqlite_subscribers=s.get("fanout_churn_sqlite_subscribers"),
-                    )
+                generated_dynsec_path: str | None = None
+                try:
+                    if s.get("dynamic_security_generated_profile"):
+                        generated_dynsec_path = _generate_dynamic_security_config(
+                            cast(str, s["dynamic_security_generated_profile"])
+                        )
+                        _apply_dynamic_security_config(generated_dynsec_path)
+                    elif s.get("dynamic_security_config"):
+                        _apply_dynamic_security_config(s["dynamic_security_config"])
+                    elif s.get("dynamic_security_churn"):
+                        churn_list = s["dynamic_security_churn"]
+                        _apply_dynamic_security_config(churn_list[idx % len(churn_list)])
+                    if s.get("sqlite_seed_fanout"):
+                        policy_churn.seed_sqlite_fanout_policy(
+                            s.get("sqlite_seed_db", "docker/sqlite/policy.db"),
+                            topic=s.get(
+                                "sqlite_seed_topic", s.get("fanout_topic", "fanout/broadcast")
+                            ),
+                            subscriber_count=int(
+                                s.get("sqlite_seed_subscribers", s.get("subscriber_count", clients))
+                            ),
+                            profile=str(s.get("sqlite_seed_profile", "fanout_basic")),
+                        )
+                    mqtt5_cfg = s.get("mqtt5_auth")
+                    if mqtt5_cfg is not None:
+                        res = _run_mqtt5_auth(
+                            mqtt_host,
+                            mqtt_port,
+                            mqtt5_cfg["token1"],
+                            mqtt5_cfg["token2"],
+                            scenario_tls,
+                            tls_ca,
+                            tls_insecure,
+                        )
+                    else:
+                        token_refresh = s.get("token_refresh")
+                        scenario_qos = int(s.get("qos", qos))
+                        scenario_qos_distribution = s.get("qos_distribution", qos_distribution)
+                        scenario_clients = _effective_scenario_client_count(s, clients)
+                        res = _run_loadgen(
+                            tokens=tokens,
+                            host=mqtt_host,
+                            port=mqtt_port,
+                            username=s.get("username", ""),
+                            password=s.get("password", ""),
+                            fanout_publisher_username=s.get("fanout_publisher_username"),
+                            fanout_publisher_password=s.get("fanout_publisher_password"),
+                            clients=scenario_clients,
+                            messages=messages,
+                            topic=s.get("topic", "sensors/{client_id}/temp"),
+                            mode=s.get("traffic_pattern"),
+                            fanout_topic=s.get("fanout_topic"),
+                            qos=scenario_qos,
+                            qos_distribution=scenario_qos_distribution,
+                            message_size=int(s.get("message_size", 0)),
+                            sync_connect=bool(s.get("sync_connect", False)),
+                            token_issuer_url=token_issuer_base if token_refresh else None,
+                            token_issuer_kind=(
+                                token_refresh.get("kind") if token_refresh else None
+                            ),
+                            token_issuer_ttl=(
+                                token_refresh.get("ttl_seconds") if token_refresh else None
+                            ),
+                            token_issuer_no_default_roles=token_issuer_no_default_roles,
+                            token_issuer_no_default_grants=token_issuer_no_default_grants,
+                            token_refresh_codes=token_refresh_codes,
+                            tls_enabled=scenario_tls,
+                            tls_ca_file=tls_ca,
+                            tls_insecure=tls_insecure,
+                            biscuit_attenuate=bool(s.get("biscuit_attenuate")),
+                            biscuit_attenuate_denies=(
+                                s.get("biscuit_attenuate", {}).get("denies")
+                                if s.get("biscuit_attenuate")
+                                else None
+                            ),
+                            biscuit_attenuate_checks=(
+                                s.get("biscuit_attenuate", {}).get("checks")
+                                if s.get("biscuit_attenuate")
+                                else None
+                            ),
+                            biscuit_attenuate_topic=(
+                                s.get("biscuit_attenuate", {}).get("topic")
+                                if s.get("biscuit_attenuate")
+                                else None
+                            ),
+                            biscuit_attenuate_op=(
+                                s.get("biscuit_attenuate", {}).get("op")
+                                if s.get("biscuit_attenuate")
+                                else None
+                            ),
+                            biscuit_attenuate_ttl=(
+                                s.get("biscuit_attenuate", {}).get("ttl_seconds")
+                                if s.get("biscuit_attenuate")
+                                else None
+                            ),
+                            biscuit_public_key_hex=s.get("biscuit_public_key_hex"),
+                            biscuit_public_key_file=s.get(
+                                "biscuit_public_key_file", "docker/biscuit_public.key"
+                            ),
+                            biscuit_attenuate_bin=s.get("biscuit_attenuate_bin"),
+                            biscuit_delegate=bool(s.get("biscuit_delegate")),
+                            biscuit_delegate_denies=(
+                                s.get("biscuit_delegate", {}).get("denies")
+                                if s.get("biscuit_delegate")
+                                else None
+                            ),
+                            biscuit_delegate_checks=(
+                                s.get("biscuit_delegate", {}).get("checks")
+                                if s.get("biscuit_delegate")
+                                else None
+                            ),
+                            biscuit_delegate_topic=(
+                                s.get("biscuit_delegate", {}).get("topic")
+                                if s.get("biscuit_delegate")
+                                else None
+                            ),
+                            biscuit_delegate_op=(
+                                s.get("biscuit_delegate", {}).get("op")
+                                if s.get("biscuit_delegate")
+                                else None
+                            ),
+                            biscuit_delegate_ttl=(
+                                s.get("biscuit_delegate", {}).get("ttl_seconds")
+                                if s.get("biscuit_delegate")
+                                else None
+                            ),
+                            biscuit_delegate_public_key_hex=s.get(
+                                "biscuit_delegate_public_key_hex"
+                            ),
+                            biscuit_delegate_public_key_file=s.get(
+                                "biscuit_delegate_public_key_file",
+                                "docker/biscuit_public.key",
+                            ),
+                            biscuit_delegate_bin=s.get("biscuit_delegate_bin"),
+                            biscuit_delegate_handoff=bool(
+                                s.get("biscuit_delegate", {}).get("handoff")
+                                if s.get("biscuit_delegate")
+                                else False
+                            ),
+                            biscuit_delegate_handoff_topic=(
+                                s.get("biscuit_delegate", {}).get("handoff", {}).get("topic")
+                                if s.get("biscuit_delegate")
+                                else None
+                            ),
+                            biscuit_delegate_handoff_token=(
+                                s.get("biscuit_delegate", {}).get("handoff", {}).get("token")
+                                if s.get("biscuit_delegate")
+                                else None
+                            ),
+                            biscuit_delegate_handoff_qos=(
+                                s.get("biscuit_delegate", {}).get("handoff", {}).get("qos")
+                                if s.get("biscuit_delegate")
+                                else None
+                            ),
+                            biscuit_delegate_handoff_retain=(
+                                s.get("biscuit_delegate", {}).get("handoff", {}).get("retain")
+                                if s.get("biscuit_delegate")
+                                else None
+                            ),
+                            control_topic=s.get("control_topic"),
+                            control_payload=s.get("control_payload")
+                            or _generate_control_churn_payload(s["id"], "admin"),
+                            control_mode=bool(s.get("control_mode", False)),
+                            control_repeat=s.get("control_repeat", 1),
+                            control_after_messages=s.get("control_after_messages", 0),
+                            fanout_churn_kind=s.get("fanout_churn_kind"),
+                            fanout_churn_after_messages=s.get("fanout_churn_after_messages", 0),
+                            fanout_churn_interval_messages=s.get(
+                                "fanout_churn_interval_messages", 0
+                            ),
+                            fanout_churn_max_events=s.get("fanout_churn_max_events", 1),
+                            fanout_churn_settle_ms=s.get("fanout_churn_settle_ms", 0),
+                            fanout_churn_dynamic_security_source=s.get(
+                                "fanout_churn_dynamic_security_source"
+                            ),
+                            fanout_churn_control_topic=s.get("fanout_churn_control_topic"),
+                            fanout_churn_control_payload=s.get("fanout_churn_control_payload"),
+                            fanout_churn_sqlite_db=s.get("fanout_churn_sqlite_db"),
+                            fanout_churn_sqlite_topic=s.get("fanout_churn_sqlite_topic"),
+                            fanout_churn_sqlite_subscribers=s.get(
+                                "fanout_churn_sqlite_subscribers"
+                            ),
+                        )
+                finally:
+                    policy_churn.cleanup_dynsec_snapshot(generated_dynsec_path)
                 # Small delay to ensure container metrics are available after loadgen
                 time.sleep(2)
                 snap = _resource_snapshot(
@@ -3197,7 +3498,7 @@ def main(
         out_payload["packet_analysis_result"] = packet_analysis_result
 
         # Issue 19: Calculate ACL_READ cost per subscriber for fanout scenarios
-        subscriber_count = s.get("subscriber_count")
+        subscriber_count = _effective_scenario_client_count(s, clients)
         if s.get("traffic_pattern") == "fanout" and out_payload["runs"] and subscriber_count:
             total_receive_ms = 0.0
             total_receive_count = 0

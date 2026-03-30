@@ -165,3 +165,143 @@ def test_seed_sqlite_deep_control_allow_profile_assigns_client_control_role(tmp_
             ("client_1", policy_churn.DEEP_CONTROL_ADMIN_ROLE),
         ).fetchone()
         assert row is not None
+
+
+def test_build_dynsec_snapshot_fanout_control_allow_grants_control_publish_acl() -> None:
+    payload = policy_churn.build_dynsec_snapshot("fanout_control_allow")
+    roles = payload["roles"]
+    assert isinstance(roles, list)
+
+    fanout_writer = next(role for role in roles if role.get("rolename") == "fanout_writer")
+    acls = fanout_writer["acls"]
+    assert isinstance(acls, list)
+    assert {
+        "acltype": "publishClientSend",
+        "topic": "$CONTROL/dynamic-security/v1",
+        "priority": 0,
+        "allow": True,
+    } in acls
+
+
+def test_build_dynsec_snapshot_control_admin_base_contains_admin_control_identity() -> None:
+    payload = policy_churn.build_dynsec_snapshot("control_admin_base")
+    clients = payload["clients"]
+    roles = payload["roles"]
+    assert isinstance(clients, list)
+    assert isinstance(roles, list)
+
+    admin_client = next(client for client in clients if client.get("username") == "admin")
+    assert admin_client["roles"] == [{"rolename": policy_churn.CONTROL_ADMIN_ROLE, "priority": 0}]
+
+    admin_role = next(
+        role for role in roles if role.get("rolename") == policy_churn.CONTROL_ADMIN_ROLE
+    )
+    acls = admin_role["acls"]
+    assert isinstance(acls, list)
+    assert {
+        "acltype": "publishClientSend",
+        "topic": "$CONTROL/dynamic-security/v1",
+        "priority": 0,
+        "allow": True,
+    } in acls
+    assert {
+        "acltype": "publishClientSend",
+        "topic": "system/notifications/#",
+        "priority": 0,
+        "allow": True,
+    } in acls
+    assert {
+        "acltype": "publishClientSend",
+        "topic": "sensors/+/#",
+        "priority": 0,
+        "allow": True,
+    } in acls
+    assert {
+        "acltype": "publishClientReceive",
+        "topic": "system/notifications/#",
+        "priority": 0,
+        "allow": True,
+    } in acls
+    assert {
+        "acltype": "subscribePattern",
+        "topic": "system/notifications/#",
+        "priority": 0,
+        "allow": True,
+    } in acls
+
+
+def test_build_dynsec_snapshot_control_interleaved_base_contains_jwt_and_biscuit_publishers() -> (
+    None
+):
+    payload = policy_churn.build_dynsec_snapshot("control_interleaved_base")
+    clients = payload["clients"]
+    roles = payload["roles"]
+    assert isinstance(clients, list)
+    assert isinstance(roles, list)
+
+    for username in ("jwt", "biscuit"):
+        client = next(client for client in clients if client.get("username") == username)
+        expected_role = f"{policy_churn.CONTROL_DATA_PUBLISHER_ROLE}_{username}"
+        assert client["roles"] == [{"rolename": expected_role, "priority": 0}]
+
+        role = next(role for role in roles if role.get("rolename") == expected_role)
+        acls = role["acls"]
+        assert isinstance(acls, list)
+        assert {
+            "acltype": "publishClientSend",
+            "topic": "sensors/+/#",
+            "priority": 0,
+            "allow": True,
+        } in acls
+        assert {
+            "acltype": "publishClientSend",
+            "topic": "$CONTROL/dynamic-security/v1",
+            "priority": 0,
+            "allow": True,
+        } in acls
+
+
+def test_build_dynsec_snapshot_noop_group_seeds_existing_reader_membership() -> None:
+    payload = policy_churn.build_dynsec_snapshot("fanout_control_noop_group")
+    groups = payload["groups"]
+    clients = payload["clients"]
+    assert isinstance(groups, list)
+    assert isinstance(clients, list)
+
+    group = next(group for group in groups if group.get("groupname") == "fanout_existing_readers")
+    assert group["roles"] == [{"rolename": policy_churn.FANOUT_READER_ROLE, "priority": 0}]
+    assert group["clients"] == [{"username": "dynsec_client_1", "priority": 0}]
+    admin_client = next(client for client in clients if client.get("username") == "admin")
+    assert admin_client["roles"] == [{"rolename": policy_churn.CONTROL_ADMIN_ROLE, "priority": 0}]
+
+
+def test_build_dynsec_snapshot_large_state_adds_deterministic_bulk_entities() -> None:
+    payload = policy_churn.build_dynsec_snapshot("large_state_control")
+
+    roles = payload["roles"]
+    groups = payload["groups"]
+    clients = payload["clients"]
+    assert isinstance(roles, list)
+    assert isinstance(groups, list)
+    assert isinstance(clients, list)
+
+    bulk_role_names = {
+        role["rolename"] for role in roles if role["rolename"].startswith("dynamic_bulk_reader_")
+    }
+    bulk_group_names = {
+        group["groupname"]
+        for group in groups
+        if group["groupname"].startswith("dynamic_bulk_group_")
+    }
+    bulk_usernames = {
+        client["username"] for client in clients if client["username"].startswith("bulk_user_")
+    }
+
+    assert len(bulk_role_names) == 20
+    assert len(bulk_group_names) == 20
+    assert len(bulk_usernames) == 100
+    assert "dynamic_bulk_reader_1" in bulk_role_names
+    assert "dynamic_bulk_group_20" in bulk_group_names
+    assert "bulk_user_100" in bulk_usernames
+    admin_client = next(client for client in clients if client.get("username") == "admin")
+    assert admin_client["roles"] == [{"rolename": policy_churn.CONTROL_ADMIN_ROLE, "priority": 0}]

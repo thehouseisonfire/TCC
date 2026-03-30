@@ -7,6 +7,7 @@ import queue
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TypedDict
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
@@ -40,6 +41,12 @@ class _FanoutKwargs(TypedDict):
     tls_insecure: bool
     mode: str
     fanout_topic: str | None
+
+
+class _PublishedMessage(TypedDict):
+    topic: str
+    payload: bytes
+    qos: int
 
 
 def _empty_worker_result(client_id: str, errors: list[str] | None = None) -> loadgen.WorkerResult:
@@ -309,3 +316,74 @@ def test_fanout_churn_output_includes_periodic_cache_signals(monkeypatch) -> Non
     assert churn["applied_events"] == 2
     assert churn["post_churn_delivery_ratio"] == 0.0
     assert churn["cache_validity_signal"] is True
+
+
+def test_expand_client_placeholders_recurses_through_control_payloads() -> None:
+    payload = {
+        "commands": [
+            {
+                "command": "createRole",
+                "rolename": "dynamic_role_{client_id}",
+                "acls": [
+                    {"topic": "test/{client_id}/#"},
+                    {"topic": "metrics/{region}/#"},
+                ],
+            }
+        ],
+        "metadata": [
+            "{client_id}",
+            {"owner": "{client_id}", "literal": "{}", "scoped": "metrics/{region}/#"},
+        ],
+    }
+
+    expanded = loadgen._expand_client_placeholders(payload, client_id="client_7")
+
+    assert expanded["commands"][0]["rolename"] == "dynamic_role_client_7"
+    assert expanded["commands"][0]["acls"][0]["topic"] == "test/client_7/#"
+    assert expanded["commands"][0]["acls"][1]["topic"] == "metrics/{region}/#"
+    assert expanded["metadata"] == [
+        "client_7",
+        {
+            "owner": "client_7",
+            "literal": "{}",
+            "scoped": "metrics/{region}/#",
+        },
+    ]
+
+
+def test_expand_client_placeholders_leaves_unrelated_control_topic_braces_unchanged() -> None:
+    expanded = loadgen._expand_client_placeholders(
+        "metrics/{region}/{client_id}/#",
+        client_id="client_4",
+    )
+
+    assert expanded == "metrics/{region}/client_4/#"
+
+
+def test_apply_fanout_churn_dynamic_security_control_publishes_configured_payload() -> None:
+    published: _PublishedMessage = {"topic": "", "payload": b"", "qos": 0}
+
+    class FakeClient:
+        def publish(self, topic: str, payload: bytes, qos: int = 0) -> SimpleNamespace:
+            published["topic"] = topic
+            published["payload"] = payload
+            published["qos"] = qos
+
+            return SimpleNamespace(
+                rc=loadgen.mqtt.MQTT_ERR_SUCCESS,
+                wait_for_publish=lambda timeout=10: None,
+            )
+
+    cfg = loadgen.FanoutChurnConfig(
+        kind="dynamic_security_control",
+        after_messages=1,
+        control_topic="$CONTROL/dynamic-security/v1",
+        control_payload={"commands": [{"command": "disableClient", "username": "dynsec_client_1"}]},
+    )
+
+    error = loadgen._apply_fanout_churn(cfg, FakeClient())
+
+    assert error is None
+    assert published["topic"] == "$CONTROL/dynamic-security/v1"
+    assert published["qos"] == 1
+    assert b'"command": "disableClient"' in published["payload"]

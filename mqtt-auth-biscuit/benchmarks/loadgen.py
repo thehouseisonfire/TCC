@@ -263,6 +263,8 @@ class FanoutChurnConfig:
     max_events: int = 1
     settle_ms: int = 0
     dynamic_security_source: str | None = None
+    control_topic: str | None = None
+    control_payload: dict[str, Any] | None = None
     sqlite_db: str | None = None
     sqlite_topic: str | None = None
     sqlite_subscribers: int | None = None
@@ -291,6 +293,36 @@ def _mk_payload(size: int) -> bytes:
     if size <= 0:
         return b""
     return b"A" * size
+
+
+def _expand_client_placeholders(value: Any, *, client_id: str) -> Any:
+    if isinstance(value, str):
+        return value.replace("{client_id}", client_id)
+    if isinstance(value, list):
+        return [_expand_client_placeholders(item, client_id=client_id) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _expand_client_placeholders(item, client_id=client_id)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _publish_control_message(
+    client: Any,
+    *,
+    topic: str,
+    payload: dict[str, Any],
+    qos: int,
+) -> str | None:
+    try:
+        info = client.publish(topic, json.dumps(payload).encode(), qos=qos)
+        info.wait_for_publish(timeout=10)
+        if info.rc != mqtt.MQTT_ERR_SUCCESS:
+            return f"control_publish_rc:{info.rc}"
+    except Exception as exc:
+        return f"control_publish_failed:{exc}"
+    return None
 
 
 def _fetch_token(
@@ -610,7 +642,7 @@ def _receive_delegated_token(
     return token
 
 
-def _apply_fanout_churn(cfg: FanoutChurnConfig) -> str | None:
+def _apply_fanout_churn(cfg: FanoutChurnConfig, client: Any | None = None) -> str | None:
     if not cfg.enabled or cfg.kind is None:
         return None
     try:
@@ -618,6 +650,21 @@ def _apply_fanout_churn(cfg: FanoutChurnConfig) -> str | None:
             if not cfg.dynamic_security_source:
                 return "fanout_churn_missing_dynamic_security_source"
             policy_churn.apply_dynsec_snapshot(cfg.dynamic_security_source)
+        elif cfg.kind == "dynamic_security_control":
+            if client is None:
+                return "fanout_churn_missing_control_client"
+            if not cfg.control_topic:
+                return "fanout_churn_missing_control_topic"
+            if not cfg.control_payload:
+                return "fanout_churn_missing_control_payload"
+            publish_error = _publish_control_message(
+                client,
+                topic=cfg.control_topic,
+                payload=cfg.control_payload,
+                qos=1,
+            )
+            if publish_error:
+                return publish_error
         elif cfg.kind == "sqlite_revoke_read":
             if not cfg.sqlite_db:
                 return "fanout_churn_missing_sqlite_db"
@@ -1102,7 +1149,7 @@ def _run_fanout_publisher(
 
     for sequence_id in range(message_count):
         if fanout_churn is not None and _should_apply_fanout_churn(sequence_id, fanout_churn):
-            churn_error = _apply_fanout_churn(fanout_churn)
+            churn_error = _apply_fanout_churn(fanout_churn, client)
             if churn_error:
                 errors.append(churn_error)
             else:
@@ -1201,6 +1248,8 @@ def run_load(
     fanout_churn_max_events: int = 1,
     fanout_churn_settle_ms: int = 0,
     fanout_churn_dynamic_security_source: str | None = None,
+    fanout_churn_control_topic: str | None = None,
+    fanout_churn_control_payload: dict[str, Any] | None = None,
     fanout_churn_sqlite_db: str | None = None,
     fanout_churn_sqlite_topic: str | None = None,
     fanout_churn_sqlite_subscribers: int | None = None,
@@ -1237,6 +1286,8 @@ def run_load(
         max_events=fanout_churn_max_events,
         settle_ms=fanout_churn_settle_ms,
         dynamic_security_source=fanout_churn_dynamic_security_source,
+        control_topic=fanout_churn_control_topic,
+        control_payload=fanout_churn_control_payload,
         sqlite_db=fanout_churn_sqlite_db,
         sqlite_topic=fanout_churn_sqlite_topic or fanout_topic,
         sqlite_subscribers=fanout_churn_sqlite_subscribers or clients,
@@ -1255,6 +1306,14 @@ def run_load(
         )
         formatted_delegate_topic = (
             biscuit_delegate_topic.format(client_id=client_id) if biscuit_delegate_topic else None
+        )
+        formatted_control_topic = cast(
+            str | None,
+            _expand_client_placeholders(control_topic, client_id=client_id),
+        )
+        formatted_control_payload = cast(
+            dict[str, Any] | None,
+            _expand_client_placeholders(control_payload, client_id=client_id),
         )
         delegation_ms = None
         delegation_len = None
@@ -1353,8 +1412,8 @@ def run_load(
             biscuit_delegate_handoff_nonce=handoff_nonce,
             delegation_ms=delegation_ms,
             delegation_len=delegation_len,
-            control_topic=control_topic,
-            control_payload=control_payload,
+            control_topic=formatted_control_topic,
+            control_payload=formatted_control_payload,
             control_mode=control_mode,
             control_repeat=control_repeat,
             control_qos=control_qos,
@@ -1568,6 +1627,8 @@ def run_load(
                 "max_events": fanout_churn_cfg.max_events,
                 "settle_ms": fanout_churn_cfg.settle_ms,
                 "dynamic_security_source": fanout_churn_cfg.dynamic_security_source,
+                "control_topic": fanout_churn_cfg.control_topic,
+                "control_payload": fanout_churn_cfg.control_payload,
                 "sqlite_db": fanout_churn_cfg.sqlite_db,
                 "sqlite_topic": fanout_churn_cfg.sqlite_topic,
                 "sqlite_subscribers": fanout_churn_cfg.sqlite_subscribers,
@@ -1762,6 +1823,18 @@ def main(
         envvar="MQTT_FANOUT_CHURN_DYNAMIC_SECURITY_SOURCE",
         help="Dynamic Security snapshot to copy into docker/dynamic-security.json.",
     ),
+    fanout_churn_control_topic: str | None = typer.Option(
+        None,
+        "--fanout-churn-control-topic",
+        envvar="MQTT_FANOUT_CHURN_CONTROL_TOPIC",
+        help="Control topic for fan-out churn published by the fan-out controller.",
+    ),
+    fanout_churn_control_payload: str | None = typer.Option(
+        None,
+        "--fanout-churn-control-payload",
+        envvar="MQTT_FANOUT_CHURN_CONTROL_PAYLOAD",
+        help="JSON payload for fan-out churn control messages.",
+    ),
     fanout_churn_sqlite_db: str | None = typer.Option(
         None,
         "--fanout-churn-sqlite-db",
@@ -1829,12 +1902,27 @@ def main(
     # Default control topic if mode enabled but no topic specified
     if control_mode and not control_topic:
         control_topic = "$CONTROL/dynamic-security/v1"
+    parsed_fanout_churn_control_payload: dict[str, Any] | None = None
+    if fanout_churn_control_payload:
+        try:
+            parsed_fanout_churn_control_payload = json.loads(fanout_churn_control_payload)
+        except json.JSONDecodeError as exc:
+            raise typer.BadParameter(f"Invalid fanout churn control payload JSON: {exc}") from exc
     if fanout_churn_kind and mode != "fanout":
         raise typer.BadParameter("fanout churn options require --mode fanout")
     if fanout_churn_kind == "dynamic_security_swap" and not fanout_churn_dynamic_security_source:
         raise typer.BadParameter(
             "--fanout-churn-dynamic-security-source is required for dynamic_security_swap"
         )
+    if fanout_churn_kind == "dynamic_security_control":
+        if not fanout_churn_control_topic:
+            raise typer.BadParameter(
+                "--fanout-churn-control-topic is required for dynamic_security_control"
+            )
+        if parsed_fanout_churn_control_payload is None:
+            raise typer.BadParameter(
+                "--fanout-churn-control-payload is required for dynamic_security_control"
+            )
     if fanout_churn_kind in {
         "sqlite_revoke_read",
         "sqlite_toggle_read",
@@ -1913,6 +2001,8 @@ def main(
         fanout_churn_max_events=fanout_churn_max_events,
         fanout_churn_settle_ms=fanout_churn_settle_ms,
         fanout_churn_dynamic_security_source=fanout_churn_dynamic_security_source,
+        fanout_churn_control_topic=fanout_churn_control_topic,
+        fanout_churn_control_payload=parsed_fanout_churn_control_payload,
         fanout_churn_sqlite_db=fanout_churn_sqlite_db,
         fanout_churn_sqlite_topic=fanout_churn_sqlite_topic,
         fanout_churn_sqlite_subscribers=fanout_churn_sqlite_subscribers,

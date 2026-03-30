@@ -680,6 +680,8 @@ These scenarios measure authorization overhead only - they publish to `$CONTROL/
 - `CONTROL-OVERHEAD-ACL-READ-NOTIFY-JWT` - JWT control with fanout notifications
 - `CONTROL-OVERHEAD-ACL-READ-NOTIFY-BISCUIT` - Biscuit control with fanout notifications
 
+Control-only scenario families use explicit `client_count` values in the scenario registry instead of inheriting the global benchmark `clients` default.
+
 ### CONTROL-CHURN Scenarios (Issue 35)
 
 These scenarios exercise actual Dynamic Security policy modifications via JSON command payloads:
@@ -687,6 +689,11 @@ These scenarios exercise actual Dynamic Security policy modifications via JSON c
 - `CONTROL-CHURN-CREATE-ROLE-JWT/BISCUIT` - Create and delete roles dynamically
 - `CONTROL-CHURN-GROUP-CLIENT-JWT/BISCUIT` - Add/remove clients from groups
 - `CONTROL-CHURN-ACL-MODIFY-JWT/BISCUIT` - Modify role ACLs dynamically
+- `CONTROL-CHURN-LARGE-STATE-GROUP-CLIENT-JWT/BISCUIT` - Group membership churn against a generated large dynsec state
+- `CONTROL-CHURN-NOOP-GROUP-CLIENT-JWT/BISCUIT` - Idempotent membership updates against pre-seeded dynsec state
+- `CONTROL-CHURN-REPEAT-SAME-ENTITY-JWT/BISCUIT` - Repeated mutations against one shared dynsec entity
+- `CONTROL-CHURN-REPEAT-DISTINCT-ENTITY-JWT/BISCUIT` - Repeated mutations against worker-specific dynsec entities
+- `CONTROL-CHURN-CONCURRENT-CONTROLLERS-JWT/BISCUIT` - Multi-controller contention against worker-specific dynsec entities
 
 Command payloads are generated using the `dynsec_commands.py` module and include operations like:
 
@@ -699,6 +706,15 @@ Command payloads are generated using the `dynsec_commands.py` module and include
   ]
 }
 ```
+
+`control_payload` supports recursive `{client_id}` expansion before each worker publishes. That lets one scenario template generate worker-local dynsec entities without shipping a separate payload file per client.
+
+The ACL-read fan-out churn matrix also includes mutation-driven dynsec variants that publish control commands during live fan-out traffic:
+
+- `DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-REVOKE-JWT/BISCUIT-{10,50,100}`
+- `DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-DISABLE-JWT/BISCUIT-{10,50,100}`
+
+These use `fanout_churn_kind=dynamic_security_control` and publish the configured control payload from the fan-out controller instead of swapping the dynsec JSON file on disk.
 
 ### CLI Options For Control Messages
 

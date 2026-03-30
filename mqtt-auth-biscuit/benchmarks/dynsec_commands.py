@@ -296,6 +296,20 @@ def generate_remove_role_acl_command(
     return cmd
 
 
+def generate_disable_client_command(
+    username: str,
+    correlation_data: str | None = None,
+) -> DynsecCommand:
+    """Generate a disableClient command."""
+    cmd: DynsecCommand = {
+        "command": "disableClient",
+        "username": username,
+    }
+    if correlation_data:
+        cmd["correlationData"] = correlation_data
+    return cmd
+
+
 def generate_command_payload(
     commands: list[DynsecCommand],
     correlation_data: str | None = None,
@@ -323,7 +337,8 @@ def generate_churn_sequence(
     """Generate a standard churn command sequence.
 
     Args:
-        sequence_type: Type of churn sequence ("role", "group_client", "acl")
+        sequence_type: Type of churn sequence ("role", "group_client", "acl",
+            "noop_group_client", "disable_client")
         base_id: Optional base ID for naming (generates UUID if not provided)
         client_id: Optional client ID for group/acl operations
 
@@ -393,6 +408,16 @@ def generate_churn_sequence(
             ),
             generate_delete_role_command(rolename=rolename),
         ]
+    elif sequence_type == "noop_group_client":
+        return [
+            generate_add_group_client_command(
+                groupname="fanout_existing_readers",
+                username=cid,
+                priority=0,
+            )
+        ]
+    elif sequence_type == "disable_client":
+        return [generate_disable_client_command(username=cid)]
 
     else:
         raise ValueError(f"Unknown sequence_type: {sequence_type}")

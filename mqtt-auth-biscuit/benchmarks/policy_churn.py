@@ -1,8 +1,12 @@
+import contextlib
+import json
 import shutil
 import sqlite3
+import tempfile
 from collections.abc import Iterable
+from os import fdopen
 from pathlib import Path
-from typing import TypedDict
+from typing import Any, TypedDict
 
 ACL_READ = 0x01
 ACL_WRITE = 0x02
@@ -10,6 +14,8 @@ ACL_SUBSCRIBE = 0x04
 ACL_CONTROL = 0x08
 FANOUT_READER_ROLE = "fanout_reader"
 FANOUT_PUBLISHER_ROLE = "fanout_publisher"
+CONTROL_ADMIN_ROLE = "benchmark_control_admin"
+CONTROL_DATA_PUBLISHER_ROLE = "benchmark_control_data_publisher"
 DEEP_DATA_ALLOW_ROLE = "deep_data_allow"
 DEEP_PRIVATE_DENY_ROLE = "deep_private_deny"
 DEEP_PUBLISHER_ROLE = "deep_publisher"
@@ -66,6 +72,248 @@ def apply_dynsec_snapshot(
         shutil.copyfile(src, tls_dest)
         out["tls_dest"] = str(tls_dest)
     return out
+
+
+def read_dynsec_snapshot(source_path: str | Path) -> dict[str, Any]:
+    src = _resolve_repo_path(source_path)
+    return json.loads(src.read_text(encoding="utf-8"))
+
+
+def write_dynsec_snapshot(
+    payload: dict[str, Any],
+    *,
+    prefix: str = "dynamic-security-generated-",
+    suffix: str = ".json",
+) -> str:
+    fd, temp_path = tempfile.mkstemp(prefix=prefix, suffix=suffix)
+    with fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+    Path(temp_path).chmod(0o600)
+    return temp_path
+
+
+def cleanup_dynsec_snapshot(path: str | None) -> None:
+    if not path:
+        return
+    candidate = Path(path)
+    with contextlib.suppress(FileNotFoundError):
+        candidate.unlink()
+
+
+def _upsert_acl(
+    role: dict[str, Any], *, acltype: str, topic: str, allow: bool, priority: int = 0
+) -> None:
+    acls = role.setdefault("acls", [])
+    assert isinstance(acls, list)
+    for acl in acls:
+        if acl.get("acltype") == acltype and acl.get("topic") == topic:
+            acl["allow"] = allow
+            acl["priority"] = priority
+            return
+    acls.append({"acltype": acltype, "topic": topic, "priority": priority, "allow": allow})
+
+
+def _upsert_group(
+    payload: dict[str, Any],
+    *,
+    groupname: str,
+    roles: list[dict[str, Any]] | None = None,
+    clients: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    groups = payload.setdefault("groups", [])
+    assert isinstance(groups, list)
+    for group in groups:
+        if group.get("groupname") == groupname:
+            if roles is not None:
+                group["roles"] = roles
+            group.setdefault("clients", [])
+            if clients:
+                existing = {
+                    entry.get("username"): entry
+                    for entry in group.get("clients", [])
+                    if isinstance(entry, dict)
+                }
+                for client in clients:
+                    existing[client["username"]] = client
+                group["clients"] = list(existing.values())
+            return group
+    group = {"groupname": groupname, "roles": roles or [], "clients": clients or []}
+    groups.append(group)
+    return group
+
+
+def _upsert_role(payload: dict[str, Any], rolename: str) -> dict[str, Any]:
+    roles = payload.setdefault("roles", [])
+    assert isinstance(roles, list)
+    for role in roles:
+        if role.get("rolename") == rolename:
+            role.setdefault("acls", [])
+            return role
+    role = {"rolename": rolename, "acls": []}
+    roles.append(role)
+    return role
+
+
+def _upsert_client(
+    payload: dict[str, Any], *, username: str, clientid: str | None = None
+) -> dict[str, Any]:
+    clients = payload.setdefault("clients", [])
+    assert isinstance(clients, list)
+    for existing_client in clients:
+        if existing_client.get("username") == username:
+            if clientid is not None:
+                existing_client["clientid"] = clientid
+            existing_client.setdefault("roles", [])
+            existing_client.setdefault("disabled", False)
+            return existing_client
+    client_entry: dict[str, Any] = {"username": username, "roles": [], "disabled": False}
+    if clientid is not None:
+        client_entry["clientid"] = clientid
+    clients.append(client_entry)
+    return client_entry
+
+
+def _upsert_client_role(
+    payload: dict[str, Any],
+    *,
+    username: str,
+    rolename: str,
+    priority: int = 0,
+) -> None:
+    client = _upsert_client(payload, username=username)
+    roles = client.setdefault("roles", [])
+    assert isinstance(roles, list)
+    for role in roles:
+        if role.get("rolename") == rolename:
+            role["priority"] = priority
+            return
+    roles.append({"rolename": rolename, "priority": priority})
+
+
+def _add_control_admin_identity(payload: dict[str, Any]) -> None:
+    role = _upsert_role(payload, CONTROL_ADMIN_ROLE)
+    _upsert_acl(
+        role,
+        acltype="publishClientSend",
+        topic="$CONTROL/dynamic-security/v1",
+        allow=True,
+    )
+    _upsert_acl(
+        role,
+        acltype="publishClientSend",
+        topic="system/notifications/#",
+        allow=True,
+    )
+    _upsert_acl(
+        role,
+        acltype="publishClientSend",
+        topic="sensors/+/#",
+        allow=True,
+    )
+    _upsert_acl(
+        role,
+        acltype="publishClientReceive",
+        topic="system/notifications/#",
+        allow=True,
+    )
+    _upsert_acl(
+        role,
+        acltype="subscribePattern",
+        topic="system/notifications/#",
+        allow=True,
+    )
+    _upsert_client_role(payload, username="admin", rolename=CONTROL_ADMIN_ROLE)
+
+
+def _add_control_data_identity(payload: dict[str, Any], username: str) -> None:
+    role = _upsert_role(payload, f"{CONTROL_DATA_PUBLISHER_ROLE}_{username}")
+    _upsert_acl(
+        role,
+        acltype="publishClientSend",
+        topic="sensors/+/#",
+        allow=True,
+    )
+    _upsert_acl(
+        role,
+        acltype="publishClientSend",
+        topic="$CONTROL/dynamic-security/v1",
+        allow=True,
+    )
+    _upsert_client_role(payload, username=username, rolename=role["rolename"])
+
+
+def build_dynsec_snapshot(profile: str) -> dict[str, Any]:
+    if profile == "fanout_control_allow":
+        payload = read_dynsec_snapshot("docker/dynamic-security-fanout-read-allow-unpinned.json")
+    elif profile in {
+        "control_admin_base",
+        "control_interleaved_base",
+        "fanout_control_noop_group",
+        "large_state_control",
+    }:
+        payload = read_dynsec_snapshot("docker/dynamic-security.json")
+    else:
+        raise ValueError(f"unknown dynsec snapshot profile: {profile}")
+
+    if profile == "fanout_control_allow":
+        publisher_role = _upsert_role(payload, "fanout_writer")
+        _upsert_acl(
+            publisher_role,
+            acltype="publishClientSend",
+            topic="$CONTROL/dynamic-security/v1",
+            allow=True,
+        )
+    else:
+        _add_control_admin_identity(payload)
+
+    if profile == "control_interleaved_base":
+        _add_control_data_identity(payload, "jwt")
+        _add_control_data_identity(payload, "biscuit")
+
+    if profile == "fanout_control_noop_group":
+        _upsert_group(
+            payload,
+            groupname="fanout_existing_readers",
+            roles=[{"rolename": FANOUT_READER_ROLE, "priority": 0}],
+            clients=[{"username": "dynsec_client_1", "priority": 0}],
+        )
+    elif profile == "large_state_control":
+        for idx in range(1, 21):
+            role = _upsert_role(payload, f"dynamic_bulk_reader_{idx}")
+            _upsert_acl(
+                role,
+                acltype="publishClientReceive",
+                topic=f"bulk/{idx}/#",
+                allow=True,
+            )
+            _upsert_acl(
+                role,
+                acltype="subscribeLiteral",
+                topic=f"bulk/{idx}/notifications",
+                allow=True,
+            )
+        for idx in range(1, 21):
+            members: list[dict[str, Any]] = []
+            for member in range(1, 6):
+                username = f"bulk_user_{((idx - 1) * 5) + member}"
+                client = _upsert_client(
+                    payload, username=username, clientid=f"bulk-client-{((idx - 1) * 5) + member}"
+                )
+                client["roles"] = []
+                members.append({"username": username, "priority": 0})
+            _upsert_group(
+                payload,
+                groupname=f"dynamic_bulk_group_{idx}",
+                roles=[{"rolename": f"dynamic_bulk_reader_{idx}", "priority": 0}],
+                clients=members,
+            )
+
+    return payload
+
+
+def generate_dynsec_snapshot(profile: str) -> str:
+    return write_dynsec_snapshot(build_dynsec_snapshot(profile))
 
 
 def _ensure_policy_tables(conn: sqlite3.Connection) -> None:

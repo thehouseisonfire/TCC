@@ -16,6 +16,10 @@ def _expected_ids() -> set[str]:
     for count in subscribers:
         out.add(f"DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-JWT-{count}")
         out.add(f"DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-BISCUIT-{count}")
+        out.add(f"DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-REVOKE-JWT-{count}")
+        out.add(f"DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-REVOKE-BISCUIT-{count}")
+        out.add(f"DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-DISABLE-JWT-{count}")
+        out.add(f"DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-DISABLE-BISCUIT-{count}")
         out.add(f"SQLITE-ACL-READ-FANOUT-CHURN-JWT-{count}")
         out.add(f"SQLITE-ACL-READ-FANOUT-CHURN-BISCUIT-{count}")
     return out
@@ -38,15 +42,35 @@ def test_acl_read_fanout_churn_scenarios_use_fanout_and_subscriber_scaling() -> 
 
         if scenario_id.startswith("DYNAMIC-SECURITY-"):
             assert scenario["mosquitto_conf"] == "./mosquitto_dynsec_acl_read.conf"
-            assert (
-                scenario["dynamic_security_config"]
-                == "docker/dynamic-security-fanout-read-allow-unpinned.json"
-            )
-            assert scenario["fanout_churn_kind"] == "dynamic_security_swap"
-            assert (
-                scenario["fanout_churn_dynamic_security_source"]
-                == "docker/dynamic-security-fanout-read-deny-unpinned.json"
-            )
+            if "CONTROL-" in scenario_id:
+                assert scenario["dynamic_security_generated_profile"] == "fanout_control_allow"
+                assert scenario["fanout_churn_kind"] == "dynamic_security_control"
+                assert scenario["fanout_churn_control_topic"] == "$CONTROL/dynamic-security/v1"
+                commands = scenario["fanout_churn_control_payload"]["commands"]
+                assert isinstance(commands, list)
+                assert len(commands) == 1
+                command = commands[0]
+                assert isinstance(command, dict)
+                if "REVOKE" in scenario_id:
+                    assert command["command"] == "removeRoleACL"
+                    assert command["rolename"] == "fanout_reader"
+                    assert command["acltype"] == "publishClientReceive"
+                    assert command["topic"] == "fanout/broadcast"
+                else:
+                    assert command == {
+                        "command": "disableClient",
+                        "username": "dynsec_client_1",
+                    }
+            else:
+                assert (
+                    scenario["dynamic_security_config"]
+                    == "docker/dynamic-security-fanout-read-allow-unpinned.json"
+                )
+                assert scenario["fanout_churn_kind"] == "dynamic_security_swap"
+                assert (
+                    scenario["fanout_churn_dynamic_security_source"]
+                    == "docker/dynamic-security-fanout-read-deny-unpinned.json"
+                )
         elif scenario_id.startswith("SQLITE-"):
             assert scenario["mosquitto_conf"] == "./mosquitto_sqlite_acl_read.conf"
             assert scenario["fanout_churn_kind"] == "sqlite_revoke_read"

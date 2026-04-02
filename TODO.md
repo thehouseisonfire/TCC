@@ -410,7 +410,6 @@ contain a concrete execution sequence.
 Implement in this order:
 
 1. Add plugin config surface and defaults
-   - Already in TODO: yes
    - Add parsing and typed config support for:
      - `jwt_identity_binding`
      - `biscuit_identity_binding`
@@ -419,7 +418,6 @@ Implement in this order:
    - Reject invalid enum values and invalid predicate identifiers
 
 2. Add shared plugin identity-binding helpers
-   - Already in TODO: partially
    - Implement token-type-specific helpers for:
      - resolving JWT effective identity
      - resolving Biscuit identity fact
@@ -427,7 +425,6 @@ Implement in this order:
    - Return explicit non-secret-bearing errors for logging/tests
 
 3. Wire enforcement into both auth entry points before caching
-   - Already in TODO: partially
    - Apply the checks in:
      - basic auth flow
      - MQTT v5 enhanced auth flow
@@ -437,7 +434,6 @@ Implement in this order:
      - username derivation
 
 4. Extend plugin unit/integration tests first
-   - Already in TODO: yes
    - Add focused tests for JWT and Biscuit in both `off` and `strict` modes
    - Cover both auth paths:
      - basic auth
@@ -445,7 +441,6 @@ Implement in this order:
    - Add tests that prove mismatched tokens are not cached
 
 5. Align token issuance with the new semantics
-   - Already in TODO: yes
    - Update token issuer fixtures/endpoints so strict-mode JWTs can include:
      - `sub`
      - optional matching `client_id`
@@ -453,13 +448,11 @@ Implement in this order:
      - configurable identity fact such as `client_id("client_7")`
 
 6. Align authz-server behavior with optional identity binding
-   - Already in TODO: yes
    - Remove hard-coded assumptions that JWT identity binding is always on
    - If needed, add matching config knobs so role extraction behavior is
      scenario-aware
 
 7. Add benchmark scenario metadata and validation
-   - Already in TODO: yes
    - Extend scenario definitions and emitted metadata with:
      - `jwt_identity_binding`
      - `biscuit_identity_binding`
@@ -469,21 +462,18 @@ Implement in this order:
      - capability scenarios may intentionally reuse shared tokens
 
 8. Classify existing scenario families and add parity variants where needed
-   - Already in TODO: partially
    - Mark existing shared-token fan-out and delegation flows as `capability`
    - Mark mixed JWT-strict/Biscuit-off cases as `mixed`
    - Add or split explicit `parity_identity_bound` variants where JWT and
      Biscuit are both strict
 
 9. Update benchmark and regression tests around scenario semantics
-   - Already in TODO: yes
    - Add tests for:
      - scenario metadata correctness
      - strict provisioning validation
      - capability-mode shared token allowance
 
 10. Update docs and cleanup stale assumptions
-    - Already in TODO: yes
     - Update:
       - `ARTICLE.md`
       - `PROGRESS.md`
@@ -492,7 +482,6 @@ Implement in this order:
     - Remove comments/docs/tests that imply JWT is always identity-bound
 
 11. Run targeted verification in the same order
-    - Already in TODO: no
     - Verify in layers:
       - plugin unit tests
       - token issuer/authz-server tests

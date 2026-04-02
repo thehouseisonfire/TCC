@@ -402,6 +402,110 @@ After the feature lands, remove or revise:
 - Do not silently change existing scenario meaning without documenting it
 - Do not claim parity for mixed-semantics scenarios
 
+## Recommended Implementation Order
+
+The document already contains most of the requirements, but it does not yet
+contain a concrete execution sequence.
+
+Implement in this order:
+
+1. Add plugin config surface and defaults
+   - Already in TODO: yes
+   - Add parsing and typed config support for:
+     - `jwt_identity_binding`
+     - `biscuit_identity_binding`
+     - `biscuit_client_id_fact`
+   - Keep defaults at `off`, `off`, and `client_id`
+   - Reject invalid enum values and invalid predicate identifiers
+
+2. Add shared plugin identity-binding helpers
+   - Already in TODO: partially
+   - Implement token-type-specific helpers for:
+     - resolving JWT effective identity
+     - resolving Biscuit identity fact
+     - enforcing configured binding mode against live MQTT `client_id`
+   - Return explicit non-secret-bearing errors for logging/tests
+
+3. Wire enforcement into both auth entry points before caching
+   - Already in TODO: partially
+   - Apply the checks in:
+     - basic auth flow
+     - MQTT v5 enhanced auth flow
+   - Ensure rejection happens before:
+     - cache insert
+     - session binding
+     - username derivation
+
+4. Extend plugin unit/integration tests first
+   - Already in TODO: yes
+   - Add focused tests for JWT and Biscuit in both `off` and `strict` modes
+   - Cover both auth paths:
+     - basic auth
+     - enhanced auth
+   - Add tests that prove mismatched tokens are not cached
+
+5. Align token issuance with the new semantics
+   - Already in TODO: yes
+   - Update token issuer fixtures/endpoints so strict-mode JWTs can include:
+     - `sub`
+     - optional matching `client_id`
+   - Update Biscuit issuance/fixtures so strict-mode tokens can include:
+     - configurable identity fact such as `client_id("client_7")`
+
+6. Align authz-server behavior with optional identity binding
+   - Already in TODO: yes
+   - Remove hard-coded assumptions that JWT identity binding is always on
+   - If needed, add matching config knobs so role extraction behavior is
+     scenario-aware
+
+7. Add benchmark scenario metadata and validation
+   - Already in TODO: yes
+   - Extend scenario definitions and emitted metadata with:
+     - `jwt_identity_binding`
+     - `biscuit_identity_binding`
+     - `semantic_class`
+   - Add validation rules:
+     - strict multi-client scenarios require per-client provisioning
+     - capability scenarios may intentionally reuse shared tokens
+
+8. Classify existing scenario families and add parity variants where needed
+   - Already in TODO: partially
+   - Mark existing shared-token fan-out and delegation flows as `capability`
+   - Mark mixed JWT-strict/Biscuit-off cases as `mixed`
+   - Add or split explicit `parity_identity_bound` variants where JWT and
+     Biscuit are both strict
+
+9. Update benchmark and regression tests around scenario semantics
+   - Already in TODO: yes
+   - Add tests for:
+     - scenario metadata correctness
+     - strict provisioning validation
+     - capability-mode shared token allowance
+
+10. Update docs and cleanup stale assumptions
+    - Already in TODO: yes
+    - Update:
+      - `ARTICLE.md`
+      - `PROGRESS.md`
+      - `SCENARIO_POLICIES.md`
+      - `mqtt-auth-biscuit/benchmarks/RUNNING_BENCHMARKS.md`
+    - Remove comments/docs/tests that imply JWT is always identity-bound
+
+11. Run targeted verification in the same order
+    - Already in TODO: no
+    - Verify in layers:
+      - plugin unit tests
+      - token issuer/authz-server tests
+      - benchmark scenario metadata tests
+      - one capability scenario and one parity scenario end-to-end
+
+Recommended batching for implementation:
+
+- Batch 1: steps 1 to 4
+- Batch 2: steps 5 to 6
+- Batch 3: steps 7 to 9
+- Batch 4: steps 10 to 11
+
 ## Acceptance Criteria
 
 This work is complete when:

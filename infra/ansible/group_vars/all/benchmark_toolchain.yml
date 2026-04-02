@@ -1,0 +1,10 @@
+benchmark_host_python_version: "3.14.2"
+benchmark_host_uv_version: "0.9.17"
+benchmark_host_rust_toolchain: "1.93.1"
+benchmark_host_rust_components:
+  - clippy
+  - rustfmt
+
+benchmark_host_benchmark_package_versions:
+  linux-tools-common: "6.8.0-31.31"
+  linux-tools-generic: "6.8.0-31.31"

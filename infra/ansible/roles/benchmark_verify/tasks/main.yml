@@ -1,0 +1,104 @@
+---
+- name: Gather installed package facts for benchmark verification
+  ansible.builtin.package_facts:
+    manager: apt
+
+- name: Verify pinned uv version
+  ansible.builtin.command: /home/{{ benchmark_host_operator_user }}/.local/bin/uv --version
+  become: true
+  become_user: "{{ benchmark_host_operator_user }}"
+  register: verify_uv_version
+  changed_when: false
+
+- name: Verify pinned managed Python version is available
+  ansible.builtin.command:
+    argv:
+      - /home/{{ benchmark_host_operator_user }}/.local/bin/uv
+      - python
+      - find
+      - "{{ benchmark_host_python_version }}"
+  become: true
+  become_user: "{{ benchmark_host_operator_user }}"
+  environment:
+    UV_PYTHON_PREFERENCE: only-managed
+  register: verify_python_find
+  changed_when: false
+
+- name: Verify Rust toolchain list contains the pinned toolchain
+  ansible.builtin.command: /home/{{ benchmark_host_operator_user }}/.cargo/bin/rustup toolchain list
+  become: true
+  become_user: "{{ benchmark_host_operator_user }}"
+  register: verify_rustup_toolchains
+  changed_when: false
+
+- name: Verify pinned Rust toolchain components are installed
+  ansible.builtin.command:
+    argv:
+      - /home/{{ benchmark_host_operator_user }}/.cargo/bin/rustup
+      - component
+      - list
+      - --toolchain
+      - "{{ benchmark_host_rust_toolchain }}"
+  become: true
+  become_user: "{{ benchmark_host_operator_user }}"
+  register: verify_rustup_components
+  changed_when: false
+
+- name: Verify rustc version
+  ansible.builtin.command: /home/{{ benchmark_host_operator_user }}/.cargo/bin/rustc --version
+  become: true
+  become_user: "{{ benchmark_host_operator_user }}"
+  register: verify_rustc_version
+  changed_when: false
+
+- name: Verify cargo version
+  ansible.builtin.command: /home/{{ benchmark_host_operator_user }}/.cargo/bin/cargo --version
+  become: true
+  become_user: "{{ benchmark_host_operator_user }}"
+  register: verify_cargo_version
+  changed_when: false
+
+- name: Verify perf is installed
+  ansible.builtin.command: perf --version
+  register: verify_perf_version
+  changed_when: false
+
+- name: Verify docker compose is available
+  ansible.builtin.command: docker compose version
+  become: true
+  become_user: "{{ benchmark_host_operator_user }}"
+  register: verify_docker_compose
+  changed_when: false
+
+- name: Read perf event paranoia setting
+  ansible.builtin.command: cat /proc/sys/kernel/perf_event_paranoid
+  register: verify_perf_event_paranoid
+  changed_when: false
+
+- name: Verify pinned benchmark packages are installed
+  ansible.builtin.assert:
+    that:
+      - item.key in ansible_facts.packages
+      - (ansible_facts.packages[item.key] | map(attribute='version')) is contains(item.value)
+    fail_msg: Expected pinned benchmark package {{ item.key }}={{ item.value }} was not installed.
+  loop: "{{ benchmark_host_benchmark_package_versions | dict2items }}"
+
+- name: Verify pinned Rust toolchain components are present
+  ansible.builtin.assert:
+    that:
+      - verify_rustup_components.stdout is regex('(?m)^' ~ (item | regex_escape) ~ '(?:-preview)?(?:-[^ ]+)? \\(installed\\)$')
+    fail_msg: Expected Rust component {{ item }} to be installed for toolchain {{ benchmark_host_rust_toolchain }}.
+  loop: "{{ benchmark_host_rust_components }}"
+
+- name: Assert benchmark-specific prerequisites are ready
+  ansible.builtin.assert:
+    that:
+      - (verify_uv_version.stdout | trim) == ("uv " ~ benchmark_host_uv_version)
+      - verify_python_find.rc == 0
+      - verify_rustup_toolchains.stdout is regex('(?m)^' ~ (benchmark_host_rust_toolchain | regex_escape) ~ '(?:-|\\s|$)')
+      - verify_rustc_version.stdout.split()[1] == benchmark_host_rust_toolchain
+      - verify_cargo_version.rc == 0
+      - verify_perf_version.rc == 0
+      - verify_docker_compose.rc == 0
+      - (verify_perf_event_paranoid.stdout | trim | int) <= 0
+    fail_msg: Benchmark-specific host prerequisites are not fully satisfied.

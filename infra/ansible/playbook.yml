@@ -8,3 +8,4 @@
     - apt_snapshot
     - base
     - docker
+    - benchmark_prereqs

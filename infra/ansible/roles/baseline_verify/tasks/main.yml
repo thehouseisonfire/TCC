@@ -1,0 +1,69 @@
+---
+- name: Gather installed package facts for baseline verification
+  ansible.builtin.package_facts:
+    manager: apt
+
+- name: Verify Ubuntu 24.04 benchmark baseline target
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution == "Ubuntu"
+      - ansible_distribution_version == "24.04"
+    fail_msg: Benchmark baseline verification currently supports only Ubuntu 24.04.
+
+- name: Check benchmark snapshot pin file
+  ansible.builtin.slurp:
+    path: /etc/apt/apt.conf.d/50benchmark-snapshot
+  register: benchmark_snapshot_conf
+
+- name: Verify benchmark snapshot pin file contents
+  ansible.builtin.assert:
+    that:
+      - ('APT::Snapshot "' ~ benchmark_host_snapshot_id ~ '";') in (benchmark_snapshot_conf.content | b64decode)
+    fail_msg: The benchmark APT snapshot pin does not match the configured snapshot id.
+
+- name: Collect baseline service states
+  ansible.builtin.service_facts:
+
+- name: Verify unattended apt services and timers stay disabled
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.services["apt-daily.service"].state == "stopped"
+      - ansible_facts.services["apt-daily-upgrade.service"].state == "stopped"
+      - ansible_facts.services["apt-daily.timer"].status in ["disabled", "masked"]
+      - ansible_facts.services["apt-daily-upgrade.timer"].status in ["disabled", "masked"]
+      - ansible_facts.services["docker.service"].state == "running"
+      - ansible_facts.services["docker.service"].status == "enabled"
+    fail_msg: One or more baseline service invariants are not satisfied.
+
+- name: Verify pinned base packages are installed
+  ansible.builtin.assert:
+    that:
+      - item.key in ansible_facts.packages
+      - (ansible_facts.packages[item.key] | map(attribute='version')) is contains(item.value)
+    fail_msg: Expected pinned base package {{ item.key }}={{ item.value }} was not installed.
+  loop: "{{ benchmark_host_base_package_versions | dict2items }}"
+
+- name: Verify pinned Docker packages are installed
+  ansible.builtin.assert:
+    that:
+      - item.key in ansible_facts.packages
+      - (ansible_facts.packages[item.key] | map(attribute='version')) is contains(item.value)
+    fail_msg: Expected pinned Docker package {{ item.key }}={{ item.value }} was not installed.
+  loop: "{{ benchmark_host_docker_package_versions | dict2items }}"
+
+- name: Gather benchmark operator account facts
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ benchmark_host_operator_user }}"
+
+- name: Gather docker group membership
+  ansible.builtin.getent:
+    database: group
+    key: docker
+
+- name: Verify benchmark operator exists and belongs to docker
+  ansible.builtin.assert:
+    that:
+      - benchmark_host_operator_user in ansible_facts.getent_passwd
+      - benchmark_host_operator_user in ansible_facts.getent_group["docker"][2].split(",")
+    fail_msg: Benchmark operator user is missing or is not a member of the docker group.

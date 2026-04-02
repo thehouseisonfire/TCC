@@ -1,7 +1,7 @@
 # Benchmark Host Infrastructure
 
-This directory is the canonical repo-local entrypoint for preparing the final
-benchmark host on a paid Debian/Ubuntu server.
+This directory is the canonical repo-local entrypoint for preparing and smoke
+verifying the final benchmark host on a paid Debian/Ubuntu server.
 
 The current stage-1 split is:
 
@@ -22,15 +22,19 @@ The benchmark-host path is intentionally small and explicit:
 
 ## Current Boundary
 
-This repo state implements the first four steps in the staged host path:
+This repo state implements the first six steps in the staged host path:
 
 - the path contract, docs, helper, and regression test
 - a minimal Hetzner Terraform root for one Ubuntu 24.04 benchmark host
 - Ansible convergence for the Terraform-created Ubuntu 24.04 host
 - Ubuntu snapshot pinning plus exact apt package locks for the host baseline
+- a smoke path that proves a fresh host reaches the expected baseline
+- benchmark prerequisite installation plus verification coverage
 
 It does **not** yet implement:
 
+- repo checkout on the host
+- plugin or token builds on the host
 - benchmark execution on the host
 - Packer image baking
 
@@ -59,8 +63,35 @@ benchmark work:
 - install Docker from the same pinned snapshot
 - disable unattended apt timers that would perturb later measurements
 
-It intentionally does **not** yet install benchmark-specific toolchains such as
-Rust, `uv`, perf tooling, or repo checkouts. Those remain follow-on work.
+It now also installs the benchmark prerequisite toolchain needed before a later
+repo checkout/build step:
+
+- `uv 0.9.17`
+- managed Python `3.14.2` via `uv`
+- Rust `1.93.1` with `clippy` and `rustfmt`
+- Linux `perf` tooling with `kernel.perf_event_paranoid=0`
+
+It intentionally does **not** yet clone this repository onto the host, build
+the plugin, generate tokens, or start benchmark containers. Those remain the
+next follow-on layer above the reproducible host baseline.
+
+## Smoke Path
+
+After Terraform has created the host and inventory has been rendered, use the
+repo-local smoke path to converge and verify the machine:
+
+```bash
+uv run --locked python scripts/benchmark_host_smoke.py --inventory infra/ansible/inventory.yml
+```
+
+To rerun verification without applying changes again:
+
+```bash
+uv run --locked python scripts/benchmark_host_smoke.py --inventory infra/ansible/inventory.yml --verify-only
+```
+
+The smoke path applies `infra/ansible/playbook.yml` and then runs the separate
+verification playbook `infra/ansible/verify.yml`.
 
 ## Helper
 
@@ -97,6 +128,12 @@ Then converge the host:
 ```bash
 cd infra/ansible
 uv run --locked --group dev ansible-playbook -i inventory.yml playbook.yml
+```
+
+Or run the combined converge-and-verify smoke path from the repo root:
+
+```bash
+uv run --locked python scripts/benchmark_host_smoke.py --inventory infra/ansible/inventory.yml
 ```
 
 The committed `inventory.example.yml` exists only as a syntax-checkable example.

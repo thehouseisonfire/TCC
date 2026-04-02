@@ -1,0 +1,130 @@
+---
+- name: Install pinned benchmark prerequisite packages
+  ansible.builtin.apt:
+    name: "{{ item.key }}={{ item.value }}"
+    state: present
+    allow_downgrade: true
+    lock_timeout: 300
+  loop: "{{ benchmark_host_benchmark_package_versions | dict2items }}"
+
+- name: Install benchmark perf sysctl drop-in
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-benchmark-perf.conf
+    content: |
+      kernel.perf_event_paranoid=0
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload benchmark perf sysctl
+
+- name: Apply benchmark perf sysctl immediately
+  ansible.builtin.command: sysctl --load=/etc/sysctl.d/99-benchmark-perf.conf
+  changed_when: false
+
+- name: Check pinned uv version for benchmark operator
+  ansible.builtin.command: /home/{{ benchmark_host_operator_user }}/.local/bin/uv --version
+  become: true
+  become_user: "{{ benchmark_host_operator_user }}"
+  register: benchmark_uv_version
+  failed_when: false
+  changed_when: false
+
+- name: Install pinned uv for benchmark operator
+  ansible.builtin.shell: |
+    set -euo pipefail
+    curl -LsSf https://astral.sh/uv/install.sh | env UV_VERSION="{{ benchmark_host_uv_version }}" sh
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ benchmark_host_operator_user }}"
+  when: benchmark_uv_version.rc != 0 or (benchmark_uv_version.stdout | trim) != ("uv " ~ benchmark_host_uv_version)
+
+- name: Check managed Python availability for benchmark operator
+  ansible.builtin.command:
+    argv:
+      - /home/{{ benchmark_host_operator_user }}/.local/bin/uv
+      - python
+      - find
+      - "{{ benchmark_host_python_version }}"
+  become: true
+  become_user: "{{ benchmark_host_operator_user }}"
+  environment:
+    UV_PYTHON_PREFERENCE: only-managed
+  register: benchmark_python_find
+  failed_when: false
+  changed_when: false
+
+- name: Install pinned managed Python for benchmark operator
+  ansible.builtin.command:
+    argv:
+      - /home/{{ benchmark_host_operator_user }}/.local/bin/uv
+      - python
+      - install
+      - "{{ benchmark_host_python_version }}"
+  become: true
+  become_user: "{{ benchmark_host_operator_user }}"
+  environment:
+    UV_PYTHON_PREFERENCE: only-managed
+  when: benchmark_python_find.rc != 0
+
+- name: Check pinned Rust toolchain availability for benchmark operator
+  ansible.builtin.command: /home/{{ benchmark_host_operator_user }}/.cargo/bin/rustup toolchain list
+  become: true
+  become_user: "{{ benchmark_host_operator_user }}"
+  register: benchmark_rustup_toolchains
+  failed_when: false
+  changed_when: false
+
+- name: Install rustup for benchmark operator
+  ansible.builtin.shell: |
+    set -euo pipefail
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+      sh -s -- -y --profile minimal --default-toolchain {{ benchmark_host_rust_toolchain }}
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ benchmark_host_operator_user }}"
+  when: benchmark_rustup_toolchains.rc != 0
+
+- name: Check pinned Rust toolchain component availability for benchmark operator
+  ansible.builtin.shell: |
+    set -euo pipefail
+    /home/{{ benchmark_host_operator_user }}/.cargo/bin/rustup component list --toolchain {{ benchmark_host_rust_toolchain }} | \
+      grep -Eq '^{{ item }}(?:-preview)?(?:-[^ ]+)? \(installed\)$'
+  args:
+    executable: /bin/bash
+  become: true
+  become_user: "{{ benchmark_host_operator_user }}"
+  register: benchmark_rust_component_checks
+  failed_when: false
+  changed_when: false
+  loop: "{{ benchmark_host_rust_components }}"
+  when:
+    - benchmark_rustup_toolchains.rc == 0
+    - benchmark_rustup_toolchains.stdout is regex('(?m)^' ~ (benchmark_host_rust_toolchain | regex_escape) ~ '(?:-|\\s|$)')
+
+- name: Install pinned Rust toolchain components for benchmark operator
+  ansible.builtin.command:
+    argv: "{{ ['/home/' ~ benchmark_host_operator_user ~ '/.cargo/bin/rustup', 'toolchain', 'install', benchmark_host_rust_toolchain, '--profile', 'minimal', '--component', benchmark_host_rust_components | join(',')] }}"
+  become: true
+  become_user: "{{ benchmark_host_operator_user }}"
+  when:
+    - benchmark_rustup_toolchains.rc != 0
+      or benchmark_rustup_toolchains.stdout is not regex('(?m)^' ~ (benchmark_host_rust_toolchain | regex_escape) ~ '(?:-|\\s|$)')
+      or (
+        benchmark_rust_component_checks.results | default([])
+        | selectattr('rc', 'ne', 0)
+        | list
+        | length
+      ) > 0
+
+- name: Set pinned Rust toolchain as default for benchmark operator
+  ansible.builtin.command:
+    argv:
+      - /home/{{ benchmark_host_operator_user }}/.cargo/bin/rustup
+      - default
+      - "{{ benchmark_host_rust_toolchain }}"
+  become: true
+  become_user: "{{ benchmark_host_operator_user }}"
+  changed_when: false

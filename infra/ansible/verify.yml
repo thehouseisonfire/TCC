@@ -1,0 +1,9 @@
+---
+- name: Benchmark Host Verification
+  hosts: all
+  become: true
+  gather_facts: true
+
+  roles:
+    - baseline_verify
+    - benchmark_verify

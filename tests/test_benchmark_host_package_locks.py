@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import yaml
@@ -33,3 +34,26 @@ def test_snapshot_id_and_package_locks_are_repo_pinned() -> None:
         "docker.io": "24.0.7-0ubuntu4.1",
         "docker-compose-v2": "2.24.6+ds1-0ubuntu2",
     }
+
+
+def test_benchmark_toolchain_pins_match_repo_contract() -> None:
+    benchmark_toolchain = yaml.safe_load(
+        (ROOT / "infra" / "ansible" / "group_vars" / "all" / "benchmark_toolchain.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    rust_toolchain = tomllib.loads((ROOT / "rust-toolchain.toml").read_text(encoding="utf-8"))
+    python_version = (ROOT / ".python-version").read_text(encoding="utf-8").strip()
+    benchmark_docs = (ROOT / "mqtt-auth-biscuit" / "README.md").read_text(encoding="utf-8")
+
+    assert benchmark_toolchain["benchmark_host_python_version"] == python_version
+    assert (
+        benchmark_toolchain["benchmark_host_rust_toolchain"]
+        == rust_toolchain["toolchain"]["channel"]
+    )
+    assert (
+        benchmark_toolchain["benchmark_host_rust_components"]
+        == rust_toolchain["toolchain"]["components"]
+    )
+    assert benchmark_toolchain["benchmark_host_uv_version"] == "0.9.17"
+    assert "Python 3.14.2 + `uv 0.9.17`" in benchmark_docs

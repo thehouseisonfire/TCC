@@ -7,6 +7,7 @@ use crate::auth_runtime::{
     cache_ttl_for_token, is_acl_read_only, normalize_username, should_defer_no_token_basic_auth,
 };
 use crate::authz::{AuthzOutcome, AuthzParams, check_authorization, check_token_expiry};
+use crate::identity_binding::enforce_identity_binding;
 use crate::mosquitto_ffi::ffi_utils::{
     acl_payload_bytes, bytes_from_c_void, control_payload_bytes, message_payload_bytes,
 };
@@ -77,6 +78,19 @@ pub extern "C" fn basic_auth_callback(
                     return MOSQ_ERR_AUTH;
                 }
             };
+            let client_id = match mosq_client_id_string(evt.client) {
+                Some(client_id) => client_id,
+                None => {
+                    log_debug("Authentication rejected: live MQTT client_id missing");
+                    return MOSQ_ERR_AUTH;
+                }
+            };
+            if let Err(err) =
+                enforce_identity_binding(&token_type, Some(client_id.as_str()), &state.config)
+            {
+                log_debug(&format!("Authentication rejected: {err}"));
+                return MOSQ_ERR_AUTH;
+            }
             let token_type = attach_biscuit_roles(token_type, &state.config);
             log_static_acl_policy_bias(&token_type, &state.config);
             if let Err(err) = set_synthetic_username(evt.client, &token_type, &state.config) {
@@ -89,9 +103,6 @@ pub extern "C" fn basic_auth_callback(
                     log_debug(&format!("Authentication rejected: {err}"));
                     return MOSQ_ERR_AUTH;
                 }
-            };
-            let Some(client_id) = mosq_client_id_string(evt.client) else {
-                return MOSQ_ERR_AUTH;
             };
             state.cache.insert(client_id.clone(), token_type, cache_ttl);
             prune_session_index_against_cache(state);
@@ -152,6 +163,19 @@ pub extern "C" fn ext_auth_start_callback(
                     return MOSQ_ERR_AUTH;
                 }
             };
+            let client_id = match mosq_client_id_string(evt.client) {
+                Some(client_id) => client_id,
+                None => {
+                    log_debug("Enhanced auth rejected: live MQTT client_id missing");
+                    return MOSQ_ERR_AUTH;
+                }
+            };
+            if let Err(err) =
+                enforce_identity_binding(&token_type, Some(client_id.as_str()), &state.config)
+            {
+                log_debug(&format!("Enhanced auth rejected: {err}"));
+                return MOSQ_ERR_AUTH;
+            }
             let token_type = attach_biscuit_roles(token_type, &state.config);
             log_static_acl_policy_bias(&token_type, &state.config);
             if let Err(err) = set_synthetic_username(evt.client, &token_type, &state.config) {
@@ -164,9 +188,6 @@ pub extern "C" fn ext_auth_start_callback(
                     log_debug(&format!("Enhanced auth rejected: {err}"));
                     return MOSQ_ERR_AUTH;
                 }
-            };
-            let Some(client_id) = mosq_client_id_string(evt.client) else {
-                return MOSQ_ERR_AUTH;
             };
             state.cache.insert(client_id.clone(), token_type, cache_ttl);
             prune_session_index_against_cache(state);

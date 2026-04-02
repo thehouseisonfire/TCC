@@ -1,7 +1,7 @@
 use super::*;
 use crate::auth::AuthEngine;
 use crate::cache::SessionCache;
-use crate::config::{BiscuitConfig, JwtConfig, PluginConfig};
+use crate::config::{BiscuitConfig, IdentityBindingMode, JwtConfig, PluginConfig};
 use crate::policy::{PolicyBackendConfig, PolicyMode};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use std::ptr;
@@ -40,7 +40,13 @@ fn mock_plugin_state() -> *mut PluginState {
             http_url: None,
             http_ca_file: None,
             http_tls_insecure: false,
+            http_timeout_seconds: 2,
+            http_max_response_bytes: 64 * 1024,
+            dynamic_security_url: None,
+            dynamic_security_reload_interval_seconds: None,
         },
+        jwt_identity_binding: IdentityBindingMode::Off,
+        biscuit_identity_binding: IdentityBindingMode::Off,
         sqlite_seed_demo_rules: false,
         cache_ttl_seconds: 3600,
         allow_anonymous_no_token: false,
@@ -49,6 +55,7 @@ fn mock_plugin_state() -> *mut PluginState {
         ext_auth_method: Some("token".to_string()),
         role_username_prefix: "role:".to_string(),
         biscuit_role_fact: "role".to_string(),
+        biscuit_client_id_fact: "client_id".to_string(),
         biscuit_authorizer_profile: crate::config::BiscuitAuthorizerProfile::Simple,
         biscuit_authorizer_max_time_ms: 25,
     };

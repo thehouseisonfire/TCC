@@ -1,7 +1,8 @@
 use super::*;
-use crate::config::BiscuitAuthorizerProfile;
+use crate::config::{BiscuitAuthorizerProfile, IdentityBindingMode};
 use crate::jwt_handler::Claims;
 use biscuit_auth::{Biscuit, KeyPair, PrivateKey};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use std::ffi::CString;
 use std::fs;
 use std::path::Path;
@@ -9,10 +10,125 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 static TEST_DYNSEC_COUNTER: AtomicU64 = AtomicU64::new(0);
+const TEST_JWT_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgAQEBAQEBAQEBAQEB\n\
+AQEBAQEBAQEBAQEBAQEBAQEBAQGhRANCAARv8DuUkkHOHa3UNRnmlg4KhbQaaaBc\n\
+MoEDqivOFZTKFjxPdTpVvwHcU/bAsMfu54tAxv99JaluIoK5ic73HBRK\n\
+-----END PRIVATE KEY-----\n";
+
+#[derive(Clone, Copy, Debug)]
+enum AuthPath {
+    Basic,
+    Enhanced,
+}
 
 fn root_keypair() -> KeyPair {
     let root_bytes = [1u8; 32];
     KeyPair::from(&PrivateKey::from_bytes(&root_bytes, biscuit_auth::Algorithm::Ed25519).unwrap())
+}
+
+fn jwt_encoding_key() -> EncodingKey {
+    EncodingKey::from_ec_pem(TEST_JWT_PRIVATE_KEY_PEM.as_bytes())
+        .expect("test JWT private key should parse")
+}
+
+fn signed_jwt(sub: &str, client_id: Option<&str>, roles: Option<Vec<String>>) -> Vec<u8> {
+    let claims = Claims {
+        sub: sub.to_string(),
+        exp: 2_000_000_000,
+        iss: None,
+        aud: None,
+        client_id: client_id.map(ToOwned::to_owned),
+        roles,
+        grants: None,
+        denies: None,
+    };
+    encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key())
+        .expect("JWT should sign")
+        .into_bytes()
+}
+
+fn biscuit_token(identity_fact: Option<(&str, &str)>) -> Vec<u8> {
+    let keypair = root_keypair();
+    let mut builder = Biscuit::builder()
+        .fact(r#"right("publish", "sensors/client_1/temp")"#)
+        .expect("fact should build")
+        .fact("expires_at(2000000000)")
+        .expect("fact should build");
+    if let Some((predicate, value)) = identity_fact {
+        let fact = format!(r#"{predicate}("{value}")"#);
+        builder = builder
+            .fact(fact.as_str())
+            .expect("identity fact should build");
+    }
+    builder
+        .build(&keypair)
+        .expect("biscuit should build")
+        .to_vec()
+        .expect("biscuit should serialize")
+}
+
+fn configure_jwt_identity_binding(userdata: *mut c_void, mode: IdentityBindingMode) {
+    let state = unsafe { plugin_state_mut(userdata) };
+    state.config.jwt_identity_binding = mode;
+}
+
+fn configure_biscuit_identity_binding(
+    userdata: *mut c_void,
+    mode: IdentityBindingMode,
+    predicate: &str,
+) {
+    let state = unsafe { plugin_state_mut(userdata) };
+    state.config.biscuit_identity_binding = mode;
+    state.config.biscuit_client_id_fact = predicate.to_string();
+    state.config.biscuit.root_public_key = root_keypair().public();
+}
+
+fn run_auth_path(userdata: *mut c_void, path: AuthPath, token: &[u8]) -> c_int {
+    match path {
+        AuthPath::Basic => run_basic_auth(userdata, token),
+        AuthPath::Enhanced => run_enhanced_auth(userdata, token),
+    }
+}
+
+fn run_basic_auth(userdata: *mut c_void, token: &[u8]) -> c_int {
+    let username = CString::new("test_user").expect("username should build");
+    let mut token_bytes = token.to_vec();
+    let mut evt = MosquittoEvtBasicAuth {
+        future: ptr::null_mut(),
+        client: std::ptr::dangling_mut::<c_void>(),
+        username: username.as_ptr().cast_mut(),
+        password: token_bytes.as_mut_ptr().cast(),
+        extra: MosquittoEvtBasicAuthFuture {
+            password_len: u16::try_from(token_bytes.len()).expect("token length fits u16"),
+        },
+    };
+
+    basic_auth_callback(
+        MOSQ_EVT_BASIC_AUTH,
+        (&raw mut evt).cast::<c_void>(),
+        userdata,
+    )
+}
+
+fn run_enhanced_auth(userdata: *mut c_void, token: &[u8]) -> c_int {
+    let auth_method = CString::new("token").expect("auth method should build");
+    let mut evt = MosquittoEvtExtendedAuth {
+        future: ptr::null_mut(),
+        client: std::ptr::dangling_mut::<c_void>(),
+        data_in: token.as_ptr().cast::<c_void>(),
+        data_out: ptr::null_mut(),
+        data_in_len: u16::try_from(token.len()).expect("token length fits u16"),
+        data_out_len: 0,
+        auth_method: auth_method.as_ptr().cast::<c_char>(),
+        future2: [ptr::null_mut(); 3],
+    };
+
+    ext_auth_start_callback(
+        MOSQ_EVT_EXT_AUTH_START,
+        (&raw mut evt).cast::<c_void>(),
+        userdata,
+    )
 }
 
 fn setup_plugin_with_config() -> (*mut c_void, MosquittoPluginId) {
@@ -565,6 +681,214 @@ fn ext_auth_continue_callback_delegates_to_start() {
     assert_eq!(rc, MOSQ_ERR_AUTH);
 
     teardown_plugin(userdata);
+}
+
+#[test]
+fn jwt_strict_accepts_matching_identity_in_basic_and_enhanced_auth() {
+    for path in [AuthPath::Basic, AuthPath::Enhanced] {
+        for token in [
+            signed_jwt("test_client", None, None),
+            signed_jwt("test_client", Some("test_client"), None),
+        ] {
+            let (userdata, _identifier) = setup_plugin_with_config();
+            configure_jwt_identity_binding(userdata, IdentityBindingMode::Strict);
+
+            let rc = run_auth_path(userdata, path, &token);
+            assert_eq!(rc, MOSQ_ERR_SUCCESS, "path={path:?}");
+
+            let state = unsafe { plugin_state(userdata) };
+            assert!(state.cache.get(&"test_client".to_string()).is_some());
+
+            teardown_plugin(userdata);
+        }
+    }
+}
+
+#[test]
+fn jwt_strict_rejects_mismatched_live_client_id_in_basic_and_enhanced_auth() {
+    for path in [AuthPath::Basic, AuthPath::Enhanced] {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        configure_jwt_identity_binding(userdata, IdentityBindingMode::Strict);
+        let token = signed_jwt("other_client", Some("other_client"), None);
+
+        let rc = run_auth_path(userdata, path, &token);
+        assert_eq!(rc, MOSQ_ERR_AUTH, "path={path:?}");
+
+        let state = unsafe { plugin_state(userdata) };
+        assert!(state.cache.get(&"test_client".to_string()).is_none());
+
+        teardown_plugin(userdata);
+    }
+}
+
+#[test]
+fn jwt_strict_rejects_missing_identity_in_basic_and_enhanced_auth() {
+    for path in [AuthPath::Basic, AuthPath::Enhanced] {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        configure_jwt_identity_binding(userdata, IdentityBindingMode::Strict);
+        let token = signed_jwt("", None, None);
+
+        let rc = run_auth_path(userdata, path, &token);
+        assert_eq!(rc, MOSQ_ERR_AUTH, "path={path:?}");
+
+        let state = unsafe { plugin_state(userdata) };
+        assert!(state.cache.get(&"test_client".to_string()).is_none());
+
+        teardown_plugin(userdata);
+    }
+}
+
+#[test]
+fn jwt_strict_rejects_inconsistent_sub_and_client_id_in_basic_and_enhanced_auth() {
+    for path in [AuthPath::Basic, AuthPath::Enhanced] {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        configure_jwt_identity_binding(userdata, IdentityBindingMode::Strict);
+        let token = signed_jwt("test_client", Some("other_client"), None);
+
+        let rc = run_auth_path(userdata, path, &token);
+        assert_eq!(rc, MOSQ_ERR_AUTH, "path={path:?}");
+
+        let state = unsafe { plugin_state(userdata) };
+        assert!(state.cache.get(&"test_client".to_string()).is_none());
+
+        teardown_plugin(userdata);
+    }
+}
+
+#[test]
+fn jwt_strict_rejects_whitespace_distinct_identity_in_basic_and_enhanced_auth() {
+    for path in [AuthPath::Basic, AuthPath::Enhanced] {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        configure_jwt_identity_binding(userdata, IdentityBindingMode::Strict);
+        let token = signed_jwt(" test_client ", Some(" test_client "), None);
+
+        let rc = run_auth_path(userdata, path, &token);
+        assert_eq!(rc, MOSQ_ERR_AUTH, "path={path:?}");
+
+        let state = unsafe { plugin_state(userdata) };
+        assert!(state.cache.get(&"test_client".to_string()).is_none());
+
+        teardown_plugin(userdata);
+    }
+}
+
+#[test]
+fn jwt_off_accepts_inconsistent_sub_and_client_id_in_basic_and_enhanced_auth() {
+    for path in [AuthPath::Basic, AuthPath::Enhanced] {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        configure_jwt_identity_binding(userdata, IdentityBindingMode::Off);
+        let token = signed_jwt("test_client", Some("other_client"), None);
+
+        let rc = run_auth_path(userdata, path, &token);
+        assert_eq!(rc, MOSQ_ERR_SUCCESS, "path={path:?}");
+
+        let state = unsafe { plugin_state(userdata) };
+        assert!(state.cache.get(&"test_client".to_string()).is_some());
+
+        teardown_plugin(userdata);
+    }
+}
+
+#[test]
+fn jwt_off_accepts_mismatched_live_client_id_in_basic_and_enhanced_auth() {
+    for path in [AuthPath::Basic, AuthPath::Enhanced] {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        configure_jwt_identity_binding(userdata, IdentityBindingMode::Off);
+        let token = signed_jwt("other_client", Some("other_client"), None);
+
+        let rc = run_auth_path(userdata, path, &token);
+        assert_eq!(rc, MOSQ_ERR_SUCCESS, "path={path:?}");
+
+        let state = unsafe { plugin_state(userdata) };
+        assert!(state.cache.get(&"test_client".to_string()).is_some());
+
+        teardown_plugin(userdata);
+    }
+}
+
+#[test]
+fn biscuit_strict_accepts_matching_identity_in_basic_and_enhanced_auth() {
+    for path in [AuthPath::Basic, AuthPath::Enhanced] {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        configure_biscuit_identity_binding(userdata, IdentityBindingMode::Strict, "device_id");
+        let token = biscuit_token(Some(("device_id", "test_client")));
+
+        let rc = run_auth_path(userdata, path, &token);
+        assert_eq!(rc, MOSQ_ERR_SUCCESS, "path={path:?}");
+
+        let state = unsafe { plugin_state(userdata) };
+        assert!(state.cache.get(&"test_client".to_string()).is_some());
+
+        teardown_plugin(userdata);
+    }
+}
+
+#[test]
+fn biscuit_strict_rejects_whitespace_distinct_identity_in_basic_and_enhanced_auth() {
+    for path in [AuthPath::Basic, AuthPath::Enhanced] {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        configure_biscuit_identity_binding(userdata, IdentityBindingMode::Strict, "device_id");
+        let token = biscuit_token(Some(("device_id", " test_client ")));
+
+        let rc = run_auth_path(userdata, path, &token);
+        assert_eq!(rc, MOSQ_ERR_AUTH, "path={path:?}");
+
+        let state = unsafe { plugin_state(userdata) };
+        assert!(state.cache.get(&"test_client".to_string()).is_none());
+
+        teardown_plugin(userdata);
+    }
+}
+
+#[test]
+fn biscuit_strict_rejects_mismatched_identity_in_basic_and_enhanced_auth() {
+    for path in [AuthPath::Basic, AuthPath::Enhanced] {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        configure_biscuit_identity_binding(userdata, IdentityBindingMode::Strict, "device_id");
+        let token = biscuit_token(Some(("device_id", "other_client")));
+
+        let rc = run_auth_path(userdata, path, &token);
+        assert_eq!(rc, MOSQ_ERR_AUTH, "path={path:?}");
+
+        let state = unsafe { plugin_state(userdata) };
+        assert!(state.cache.get(&"test_client".to_string()).is_none());
+
+        teardown_plugin(userdata);
+    }
+}
+
+#[test]
+fn biscuit_strict_rejects_missing_identity_in_basic_and_enhanced_auth() {
+    for path in [AuthPath::Basic, AuthPath::Enhanced] {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        configure_biscuit_identity_binding(userdata, IdentityBindingMode::Strict, "device_id");
+        let token = biscuit_token(None);
+
+        let rc = run_auth_path(userdata, path, &token);
+        assert_eq!(rc, MOSQ_ERR_AUTH, "path={path:?}");
+
+        let state = unsafe { plugin_state(userdata) };
+        assert!(state.cache.get(&"test_client".to_string()).is_none());
+
+        teardown_plugin(userdata);
+    }
+}
+
+#[test]
+fn biscuit_off_accepts_mismatched_live_client_id_in_basic_and_enhanced_auth() {
+    for path in [AuthPath::Basic, AuthPath::Enhanced] {
+        let (userdata, _identifier) = setup_plugin_with_config();
+        configure_biscuit_identity_binding(userdata, IdentityBindingMode::Off, "device_id");
+        let token = biscuit_token(Some(("device_id", "other_client")));
+
+        let rc = run_auth_path(userdata, path, &token);
+        assert_eq!(rc, MOSQ_ERR_SUCCESS, "path={path:?}");
+
+        let state = unsafe { plugin_state(userdata) };
+        assert!(state.cache.get(&"test_client".to_string()).is_some());
+
+        teardown_plugin(userdata);
+    }
 }
 
 #[test]

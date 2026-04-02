@@ -63,6 +63,12 @@ pub enum ConfigError {
     #[error("Invalid biscuit role fact predicate: {0}")]
     InvalidBiscuitRoleFact(String),
 
+    #[error("Invalid identity binding mode: {0}")]
+    InvalidIdentityBindingMode(String),
+
+    #[error("Invalid biscuit client_id fact predicate: {0}")]
+    InvalidBiscuitClientIdFact(String),
+
     #[allow(dead_code)]
     #[error("Invalid policy mode: {0}")]
     InvalidPolicyMode(String),
@@ -114,6 +120,12 @@ pub struct BiscuitConfig {
     pub root_public_key: biscuit_auth::PublicKey,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentityBindingMode {
+    Off,
+    Strict,
+}
+
 fn is_simple_identifier(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
@@ -130,6 +142,8 @@ pub struct PluginConfig {
     pub jwt: JwtConfig,
     pub biscuit: BiscuitConfig,
     pub policy: PolicyBackendConfig,
+    pub jwt_identity_binding: IdentityBindingMode,
+    pub biscuit_identity_binding: IdentityBindingMode,
     pub sqlite_seed_demo_rules: bool,
     pub cache_ttl_seconds: u64,
     pub allow_anonymous_no_token: bool,
@@ -138,6 +152,7 @@ pub struct PluginConfig {
     pub ext_auth_method: Option<String>,
     pub role_username_prefix: String,
     pub biscuit_role_fact: String,
+    pub biscuit_client_id_fact: String,
     pub biscuit_authorizer_profile: BiscuitAuthorizerProfile,
     pub biscuit_authorizer_max_time_ms: u64,
 }
@@ -188,6 +203,9 @@ pub struct PluginConfigBuilder {
     ext_auth_method: Option<String>,
     role_username_prefix: Option<String>,
     biscuit_role_fact: Option<String>,
+    jwt_identity_binding: Option<IdentityBindingMode>,
+    biscuit_identity_binding: Option<IdentityBindingMode>,
+    biscuit_client_id_fact: Option<String>,
     biscuit_authorizer_profile: Option<BiscuitAuthorizerProfile>,
     biscuit_authorizer_max_time_ms: Option<u64>,
 }
@@ -223,6 +241,9 @@ impl PluginConfigBuilder {
             ext_auth_method: None,
             role_username_prefix: None,
             biscuit_role_fact: None,
+            jwt_identity_binding: None,
+            biscuit_identity_binding: None,
+            biscuit_client_id_fact: None,
             biscuit_authorizer_profile: None,
             biscuit_authorizer_max_time_ms: None,
         }
@@ -338,6 +359,21 @@ impl PluginConfigBuilder {
         self
     }
 
+    pub const fn jwt_identity_binding(mut self, mode: IdentityBindingMode) -> Self {
+        self.jwt_identity_binding = Some(mode);
+        self
+    }
+
+    pub const fn biscuit_identity_binding(mut self, mode: IdentityBindingMode) -> Self {
+        self.biscuit_identity_binding = Some(mode);
+        self
+    }
+
+    pub fn biscuit_client_id_fact(mut self, fact: impl Into<String>) -> Self {
+        self.biscuit_client_id_fact = Some(fact.into());
+        self
+    }
+
     pub const fn biscuit_authorizer_profile(mut self, profile: BiscuitAuthorizerProfile) -> Self {
         self.biscuit_authorizer_profile = Some(profile);
         self
@@ -380,6 +416,14 @@ impl PluginConfigBuilder {
         if !is_simple_identifier(&biscuit_role_fact) {
             return Err(ConfigError::InvalidBiscuitRoleFact(biscuit_role_fact));
         }
+        let biscuit_client_id_fact = self
+            .biscuit_client_id_fact
+            .unwrap_or_else(|| "client_id".to_string());
+        if !is_simple_identifier(&biscuit_client_id_fact) {
+            return Err(ConfigError::InvalidBiscuitClientIdFact(
+                biscuit_client_id_fact,
+            ));
+        }
 
         let biscuit_authorizer_profile = self
             .biscuit_authorizer_profile
@@ -399,6 +443,12 @@ impl PluginConfigBuilder {
                 root_public_key: biscuit_root_public_key,
             },
             policy,
+            jwt_identity_binding: self
+                .jwt_identity_binding
+                .unwrap_or(IdentityBindingMode::Off),
+            biscuit_identity_binding: self
+                .biscuit_identity_binding
+                .unwrap_or(IdentityBindingMode::Off),
             sqlite_seed_demo_rules: self.sqlite_seed_demo_rules.unwrap_or(false),
             cache_ttl_seconds,
             allow_anonymous_no_token: self.allow_anonymous_no_token.unwrap_or(false),
@@ -409,6 +459,7 @@ impl PluginConfigBuilder {
                 .role_username_prefix
                 .unwrap_or_else(|| "role:".to_string()),
             biscuit_role_fact,
+            biscuit_client_id_fact,
             biscuit_authorizer_profile,
             biscuit_authorizer_max_time_ms,
         })
@@ -597,6 +648,13 @@ fn apply_option(
         "ext_auth_method" => Ok(builder.ext_auth_method(value)),
         "role_username_prefix" => Ok(builder.role_username_prefix(value)),
         "biscuit_role_fact" => Ok(builder.biscuit_role_fact(value)),
+        "jwt_identity_binding" => {
+            Ok(builder.jwt_identity_binding(parse_identity_binding_mode(&value)?))
+        }
+        "biscuit_identity_binding" => {
+            Ok(builder.biscuit_identity_binding(parse_identity_binding_mode(&value)?))
+        }
+        "biscuit_client_id_fact" => Ok(builder.biscuit_client_id_fact(value)),
         "biscuit_authorizer_profile" => {
             Ok(builder.biscuit_authorizer_profile(value.parse::<BiscuitAuthorizerProfile>()?))
         }
@@ -616,6 +674,14 @@ fn parse_bool_option(option: &'static str, value: &str) -> Result<bool, ConfigEr
     value
         .parse::<bool>()
         .map_err(|source| ConfigError::InvalidBooleanOption { option, source })
+}
+
+fn parse_identity_binding_mode(value: &str) -> Result<IdentityBindingMode, ConfigError> {
+    match value {
+        "off" => Ok(IdentityBindingMode::Off),
+        "strict" => Ok(IdentityBindingMode::Strict),
+        _ => Err(ConfigError::InvalidIdentityBindingMode(value.to_string())),
+    }
 }
 
 fn parse_u64_option(option: &'static str, value: &str) -> Result<u64, ConfigError> {
@@ -657,7 +723,10 @@ fn parse_bounded_u64_option(
 
 #[cfg(test)]
 mod tests {
-    use super::{BiscuitAuthorizerProfile, ConfigError, PluginConfigBuilder, parse_options};
+    use super::{
+        BiscuitAuthorizerProfile, ConfigError, IdentityBindingMode, PluginConfigBuilder,
+        parse_options,
+    };
     use crate::MosquittoOpt;
     use std::ffi::CString;
 
@@ -700,6 +769,49 @@ mod tests {
             .build();
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn rejects_invalid_biscuit_client_id_fact() {
+        let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
+        let biscuit_root_key_file = format!(
+            "{}/../../docker/biscuit_public.key",
+            env!("CARGO_MANIFEST_DIR")
+        );
+
+        let result = PluginConfigBuilder::new()
+            .jwt_algorithm("ES256")
+            .jwt_key_file(jwt_pub_pem)
+            .biscuit_root_key_file(biscuit_root_key_file)
+            .biscuit_client_id_fact("client-id")
+            .build();
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidBiscuitClientIdFact(_))
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn defaults_identity_binding_modes_and_biscuit_client_id_fact() {
+        let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
+        let biscuit_root_key_file = format!(
+            "{}/../../docker/biscuit_public.key",
+            env!("CARGO_MANIFEST_DIR")
+        );
+
+        let config = PluginConfigBuilder::new()
+            .jwt_algorithm("ES256")
+            .jwt_key_file(jwt_pub_pem)
+            .biscuit_root_key_file(biscuit_root_key_file)
+            .build()
+            .expect("config should build");
+
+        assert_eq!(config.jwt_identity_binding, IdentityBindingMode::Off);
+        assert_eq!(config.biscuit_identity_binding, IdentityBindingMode::Off);
+        assert_eq!(config.biscuit_client_id_fact, "client_id");
     }
 
     #[test]
@@ -790,6 +902,113 @@ mod tests {
             config.biscuit_authorizer_profile,
             BiscuitAuthorizerProfile::Contextual
         );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn parse_options_supports_identity_binding_modes_and_biscuit_client_id_fact() {
+        let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
+        let biscuit_root_key_file = format!(
+            "{}/../../docker/biscuit_public.key",
+            env!("CARGO_MANIFEST_DIR")
+        );
+
+        let cstrings: Vec<CString> = vec![
+            CString::new("jwt_alg").unwrap(),
+            CString::new("ES256").unwrap(),
+            CString::new("jwt_key_file").unwrap(),
+            CString::new(jwt_pub_pem).unwrap(),
+            CString::new("biscuit_root_key_file").unwrap(),
+            CString::new(biscuit_root_key_file).unwrap(),
+            CString::new("jwt_identity_binding").unwrap(),
+            CString::new("strict").unwrap(),
+            CString::new("biscuit_identity_binding").unwrap(),
+            CString::new("off").unwrap(),
+            CString::new("biscuit_client_id_fact").unwrap(),
+            CString::new("device_id").unwrap(),
+        ];
+        let mut opts = vec![
+            MosquittoOpt {
+                key: cstrings[0].as_ptr().cast_mut(),
+                value: cstrings[1].as_ptr().cast_mut(),
+            },
+            MosquittoOpt {
+                key: cstrings[2].as_ptr().cast_mut(),
+                value: cstrings[3].as_ptr().cast_mut(),
+            },
+            MosquittoOpt {
+                key: cstrings[4].as_ptr().cast_mut(),
+                value: cstrings[5].as_ptr().cast_mut(),
+            },
+            MosquittoOpt {
+                key: cstrings[6].as_ptr().cast_mut(),
+                value: cstrings[7].as_ptr().cast_mut(),
+            },
+            MosquittoOpt {
+                key: cstrings[8].as_ptr().cast_mut(),
+                value: cstrings[9].as_ptr().cast_mut(),
+            },
+            MosquittoOpt {
+                key: cstrings[10].as_ptr().cast_mut(),
+                value: cstrings[11].as_ptr().cast_mut(),
+            },
+        ];
+
+        let config = parse_options(
+            opts.as_mut_ptr(),
+            i32::try_from(opts.len()).expect("opts len fits i32"),
+        )
+        .expect("config parse");
+        assert_eq!(config.jwt_identity_binding, IdentityBindingMode::Strict);
+        assert_eq!(config.biscuit_identity_binding, IdentityBindingMode::Off);
+        assert_eq!(config.biscuit_client_id_fact, "device_id");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn parse_options_rejects_invalid_identity_binding_mode() {
+        let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
+        let biscuit_root_key_file = format!(
+            "{}/../../docker/biscuit_public.key",
+            env!("CARGO_MANIFEST_DIR")
+        );
+
+        let cstrings: Vec<CString> = vec![
+            CString::new("jwt_alg").unwrap(),
+            CString::new("ES256").unwrap(),
+            CString::new("jwt_key_file").unwrap(),
+            CString::new(jwt_pub_pem).unwrap(),
+            CString::new("biscuit_root_key_file").unwrap(),
+            CString::new(biscuit_root_key_file).unwrap(),
+            CString::new("jwt_identity_binding").unwrap(),
+            CString::new("maybe").unwrap(),
+        ];
+        let mut opts = vec![
+            MosquittoOpt {
+                key: cstrings[0].as_ptr().cast_mut(),
+                value: cstrings[1].as_ptr().cast_mut(),
+            },
+            MosquittoOpt {
+                key: cstrings[2].as_ptr().cast_mut(),
+                value: cstrings[3].as_ptr().cast_mut(),
+            },
+            MosquittoOpt {
+                key: cstrings[4].as_ptr().cast_mut(),
+                value: cstrings[5].as_ptr().cast_mut(),
+            },
+            MosquittoOpt {
+                key: cstrings[6].as_ptr().cast_mut(),
+                value: cstrings[7].as_ptr().cast_mut(),
+            },
+        ];
+
+        match parse_options(
+            opts.as_mut_ptr(),
+            i32::try_from(opts.len()).expect("opts len fits i32"),
+        ) {
+            Ok(_) => panic!("must fail"),
+            Err(err) => assert!(err.to_string().contains("Invalid identity binding mode")),
+        }
     }
 
     #[test]

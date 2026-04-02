@@ -409,7 +409,7 @@ contain a concrete execution sequence.
 
 Implement in this order:
 
-1. Add plugin config surface and defaults
+1. Add plugin config surface and defaults (Completed)
    - Add parsing and typed config support for:
      - `jwt_identity_binding`
      - `biscuit_identity_binding`
@@ -417,14 +417,14 @@ Implement in this order:
    - Keep defaults at `off`, `off`, and `client_id`
    - Reject invalid enum values and invalid predicate identifiers
 
-2. Add shared plugin identity-binding helpers
+2. Add shared plugin identity-binding helpers (Completed)
    - Implement token-type-specific helpers for:
      - resolving JWT effective identity
      - resolving Biscuit identity fact
      - enforcing configured binding mode against live MQTT `client_id`
    - Return explicit non-secret-bearing errors for logging/tests
 
-3. Wire enforcement into both auth entry points before caching
+3. Wire enforcement into both auth entry points before caching (Completed)
    - Apply the checks in:
      - basic auth flow
      - MQTT v5 enhanced auth flow
@@ -433,7 +433,7 @@ Implement in this order:
      - session binding
      - username derivation
 
-4. Extend plugin unit/integration tests first
+4. Extend plugin unit/integration tests first (Completed)
    - Add focused tests for JWT and Biscuit in both `off` and `strict` modes
    - Cover both auth paths:
      - basic auth
@@ -490,7 +490,7 @@ Implement in this order:
 
 Recommended batching for implementation:
 
-- Batch 1: steps 1 to 4
+- Batch 1: steps 1 to 4 (Completed)
 - Batch 2: steps 5 to 6
 - Batch 3: steps 7 to 9
 - Batch 4: steps 10 to 11

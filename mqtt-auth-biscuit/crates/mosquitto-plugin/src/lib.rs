@@ -75,6 +75,7 @@ mod cache {
 }
 mod config;
 mod http_policy;
+mod identity_binding;
 mod jwt_handler;
 mod policy;
 mod sqlite_policy;

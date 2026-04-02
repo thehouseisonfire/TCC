@@ -1,0 +1,61 @@
+---
+- name: Validate Ubuntu 24.04 target
+  ansible.builtin.assert:
+    that:
+      - ansible_distribution == "Ubuntu"
+      - ansible_distribution_version == "24.04"
+    fail_msg: >-
+      This playbook currently supports only Ubuntu 24.04 hosts created by the
+      benchmark Terraform root.
+
+- name: Validate benchmark host snapshot format
+  ansible.builtin.assert:
+    that:
+      - benchmark_host_snapshot_id is match("^[0-9]{8}T[0-9]{6}Z$")
+    fail_msg: >-
+      benchmark_host_snapshot_id must use Ubuntu snapshot format
+      YYYYMMDDTHHMMSSZ.
+
+- name: Check Ubuntu deb822 source file
+  ansible.builtin.stat:
+    path: /etc/apt/sources.list.d/ubuntu.sources
+  register: ubuntu_sources_file
+
+- name: Validate Ubuntu deb822 source file exists
+  ansible.builtin.assert:
+    that:
+      - ubuntu_sources_file.stat.exists
+      - ubuntu_sources_file.stat.isreg
+    fail_msg: >-
+      Expected Ubuntu 24.04 deb822 sources at
+      /etc/apt/sources.list.d/ubuntu.sources.
+
+- name: Normalize snapshot support in Ubuntu source entries
+  ansible.builtin.replace:
+    path: /etc/apt/sources.list.d/ubuntu.sources
+    regexp: '(?m)^Snapshot:\s+.+$'
+    replace: 'Snapshot: enable'
+  notify:
+    - Update APT cache
+
+- name: Enable snapshot support in Ubuntu source entries
+  ansible.builtin.replace:
+    path: /etc/apt/sources.list.d/ubuntu.sources
+    regexp: '(?m)^Signed-By:\s+(.+)\n(?!Snapshot:\s+enable$)'
+    replace: 'Signed-By: \1\nSnapshot: enable\n'
+  notify:
+    - Update APT cache
+
+- name: Pin APT to the configured Ubuntu snapshot
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/50benchmark-snapshot
+    content: |
+      APT::Snapshot "{{ benchmark_host_snapshot_id }}";
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Update APT cache
+
+- name: Refresh apt cache after snapshot changes
+  ansible.builtin.meta: flush_handlers

@@ -15,6 +15,9 @@ Thumbs.db
 # Python cache
 __pycache__/
 
+# Generated benchmark-host inventory
+/infra/ansible/inventory.yml
+
 # Generated TLS assets (see docker/tls/generate_certs.sh)
 /mqtt-auth-biscuit/docker/tls/*.pem
 /mqtt-auth-biscuit/docker/tls/*.key

@@ -1,0 +1,10 @@
+---
+- name: Benchmark Host Convergence
+  hosts: all
+  become: true
+  gather_facts: true
+
+  roles:
+    - apt_snapshot
+    - base
+    - docker

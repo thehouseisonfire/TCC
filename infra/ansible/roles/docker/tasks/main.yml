@@ -1,0 +1,20 @@
+---
+- name: Install pinned Docker packages
+  ansible.builtin.apt:
+    name: "{{ item.key }}={{ item.value }}"
+    state: present
+    allow_downgrade: true
+    lock_timeout: 300
+  loop: "{{ benchmark_host_docker_package_versions | dict2items }}"
+
+- name: Ensure docker service is started and enabled
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Add benchmark user to docker group
+  ansible.builtin.user:
+    name: "{{ benchmark_host_operator_user }}"
+    groups: docker
+    append: true

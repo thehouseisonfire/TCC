@@ -1,0 +1,27 @@
+---
+- name: Stop unattended APT services during benchmark host preparation
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+    masked: true
+  loop:
+    - apt-daily.service
+    - apt-daily-upgrade.service
+
+- name: Disable unattended APT timers during benchmark host preparation
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: false
+    state: stopped
+    masked: true
+  loop:
+    - apt-daily.timer
+    - apt-daily-upgrade.timer
+
+- name: Install pinned base packages
+  ansible.builtin.apt:
+    name: "{{ item.key }}={{ item.value }}"
+    state: present
+    allow_downgrade: true
+    lock_timeout: 300
+  loop: "{{ benchmark_host_base_package_versions | dict2items }}"

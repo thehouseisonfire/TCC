@@ -1,0 +1,10 @@
+---
+benchmark_host_base_package_versions:
+  ca-certificates: "20240203"
+  curl: "8.5.0-2ubuntu10.3"
+  git: "1:2.43.0-1ubuntu7.1"
+  jq: "1.7.1-3build1"
+
+benchmark_host_docker_package_versions:
+  docker.io: "24.0.7-0ubuntu4.1"
+  docker-compose-v2: "2.24.6+ds1-0ubuntu2"

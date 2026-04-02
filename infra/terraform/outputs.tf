@@ -23,6 +23,15 @@ output "ssh_command" {
   value       = format("ssh %s@%s", var.operator_username, hcloud_server.benchmark.ipv4_address)
 }
 
+output "ansible_inventory" {
+  description = "Structured inventory data for the benchmark host Ansible step."
+  value = {
+    host_alias   = hcloud_server.benchmark.name
+    ansible_host = hcloud_server.benchmark.ipv4_address
+    ansible_user = var.operator_username
+  }
+}
+
 output "ansible_inventory_line" {
   description = "Single-host inventory line for the later Ansible step."
   value = format(

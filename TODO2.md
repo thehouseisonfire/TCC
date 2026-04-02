@@ -158,8 +158,8 @@ host layout cannot drift silently.
 
 1. Add the repo structure and docs only. (Completed)
 2. Add Terraform for VM creation, pinned and minimal. (Completed)
-3. Add Ansible for host convergence on an already-created VM.
-4. Add apt snapshot pinning and exact package versions.
+3. Add Ansible for host convergence on an already-created VM. (Completed)
+4. Add apt snapshot pinning and exact package versions. (Completed)
 5. Add a smoke path that proves a fresh host reaches the expected baseline.
 6. Add the benchmark-specific setup and verification tests.
 

@@ -68,7 +68,7 @@ jobs:
           terraform_version: 1.13.5
 
       - name: Test benchmark-host helper
-        run: uv run --locked --group dev pytest -q tests/test_benchmark_host_helper.py
+        run: uv run --locked --group dev pytest -q tests/test_benchmark_host_helper.py tests/test_render_benchmark_inventory.py tests/test_benchmark_host_package_locks.py
 
       - name: Check Terraform formatting
         run: terraform -chdir=infra/terraform fmt -check
@@ -81,6 +81,10 @@ jobs:
 
       - name: Validate Terraform configuration
         run: terraform -chdir=infra/terraform validate
+
+      - name: Syntax check benchmark-host Ansible playbook
+        working-directory: infra/ansible
+        run: uv run --locked --group dev ansible-playbook -i inventory.example.yml --syntax-check playbook.yml
 
   test-benchmark-infrastructure:
     if: github.event_name == 'push' || github.event_name == 'pull_request'

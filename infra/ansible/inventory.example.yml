@@ -1,0 +1,6 @@
+---
+all:
+  hosts:
+    tcc2-bench-host:
+      ansible_host: 203.0.113.10
+      ansible_user: benchmark

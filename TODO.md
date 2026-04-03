@@ -461,19 +461,36 @@ Implement in this order:
      - strict multi-client scenarios require per-client provisioning
      - capability scenarios may intentionally reuse shared tokens
 
-8. Classify existing scenario families and add parity variants where needed
+8. Classify existing scenario families and add runnable parity variants where possible
    - Mark existing shared-token fan-out and delegation flows as `capability`
    - Mark mixed JWT-strict/Biscuit-off cases as `mixed`
-   - Add or split explicit `parity_identity_bound` variants where JWT and
-     Biscuit are both strict
+   - Add runnable `parity_identity_bound` variants only for single-client
+     strict slices
+   - Do not relabel existing multi-client shared-token families as parity
 
 9. Update benchmark and regression tests around scenario semantics
    - Add tests for:
      - scenario metadata correctness
-     - strict provisioning validation
-     - capability-mode shared token allowance
+      - strict provisioning validation
+      - capability-mode shared token allowance
+      - single-client parity metadata/binding correctness
 
-10. Update docs and cleanup stale assumptions
+10. Implement generic per-client strict token provisioning
+    - Add harness support to provision one strict-bound token per client
+      identity
+    - Support both JWT and Biscuit strict modes
+    - Apply provisioning at scenario startup, not only refresh/error paths
+    - Make the capability generic across eligible multi-client scenario
+      families
+
+11. Add blocked multi-client parity variants after provisioning exists
+    - Add or split explicit runnable `parity_identity_bound` variants for
+      multi-client JWT/Biscuit comparison families
+    - Enable strict binding for both token types in those variants
+    - Add tests proving valid multi-client strict parity runs now pass
+      validation
+
+12. Update docs and cleanup stale assumptions
     - Update:
       - `ARTICLE.md`
       - `PROGRESS.md`
@@ -481,7 +498,7 @@ Implement in this order:
       - `mqtt-auth-biscuit/benchmarks/RUNNING_BENCHMARKS.md`
     - Remove comments/docs/tests that imply JWT is always identity-bound
 
-11. Run targeted verification in the same order
+13. Run targeted verification in the same order
     - Verify in layers:
       - plugin unit tests
       - token issuer/authz-server tests
@@ -492,8 +509,10 @@ Recommended batching for implementation:
 
 - Batch 1: steps 1 to 4 (Completed)
 - Batch 2: steps 5 to 6 (Completed)
-- Batch 3: steps 7 to 9
-- Batch 4: steps 10 to 11
+- Batch 3A: steps 7 to 9
+- Feature: step 10
+- Batch 3B: step 11
+- Batch 4: steps 12 to 13
 
 ## Acceptance Criteria
 

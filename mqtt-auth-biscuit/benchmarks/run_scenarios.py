@@ -63,6 +63,7 @@ class AuthzConfig(TypedDict, total=False):
     authz_profile: str
     rules: list[dict[str, Any]]
     client_roles: dict[str, list[str]]
+    jwt_identity_binding: str
 
 
 AUTHZ_BASELINE_STATE: dict[str, object] = {
@@ -72,6 +73,7 @@ AUTHZ_BASELINE_STATE: dict[str, object] = {
     "authz_profile": "custom",
     "rules_count": 0,
     "client_roles_count": 0,
+    "jwt_identity_binding": "off",
 }
 
 AUTHZ_STATE_KEYS: tuple[str, ...] = (
@@ -81,6 +83,7 @@ AUTHZ_STATE_KEYS: tuple[str, ...] = (
     "authz_profile",
     "rules_count",
     "client_roles_count",
+    "jwt_identity_binding",
 )
 
 AUTHZ_PROFILE_RULE_COUNT: dict[str, int] = {
@@ -309,6 +312,7 @@ def _authz_config(
     authz_profile: str | None = None,
     rules: list[dict[str, Any]] | None = None,
     client_roles: dict[str, list[str]] | None = None,
+    jwt_identity_binding: str | None = None,
     ca_file: str | None = None,
     insecure: bool = False,
 ):
@@ -325,6 +329,8 @@ def _authz_config(
         body["rules"] = rules
     if client_roles is not None:
         body["client_roles"] = client_roles
+    if jwt_identity_binding is not None:
+        body["jwt_identity_binding"] = jwt_identity_binding
 
     with _http_client(ca_file, insecure) as client:
         resp = client.post(
@@ -392,6 +398,8 @@ def _expected_authz_state(
         expected["fail_rate"] = float(cfg["fail_rate"])
     if "authz_profile" in cfg:
         expected["authz_profile"] = cfg["authz_profile"]
+    if "jwt_identity_binding" in cfg:
+        expected["jwt_identity_binding"] = cfg["jwt_identity_binding"]
     profile = cast(str, expected["authz_profile"])
     expected["rules_count"] = AUTHZ_PROFILE_RULE_COUNT.get(profile, 0) + len(cfg.get("rules", []))
     expected["client_roles_count"] = len(cfg.get("client_roles", {}))
@@ -3053,6 +3061,7 @@ def main(
                 authz_profile=cfg.get("authz_profile"),
                 rules=cfg.get("rules"),
                 client_roles=cfg.get("client_roles"),
+                jwt_identity_binding=cfg.get("jwt_identity_binding"),
                 ca_file=tls_ca,
                 insecure=tls_insecure,
             )

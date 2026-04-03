@@ -491,7 +491,7 @@ Implement in this order:
 Recommended batching for implementation:
 
 - Batch 1: steps 1 to 4 (Completed)
-- Batch 2: steps 5 to 6
+- Batch 2: steps 5 to 6 (Completed)
 - Batch 3: steps 7 to 9
 - Batch 4: steps 10 to 11
 

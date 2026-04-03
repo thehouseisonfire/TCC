@@ -25,6 +25,8 @@ struct Claims {
     sub: String,
     exp: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    client_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     roles: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     grants: Option<Vec<JwtGrant>>,
@@ -36,6 +38,41 @@ struct Claims {
 struct JwtGrant {
     op: String,
     res: String,
+}
+
+fn make_claims(
+    sub: &str,
+    exp: i64,
+    client_id: Option<&str>,
+    roles: Option<Vec<String>>,
+    grants: Option<Vec<JwtGrant>>,
+    denies: Option<Vec<JwtGrant>>,
+) -> Claims {
+    Claims {
+        sub: sub.to_string(),
+        exp,
+        client_id: client_id.map(str::to_string),
+        roles,
+        grants,
+        denies,
+    }
+}
+
+fn build_biscuit_with_identity(
+    root_keypair: &KeyPair,
+    facts: &[&str],
+    identity_fact: Option<(&str, &str)>,
+) -> Biscuit {
+    let mut builder = Biscuit::builder();
+    for fact in facts {
+        builder = builder.fact(*fact).unwrap();
+    }
+    if let Some((predicate, value)) = identity_fact {
+        builder = builder
+            .fact(format!(r#"{predicate}("{value}")"#).as_str())
+            .unwrap();
+    }
+    builder.build(root_keypair).unwrap()
 }
 
 #[allow(clippy::too_many_lines)]
@@ -74,11 +111,12 @@ fn main() {
 
     let jwt_long = {
         let topic = BASE_TOPIC.to_string();
-        let claims = Claims {
-            sub: "client_1".to_string(),
-            exp: LONG_EXP,
-            roles: Some(vec!["admin".to_string()]),
-            grants: Some(vec![
+        let claims = make_claims(
+            "client_1",
+            LONG_EXP,
+            None,
+            Some(vec!["admin".to_string()]),
+            Some(vec![
                 JwtGrant {
                     op: "publish".to_string(),
                     res: topic.clone(),
@@ -88,18 +126,19 @@ fn main() {
                     res: topic,
                 },
             ]),
-            denies: None,
-        };
+            None,
+        );
         encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
     };
 
     let jwt_deny = {
         let topic = BASE_TOPIC.to_string();
-        let claims = Claims {
-            sub: "client_1".to_string(),
-            exp: LONG_EXP,
-            roles: Some(vec!["admin".to_string()]),
-            grants: Some(vec![
+        let claims = make_claims(
+            "client_1",
+            LONG_EXP,
+            None,
+            Some(vec!["admin".to_string()]),
+            Some(vec![
                 JwtGrant {
                     op: "publish".to_string(),
                     res: topic.clone(),
@@ -109,21 +148,22 @@ fn main() {
                     res: topic.clone(),
                 },
             ]),
-            denies: Some(vec![JwtGrant {
+            Some(vec![JwtGrant {
                 op: "read".to_string(),
                 res: topic,
             }]),
-        };
+        );
         encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
     };
 
     let jwt_short = {
         let topic = BASE_TOPIC.to_string();
-        let claims = Claims {
-            sub: "client_1".to_string(),
-            exp: now + SHORT_TTL_SECS,
-            roles: Some(vec!["admin".to_string()]),
-            grants: Some(vec![
+        let claims = make_claims(
+            "client_1",
+            now + SHORT_TTL_SECS,
+            None,
+            Some(vec!["admin".to_string()]),
+            Some(vec![
                 JwtGrant {
                     op: "publish".to_string(),
                     res: topic.clone(),
@@ -133,18 +173,19 @@ fn main() {
                     res: topic,
                 },
             ]),
-            denies: None,
-        };
+            None,
+        );
         encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
     };
 
     let jwt_fanout_allow = {
         let topic = FANOUT_TOPIC.to_string();
-        let claims = Claims {
-            sub: "client_1".to_string(),
-            exp: LONG_EXP,
-            roles: Some(vec!["reader".to_string(), "writer".to_string()]),
-            grants: Some(vec![
+        let claims = make_claims(
+            "client_1",
+            LONG_EXP,
+            None,
+            Some(vec!["reader".to_string(), "writer".to_string()]),
+            Some(vec![
                 JwtGrant {
                     op: "publish".to_string(),
                     res: topic.clone(),
@@ -154,18 +195,19 @@ fn main() {
                     res: topic,
                 },
             ]),
-            denies: None,
-        };
+            None,
+        );
         encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
     };
 
     let jwt_fanout_read_deny = {
         let topic = FANOUT_TOPIC.to_string();
-        let claims = Claims {
-            sub: "client_1".to_string(),
-            exp: LONG_EXP,
-            roles: Some(vec!["reader".to_string()]),
-            grants: Some(vec![
+        let claims = make_claims(
+            "client_1",
+            LONG_EXP,
+            None,
+            Some(vec!["reader".to_string()]),
+            Some(vec![
                 JwtGrant {
                     op: "publish".to_string(),
                     res: topic.clone(),
@@ -175,45 +217,72 @@ fn main() {
                     res: topic.clone(),
                 },
             ]),
-            denies: Some(vec![JwtGrant {
+            Some(vec![JwtGrant {
                 op: "read".to_string(),
                 res: topic,
             }]),
-        };
+        );
         encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
     };
 
     // Static ACL isolation fixtures: role identity only (no token grants/denies).
     let jwt_static_admin = {
-        let claims = Claims {
-            sub: "client_1".to_string(),
-            exp: LONG_EXP,
-            roles: Some(vec!["admin".to_string()]),
-            grants: None,
-            denies: None,
-        };
+        let claims = make_claims(
+            "client_1",
+            LONG_EXP,
+            None,
+            Some(vec!["admin".to_string()]),
+            None,
+            None,
+        );
         encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
     };
 
     let jwt_static_writer = {
-        let claims = Claims {
-            sub: "client_1".to_string(),
-            exp: LONG_EXP,
-            roles: Some(vec!["writer".to_string()]),
-            grants: None,
-            denies: None,
-        };
+        let claims = make_claims(
+            "client_1",
+            LONG_EXP,
+            None,
+            Some(vec!["writer".to_string()]),
+            None,
+            None,
+        );
         encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
     };
 
     let jwt_static_reader = {
-        let claims = Claims {
-            sub: "client_1".to_string(),
-            exp: LONG_EXP,
-            roles: Some(vec!["reader".to_string()]),
-            grants: None,
-            denies: None,
-        };
+        let claims = make_claims(
+            "client_1",
+            LONG_EXP,
+            None,
+            Some(vec!["reader".to_string()]),
+            None,
+            None,
+        );
+        encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
+    };
+
+    let jwt_strict_sub = {
+        let claims = make_claims(
+            "client_1",
+            LONG_EXP,
+            None,
+            Some(vec!["reader".to_string()]),
+            None,
+            None,
+        );
+        encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
+    };
+
+    let jwt_strict_sub_client_id = {
+        let claims = make_claims(
+            "client_1",
+            LONG_EXP,
+            Some("client_1"),
+            Some(vec!["reader".to_string()]),
+            None,
+            None,
+        );
         encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap()
     };
 
@@ -223,15 +292,15 @@ fn main() {
         &PrivateKey::from_bytes(&root_bytes, biscuit_auth::Algorithm::Ed25519).unwrap(),
     );
 
-    let biscuit_base = Biscuit::builder()
-        .fact("right(\"publish\", \"sensors/client_1/temp\")")
-        .unwrap()
-        .fact("right(\"subscribe\", \"sensors/client_1/temp\")")
-        .unwrap()
-        .fact("expires_at(2000000000)")
-        .unwrap()
-        .build(&root_keypair)
-        .unwrap();
+    let biscuit_base = build_biscuit_with_identity(
+        &root_keypair,
+        &[
+            r#"right("publish", "sensors/client_1/temp")"#,
+            r#"right("subscribe", "sensors/client_1/temp")"#,
+            "expires_at(2000000000)",
+        ],
+        None,
+    );
 
     let biscuit_short = {
         let exp = now + SHORT_TTL_SECS;
@@ -308,29 +377,29 @@ fn main() {
     };
 
     // Static ACL isolation fixtures: role identity only (no right/deny facts).
-    let biscuit_static_admin = Biscuit::builder()
-        .fact(r#"role("admin")"#)
-        .unwrap()
-        .fact("expires_at(2000000000)")
-        .unwrap()
-        .build(&root_keypair)
-        .unwrap();
+    let biscuit_static_admin = build_biscuit_with_identity(
+        &root_keypair,
+        &[r#"role("admin")"#, "expires_at(2000000000)"],
+        None,
+    );
 
-    let biscuit_static_writer = Biscuit::builder()
-        .fact(r#"role("writer")"#)
-        .unwrap()
-        .fact("expires_at(2000000000)")
-        .unwrap()
-        .build(&root_keypair)
-        .unwrap();
+    let biscuit_static_writer = build_biscuit_with_identity(
+        &root_keypair,
+        &[r#"role("writer")"#, "expires_at(2000000000)"],
+        None,
+    );
 
-    let biscuit_static_reader = Biscuit::builder()
-        .fact(r#"role("reader")"#)
-        .unwrap()
-        .fact("expires_at(2000000000)")
-        .unwrap()
-        .build(&root_keypair)
-        .unwrap();
+    let biscuit_static_reader = build_biscuit_with_identity(
+        &root_keypair,
+        &[r#"role("reader")"#, "expires_at(2000000000)"],
+        None,
+    );
+
+    let biscuit_strict_client_id = build_biscuit_with_identity(
+        &root_keypair,
+        &[r#"role("reader")"#, "expires_at(2000000000)"],
+        Some(("client_id", "client_1")),
+    );
 
     let biscuit_complex_base = Biscuit::builder()
         .fact(r#"role("sensor")"#)
@@ -480,6 +549,8 @@ fn main() {
         general_purpose::URL_SAFE_NO_PAD.encode(biscuit_static_writer.to_vec().unwrap());
     let biscuit_static_reader_b64 =
         general_purpose::URL_SAFE_NO_PAD.encode(biscuit_static_reader.to_vec().unwrap());
+    let biscuit_strict_client_id_b64 =
+        general_purpose::URL_SAFE_NO_PAD.encode(biscuit_strict_client_id.to_vec().unwrap());
     let biscuit_handoff_b64 =
         general_purpose::URL_SAFE_NO_PAD.encode(biscuit_handoff.to_vec().unwrap());
     let biscuit_complex_low_b64 =
@@ -516,6 +587,8 @@ fn main() {
         "jwt_static_admin": jwt_static_admin,
         "jwt_static_writer": jwt_static_writer,
         "jwt_static_reader": jwt_static_reader,
+        "jwt_strict_sub": jwt_strict_sub,
+        "jwt_strict_sub_client_id": jwt_strict_sub_client_id,
         "jwt_alg": "ES256",
         "jwt_grants_schema": jwt_grants_schema,
         "jwt_denies_schema": jwt_denies_schema,
@@ -530,6 +603,7 @@ fn main() {
         "biscuit_static_admin": biscuit_static_admin_b64,
         "biscuit_static_writer": biscuit_static_writer_b64,
         "biscuit_static_reader": biscuit_static_reader_b64,
+        "biscuit_strict_client_id": biscuit_strict_client_id_b64,
         "biscuit_delegation_handoff": biscuit_handoff_b64,
         "biscuit_complex_low": biscuit_complex_low_b64,
         "biscuit_complex_med": biscuit_complex_med_b64,
@@ -542,4 +616,69 @@ fn main() {
     f.write_all(serde_json::to_string_pretty(&tokens).unwrap().as_bytes())
         .unwrap();
     println!("Wrote benchmarks/tokens.json");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use biscuit_auth::AuthorizerBuilder;
+
+    fn decode_jwt_claims(token: &str) -> Claims {
+        let payload = token.split('.').nth(1).expect("JWT payload should exist");
+        let bytes = general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .expect("JWT payload should decode");
+        serde_json::from_slice(&bytes).expect("JWT claims should parse")
+    }
+
+    #[test]
+    fn strict_jwt_fixture_can_include_matching_client_id() {
+        let header = Header::new(Algorithm::ES256);
+        let jwt_secret_key = SecretKey::from_slice(&TEST_JWT_SK_BYTES).unwrap();
+        let jwt_private_pem = jwt_secret_key.to_pkcs8_pem(LineEnding::LF).unwrap();
+        let jwt_encoding_key = EncodingKey::from_ec_pem(jwt_private_pem.as_bytes()).unwrap();
+        let token = encode(
+            &header,
+            &make_claims(
+                "client_1",
+                LONG_EXP,
+                Some("client_1"),
+                Some(vec!["reader".to_string()]),
+                None,
+                None,
+            ),
+            &jwt_encoding_key,
+        )
+        .unwrap();
+
+        let claims = decode_jwt_claims(&token);
+        assert_eq!(claims.sub, "client_1");
+        assert_eq!(claims.client_id.as_deref(), Some("client_1"));
+    }
+
+    #[test]
+    fn strict_biscuit_fixture_can_include_identity_fact() {
+        let root_keypair = KeyPair::from(
+            &PrivateKey::from_bytes(&TEST_BISCUIT_ROOT_BYTES, biscuit_auth::Algorithm::Ed25519)
+                .unwrap(),
+        );
+        let biscuit = build_biscuit_with_identity(
+            &root_keypair,
+            &[r#"role("reader")"#, "expires_at(2000000000)"],
+            Some(("client_id", "client_1")),
+        );
+        let bytes = biscuit.to_vec().unwrap();
+        let public_key = biscuit_auth::PublicKey::from_bytes(
+            &root_keypair.public().to_bytes(),
+            biscuit_auth::Algorithm::Ed25519,
+        )
+        .unwrap();
+        let biscuit = Biscuit::from(&bytes, public_key).unwrap();
+        let mut authorizer = AuthorizerBuilder::new().build(&biscuit).unwrap();
+        let identities: Vec<(String,)> = authorizer
+            .query_all(r#"data($id) <- client_id($id)"#)
+            .unwrap();
+
+        assert_eq!(identities, vec![("client_1".to_string(),)]);
+    }
 }

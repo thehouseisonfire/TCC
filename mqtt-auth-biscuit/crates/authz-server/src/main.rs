@@ -57,6 +57,14 @@ enum PolicyProfile {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
+enum JwtIdentityBindingMode {
+    #[default]
+    Off,
+    Strict,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
 enum RuleEffect {
     #[default]
     Allow,
@@ -89,6 +97,8 @@ struct AppConfig {
     rules: Vec<Rule>,
     #[serde(default)]
     client_roles: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    jwt_identity_binding: JwtIdentityBindingMode,
     max_conns: usize,
 }
 
@@ -101,13 +111,14 @@ impl Default for AppConfig {
             authz_profile: PolicyProfile::Custom,
             rules: Vec::new(),
             client_roles: HashMap::new(),
+            jwt_identity_binding: JwtIdentityBindingMode::Off,
             max_conns: 1024,
         }
     }
 }
 
 impl AppConfig {
-    fn from_env() -> Self {
+    fn from_env() -> Result<Self, String> {
         let delay_ms = env::var("AUTHZ_DELAY_MS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -139,20 +150,36 @@ impl AppConfig {
             })
             .unwrap_or(PolicyProfile::Custom);
 
+        let jwt_identity_binding = match env::var("AUTHZ_JWT_IDENTITY_BINDING") {
+            Ok(value) => parse_jwt_identity_binding_mode(&value)?,
+            Err(_) => JwtIdentityBindingMode::Off,
+        };
+
         let max_conns = env::var("AUTHZ_MAX_CONNS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(1024);
 
-        Self {
+        Ok(Self {
             delay_ms,
             fail_mode,
             fail_rate,
             authz_profile,
             rules: Vec::new(),
             client_roles: HashMap::new(),
+            jwt_identity_binding,
             max_conns,
-        }
+        })
+    }
+}
+
+fn parse_jwt_identity_binding_mode(value: &str) -> Result<JwtIdentityBindingMode, String> {
+    match value.to_ascii_lowercase().as_str() {
+        "off" => Ok(JwtIdentityBindingMode::Off),
+        "strict" => Ok(JwtIdentityBindingMode::Strict),
+        _ => Err(format!(
+            "invalid AUTHZ_JWT_IDENTITY_BINDING '{value}'; use 'off' or 'strict'"
+        )),
     }
 }
 
@@ -164,6 +191,7 @@ struct ConfigUpdate {
     authz_profile: Option<PolicyProfile>,
     rules: Option<Vec<Rule>>,
     client_roles: Option<HashMap<String, Vec<String>>>,
+    jwt_identity_binding: Option<JwtIdentityBindingMode>,
 }
 
 fn apply_config_update(next: &mut AppConfig, update: ConfigUpdate) {
@@ -185,6 +213,9 @@ fn apply_config_update(next: &mut AppConfig, update: ConfigUpdate) {
     if let Some(v) = update.client_roles {
         next.client_roles = v;
     }
+    if let Some(v) = update.jwt_identity_binding {
+        next.jwt_identity_binding = v;
+    }
 }
 
 fn config_summary_body(next: &AppConfig) -> serde_json::Value {
@@ -196,6 +227,7 @@ fn config_summary_body(next: &AppConfig) -> serde_json::Value {
         "authz_profile": next.authz_profile,
         "rules_count": effective_rules(next).len(),
         "client_roles_count": next.client_roles.len(),
+        "jwt_identity_binding": next.jwt_identity_binding,
     })
 }
 
@@ -505,7 +537,24 @@ struct JwtClaimsLite {
     sub: Option<String>,
 }
 
-fn extract_token_roles(token: &str, expected_client_id: &str) -> HashSet<String> {
+fn resolve_jwt_effective_identity(claims: &JwtClaimsLite) -> Option<Result<&str, ()>> {
+    let sub = claims.sub.as_deref().filter(|v| !v.is_empty());
+    let client_id = claims.client_id.as_deref().filter(|v| !v.is_empty());
+
+    match (sub, client_id) {
+        (Some(sub), Some(client_id)) if sub != client_id => Some(Err(())),
+        (Some(sub), Some(_)) => Some(Ok(sub)),
+        (Some(sub), None) => Some(Ok(sub)),
+        (None, Some(client_id)) => Some(Ok(client_id)),
+        (None, None) => None,
+    }
+}
+
+fn extract_token_roles(
+    token: &str,
+    expected_client_id: &str,
+    binding_mode: &JwtIdentityBindingMode,
+) -> HashSet<String> {
     let mut out = HashSet::new();
     let mut parts = token.split('.');
     let _header = parts.next();
@@ -523,16 +572,16 @@ fn extract_token_roles(token: &str, expected_client_id: &str) -> HashSet<String>
         return out;
     };
 
-    let token_client = claims
-        .client_id
-        .as_deref()
-        .filter(|v| !v.is_empty())
-        .or_else(|| claims.sub.as_deref().filter(|v| !v.is_empty()));
-    if let Some(token_client) = token_client
-        && !expected_client_id.is_empty()
-        && token_client != expected_client_id
-    {
-        return out;
+    if *binding_mode == JwtIdentityBindingMode::Strict {
+        let Some(identity_result) = resolve_jwt_effective_identity(&claims) else {
+            return out;
+        };
+        let Ok(token_client) = identity_result else {
+            return out;
+        };
+        if !expected_client_id.is_empty() && token_client != expected_client_id {
+            return out;
+        }
     }
 
     for role in claims.roles.unwrap_or_default() {
@@ -613,7 +662,11 @@ fn evaluate_authorization(cfg: &AppConfig, req: &AuthRequest) -> bool {
         }
     }
     if let Some(token) = req.token.as_deref() {
-        effective_roles.extend(extract_token_roles(token, req.client_id.trim()));
+        effective_roles.extend(extract_token_roles(
+            token,
+            req.client_id.trim(),
+            &cfg.jwt_identity_binding,
+        ));
     }
 
     let policy_rules = effective_rules(cfg);
@@ -796,7 +849,13 @@ async fn main() -> anyhow::Result<()> {
     let port = env::var("AUTHZ_PORT").unwrap_or_else(|_| "8081".to_string());
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
 
-    let shared_config = AppConfig::from_env();
+    let shared_config = match AppConfig::from_env() {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("authz-server config error: {err}");
+            std::process::exit(1);
+        }
+    };
 
     let state = AppState {
         config: Arc::new(ArcSwap::from_pointee(shared_config.clone())),
@@ -938,6 +997,43 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_env_var<R>(key: &str, value: Option<&str>, f: impl FnOnce() -> R) -> R {
+        let _guard = env_lock().lock().expect("env lock should acquire");
+        let previous = env::var(key).ok();
+        match value {
+            Some(value) => {
+                // SAFETY: tests serialize all environment mutation through env_lock.
+                unsafe { env::set_var(key, value) };
+            }
+            None => {
+                // SAFETY: tests serialize all environment mutation through env_lock.
+                unsafe { env::remove_var(key) };
+            }
+        }
+
+        let result = f();
+
+        match previous.as_deref() {
+            Some(previous) => {
+                // SAFETY: tests serialize all environment mutation through env_lock.
+                unsafe { env::set_var(key, previous) };
+            }
+            None => {
+                // SAFETY: tests serialize all environment mutation through env_lock.
+                unsafe { env::remove_var(key) };
+            }
+        }
+
+        result
+    }
 
     fn base_cfg() -> AppConfig {
         AppConfig::default()
@@ -1057,13 +1153,163 @@ mod tests {
     }
 
     #[test]
-    fn token_roles_are_ignored_when_client_binding_mismatches() {
+    fn parse_jwt_identity_binding_mode_accepts_off() {
+        assert_eq!(
+            parse_jwt_identity_binding_mode("off").expect("mode should parse"),
+            JwtIdentityBindingMode::Off
+        );
+    }
+
+    #[test]
+    fn parse_jwt_identity_binding_mode_accepts_strict() {
+        assert_eq!(
+            parse_jwt_identity_binding_mode("strict").expect("mode should parse"),
+            JwtIdentityBindingMode::Strict
+        );
+    }
+
+    #[test]
+    fn parse_jwt_identity_binding_mode_rejects_invalid_values() {
+        let err = parse_jwt_identity_binding_mode("typo").expect_err("mode should fail");
+        assert!(err.contains("AUTHZ_JWT_IDENTITY_BINDING"));
+    }
+
+    #[test]
+    fn from_env_defaults_jwt_identity_binding_to_off() {
+        with_env_var("AUTHZ_JWT_IDENTITY_BINDING", None, || {
+            let cfg = AppConfig::from_env().expect("config should parse");
+            assert_eq!(cfg.jwt_identity_binding, JwtIdentityBindingMode::Off);
+        });
+    }
+
+    #[test]
+    fn from_env_reads_strict_jwt_identity_binding() {
+        with_env_var("AUTHZ_JWT_IDENTITY_BINDING", Some("strict"), || {
+            let cfg = AppConfig::from_env().expect("config should parse");
+            assert_eq!(cfg.jwt_identity_binding, JwtIdentityBindingMode::Strict);
+        });
+    }
+
+    #[test]
+    fn from_env_rejects_invalid_jwt_identity_binding() {
+        with_env_var("AUTHZ_JWT_IDENTITY_BINDING", Some("strict_typo"), || {
+            let err = AppConfig::from_env().expect_err("config should fail");
+            assert!(err.contains("AUTHZ_JWT_IDENTITY_BINDING"));
+        });
+    }
+
+    #[test]
+    fn token_roles_are_accepted_when_binding_is_off_even_if_client_mismatches() {
         let token = make_token(&serde_json::json!({
             "sub": "client_2",
             "roles": ["reader"]
         }));
         let mut cfg = base_cfg();
         cfg.authz_profile = PolicyProfile::Custom;
+        cfg.rules = vec![make_rule(
+            RuleEffect::Allow,
+            &["read"],
+            &["alerts/#"],
+            &[],
+            &["reader"],
+            "reader_alerts",
+        )];
+        let req = AuthRequest {
+            client_id: "client_1".to_string(),
+            topic: "alerts/critical".to_string(),
+            access: 0x01,
+            token: Some(token),
+        };
+        assert!(evaluate_authorization(&cfg, &req));
+    }
+
+    #[test]
+    fn token_roles_are_ignored_when_client_binding_mismatches_in_strict_mode() {
+        let token = make_token(&serde_json::json!({
+            "sub": "client_2",
+            "roles": ["reader"]
+        }));
+        let mut cfg = base_cfg();
+        cfg.authz_profile = PolicyProfile::Custom;
+        cfg.jwt_identity_binding = JwtIdentityBindingMode::Strict;
+        cfg.rules = vec![make_rule(
+            RuleEffect::Allow,
+            &["read"],
+            &["alerts/#"],
+            &[],
+            &["reader"],
+            "reader_alerts",
+        )];
+        let req = AuthRequest {
+            client_id: "client_1".to_string(),
+            topic: "alerts/critical".to_string(),
+            access: 0x01,
+            token: Some(token),
+        };
+        assert!(!evaluate_authorization(&cfg, &req));
+    }
+
+    #[test]
+    fn token_roles_use_client_id_claim_when_strict_identity_lacks_sub() {
+        let token = make_token(&serde_json::json!({
+            "client_id": "client_1",
+            "roles": ["reader"]
+        }));
+        let mut cfg = base_cfg();
+        cfg.authz_profile = PolicyProfile::Custom;
+        cfg.jwt_identity_binding = JwtIdentityBindingMode::Strict;
+        cfg.rules = vec![make_rule(
+            RuleEffect::Allow,
+            &["read"],
+            &["alerts/#"],
+            &[],
+            &["reader"],
+            "reader_alerts",
+        )];
+        let req = AuthRequest {
+            client_id: "client_1".to_string(),
+            topic: "alerts/critical".to_string(),
+            access: 0x01,
+            token: Some(token),
+        };
+        assert!(evaluate_authorization(&cfg, &req));
+    }
+
+    #[test]
+    fn token_roles_are_ignored_when_strict_identity_is_inconsistent() {
+        let token = make_token(&serde_json::json!({
+            "sub": "client_1",
+            "client_id": "client_2",
+            "roles": ["reader"]
+        }));
+        let mut cfg = base_cfg();
+        cfg.authz_profile = PolicyProfile::Custom;
+        cfg.jwt_identity_binding = JwtIdentityBindingMode::Strict;
+        cfg.rules = vec![make_rule(
+            RuleEffect::Allow,
+            &["read"],
+            &["alerts/#"],
+            &[],
+            &["reader"],
+            "reader_alerts",
+        )];
+        let req = AuthRequest {
+            client_id: "client_1".to_string(),
+            topic: "alerts/critical".to_string(),
+            access: 0x01,
+            token: Some(token),
+        };
+        assert!(!evaluate_authorization(&cfg, &req));
+    }
+
+    #[test]
+    fn token_roles_are_ignored_when_strict_identity_is_missing() {
+        let token = make_token(&serde_json::json!({
+            "roles": ["reader"]
+        }));
+        let mut cfg = base_cfg();
+        cfg.authz_profile = PolicyProfile::Custom;
+        cfg.jwt_identity_binding = JwtIdentityBindingMode::Strict;
         cfg.rules = vec![make_rule(
             RuleEffect::Allow,
             &["read"],
@@ -1133,6 +1379,7 @@ mod tests {
                 authz_profile: None,
                 rules: None,
                 client_roles: None,
+                jwt_identity_binding: None,
             },
         );
         assert_eq!(cfg.delay_ms, 200);
@@ -1146,6 +1393,7 @@ mod tests {
     fn config_reset_restores_startup_baseline() {
         let baseline = AppConfig {
             authz_profile: PolicyProfile::Simple,
+            jwt_identity_binding: JwtIdentityBindingMode::Strict,
             max_conns: 2048,
             ..base_cfg()
         };
@@ -1166,6 +1414,7 @@ mod tests {
         assert_eq!(cfg.authz_profile, PolicyProfile::Simple);
         assert!(cfg.rules.is_empty());
         assert!(cfg.client_roles.is_empty());
+        assert_eq!(cfg.jwt_identity_binding, JwtIdentityBindingMode::Strict);
         assert_eq!(cfg.max_conns, 2048);
     }
 }

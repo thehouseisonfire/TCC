@@ -47,6 +47,7 @@ def test_expected_authz_state_for_http_policy_complex():
     assert expected["authz_profile"] == "complex"
     assert expected["rules_count"] == 10
     assert expected["client_roles_count"] == 3
+    assert expected["jwt_identity_binding"] == "off"
 
 
 def test_expected_authz_state_for_http_policy_med():
@@ -55,6 +56,7 @@ def test_expected_authz_state_for_http_policy_med():
     assert expected["authz_profile"] == "med"
     assert expected["rules_count"] == 6
     assert expected["client_roles_count"] == 3
+    assert expected["jwt_identity_binding"] == "off"
 
 
 def test_expected_authz_state_for_none_uses_baseline():
@@ -72,10 +74,12 @@ def test_expected_authz_state_counts_profile_rules_plus_custom_rules():
         "authz_profile": "med",
         "rules": [{"effect": "allow", "ops": ["read"], "topics": ["#"]}],
         "client_roles": {"client_x": ["reader"]},
+        "jwt_identity_binding": "strict",
     }
     expected = rs._expected_authz_state(cfg, dict(rs.AUTHZ_BASELINE_STATE))
     assert expected["rules_count"] == rs.AUTHZ_PROFILE_RULE_COUNT["med"] + 1
     assert expected["client_roles_count"] == 1
+    assert expected["jwt_identity_binding"] == "strict"
 
 
 def test_expected_authz_state_uses_runtime_baseline_for_non_default_startup():
@@ -86,6 +90,7 @@ def test_expected_authz_state_uses_runtime_baseline_for_non_default_startup():
         "authz_profile": "simple",
         "rules_count": 0,
         "client_roles_count": 0,
+        "jwt_identity_binding": "strict",
     }
     expected = rs._expected_authz_state(None, runtime_baseline)
     assert expected == runtime_baseline
@@ -109,6 +114,7 @@ def test_validated_authz_state_baseline_accepts_non_default_values():
         "authz_profile": "simple",
         "rules_count": 0,
         "client_roles_count": 0,
+        "jwt_identity_binding": "off",
     }
     baseline = rs._validated_authz_state_baseline("JWT-HTTP-1000MS", "authz reset", observed)
     assert baseline["authz_profile"] == "simple"

@@ -89,10 +89,27 @@ fn escape_datalog_str(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+fn is_simple_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn non_empty_owned(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty())
+}
+
 #[derive(Debug, Deserialize)]
 struct BiscuitIssueRequest {
     client_id: Option<String>,
     topic: Option<String>,
+    identity_fact_predicate: Option<String>,
+    identity_fact_value: Option<String>,
     roles: Option<Vec<String>>,
     denies: Option<Vec<JwtGrant>>,
     ttl_seconds: Option<i64>,
@@ -118,7 +135,7 @@ struct BinaryTokenResponse {
     size_bytes: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct JwtClaims {
     sub: String,
     exp: i64,
@@ -145,6 +162,42 @@ struct IssuerConfig {
     jwt_no_default_roles: bool,
     jwt_no_default_grants: bool,
     tls_config: Option<Arc<ServerConfig>>,
+}
+
+#[derive(Debug)]
+enum IssueResponse {
+    Token(TokenResponse),
+    Binary(BinaryTokenResponse),
+}
+
+#[derive(Debug)]
+enum IssueError {
+    BadRequest(String),
+    NotFound(String),
+    Internal(String),
+}
+
+impl IssueError {
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self::BadRequest(message.into())
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self::Internal(message.into())
+    }
+
+    fn into_response_parts(self) -> (StatusCode, String) {
+        match self {
+            Self::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
+            Self::NotFound(message) => (StatusCode::NOT_FOUND, message),
+            Self::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
+        }
+    }
+}
+
+struct JwtIdentityClaims {
+    subject: String,
+    client_id: Option<String>,
 }
 
 fn env_default(name: &str, default: &str) -> String {
@@ -231,14 +284,22 @@ fn error_response(status: StatusCode, message: &str) -> Response<Full<Bytes>> {
     json_response(status, &payload)
 }
 
-fn handle_jwt(req: JwtIssueRequest, cfg: &IssuerConfig) -> Result<TokenResponse, String> {
-    let now = Utc::now().timestamp();
+fn resolve_jwt_identity_claims(req: &JwtIssueRequest) -> JwtIdentityClaims {
+    let subject = non_empty_owned(req.subject.clone())
+        .or_else(|| non_empty_owned(req.client_id.clone()))
+        .unwrap_or_else(|| "client_1".to_string());
+
+    JwtIdentityClaims {
+        subject,
+        client_id: non_empty_owned(req.client_id.clone()),
+    }
+}
+
+fn build_jwt_claims(req: JwtIssueRequest, cfg: &IssuerConfig, now: i64) -> JwtClaims {
     let ttl = req.ttl_seconds.unwrap_or(3600).max(1);
     let exp = now + ttl;
-    let subject = req
-        .subject
-        .or_else(|| req.client_id.clone())
-        .unwrap_or_else(|| "client_1".to_string());
+    let identity = resolve_jwt_identity_claims(&req);
+    let subject = identity.subject;
 
     let no_default_roles = req.no_default_roles.unwrap_or(cfg.jwt_no_default_roles);
     let roles = if no_default_roles {
@@ -268,7 +329,7 @@ fn handle_jwt(req: JwtIssueRequest, cfg: &IssuerConfig) -> Result<TokenResponse,
 
     let denies = req.denies;
 
-    let claims = JwtClaims {
+    JwtClaims {
         sub: subject,
         exp,
         roles,
@@ -276,9 +337,14 @@ fn handle_jwt(req: JwtIssueRequest, cfg: &IssuerConfig) -> Result<TokenResponse,
         denies,
         iss: req.issuer.or_else(|| cfg.jwt_default_issuer.clone()),
         aud: req.audience.or_else(|| cfg.jwt_default_audience.clone()),
-        client_id: req.client_id,
-    };
+        client_id: identity.client_id,
+    }
+}
 
+fn handle_jwt(req: JwtIssueRequest, cfg: &IssuerConfig) -> Result<TokenResponse, String> {
+    let now = Utc::now().timestamp();
+    let claims = build_jwt_claims(req, cfg, now);
+    let exp = claims.exp;
     let token = encode(&Header::new(cfg.jwt_alg), &claims, &cfg.jwt_key)
         .map_err(|e| format!("jwt encode failed: {e}"))?;
 
@@ -296,7 +362,7 @@ fn handle_jwt(req: JwtIssueRequest, cfg: &IssuerConfig) -> Result<TokenResponse,
 fn build_biscuit_core(
     req: &BiscuitIssueRequest,
     cfg: &IssuerConfig,
-) -> Result<(Vec<u8>, i64, i64), String> {
+) -> Result<(Vec<u8>, i64, i64), IssueError> {
     let now = Utc::now().timestamp();
     let ttl = req.ttl_seconds.unwrap_or(3600).max(1);
     let exp = now + ttl;
@@ -310,11 +376,46 @@ fn build_biscuit_core(
     let expires_fact = format!("expires_at({exp})");
     let mut builder = Biscuit::builder()
         .fact(publish_fact.as_str())
-        .map_err(|e| format!("biscuit fact publish: {e}"))?
+        .map_err(|e| IssueError::internal(format!("biscuit fact publish: {e}")))?
         .fact(subscribe_fact.as_str())
-        .map_err(|e| format!("biscuit fact subscribe: {e}"))?
+        .map_err(|e| IssueError::internal(format!("biscuit fact subscribe: {e}")))?
         .fact(expires_fact.as_str())
-        .map_err(|e| format!("biscuit fact expires_at: {e}"))?;
+        .map_err(|e| IssueError::internal(format!("biscuit fact expires_at: {e}")))?;
+
+    match (
+        req.identity_fact_predicate.as_deref(),
+        req.identity_fact_value.as_deref(),
+    ) {
+        (Some(predicate), Some(value)) => {
+            if !is_simple_identifier(predicate) {
+                return Err(IssueError::bad_request(format!(
+                    "invalid Biscuit identity fact predicate: {predicate}"
+                )));
+            }
+            if value.is_empty() {
+                return Err(IssueError::bad_request(
+                    "Biscuit identity fact value must not be empty",
+                ));
+            }
+            let predicate = escape_datalog_str(predicate);
+            let value = escape_datalog_str(value);
+            let identity_fact = format!("{predicate}(\"{value}\")");
+            builder = builder
+                .fact(identity_fact.as_str())
+                .map_err(|e| IssueError::internal(format!("biscuit fact identity: {e}")))?;
+        }
+        (Some(_), None) => {
+            return Err(IssueError::bad_request(
+                "Biscuit identity fact invalid: identity_fact_value is required",
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(IssueError::bad_request(
+                "Biscuit identity fact invalid: identity_fact_predicate is required",
+            ));
+        }
+        (None, None) => {}
+    }
 
     if let Some(roles) = &req.roles {
         for role in roles {
@@ -322,7 +423,7 @@ fn build_biscuit_core(
             let role_fact = format!("role(\"{role}\")");
             builder = builder
                 .fact(role_fact.as_str())
-                .map_err(|e| format!("biscuit fact role: {e}"))?;
+                .map_err(|e| IssueError::internal(format!("biscuit fact role: {e}")))?;
         }
     }
 
@@ -333,32 +434,35 @@ fn build_biscuit_core(
             let deny_fact = format!("deny(\"{op}\", \"{res}\")");
             builder = builder
                 .fact(deny_fact.as_str())
-                .map_err(|e| format!("biscuit fact deny: {e}"))?;
+                .map_err(|e| IssueError::internal(format!("biscuit fact deny: {e}")))?;
         }
     }
 
     let biscuit = builder
         .build(&cfg.biscuit_keypair)
-        .map_err(|e| format!("biscuit build: {e}"))?;
+        .map_err(|e| IssueError::internal(format!("biscuit build: {e}")))?;
 
     let check_src = format!("check if time($t), $t < {exp}");
     let block = BlockBuilder::new()
         .check(check_src.as_str())
-        .map_err(|e| format!("biscuit check: {e}"))?
+        .map_err(|e| IssueError::internal(format!("biscuit check: {e}")))?
         .fact(expires_fact.as_str())
-        .map_err(|e| format!("biscuit fact expires_at: {e}"))?;
+        .map_err(|e| IssueError::internal(format!("biscuit fact expires_at: {e}")))?;
 
     let biscuit = biscuit
         .append(block)
-        .map_err(|e| format!("biscuit append: {e}"))?;
+        .map_err(|e| IssueError::internal(format!("biscuit append: {e}")))?;
     let bytes = biscuit
         .to_vec()
-        .map_err(|e| format!("biscuit encode: {e}"))?;
+        .map_err(|e| IssueError::internal(format!("biscuit encode: {e}")))?;
 
     Ok((bytes, exp, now))
 }
 
-fn handle_biscuit(req: &BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<TokenResponse, String> {
+fn handle_biscuit(
+    req: &BiscuitIssueRequest,
+    cfg: &IssuerConfig,
+) -> Result<TokenResponse, IssueError> {
     let (bytes, exp, now) = build_biscuit_core(req, cfg)?;
     let token = general_purpose::URL_SAFE_NO_PAD.encode(&bytes);
 
@@ -375,7 +479,7 @@ fn handle_biscuit(req: &BiscuitIssueRequest, cfg: &IssuerConfig) -> Result<Token
 fn handle_biscuit_binary(
     req: &BiscuitIssueRequest,
     cfg: &IssuerConfig,
-) -> Result<BinaryTokenResponse, String> {
+) -> Result<BinaryTokenResponse, IssueError> {
     let (bytes, exp, now) = build_biscuit_core(req, cfg)?;
 
     // Return raw binary data (base64-encoded for JSON transport, but represents raw Protobuf)
@@ -389,6 +493,30 @@ fn handle_biscuit_binary(
         alg: "Biscuit".to_string(),
         size_bytes,
     })
+}
+
+fn issue_request(url: &str, body: &[u8], cfg: &IssuerConfig) -> Result<IssueResponse, IssueError> {
+    match url {
+        "/jwt" => {
+            let req: JwtIssueRequest = serde_json::from_slice(body)
+                .map_err(|e| IssueError::bad_request(format!("invalid json: {e}")))?;
+            let response = handle_jwt(req, cfg).map_err(IssueError::internal)?;
+            Ok(IssueResponse::Token(response))
+        }
+        "/biscuit" => {
+            let req: BiscuitIssueRequest = serde_json::from_slice(body)
+                .map_err(|e| IssueError::bad_request(format!("invalid json: {e}")))?;
+            let response = handle_biscuit(&req, cfg)?;
+            Ok(IssueResponse::Token(response))
+        }
+        "/biscuit/binary" => {
+            let req: BiscuitIssueRequest = serde_json::from_slice(body)
+                .map_err(|e| IssueError::bad_request(format!("invalid json: {e}")))?;
+            let response = handle_biscuit_binary(&req, cfg)?;
+            Ok(IssueResponse::Binary(response))
+        }
+        _ => Err(IssueError::NotFound("not found".to_string())),
+    }
 }
 
 async fn handle_request(
@@ -428,53 +556,13 @@ async fn handle_request(
         ));
     }
 
-    let res: Result<TokenResponse, (StatusCode, String)> = match url.as_str() {
-        "/jwt" => {
-            let parsed: Result<JwtIssueRequest, _> = serde_json::from_slice(&body);
-            match parsed {
-                Ok(req) => {
-                    handle_jwt(req, &cfg).map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err))
-                }
-                Err(e) => Err((StatusCode::BAD_REQUEST, format!("invalid json: {e}"))),
-            }
+    let response = match issue_request(url.as_str(), &body, &cfg) {
+        Ok(IssueResponse::Token(payload)) => json_response(StatusCode::OK, &payload),
+        Ok(IssueResponse::Binary(payload)) => json_response(StatusCode::OK, &payload),
+        Err(err) => {
+            let (status, message) = err.into_response_parts();
+            error_response(status, &message)
         }
-        "/biscuit" => {
-            let parsed: Result<BiscuitIssueRequest, _> = serde_json::from_slice(&body);
-            match parsed {
-                Ok(req) => handle_biscuit(&req, &cfg)
-                    .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err)),
-                Err(e) => Err((StatusCode::BAD_REQUEST, format!("invalid json: {e}"))),
-            }
-        }
-        "/biscuit/binary" => {
-            let parsed: Result<BiscuitIssueRequest, _> = serde_json::from_slice(&body);
-            match parsed {
-                Ok(req) => {
-                    match handle_biscuit_binary(&req, &cfg) {
-                        Ok(binary_resp) => {
-                            // Return as JSON with base64-encoded data
-                            let body =
-                                serde_json::to_vec(&binary_resp).unwrap_or_else(|_| b"{}".to_vec());
-                            return Ok(Response::builder()
-                                .status(StatusCode::OK)
-                                .header("Content-Type", "application/json")
-                                .body(Full::new(Bytes::from(body)))
-                                .unwrap_or_else(|_| {
-                                    Response::new(Full::new(Bytes::from_static(b"{}")))
-                                }));
-                        }
-                        Err(err) => Err((StatusCode::INTERNAL_SERVER_ERROR, err)),
-                    }
-                }
-                Err(e) => Err((StatusCode::BAD_REQUEST, format!("invalid json: {e}"))),
-            }
-        }
-        _ => Err((StatusCode::NOT_FOUND, "not found".to_string())),
-    };
-
-    let response = match res {
-        Ok(payload) => json_response(StatusCode::OK, &payload),
-        Err((status, err)) => error_response(status, &err),
     };
 
     Ok(response)
@@ -571,5 +659,283 @@ async fn main() {
                 serve_connection(stream, cfg).await;
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use biscuit_auth::{AuthorizerBuilder, PublicKey};
+
+    fn test_cfg() -> IssuerConfig {
+        let (jwt_alg, jwt_key, jwt_alg_label, jwt_default_issuer, jwt_default_audience) =
+            load_jwt_key(true).expect("default JWT key should load");
+        let biscuit_keypair =
+            load_biscuit_keypair(true).expect("default Biscuit keypair should load");
+        IssuerConfig {
+            host: "127.0.0.1".to_string(),
+            port: 8082,
+            jwt_alg,
+            jwt_key,
+            jwt_alg_label,
+            jwt_default_issuer,
+            jwt_default_audience,
+            biscuit_keypair,
+            jwt_no_default_roles: false,
+            jwt_no_default_grants: false,
+            tls_config: None,
+        }
+    }
+
+    fn decode_jwt_claims(token: &str) -> JwtClaims {
+        let payload = token
+            .split('.')
+            .nth(1)
+            .expect("JWT payload should be present");
+        let bytes = general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .expect("JWT payload should decode");
+        serde_json::from_slice(&bytes).expect("JWT claims should parse")
+    }
+
+    fn parse_biscuit(bytes: &[u8], cfg: &IssuerConfig) -> Biscuit {
+        let public_key = PublicKey::from_bytes(
+            &cfg.biscuit_keypair.public().to_bytes(),
+            biscuit_auth::Algorithm::Ed25519,
+        )
+        .expect("public key should parse");
+        Biscuit::from(bytes, public_key).expect("Biscuit should parse")
+    }
+
+    fn biscuit_identity_values(biscuit: &Biscuit, predicate: &str) -> Vec<(String,)> {
+        let mut authorizer = AuthorizerBuilder::new()
+            .build(biscuit)
+            .expect("authorizer should build");
+        authorizer
+            .query_all(format!("data($id) <- {predicate}($id)").as_str())
+            .expect("identity query should succeed")
+    }
+
+    fn issue_status(path: &str, body: serde_json::Value, cfg: &IssuerConfig) -> StatusCode {
+        let bytes = serde_json::to_vec(&body).expect("body should serialize");
+        let err = issue_request(path, &bytes, cfg).expect_err("request should fail");
+        err.into_response_parts().0
+    }
+
+    #[test]
+    fn jwt_subject_is_issued_without_client_id_claim() {
+        let cfg = test_cfg();
+        let response = handle_jwt(
+            JwtIssueRequest {
+                client_id: None,
+                subject: Some("client_7".to_string()),
+                roles: Some(vec!["reader".to_string()]),
+                grants: None,
+                denies: None,
+                ttl_seconds: Some(60),
+                issuer: None,
+                audience: None,
+                no_default_roles: Some(false),
+                no_default_grants: Some(true),
+            },
+            &cfg,
+        )
+        .expect("JWT should be issued");
+
+        let claims = decode_jwt_claims(&response.token);
+        assert_eq!(claims.sub, "client_7");
+        assert_eq!(claims.client_id, None);
+    }
+
+    #[test]
+    fn jwt_subject_and_client_id_are_emitted_when_requested() {
+        let cfg = test_cfg();
+        let response = handle_jwt(
+            JwtIssueRequest {
+                client_id: Some("client_7".to_string()),
+                subject: Some("client_7".to_string()),
+                roles: Some(vec!["reader".to_string()]),
+                grants: None,
+                denies: None,
+                ttl_seconds: Some(60),
+                issuer: None,
+                audience: None,
+                no_default_roles: Some(false),
+                no_default_grants: Some(true),
+            },
+            &cfg,
+        )
+        .expect("JWT should be issued");
+
+        let claims = decode_jwt_claims(&response.token);
+        assert_eq!(claims.sub, "client_7");
+        assert_eq!(claims.client_id.as_deref(), Some("client_7"));
+    }
+
+    #[test]
+    fn jwt_subject_and_client_id_do_not_require_global_match() {
+        let cfg = test_cfg();
+        let response = handle_jwt(
+            JwtIssueRequest {
+                client_id: Some("client_8".to_string()),
+                subject: Some("client_7".to_string()),
+                roles: Some(vec!["reader".to_string()]),
+                grants: None,
+                denies: None,
+                ttl_seconds: Some(60),
+                issuer: None,
+                audience: None,
+                no_default_roles: Some(false),
+                no_default_grants: Some(true),
+            },
+            &cfg,
+        )
+        .expect("JWT should be issued");
+
+        let claims = decode_jwt_claims(&response.token);
+        assert_eq!(claims.sub, "client_7");
+        assert_eq!(claims.client_id.as_deref(), Some("client_8"));
+    }
+
+    #[test]
+    fn biscuit_identity_fact_is_added_when_requested() {
+        let cfg = test_cfg();
+        let (bytes, _, _) = build_biscuit_core(
+            &BiscuitIssueRequest {
+                client_id: Some("client_7".to_string()),
+                topic: None,
+                identity_fact_predicate: Some("client_id".to_string()),
+                identity_fact_value: Some("client_7".to_string()),
+                roles: None,
+                denies: None,
+                ttl_seconds: Some(60),
+            },
+            &cfg,
+        )
+        .expect("Biscuit should be issued");
+
+        let biscuit = parse_biscuit(&bytes, &cfg);
+        let identities = biscuit_identity_values(&biscuit, "client_id");
+        assert_eq!(identities, vec![("client_7".to_string(),)]);
+    }
+
+    #[test]
+    fn biscuit_identity_fact_requires_both_fields() {
+        let cfg = test_cfg();
+        let err = build_biscuit_core(
+            &BiscuitIssueRequest {
+                client_id: Some("client_7".to_string()),
+                topic: None,
+                identity_fact_predicate: Some("client_id".to_string()),
+                identity_fact_value: None,
+                roles: None,
+                denies: None,
+                ttl_seconds: Some(60),
+            },
+            &cfg,
+        )
+        .expect_err("partial Biscuit identity fact input must fail");
+        let (status, message) = err.into_response_parts();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(message.contains("identity_fact_value is required"));
+    }
+
+    #[test]
+    fn biscuit_request_reports_missing_identity_value_as_bad_request() {
+        let cfg = test_cfg();
+        let status = issue_status(
+            "/biscuit",
+            serde_json::json!({
+                "client_id": "client_7",
+                "identity_fact_predicate": "client_id"
+            }),
+            &cfg,
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn biscuit_request_reports_invalid_identity_predicate_as_bad_request() {
+        let cfg = test_cfg();
+        let status = issue_status(
+            "/biscuit",
+            serde_json::json!({
+                "client_id": "client_7",
+                "identity_fact_predicate": "client-id",
+                "identity_fact_value": "client_7"
+            }),
+            &cfg,
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn biscuit_binary_request_reports_missing_identity_predicate_as_bad_request() {
+        let cfg = test_cfg();
+        let status = issue_status(
+            "/biscuit/binary",
+            serde_json::json!({
+                "client_id": "client_7",
+                "identity_fact_value": "client_7"
+            }),
+            &cfg,
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn biscuit_binary_request_reports_empty_identity_value_as_bad_request() {
+        let cfg = test_cfg();
+        let status = issue_status(
+            "/biscuit/binary",
+            serde_json::json!({
+                "client_id": "client_7",
+                "identity_fact_predicate": "client_id",
+                "identity_fact_value": ""
+            }),
+            &cfg,
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn legacy_jwt_and_biscuit_requests_keep_default_behavior() {
+        let cfg = test_cfg();
+        let jwt_response = handle_jwt(
+            JwtIssueRequest {
+                client_id: Some("client_1".to_string()),
+                subject: None,
+                roles: None,
+                grants: None,
+                denies: None,
+                ttl_seconds: Some(60),
+                issuer: None,
+                audience: None,
+                no_default_roles: None,
+                no_default_grants: Some(true),
+            },
+            &cfg,
+        )
+        .expect("legacy JWT request should still work");
+        let jwt_claims = decode_jwt_claims(&jwt_response.token);
+        assert_eq!(jwt_claims.sub, "client_1");
+        assert_eq!(jwt_claims.client_id.as_deref(), Some("client_1"));
+
+        let (bytes, _, _) = build_biscuit_core(
+            &BiscuitIssueRequest {
+                client_id: Some("client_1".to_string()),
+                topic: None,
+                identity_fact_predicate: None,
+                identity_fact_value: None,
+                roles: None,
+                denies: None,
+                ttl_seconds: Some(60),
+            },
+            &cfg,
+        )
+        .expect("legacy Biscuit request should still work");
+        let biscuit = parse_biscuit(&bytes, &cfg);
+        let identities = biscuit_identity_values(&biscuit, "client_id");
+        assert!(identities.is_empty());
     }
 }

@@ -46,6 +46,9 @@ logger = get_logger(__name__)
 app = typer.Typer(add_completion=False)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RAW_BISCUIT_MARKER = "b64:"
+IdentityBindingMode = Literal["off", "strict"]
+SemanticClass = Literal["capability", "mixed", "parity_identity_bound"]
+ScenarioTokenKind = Literal["jwt", "biscuit"]
 
 
 class NetemConfig(TypedDict, total=False):
@@ -63,7 +66,7 @@ class AuthzConfig(TypedDict, total=False):
     authz_profile: str
     rules: list[dict[str, Any]]
     client_roles: dict[str, list[str]]
-    jwt_identity_binding: str
+    jwt_identity_binding: IdentityBindingMode
 
 
 AUTHZ_BASELINE_STATE: dict[str, object] = {
@@ -91,6 +94,50 @@ AUTHZ_PROFILE_RULE_COUNT: dict[str, int] = {
     "med": 6,
     "complex": 10,
     "custom": 0,
+}
+
+SCENARIO_SEMANTIC_DEFAULTS: tuple[IdentityBindingMode, IdentityBindingMode, SemanticClass] = (
+    "off",
+    "off",
+    "capability",
+)
+
+SCENARIO_SEMANTIC_RULES: dict[SemanticClass, tuple[IdentityBindingMode, IdentityBindingMode]] = {
+    "capability": ("off", "off"),
+    "mixed": ("strict", "off"),
+    "parity_identity_bound": ("strict", "strict"),
+}
+MOSQUITTO_BASE_CONFIGS = frozenset(
+    {
+        Path("mosquitto_base.conf"),
+        Path("tls/mosquitto_base.conf"),
+    }
+)
+
+MIXED_SCENARIO_IDS = frozenset(
+    {
+        "CONTROL-OVERHEAD-KICK-REAUTH-JWT",
+        "CONTROL-OVERHEAD-KICK-REAUTH-BISCUIT",
+        "CONTROL-CHURN-CREATE-ROLE-JWT",
+        "CONTROL-CHURN-CREATE-ROLE-BISCUIT",
+        "CONTROL-CHURN-GROUP-CLIENT-JWT",
+        "CONTROL-CHURN-GROUP-CLIENT-BISCUIT",
+        "CONTROL-CHURN-ACL-MODIFY-JWT",
+        "CONTROL-CHURN-ACL-MODIFY-BISCUIT",
+        "CONTROL-CHURN-LARGE-STATE-GROUP-CLIENT-JWT",
+        "CONTROL-CHURN-LARGE-STATE-GROUP-CLIENT-BISCUIT",
+        "CONTROL-CHURN-NOOP-GROUP-CLIENT-JWT",
+        "CONTROL-CHURN-NOOP-GROUP-CLIENT-BISCUIT",
+        "SQLITE-RBAC-DEEP-CONTROL-JWT",
+        "SQLITE-RBAC-DEEP-CONTROL-BISCUIT",
+    }
+)
+
+HTTP_PARITY_VARIANT_SOURCES: dict[str, tuple[str, str]] = {
+    "HTTP-LATENCY-200MS-PARITY": ("HTTP-LATENCY-200MS-JWT", "HTTP-LATENCY-200MS-BISCUIT"),
+    "HTTP-PROFILE-SIMPLE-PARITY": ("HTTP-PROFILE-SIMPLE-JWT", "HTTP-PROFILE-SIMPLE-BISCUIT"),
+    "HTTP-PROFILE-MED-PARITY": ("HTTP-PROFILE-MED-JWT", "HTTP-PROFILE-MED-BISCUIT"),
+    "HTTP-PROFILE-COMPLEX-PARITY": ("HTTP-PROFILE-COMPLEX-JWT", "HTTP-PROFILE-COMPLEX-BISCUIT"),
 }
 
 
@@ -207,6 +254,9 @@ class ScenarioConfig(TypedDict, total=False):
     authz_profile: str
     authorizer_profile: str
     acl_read_enforcement: Literal["expiry_only", "strict"]
+    jwt_identity_binding: IdentityBindingMode
+    biscuit_identity_binding: IdentityBindingMode
+    semantic_class: SemanticClass
 
 
 def _compose_bin():
@@ -803,6 +853,16 @@ def _resolve_repo_path(path: str | Path) -> Path:
     return REPO_ROOT / resolved_path
 
 
+def _resolve_compose_path(path: str | Path) -> Path:
+    resolved_path = Path(path)
+    if resolved_path.is_absolute():
+        return resolved_path
+    relative = str(resolved_path)
+    if relative.startswith("./"):
+        relative = relative[2:]
+    return REPO_ROOT / "docker" / relative
+
+
 def _load_dynamic_security_snapshot(path: str) -> dict[str, Any]:
     resolved = _resolve_repo_path(path)
     try:
@@ -820,6 +880,331 @@ def _load_dynamic_security_snapshot(path: str) -> dict[str, Any]:
 
 def _effective_scenario_client_count(scenario: ScenarioConfig, default_clients: int) -> int:
     return int(scenario.get("client_count", scenario.get("subscriber_count", default_clients)))
+
+
+def _set_scenario_semantics(
+    scenario: ScenarioConfig,
+    *,
+    jwt_identity_binding: IdentityBindingMode,
+    biscuit_identity_binding: IdentityBindingMode,
+    semantic_class: SemanticClass,
+) -> None:
+    scenario["jwt_identity_binding"] = jwt_identity_binding
+    scenario["biscuit_identity_binding"] = biscuit_identity_binding
+    scenario["semantic_class"] = semantic_class
+
+
+def _apply_scenario_semantic_defaults(scenarios: dict[str, ScenarioConfig]) -> None:
+    default_jwt, default_biscuit, default_semantic_class = SCENARIO_SEMANTIC_DEFAULTS
+    for scenario in scenarios.values():
+        scenario.setdefault("jwt_identity_binding", default_jwt)
+        scenario.setdefault("biscuit_identity_binding", default_biscuit)
+        scenario.setdefault("semantic_class", default_semantic_class)
+
+
+def _clone_authz_config(authz_config: AuthzConfig | None) -> AuthzConfig | None:
+    if authz_config is None:
+        return None
+    cloned = cast(AuthzConfig, dict(authz_config))
+    if "rules" in cloned:
+        cloned["rules"] = [dict(rule) for rule in cloned["rules"]]
+    if "client_roles" in cloned:
+        cloned["client_roles"] = {
+            client_id: list(roles) for client_id, roles in cloned["client_roles"].items()
+        }
+    return cloned
+
+
+def _make_http_parity_variants(
+    scenarios: dict[str, ScenarioConfig],
+    tokens: dict[str, Any],
+) -> dict[str, ScenarioConfig]:
+    parity_variants: dict[str, ScenarioConfig] = {}
+    jwt_strict_token = tokens.get("jwt_strict_sub_client_id")
+    biscuit_strict_token = tokens.get("biscuit_strict_client_id")
+
+    for parity_prefix, (jwt_source_id, biscuit_source_id) in HTTP_PARITY_VARIANT_SOURCES.items():
+        if jwt_strict_token is not None:
+            jwt_source = scenarios[jwt_source_id]
+            jwt_variant = cast(ScenarioConfig, dict(jwt_source))
+            jwt_variant["password"] = cast(str, jwt_strict_token)
+            jwt_variant["client_count"] = 1
+            jwt_variant["authz_config"] = _clone_authz_config(jwt_source.get("authz_config"))
+            if jwt_variant["authz_config"] is not None:
+                jwt_variant["authz_config"]["jwt_identity_binding"] = "strict"
+            _set_scenario_semantics(
+                jwt_variant,
+                jwt_identity_binding="strict",
+                biscuit_identity_binding="strict",
+                semantic_class="parity_identity_bound",
+            )
+            parity_variants[f"{parity_prefix}-JWT"] = jwt_variant
+
+        if biscuit_strict_token is not None:
+            biscuit_source = scenarios[biscuit_source_id]
+            biscuit_variant = cast(ScenarioConfig, dict(biscuit_source))
+            biscuit_variant["password"] = cast(str, biscuit_strict_token)
+            biscuit_variant["client_count"] = 1
+            biscuit_variant["authz_config"] = _clone_authz_config(
+                biscuit_source.get("authz_config")
+            )
+            _set_scenario_semantics(
+                biscuit_variant,
+                jwt_identity_binding="strict",
+                biscuit_identity_binding="strict",
+                semantic_class="parity_identity_bound",
+            )
+            parity_variants[f"{parity_prefix}-BISCUIT"] = biscuit_variant
+
+    return parity_variants
+
+
+def _apply_scenario_classification(
+    scenarios: dict[str, ScenarioConfig],
+    tokens: dict[str, Any],
+) -> dict[str, ScenarioConfig]:
+    _apply_scenario_semantic_defaults(scenarios)
+
+    for scenario_id in MIXED_SCENARIO_IDS:
+        scenario = scenarios.get(scenario_id)
+        if scenario is None:
+            continue
+        _set_scenario_semantics(
+            scenario,
+            jwt_identity_binding="strict",
+            biscuit_identity_binding="off",
+            semantic_class="mixed",
+        )
+
+    scenarios.update(_make_http_parity_variants(scenarios, tokens))
+    return scenarios
+
+
+def _scenario_token_kind(
+    scenario_id: str,
+    scenario: ScenarioConfig,
+) -> ScenarioTokenKind | None:
+    username = scenario.get("username")
+    if username == "jwt":
+        return "jwt"
+    if username == "biscuit":
+        return "biscuit"
+    if "-JWT" in scenario_id and "-BISCUIT" not in scenario_id:
+        return "jwt"
+    if "-BISCUIT" in scenario_id and "-JWT" not in scenario_id:
+        return "biscuit"
+    return None
+
+
+def _scenario_active_identity_binding(
+    scenario_id: str,
+    scenario: ScenarioConfig,
+) -> tuple[ScenarioTokenKind, IdentityBindingMode] | None:
+    token_kind = _scenario_token_kind(scenario_id, scenario)
+    if token_kind is None:
+        return None
+    if token_kind == "jwt":
+        return token_kind, cast(
+            IdentityBindingMode,
+            scenario.get("jwt_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[0]),
+        )
+    return token_kind, cast(
+        IdentityBindingMode,
+        scenario.get("biscuit_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[1]),
+    )
+
+
+def _validate_scenario_semantics(
+    scenario_id: str,
+    scenario: ScenarioConfig,
+    *,
+    default_clients: int,
+) -> None:
+    jwt_identity_binding = cast(
+        IdentityBindingMode,
+        scenario.get("jwt_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[0]),
+    )
+    biscuit_identity_binding = cast(
+        IdentityBindingMode,
+        scenario.get("biscuit_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[1]),
+    )
+    semantic_class = cast(
+        SemanticClass,
+        scenario.get("semantic_class", SCENARIO_SEMANTIC_DEFAULTS[2]),
+    )
+
+    expected_bindings = SCENARIO_SEMANTIC_RULES[semantic_class]
+    actual_bindings = (jwt_identity_binding, biscuit_identity_binding)
+    if actual_bindings != expected_bindings:
+        raise ValueError(
+            f"{scenario_id}: semantic_class={semantic_class} requires "
+            f"jwt_identity_binding={expected_bindings[0]} and "
+            f"biscuit_identity_binding={expected_bindings[1]}, but scenario declares "
+            f"jwt_identity_binding={jwt_identity_binding} and "
+            f"biscuit_identity_binding={biscuit_identity_binding}"
+        )
+
+    active_binding = _scenario_active_identity_binding(scenario_id, scenario)
+    if active_binding is None:
+        return
+
+    token_kind, identity_binding = active_binding
+    effective_client_count = _effective_scenario_client_count(scenario, default_clients)
+    if identity_binding == "strict" and effective_client_count > 1:
+        raise ValueError(
+            f"{scenario_id}: semantic_class={semantic_class} uses "
+            f"{token_kind}_identity_binding=strict with effective_client_count="
+            f"{effective_client_count}, but strict multi-client scenarios require "
+            "per-client token provisioning. Batch 3A does not yet provide generic "
+            "per-client strict provisioning for benchmark workers."
+        )
+
+
+def _scenario_semantics_metadata(
+    scenario_id: str,
+    scenario: ScenarioConfig,
+    *,
+    default_clients: int,
+) -> dict[str, str]:
+    _validate_scenario_semantics(scenario_id, scenario, default_clients=default_clients)
+    return {
+        "jwt_identity_binding": cast(
+            IdentityBindingMode,
+            scenario.get("jwt_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[0]),
+        ),
+        "biscuit_identity_binding": cast(
+            IdentityBindingMode,
+            scenario.get("biscuit_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[1]),
+        ),
+        "semantic_class": cast(
+            SemanticClass,
+            scenario.get("semantic_class", SCENARIO_SEMANTIC_DEFAULTS[2]),
+        ),
+    }
+
+
+def _render_mosquitto_runtime_conf(
+    base_conf_text: str,
+    *,
+    jwt_identity_binding: IdentityBindingMode,
+    biscuit_identity_binding: IdentityBindingMode,
+) -> str:
+    lines = base_conf_text.splitlines()
+    filtered_lines = [
+        line
+        for line in lines
+        if not line.strip().startswith("plugin_opt_jwt_identity_binding ")
+        and not line.strip().startswith("plugin_opt_biscuit_identity_binding ")
+    ]
+    insertion_indices = [
+        idx
+        for idx, line in enumerate(filtered_lines)
+        if line.strip().startswith("plugin_opt_jwt_key_file ")
+        or line.strip().startswith("plugin_opt_biscuit_root_key_file ")
+    ]
+    if not insertion_indices:
+        raise ValueError("Mosquitto config missing JWT/Biscuit key-file plugin options")
+
+    insert_at = insertion_indices[-1] + 1
+    filtered_lines[insert_at:insert_at] = [
+        f"plugin_opt_jwt_identity_binding {jwt_identity_binding}",
+        f"plugin_opt_biscuit_identity_binding {biscuit_identity_binding}",
+    ]
+    return "\n".join(filtered_lines) + "\n"
+
+
+def _materialize_mosquitto_runtime_conf(
+    mosquitto_conf: str,
+    *,
+    jwt_identity_binding: IdentityBindingMode,
+    biscuit_identity_binding: IdentityBindingMode,
+) -> str:
+    base_conf_path = _resolve_compose_path(mosquitto_conf)
+    rendered_conf = _render_mosquitto_runtime_conf(
+        base_conf_path.read_text(encoding="utf-8"),
+        jwt_identity_binding=jwt_identity_binding,
+        biscuit_identity_binding=biscuit_identity_binding,
+    )
+
+    base_conf_relative = _compose_relative_path(mosquitto_conf)
+    generated_relative_dir = base_conf_relative.parent / ".generated"
+    generated_name = (
+        f"{base_conf_relative.stem}.jwt-{jwt_identity_binding}."
+        f"biscuit-{biscuit_identity_binding}{base_conf_relative.suffix}"
+    )
+    generated_relative_path = generated_relative_dir / generated_name
+    generated_conf_path = _resolve_compose_path(generated_relative_path)
+    generated_conf_path.parent.mkdir(parents=True, exist_ok=True)
+    generated_conf_path.write_text(rendered_conf, encoding="utf-8")
+    return f"./{generated_relative_path.as_posix()}"
+
+
+def _compose_relative_path(path: str) -> Path:
+    return Path(path[2:] if path.startswith("./") else path)
+
+
+def _effective_mosquitto_runtime_conf(
+    mosquitto_conf: str,
+    *,
+    jwt_identity_binding: IdentityBindingMode,
+    biscuit_identity_binding: IdentityBindingMode,
+) -> str:
+    effective_conf_relative = _compose_relative_path(mosquitto_conf)
+    if effective_conf_relative in MOSQUITTO_BASE_CONFIGS:
+        return mosquitto_conf
+    return _materialize_mosquitto_runtime_conf(
+        mosquitto_conf,
+        jwt_identity_binding=jwt_identity_binding,
+        biscuit_identity_binding=biscuit_identity_binding,
+    )
+
+
+def _missing_requested_scenario_fixture_keys(
+    scenario_id: str,
+    tokens: dict[str, Any],
+) -> list[str]:
+    base_scenario_id = scenario_id.removesuffix("-TLS")
+    missing_keys: list[str] = []
+
+    if (
+        base_scenario_id in AUTHORIZER_TEMPLATE_SCENARIO_IDS
+        and tokens.get("biscuit_authorizer_template") is None
+    ):
+        missing_keys.append("biscuit_authorizer_template")
+
+    if base_scenario_id.endswith("-JWT"):
+        parity_prefix = base_scenario_id.removesuffix("-JWT")
+        if (
+            parity_prefix in HTTP_PARITY_VARIANT_SOURCES
+            and tokens.get("jwt_strict_sub_client_id") is None
+        ):
+            missing_keys.append("jwt_strict_sub_client_id")
+
+    if base_scenario_id.endswith("-BISCUIT"):
+        parity_prefix = base_scenario_id.removesuffix("-BISCUIT")
+        if (
+            parity_prefix in HTTP_PARITY_VARIANT_SOURCES
+            and tokens.get("biscuit_strict_client_id") is None
+        ):
+            missing_keys.append("biscuit_strict_client_id")
+
+    return missing_keys
+
+
+def _require_requested_scenario_fixtures(
+    scenario_id: str,
+    tokens: dict[str, Any],
+) -> None:
+    missing_keys = _missing_requested_scenario_fixture_keys(scenario_id, tokens)
+    if not missing_keys:
+        return
+
+    quoted_keys = ", ".join(f"{key!r}" for key in missing_keys)
+    key_label = "key" if len(missing_keys) == 1 else "keys"
+    raise SystemExit(
+        f"Scenario {scenario_id!r} requires token fixture {key_label} {quoted_keys}. "
+        "Regenerate tokens with: cargo run -p gen-tokens --bin gen-tokens"
+    )
 
 
 def _find_dynamic_security_client(
@@ -1131,6 +1516,9 @@ class ScenarioModel(BaseModel):
     username: str | None = None
     password: str | None = None
     topic: str | None = None
+    jwt_identity_binding: IdentityBindingMode | None = None
+    biscuit_identity_binding: IdentityBindingMode | None = None
+    semantic_class: SemanticClass | None = None
 
 
 def _http_profile_authz_config(tier: Literal["simple", "med", "complex"]) -> AuthzConfig:
@@ -2751,6 +3139,8 @@ def _build_available_scenarios(
             "message_size": 0,
         }
 
+    available_scenarios = _apply_scenario_classification(available_scenarios, tokens)
+
     for scenario in available_scenarios.values():
         scenario.setdefault("token_issuer_no_default_roles", token_issuer_no_default_roles)
         scenario.setdefault("token_issuer_no_default_grants", token_issuer_no_default_grants)
@@ -2862,21 +3252,9 @@ def main(
         )
         available_scenarios = _expand_tls_matrix(available_scenarios)
 
-        def _is_authorizer_template_scenario_id(scenario_id: str) -> bool:
-            return scenario_id.removesuffix("-TLS") in AUTHORIZER_TEMPLATE_SCENARIO_IDS
-
         # Select requested scenarios
         for scenario_id in scenario_ids:
-            if (
-                _is_authorizer_template_scenario_id(scenario_id)
-                and tokens.get("biscuit_authorizer_template") is None
-            ):
-                raise SystemExit(
-                    "Scenario "
-                    f"{scenario_id!r} requires token fixture key "
-                    "'biscuit_authorizer_template'. "
-                    "Regenerate tokens with: cargo run -p gen-tokens --bin gen-tokens"
-                )
+            _require_requested_scenario_fixtures(scenario_id, tokens)
             if scenario_id in available_scenarios:
                 scenario = available_scenarios[scenario_id].copy()
                 scenario["id"] = scenario_id
@@ -2905,11 +3283,27 @@ def main(
         _ensure_paho_mqtt()
 
     for s in scenarios:
+        scenario_semantics = _scenario_semantics_metadata(
+            s["id"],
+            s,
+            default_clients=clients,
+        )
         scenario_tls = bool(s.get("tls")) or tls_enabled
         mosq_conf = s["mosquitto_conf"]
         if scenario_tls:
             mosq_conf = mosq_conf.replace("./", "./tls/")
-        extra_env = {"MOSQUITTO_CONF": mosq_conf}
+        runtime_mosq_conf = _effective_mosquitto_runtime_conf(
+            mosq_conf,
+            jwt_identity_binding=cast(
+                IdentityBindingMode,
+                scenario_semantics["jwt_identity_binding"],
+            ),
+            biscuit_identity_binding=cast(
+                IdentityBindingMode,
+                scenario_semantics["biscuit_identity_binding"],
+            ),
+        )
+        extra_env = {"MOSQUITTO_CONF": runtime_mosq_conf}
         authz_base = "https://localhost:8443" if scenario_tls else "http://localhost:8081"
         prom_base = "https://localhost:9443" if scenario_tls else "http://localhost:9090"
         token_issuer_base = "https://localhost:8444" if scenario_tls else "http://localhost:8082"
@@ -3129,6 +3523,7 @@ def main(
             "attenuation": s.get("biscuit_attenuate"),
             "delegation": s.get("biscuit_delegate"),
             "scenario_config": {
+                **scenario_semantics,
                 "clients": effective_client_count,
                 "client_count": s.get("client_count"),
                 "messages": messages,

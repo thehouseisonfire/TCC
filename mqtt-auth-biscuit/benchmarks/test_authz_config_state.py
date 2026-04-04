@@ -164,6 +164,77 @@ def test_http_latency_and_hybrid_scenarios_explicitly_set_simple_profile():
         assert authz_config["authz_profile"] == "simple"
 
 
+def test_render_mosquitto_runtime_conf_injects_identity_binding_options() -> None:
+    base_conf = """listener 1883
+allow_anonymous false
+
+plugin /mosquitto/plugins/libmosquitto_auth_biscuit.so
+plugin_opt_jwt_alg ES256
+plugin_opt_jwt_key_file /mosquitto/config/jwt_public.pem
+plugin_opt_biscuit_root_key_file /mosquitto/config/biscuit_public.key
+
+plugin_opt_policy_mode http
+plugin_opt_http_url http://authz:8081/authorize
+plugin_opt_cache_ttl_seconds 3600
+plugin_opt_ext_auth_method token
+"""
+
+    rendered = rs._render_mosquitto_runtime_conf(
+        base_conf,
+        jwt_identity_binding="strict",
+        biscuit_identity_binding="off",
+    )
+
+    assert "plugin_opt_jwt_identity_binding strict\n" in rendered
+    assert "plugin_opt_biscuit_identity_binding off\n" in rendered
+    assert "listener 1883\n" in rendered
+    assert "plugin_opt_policy_mode http\n" in rendered
+    assert rendered.count("plugin_opt_jwt_identity_binding ") == 1
+    assert rendered.count("plugin_opt_biscuit_identity_binding ") == 1
+
+
+def test_effective_mosquitto_runtime_conf_keeps_base_config_path() -> None:
+    assert (
+        rs._effective_mosquitto_runtime_conf(
+            "./mosquitto_base.conf",
+            jwt_identity_binding="strict",
+            biscuit_identity_binding="off",
+        )
+        == "./mosquitto_base.conf"
+    )
+
+
+def test_effective_mosquitto_runtime_conf_keeps_tls_base_config_path() -> None:
+    assert (
+        rs._effective_mosquitto_runtime_conf(
+            "./tls/mosquitto_base.conf",
+            jwt_identity_binding="strict",
+            biscuit_identity_binding="off",
+        )
+        == "./tls/mosquitto_base.conf"
+    )
+
+
+def test_effective_mosquitto_runtime_conf_materializes_plugin_backed_config() -> None:
+    generated_conf = rs._resolve_compose_path(
+        ".generated/mosquitto.jwt-strict.biscuit-off.conf"
+    )
+    if generated_conf.exists():
+        generated_conf.unlink()
+
+    try:
+        rendered = rs._effective_mosquitto_runtime_conf(
+            "./mosquitto.conf",
+            jwt_identity_binding="strict",
+            biscuit_identity_binding="off",
+        )
+        assert rendered == "./.generated/mosquitto.jwt-strict.biscuit-off.conf"
+        assert generated_conf.exists()
+    finally:
+        if generated_conf.exists():
+            generated_conf.unlink()
+
+
 def test_default_dynsec_snapshot_preserves_publish_and_fanout_baselines():
     # NOTE: Calls rs._resolve_repo_path, an internal helper. If that helper is
     # renamed, this test will fail at call time rather than via a typed interface.

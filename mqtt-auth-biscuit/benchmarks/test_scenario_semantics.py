@@ -12,6 +12,14 @@ class _SelectedScenario(RuntimeError):
     pass
 
 
+MULTI_CLIENT_FANOUT_PARITY_SCENARIOS = (
+    "HTTP-ACL-READ-FANOUT-STRICT-MED-ALLOW-PARITY-JWT-50",
+    "HTTP-ACL-READ-FANOUT-STRICT-COMPLEX-DENY-PARITY-BISCUIT-10",
+    "HYBRID-ACL-READ-FANOUT-STRICT-MED-ALLOW-PARITY-BISCUIT-100",
+    "HYBRID-ACL-READ-FANOUT-STRICT-SIMPLE-DENY-PARITY-JWT-10",
+)
+
+
 def _placeholder_tokens() -> dict[str, str]:
     source = Path(rs.__file__).read_text(encoding="utf-8")
     keys = set(re.findall(r'tokens\["([^"]+)"\]', source))
@@ -119,7 +127,7 @@ def test_capability_scenarios_keep_identity_binding_disabled(scenario_id: str) -
         ("TEST-STRICT-MULTI-CLIENT-BISCUIT", "biscuit"),
     ),
 )
-def test_multi_client_strict_scenarios_fail_without_per_client_provisioning(
+def test_multi_client_strict_scenarios_validate_when_per_client_provisioning_is_available(
     scenario_id: str,
     username: str,
 ) -> None:
@@ -134,8 +142,34 @@ def test_multi_client_strict_scenarios_fail_without_per_client_provisioning(
         "semantic_class": "parity_identity_bound",
     }
 
-    with pytest.raises(ValueError, match="per-client token provisioning"):
-        rs._validate_scenario_semantics(scenario_id, scenario, default_clients=50)
+    assert rs._scenario_semantics_metadata(
+        scenario_id,
+        scenario,
+        default_clients=50,
+    ) == {
+        "jwt_identity_binding": "strict",
+        "biscuit_identity_binding": "strict",
+        "semantic_class": "parity_identity_bound",
+    }
+
+
+def test_multi_client_strict_scenarios_fail_when_harness_cannot_determine_token_kind() -> None:
+    scenario: rs.ScenarioConfig = {
+        "id": "TEST-STRICT-MULTI-CLIENT-UNKNOWN",
+        "password": "shared-token",
+        "topic": "sensors/{client_id}/temp",
+        "client_count": 10,
+        "jwt_identity_binding": "strict",
+        "biscuit_identity_binding": "strict",
+        "semantic_class": "parity_identity_bound",
+    }
+
+    with pytest.raises(ValueError, match="cannot determine how to provision"):
+        rs._validate_scenario_semantics(
+            scenario["id"],
+            scenario,
+            default_clients=50,
+        )
 
 
 def test_multi_client_capability_scenarios_may_reuse_shared_tokens_when_declared() -> None:
@@ -160,6 +194,77 @@ def test_multi_client_capability_scenarios_may_reuse_shared_tokens_when_declared
         "biscuit_identity_binding": "off",
         "semantic_class": "capability",
     }
+
+
+@pytest.mark.parametrize("scenario_id", MULTI_CLIENT_FANOUT_PARITY_SCENARIOS)
+def test_multi_client_fanout_parity_variants_are_runnable_and_strict(
+    scenario_id: str,
+) -> None:
+    scenarios = _scenario_registry()
+    scenario = scenarios[scenario_id]
+
+    assert scenario["password"] == ""
+    assert scenario.get("fanout_publisher_password") == ""
+    assert rs._scenario_semantics_metadata(
+        scenario_id,
+        scenario,
+        default_clients=50,
+    ) == {
+        "jwt_identity_binding": "strict",
+        "biscuit_identity_binding": "strict",
+        "semantic_class": "parity_identity_bound",
+    }
+
+
+def test_multi_client_fanout_parity_variants_do_not_depend_on_strict_fixture_tokens() -> None:
+    tokens = _placeholder_tokens()
+    tokens.pop("jwt_strict_sub_client_id", None)
+    tokens.pop("biscuit_strict_client_id", None)
+
+    scenarios = rs._build_available_scenarios(
+        tokens,
+        token_issuer_no_default_roles=False,
+        token_issuer_no_default_grants=False,
+    )
+
+    assert "HTTP-LATENCY-200MS-PARITY-JWT" not in scenarios
+    assert "HTTP-LATENCY-200MS-PARITY-BISCUIT" not in scenarios
+    assert "HTTP-ACL-READ-FANOUT-STRICT-MED-ALLOW-PARITY-JWT-50" in scenarios
+    assert "HYBRID-ACL-READ-FANOUT-STRICT-SIMPLE-DENY-PARITY-BISCUIT-10" in scenarios
+
+
+def test_token_acl_read_fanout_strict_scenarios_do_not_register_parity_variants() -> None:
+    scenarios = _scenario_registry()
+
+    assert "TOKEN-ACL-READ-FANOUT-STRICT-ALLOW-PARITY-JWT-50" not in scenarios
+    assert "TOKEN-ACL-READ-FANOUT-STRICT-ALLOW-PARITY-BISCUIT-50" not in scenarios
+    assert "TOKEN-ACL-READ-FANOUT-STRICT-DENY-PARITY-JWT-10" not in scenarios
+    assert "TOKEN-ACL-READ-FANOUT-STRICT-DENY-PARITY-BISCUIT-10" not in scenarios
+
+
+def test_multi_client_http_hybrid_jwt_parity_variants_enable_strict_authz_binding() -> None:
+    scenarios = _scenario_registry()
+
+    for scenario_id in (
+        "HTTP-ACL-READ-FANOUT-STRICT-MED-ALLOW-PARITY-JWT-50",
+        "HYBRID-ACL-READ-FANOUT-STRICT-SIMPLE-DENY-PARITY-JWT-10",
+    ):
+        authz_config = scenarios[scenario_id]["authz_config"]
+        assert authz_config is not None
+        assert authz_config["jwt_identity_binding"] == "strict"
+
+
+def test_requested_http_hybrid_multi_client_parity_scenarios_do_not_require_strict_fixture_tokens() -> (
+    None
+):
+    tokens = _placeholder_tokens()
+    tokens.pop("jwt_strict_sub_client_id", None)
+    tokens.pop("biscuit_strict_client_id", None)
+
+    rs._require_requested_scenario_fixtures(
+        "HTTP-ACL-READ-FANOUT-STRICT-MED-ALLOW-PARITY-JWT-50",
+        tokens,
+    )
 
 
 def test_legacy_token_fixtures_do_not_register_parity_scenarios() -> None:

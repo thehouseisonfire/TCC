@@ -139,6 +139,7 @@ HTTP_PARITY_VARIANT_SOURCES: dict[str, tuple[str, str]] = {
     "HTTP-PROFILE-MED-PARITY": ("HTTP-PROFILE-MED-JWT", "HTTP-PROFILE-MED-BISCUIT"),
     "HTTP-PROFILE-COMPLEX-PARITY": ("HTTP-PROFILE-COMPLEX-JWT", "HTTP-PROFILE-COMPLEX-BISCUIT"),
 }
+STRICT_FANOUT_PARITY_POLICY_SOURCES = frozenset({"http", "hybrid"})
 
 
 def _coerce_fail_rate(value: object, *, context: str) -> float:
@@ -238,6 +239,7 @@ class ScenarioConfig(TypedDict, total=False):
     sqlite_seed_subscribers: int
     token_issuer_no_default_roles: bool
     token_issuer_no_default_grants: bool
+    biscuit_client_id_fact: str
     tls: bool
     # CONTROL scenario support
     control_topic: str
@@ -518,6 +520,85 @@ def _prom_query(base_url: str, query: str, ca_file: str | None, insecure: bool):
         return resp.json()
 
 
+def _python_subprocess_env(extra_env: dict[str, str] | None = None) -> dict[str, str]:
+    env = os.environ.copy()
+    repo_pythonpath = str(REPO_ROOT)
+    current_pythonpath = env.get("PYTHONPATH")
+    if current_pythonpath:
+        paths = current_pythonpath.split(os.pathsep)
+        if repo_pythonpath not in paths:
+            env["PYTHONPATH"] = os.pathsep.join([repo_pythonpath, current_pythonpath])
+    else:
+        env["PYTHONPATH"] = repo_pythonpath
+    if extra_env:
+        env.update(extra_env)
+    return env
+
+
+def _health_check(name: str, base_url: str, ca_file: str | None, insecure: bool) -> None:
+    verify: bool | str = True
+    if insecure:
+        verify = False
+    elif ca_file:
+        verify = ca_file
+    transport = httpx.HTTPTransport(http1=False, http2=True)
+    with httpx.Client(verify=verify, timeout=5.0, transport=transport) as client:
+        resp = client.get(base_url.rstrip("/") + "/health")
+        resp.raise_for_status()
+        payload = resp.json()
+    if not payload.get("ok"):
+        raise RuntimeError(f"{name} health check failed: {payload}")
+
+
+def _wait_for_service_health(
+    name: str,
+    base_url: str,
+    ca_file: str | None,
+    insecure: bool,
+    *,
+    timeout_seconds: float = 60.0,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            _health_check(name, base_url, ca_file, insecure)
+            return
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            time.sleep(1.0)
+    raise RuntimeError(
+        f"timed out waiting for {name} health endpoint at {base_url.rstrip('/')}/health: "
+        f"{last_error!r}"
+    )
+
+
+def _wait_for_prometheus_api(
+    base_url: str,
+    ca_file: str | None,
+    insecure: bool,
+    *,
+    timeout_seconds: float = 60.0,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            result = _prom_query(base_url, "up", ca_file, insecure)
+            if result.get("status") == "success":
+                return
+            last_error = RuntimeError(
+                f"unexpected Prometheus status {result.get('status')!r} for query API readiness"
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+        time.sleep(1.0)
+    raise RuntimeError(
+        f"timed out waiting for Prometheus query API at {base_url.rstrip('/')}/api/v1/query: "
+        f"{last_error!r}"
+    )
+
+
 def _resource_snapshot(
     base_url: str,
     ca_file: str | None,
@@ -602,6 +683,40 @@ def _validate_resource_snapshot(
         )
 
 
+def _wait_for_non_empty_resource_snapshot(
+    base_url: str,
+    ca_file: str | None,
+    insecure: bool,
+    *,
+    compose_files: list[str] | None = None,
+    compose_project_name: str | None = None,
+    timeout_seconds: float = 45.0,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            snap = _resource_snapshot(
+                base_url,
+                ca_file,
+                insecure,
+                compose_files=compose_files,
+                compose_project_name=compose_project_name,
+            )
+            _validate_resource_snapshot(
+                snap,
+                scenario_id="STARTUP-READINESS",
+                run_index=0,
+            )
+            return snap
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            time.sleep(2.0)
+    raise RuntimeError(
+        "timed out waiting for non-empty Prometheus vectors for mosquitto: " f"{last_error!r}"
+    )
+
+
 def _run_loadgen(
     tokens: dict,
     host: str,
@@ -625,6 +740,9 @@ def _run_loadgen(
     token_issuer_no_default_roles: bool,
     token_issuer_no_default_grants: bool,
     token_refresh_codes: str | None,
+    jwt_identity_binding: IdentityBindingMode,
+    biscuit_identity_binding: IdentityBindingMode,
+    biscuit_client_id_fact: str,
     tls_enabled: bool,
     tls_ca_file: str | None,
     tls_insecure: bool,
@@ -721,6 +839,9 @@ def _run_loadgen(
         cmd.append("--token-issuer-no-default-grants")
     if token_refresh_codes:
         cmd.extend(["--token-refresh-codes", token_refresh_codes])
+    cmd.extend(["--jwt-identity-binding", jwt_identity_binding])
+    cmd.extend(["--biscuit-identity-binding", biscuit_identity_binding])
+    cmd.extend(["--biscuit-client-id-fact", biscuit_client_id_fact])
     if tls_enabled:
         cmd.append("--tls")
     if tls_ca_file:
@@ -817,7 +938,12 @@ def _run_loadgen(
     if fanout_churn_sqlite_subscribers is not None:
         cmd.extend(["--fanout-churn-sqlite-subscribers", str(fanout_churn_sqlite_subscribers)])
 
-    out = subprocess.check_output(cmd, cwd=REPO_ROOT, text=True)
+    out = subprocess.check_output(
+        cmd,
+        cwd=REPO_ROOT,
+        text=True,
+        env=_python_subprocess_env(),
+    )
     return json.loads(out)
 
 
@@ -959,6 +1085,55 @@ def _make_http_parity_variants(
     return parity_variants
 
 
+def _multi_client_fanout_parity_variant_id(
+    scenario_id: str,
+    token_kind: ScenarioTokenKind,
+) -> str:
+    token_label = token_kind.upper() if token_kind == "jwt" else "BISCUIT"
+    source_fragment = f"-{token_label}-"
+    parity_fragment = f"-PARITY-{token_label}-"
+    if source_fragment not in scenario_id:
+        raise ValueError(f"cannot derive parity variant id for {scenario_id}")
+    return scenario_id.replace(source_fragment, parity_fragment, 1)
+
+
+def _make_multi_client_fanout_parity_variants(
+    scenarios: dict[str, ScenarioConfig],
+) -> dict[str, ScenarioConfig]:
+    parity_variants: dict[str, ScenarioConfig] = {}
+
+    for scenario_id, scenario in scenarios.items():
+        if scenario.get("traffic_pattern") != "fanout":
+            continue
+        if scenario.get("acl_read_enforcement") != "strict":
+            continue
+        if scenario.get("policy_source") not in STRICT_FANOUT_PARITY_POLICY_SOURCES:
+            continue
+        if _effective_scenario_client_count(scenario, default_clients=1) <= 1:
+            continue
+
+        token_kind = _scenario_token_kind(scenario_id, scenario)
+        if token_kind is None:
+            continue
+
+        variant = cast(ScenarioConfig, dict(scenario))
+        variant["password"] = ""
+        if "fanout_publisher_password" in variant:
+            variant["fanout_publisher_password"] = ""
+        variant["authz_config"] = _clone_authz_config(scenario.get("authz_config"))
+        if token_kind == "jwt" and variant["authz_config"] is not None:
+            variant["authz_config"]["jwt_identity_binding"] = "strict"
+        _set_scenario_semantics(
+            variant,
+            jwt_identity_binding="strict",
+            biscuit_identity_binding="strict",
+            semantic_class="parity_identity_bound",
+        )
+        parity_variants[_multi_client_fanout_parity_variant_id(scenario_id, token_kind)] = variant
+
+    return parity_variants
+
+
 def _apply_scenario_classification(
     scenarios: dict[str, ScenarioConfig],
     tokens: dict[str, Any],
@@ -977,6 +1152,7 @@ def _apply_scenario_classification(
         )
 
     scenarios.update(_make_http_parity_variants(scenarios, tokens))
+    scenarios.update(_make_multi_client_fanout_parity_variants(scenarios))
     return scenarios
 
 
@@ -1014,6 +1190,54 @@ def _scenario_active_identity_binding(
     )
 
 
+def _scenario_requires_per_client_strict_provisioning(
+    scenario_id: str,
+    scenario: ScenarioConfig,
+    *,
+    default_clients: int,
+) -> tuple[ScenarioTokenKind, IdentityBindingMode] | None:
+    effective_client_count = _effective_scenario_client_count(scenario, default_clients)
+    if effective_client_count <= 1:
+        return None
+    active_binding = _scenario_active_identity_binding(scenario_id, scenario)
+    if active_binding is None:
+        return None
+    _, identity_binding = active_binding
+    if identity_binding != "strict":
+        return None
+    return active_binding
+
+
+def _supports_per_client_strict_provisioning(
+    scenario_id: str,
+    scenario: ScenarioConfig,
+    *,
+    default_clients: int,
+) -> bool:
+    effective_client_count = _effective_scenario_client_count(scenario, default_clients)
+    if effective_client_count <= 1:
+        return True
+    jwt_identity_binding = cast(
+        IdentityBindingMode,
+        scenario.get("jwt_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[0]),
+    )
+    biscuit_identity_binding = cast(
+        IdentityBindingMode,
+        scenario.get("biscuit_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[1]),
+    )
+    if jwt_identity_binding != "strict" and biscuit_identity_binding != "strict":
+        return True
+    required_binding = _scenario_requires_per_client_strict_provisioning(
+        scenario_id,
+        scenario,
+        default_clients=default_clients,
+    )
+    if required_binding is None:
+        return _scenario_token_kind(scenario_id, scenario) is not None
+    token_kind, _ = required_binding
+    return token_kind in {"jwt", "biscuit"}
+
+
 def _validate_scenario_semantics(
     scenario_id: str,
     scenario: ScenarioConfig,
@@ -1044,19 +1268,22 @@ def _validate_scenario_semantics(
             f"biscuit_identity_binding={biscuit_identity_binding}"
         )
 
-    active_binding = _scenario_active_identity_binding(scenario_id, scenario)
-    if active_binding is None:
-        return
-
-    token_kind, identity_binding = active_binding
     effective_client_count = _effective_scenario_client_count(scenario, default_clients)
-    if identity_binding == "strict" and effective_client_count > 1:
+    strict_multi_client_declared = effective_client_count > 1 and (
+        jwt_identity_binding == "strict" or biscuit_identity_binding == "strict"
+    )
+    if strict_multi_client_declared and not _supports_per_client_strict_provisioning(
+        scenario_id,
+        scenario,
+        default_clients=default_clients,
+    ):
+        token_kind = _scenario_token_kind(scenario_id, scenario)
+        token_label = f"{token_kind}_identity_binding" if token_kind is not None else "token kind"
         raise ValueError(
             f"{scenario_id}: semantic_class={semantic_class} uses "
-            f"{token_kind}_identity_binding=strict with effective_client_count="
-            f"{effective_client_count}, but strict multi-client scenarios require "
-            "per-client token provisioning. Batch 3A does not yet provide generic "
-            "per-client strict provisioning for benchmark workers."
+            f"{token_label}=strict with effective_client_count={effective_client_count}, "
+            "but the harness cannot determine how to "
+            "provision one strict-bound token per client identity for this scenario."
         )
 
 
@@ -1505,7 +1732,12 @@ def _run_mqtt5_auth(
         cmd.extend(["--tls-ca-file", tls_ca_file])
     if tls_insecure:
         cmd.append("--tls-insecure")
-    out = subprocess.check_output(cmd, cwd=REPO_ROOT, text=True)
+    out = subprocess.check_output(
+        cmd,
+        cwd=REPO_ROOT,
+        text=True,
+        env=_python_subprocess_env(),
+    )
     return json.loads(out)
 
 
@@ -3385,12 +3617,25 @@ def main(
             )
             Path(tcpdump_output_dir).mkdir(parents=True, exist_ok=True)
 
+        compose_project_name = extra_env.get("COMPOSE_PROJECT_NAME") or os.environ.get(
+            "COMPOSE_PROJECT_NAME"
+        )
         _compose(
             services_to_deploy,
             extra_env=extra_env,
             compose_files=compose_files,
         )
         time.sleep(1)
+        _wait_for_service_health("authz", authz_base, tls_ca, tls_insecure)
+        _wait_for_service_health("token-issuer", token_issuer_base, tls_ca, tls_insecure)
+        _wait_for_prometheus_api(prom_base, tls_ca, tls_insecure)
+        _wait_for_non_empty_resource_snapshot(
+            prom_base,
+            tls_ca,
+            tls_insecure,
+            compose_files=compose_files,
+            compose_project_name=compose_project_name,
+        )
 
         # Run iperf3 baseline measurement before test batch
         iperf3_baseline_result: dict[str, Any] = {}
@@ -3611,9 +3856,6 @@ def main(
 
         _validate_dynamic_security_alignment(s["id"], s, default_clients=clients)
         dynsec_baseline = _capture_dynamic_security_baseline()
-        compose_project_name = extra_env.get("COMPOSE_PROJECT_NAME") or os.environ.get(
-            "COMPOSE_PROJECT_NAME"
-        )
         try:
             for idx in range(repeats):
                 generated_dynsec_path: str | None = None
@@ -3655,6 +3897,18 @@ def main(
                         scenario_qos = int(s.get("qos", qos))
                         scenario_qos_distribution = s.get("qos_distribution", qos_distribution)
                         scenario_clients = _effective_scenario_client_count(s, clients)
+                        strict_startup_provisioning = (
+                            _scenario_requires_per_client_strict_provisioning(
+                                s["id"],
+                                s,
+                                default_clients=clients,
+                            )
+                        )
+                        startup_token_kind = (
+                            strict_startup_provisioning[0]
+                            if strict_startup_provisioning is not None
+                            else None
+                        )
                         res = _run_loadgen(
                             tokens=tokens,
                             host=mqtt_host,
@@ -3672,9 +3926,13 @@ def main(
                             qos_distribution=scenario_qos_distribution,
                             message_size=int(s.get("message_size", 0)),
                             sync_connect=bool(s.get("sync_connect", False)),
-                            token_issuer_url=token_issuer_base if token_refresh else None,
+                            token_issuer_url=(
+                                token_issuer_base
+                                if token_refresh or strict_startup_provisioning is not None
+                                else None
+                            ),
                             token_issuer_kind=(
-                                token_refresh.get("kind") if token_refresh else None
+                                token_refresh.get("kind") if token_refresh else startup_token_kind
                             ),
                             token_issuer_ttl=(
                                 token_refresh.get("ttl_seconds") if token_refresh else None
@@ -3682,6 +3940,18 @@ def main(
                             token_issuer_no_default_roles=token_issuer_no_default_roles,
                             token_issuer_no_default_grants=token_issuer_no_default_grants,
                             token_refresh_codes=token_refresh_codes,
+                            jwt_identity_binding=cast(
+                                IdentityBindingMode,
+                                scenario_semantics["jwt_identity_binding"],
+                            ),
+                            biscuit_identity_binding=cast(
+                                IdentityBindingMode,
+                                scenario_semantics["biscuit_identity_binding"],
+                            ),
+                            biscuit_client_id_fact=cast(
+                                str,
+                                s.get("biscuit_client_id_fact", "client_id"),
+                            ),
                             tls_enabled=scenario_tls,
                             tls_ca_file=tls_ca,
                             tls_insecure=tls_insecure,
@@ -3949,7 +4219,11 @@ def main(
     else:
         agg_cmd.extend(["--out-csv", str(summary_csv_path)])
     try:
-        subprocess.check_call(agg_cmd, cwd=REPO_ROOT)
+        subprocess.check_call(
+            agg_cmd,
+            cwd=REPO_ROOT,
+            env=_python_subprocess_env(),
+        )
     except subprocess.CalledProcessError as exc:
         logger.warning(
             "Aggregation failed (%s); scenario results preserved",

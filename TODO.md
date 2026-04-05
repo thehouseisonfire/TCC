@@ -510,9 +510,9 @@ Recommended batching for implementation:
 - Batch 1: steps 1 to 4 (Completed)
 - Batch 2: steps 5 to 6 (Completed)
 - Batch 3A: steps 7 to 9 (Completed)
-- Feature: step 10
-- Batch 3B: step 11
-- Batch 4: steps 12 to 13
+- Feature: step 10 (Completed)
+- Batch 3B: step 11 (Completed)
+- Batch 4: steps 12 to 13 (Completed)
 
 ## Acceptance Criteria
 

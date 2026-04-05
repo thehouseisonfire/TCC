@@ -216,9 +216,7 @@ def test_effective_mosquitto_runtime_conf_keeps_tls_base_config_path() -> None:
 
 
 def test_effective_mosquitto_runtime_conf_materializes_plugin_backed_config() -> None:
-    generated_conf = rs._resolve_compose_path(
-        ".generated/mosquitto.jwt-strict.biscuit-off.conf"
-    )
+    generated_conf = rs._resolve_compose_path(".generated/mosquitto.jwt-strict.biscuit-off.conf")
     if generated_conf.exists():
         generated_conf.unlink()
 

@@ -30,6 +30,19 @@ logger = get_logger(__name__)
 app = typer.Typer(add_completion=False)
 
 
+def _python_subprocess_env() -> dict[str, str]:
+    env = os.environ.copy()
+    repo_pythonpath = str(REPO_ROOT)
+    current_pythonpath = env.get("PYTHONPATH")
+    if current_pythonpath:
+        paths = current_pythonpath.split(os.pathsep)
+        if repo_pythonpath not in paths:
+            env["PYTHONPATH"] = os.pathsep.join([repo_pythonpath, current_pythonpath])
+    else:
+        env["PYTHONPATH"] = repo_pythonpath
+    return env
+
+
 def _http_client(
     ca_file: str | None,
     insecure: bool,
@@ -113,7 +126,12 @@ def _run_loadgen(
         cmd.extend(["--tls-ca-file", tls_ca_file])
     if tls_insecure:
         cmd.append("--tls-insecure")
-    out = subprocess.check_output(cmd, cwd=REPO_ROOT, text=True)
+    out = subprocess.check_output(
+        cmd,
+        cwd=REPO_ROOT,
+        text=True,
+        env=_python_subprocess_env(),
+    )
     return json.loads(out)
 
 
@@ -146,7 +164,12 @@ def _run_mqtt5_auth(
         cmd.extend(["--tls-ca-file", tls_ca_file])
     if tls_insecure:
         cmd.append("--tls-insecure")
-    out = subprocess.check_output(cmd, cwd=REPO_ROOT, text=True)
+    out = subprocess.check_output(
+        cmd,
+        cwd=REPO_ROOT,
+        text=True,
+        env=_python_subprocess_env(),
+    )
     return json.loads(out)
 
 

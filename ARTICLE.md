@@ -103,9 +103,11 @@ Due to the architectural characteristics of each technology, the PIP query flow 
 
 **Biscuit Flow:** Since Biscuit supports attenuation (but not expansion) of rights, the Issuer must know the maximum permissions at the time of token creation. The query to the primary PIP occurs mostly at issuance. From this point on, the token itself acts as a portable PIP until its invalidation, reducing the need for external queries.
 
-**JWT Flow:** Since standard JWT does not act as an effective capability token (it only carries identity or role claims), the PDP frequently needs to query the PIP in real-time at each request to validate complex or granular permissions.
+**JWT Flow:** In this harness, JWT scenarios are intentionally split across two semantics. Capability scenarios keep `jwt_identity_binding=off`, so bearer-token possession is sufficient and shared-token fan-out remains a valid benchmark shape when declared. Mixed and parity scenarios enable `jwt_identity_binding=strict`, binding the JWT identity to the live MQTT `client_id` and rejecting mismatches before session caching.
 
-To ensure test parity and avoid bias, common scenarios in JWT usage, where the token performs only the identification role and the PDP fetches detailed permissions at access time, will also be replicated in the Biscuit architecture for direct comparison purposes.
+**Scenario identity semantics:** The benchmark inventory now makes three classes explicit. `capability` scenarios set `jwt_identity_binding=off` and `biscuit_identity_binding=off`; `mixed` scenarios set `jwt_identity_binding=strict` and `biscuit_identity_binding=off`; `parity_identity_bound` scenarios set both to `strict`. Only the last class may claim equivalent identity semantics between JWT and Biscuit. Biscuit attenuation and delegation scenarios remain intentionally outside parity because they measure capability-specific features rather than matched identity binding.
+
+To ensure test parity and avoid bias, the project distinguishes policy parity from identity parity. Shared-token and fan-out scenarios can still be valid capability experiments, but they are not identity-bound parity scenarios. Runnable multi-client parity slices now require strict per-client provisioning at startup so each MQTT client receives its own strict-bound JWT or Biscuit instead of reusing a shared token.
 
 For reproducibility, HTTP/hybrid PDP experiments use an explicit rule-engine
 configuration per scenario. The authz-server reset state is a neutral baseline
@@ -118,7 +120,7 @@ The proposed solution consists of developing an extension module for Mosquitto, 
 
 Using the `cbindgen` tool, C headers (`.h`) will be generated that expose Rust functions to the Mosquitto plugin API (focused on version 2.0+ and MQTT 5.0 protocol). The exported functions will intercept *broker* events, specifically: `MOSQ_EVT_BASIC_AUTH` and `MOSQ_EVT_EXT_AUTH` for authentication; and `MOSQ_EVT_ACL_CHECK`, `MOSQ_EVT_MESSAGE`, and `MOSQ_EVT_CONTROL` for publication, subscription, and control authorization.
 
-For issuance and verification, the module will integrate the `jsonwebtoken` and `biscuit_auth` libraries. By default, it is assumed that clients will request tokens from an external authority before contacting the *broker*. The server will have the root public key pre-configured.
+For issuance and verification, the module will integrate the `jsonwebtoken` and `biscuit_auth` libraries. Clients request tokens from an external authority before contacting the *broker*, and the server has the root public key pre-configured. In capability scenarios, a shared fixture token may still be reused intentionally. In strict multi-client parity scenarios, however, the harness provisions one token per client identity so the configured `client_id` binding is actually exercised rather than assumed.
 
 The connection flow will follow MQTT 5.0 specifications:
 1. Clients will send their tokens through the `password` field of the `CONNECT` packet. The 65kB limit (defined by the protocol) is sufficient to accommodate both token types.

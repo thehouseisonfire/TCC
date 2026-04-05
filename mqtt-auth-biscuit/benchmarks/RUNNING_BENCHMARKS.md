@@ -26,6 +26,34 @@ This means benchmark semantics must be applied explicitly per scenario after
 `/config/reset`. The harness no longer relies on an implicit prefix-based allow
 mode at startup or reset time.
 
+## Scenario Semantics
+
+The scenario registry now classifies runnable scenarios explicitly:
+
+| `semantic_class` | JWT binding | Biscuit binding | Meaning |
+| --- | --- | --- | --- |
+| `capability` | `off` | `off` | Bearer/capability semantics. Shared-token reuse is valid when the scenario declares it. |
+| `mixed` | `strict` | `off` | JWT is identity-bound, Biscuit is not. These scenarios are intentionally not parity. |
+| `parity_identity_bound` | `strict` | `strict` | The only class that may claim equivalent identity semantics. |
+
+Current inventory rules:
+
+- Single-client HTTP parity lives in `HTTP-LATENCY-200MS-PARITY-*` and
+  `HTTP-PROFILE-{SIMPLE,MED,COMPLEX}-PARITY-*`.
+- Multi-client parity lives in the generated strict fan-out `-PARITY-` families
+  for HTTP and hybrid `ACL_READ` scenarios.
+- The non-`PARITY` strict fan-out families remain `capability`; they still use
+  shared-token multi-client semantics and therefore must not be described as
+  identity-bound parity.
+- Biscuit attenuation/delegation scenarios are intentionally `capability`, not
+  parity.
+- Runnable multi-client parity now depends on per-client strict provisioning at
+  startup. The harness fetches one strict-bound token per MQTT client identity
+  instead of reusing a shared token.
+
+The full family-to-class mapping is the source-of-truth table in
+`../../SCENARIO_POLICIES.md`.
+
 ## Prerequisites
 
 - **Rust**: For building the plugin and token generator.
@@ -308,6 +336,21 @@ Scenario families:
 - Hybrid strict fan-out:
   - `HYBRID-ACL-READ-FANOUT-STRICT-{SIMPLE|MED|COMPLEX}-{ALLOW|DENY}-{JWT|BISCUIT}-10`
   - `HYBRID-ACL-READ-FANOUT-STRICT-MED-ALLOW-{JWT|BISCUIT}-{50,100}`
+
+Semantic interpretation:
+- The base families above are `capability` (`jwt_identity_binding=off`,
+  `biscuit_identity_binding=off`) even though `ACL_READ` enforcement is strict.
+  They are valid read-path authorization benchmarks, but not identity-bound
+  parity scenarios.
+- Identity-bound parity is provided by the generated `-PARITY-` variants of the
+  HTTP/Hybrid strict `ACL_READ` fan-out families. Those runs set both binding
+  modes to `strict`.
+- For multi-client `-PARITY-` runs, the scenario password is intentionally left
+  blank so `loadgen.py` provisions one token per client identity via the token
+  issuer. Reusing a shared token would contradict the parity semantics.
+- Token-backed strict fan-out stays outside parity: startup-issued tokens do not
+  preserve the source fixture's explicit fan-out allow/deny claims, so those
+  runs remain `capability` scenarios.
 
 Result metadata now records strict fan-out context per run:
 - `scenario_config.policy_source`

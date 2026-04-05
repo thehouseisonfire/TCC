@@ -36,6 +36,9 @@ class _FanoutKwargs(TypedDict):
     token_issuer_no_default_roles: bool
     token_issuer_no_default_grants: bool
     token_refresh_codes: set[int]
+    jwt_identity_binding: str
+    biscuit_identity_binding: str
+    biscuit_client_id_fact: str
     tls_enabled: bool
     tls_ca_file: str | None
     tls_insecure: bool
@@ -93,6 +96,9 @@ def _fanout_kwargs() -> _FanoutKwargs:
         "token_issuer_no_default_roles": False,
         "token_issuer_no_default_grants": False,
         "token_refresh_codes": set(),
+        "jwt_identity_binding": "off",
+        "biscuit_identity_binding": "off",
+        "biscuit_client_id_fact": "client_id",
         "tls_enabled": False,
         "tls_ca_file": None,
         "tls_insecure": False,

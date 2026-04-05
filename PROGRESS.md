@@ -717,6 +717,27 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
       - `benchmarks/RUNNING_BENCHMARKS.md` now documents fast/full marker
         commands, CI mapping, artifact capture, and expected runtime bounds.
 
+- [x] **Issue 43: Align identity-binding documentation with runnable scenario semantics** — **COMPLETED 2026-04-04**
+  - **Summary**: Updated the research/operator docs to match the implemented
+    identity-binding behavior exactly instead of the earlier global-JWT-binding
+    assumption.
+  - **Deliverables**:
+    - Documented the three harness semantic classes:
+      `capability` (`jwt=off`, `biscuit=off`),
+      `mixed` (`jwt=strict`, `biscuit=off`), and
+      `parity_identity_bound` (`jwt=strict`, `biscuit=strict`).
+    - Recorded the current inventory split:
+      control-plane reauth/churn and `SQLITE-RBAC-DEEP-CONTROL-*` are `mixed`;
+      single-client HTTP `-PARITY-` variants and multi-client HTTP/Hybrid
+      strict fan-out `-PARITY-` variants are the runnable
+      `parity_identity_bound` scenarios;
+      the remaining families stay `capability`.
+    - Clarified that Biscuit attenuation/delegation scenarios are intentionally
+      not parity scenarios.
+    - Clarified that runnable multi-client parity now depends on per-client
+      strict provisioning at startup, while shared tokens remain valid for
+      capability scenarios that intentionally model bearer reuse.
+
 ---
 
 ### 10) Last Phase: Data Analysis & Validation

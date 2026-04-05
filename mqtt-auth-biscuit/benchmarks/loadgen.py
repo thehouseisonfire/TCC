@@ -167,6 +167,9 @@ class WorkerConfig:
     token_issuer_no_default_roles: bool
     token_issuer_no_default_grants: bool
     token_refresh_codes: set[int]
+    jwt_identity_binding: str
+    biscuit_identity_binding: str
+    biscuit_client_id_fact: str
     tls_enabled: bool
     tls_ca_file: str | None
     tls_insecure: bool
@@ -325,6 +328,27 @@ def _publish_control_message(
     return None
 
 
+def _active_token_kind(username: str) -> str | None:
+    if username == "jwt":
+        return "jwt"
+    if username == "biscuit":
+        return "biscuit"
+    return None
+
+
+def _active_identity_binding(
+    username: str,
+    jwt_identity_binding: str,
+    biscuit_identity_binding: str,
+) -> tuple[str | None, str]:
+    token_kind = _active_token_kind(username)
+    if token_kind == "jwt":
+        return token_kind, jwt_identity_binding
+    if token_kind == "biscuit":
+        return token_kind, biscuit_identity_binding
+    return None, "off"
+
+
 def _fetch_token(
     issuer_url: str,
     kind: str,
@@ -335,10 +359,18 @@ def _fetch_token(
     no_default_grants: bool,
     tls_ca_file: str | None,
     tls_insecure: bool,
+    jwt_identity_binding: str = "off",
+    biscuit_identity_binding: str = "off",
+    biscuit_client_id_fact: str = "client_id",
 ) -> MqttPassword:
     payload = {"client_id": client_id, "ttl_seconds": ttl}
     if kind == "biscuit":
         payload["topic"] = topic
+        if biscuit_identity_binding == "strict":
+            payload["identity_fact_predicate"] = biscuit_client_id_fact
+            payload["identity_fact_value"] = client_id
+    elif kind == "jwt" and jwt_identity_binding == "strict":
+        payload["subject"] = client_id
     if no_default_roles:
         payload["no_default_roles"] = True
     if no_default_grants:
@@ -932,6 +964,9 @@ def _run_worker(
                         cfg.token_issuer_no_default_grants,
                         cfg.tls_ca_file,
                         cfg.tls_insecure,
+                        jwt_identity_binding=cfg.jwt_identity_binding,
+                        biscuit_identity_binding=cfg.biscuit_identity_binding,
+                        biscuit_client_id_fact=cfg.biscuit_client_id_fact,
                     )
                     token_refresh_ms = (time.perf_counter() - t_refresh_start) * 1000.0
                     token_refresh_len = len(password)
@@ -1208,6 +1243,9 @@ def run_load(
     tls_enabled: bool,
     tls_ca_file: str | None,
     tls_insecure: bool,
+    jwt_identity_binding: str = "off",
+    biscuit_identity_binding: str = "off",
+    biscuit_client_id_fact: str = "client_id",
     mode: str = "publish",
     fanout_topic: str | None = None,
     biscuit_attenuate: bool = False,
@@ -1294,6 +1332,48 @@ def run_load(
     )
 
     delegated_tokens_by_client: dict[str, str] = {}
+    active_token_kind, active_identity_binding = _active_identity_binding(
+        username,
+        jwt_identity_binding,
+        biscuit_identity_binding,
+    )
+    strict_multi_client_startup = active_identity_binding == "strict" and clients > 1
+    resolved_token_issuer_kind = token_issuer_kind or active_token_kind
+    if strict_multi_client_startup:
+        if active_token_kind is None:
+            raise ValueError(
+                "strict multi-client startup provisioning requires username 'jwt' or 'biscuit'"
+            )
+        if token_issuer_url is None:
+            raise ValueError("strict multi-client startup provisioning requires token_issuer_url")
+        if resolved_token_issuer_kind != active_token_kind:
+            raise ValueError(
+                "strict multi-client startup provisioning requires token_issuer_kind "
+                f"{active_token_kind!r}, got {resolved_token_issuer_kind!r}"
+            )
+    provisioning_issuer_url = token_issuer_url or ""
+
+    def _provision_startup_password(client_id: str, topic: str) -> MqttPassword:
+        try:
+            return _fetch_token(
+                provisioning_issuer_url,
+                resolved_token_issuer_kind or active_token_kind or "",
+                client_id,
+                topic,
+                token_issuer_ttl,
+                token_issuer_no_default_roles,
+                token_issuer_no_default_grants,
+                tls_ca_file,
+                tls_insecure,
+                jwt_identity_binding=jwt_identity_binding,
+                biscuit_identity_binding=biscuit_identity_binding,
+                biscuit_client_id_fact=biscuit_client_id_fact,
+            )
+        except Exception as exc:
+            raise ValueError(
+                "strict multi-client startup provisioning failed for " f"{client_id}: {exc}"
+            ) from exc
+
     for i in range(clients):
         client_id = f"client_{i + 1}"
         topic = topic_template.format(client_id=client_id)
@@ -1317,11 +1397,14 @@ def run_load(
         )
         delegation_ms = None
         delegation_len = None
-        delegated_password = password
+        initial_password = password
+        if strict_multi_client_startup:
+            initial_password = _provision_startup_password(client_id, topic)
+        delegated_password = initial_password
         if biscuit_delegate:
             try:
                 delegated_password_b64, delegation_ms, delegation_len = _delegate_biscuit_token(
-                    password,
+                    initial_password,
                     custom_bin=biscuit_delegate_bin,
                     public_key_hex=biscuit_delegate_public_key_hex,
                     public_key_file=biscuit_delegate_public_key_file,
@@ -1358,7 +1441,7 @@ def run_load(
             delegated_password = delegated_password_b64
         if biscuit_delegate and biscuit_delegate_handoff:
             delegated_tokens_by_client[client_id] = delegated_password_b64
-            delegated_password = password
+            delegated_password = initial_password
         elif biscuit_delegate:
             delegated_password = _decode_biscuit_token(delegated_password_b64)
         cfg = WorkerConfig(
@@ -1375,11 +1458,14 @@ def run_load(
             protocol=protocol,
             sync_connect=sync_connect,
             token_issuer_url=token_issuer_url,
-            token_issuer_kind=token_issuer_kind,
+            token_issuer_kind=resolved_token_issuer_kind,
             token_issuer_ttl=token_issuer_ttl,
             token_issuer_no_default_roles=token_issuer_no_default_roles,
             token_issuer_no_default_grants=token_issuer_no_default_grants,
             token_refresh_codes=token_refresh_codes,
+            jwt_identity_binding=jwt_identity_binding,
+            biscuit_identity_binding=biscuit_identity_binding,
+            biscuit_client_id_fact=biscuit_client_id_fact,
             tls_enabled=tls_enabled,
             tls_ca_file=tls_ca_file,
             tls_insecure=tls_insecure,
@@ -1482,7 +1568,34 @@ def run_load(
     if mode == "fanout" and not fanout_subscribe_ready_timed_out:
         fanout_publish_start_evt.set()
         publisher_username = fanout_publisher_username or username
-        publisher_password = fanout_publisher_password or password
+        publisher_password_override: MqttPassword | None = None
+        if strict_multi_client_startup:
+            publisher_token_kind, publisher_identity_binding = _active_identity_binding(
+                publisher_username,
+                jwt_identity_binding,
+                biscuit_identity_binding,
+            )
+            if publisher_identity_binding == "strict":
+                if publisher_token_kind is None:
+                    raise ValueError(
+                        "strict multi-client startup provisioning requires fanout publisher "
+                        "username 'jwt' or 'biscuit'"
+                    )
+                if publisher_token_kind != resolved_token_issuer_kind:
+                    raise ValueError(
+                        "strict multi-client startup provisioning requires fanout publisher "
+                        f"token_issuer_kind {publisher_token_kind!r}, got "
+                        f"{resolved_token_issuer_kind!r}"
+                    )
+                publisher_password_override = _provision_startup_password(
+                    "fanout_publisher",
+                    fanout_topic or "fanout/broadcast",
+                )
+        publisher_password = (
+            publisher_password_override
+            if publisher_password_override is not None
+            else fanout_publisher_password or password
+        )
         publisher_errors: list[str]
         (
             fanout_publish_ms,
@@ -1585,10 +1698,14 @@ def run_load(
             "message_size": message_size,
             "protocol": "mqttv5",
             "token_issuer_url": token_issuer_url,
-            "token_issuer_kind": token_issuer_kind,
+            "token_issuer_kind": resolved_token_issuer_kind,
             "token_issuer_no_default_roles": token_issuer_no_default_roles,
             "token_issuer_no_default_grants": token_issuer_no_default_grants,
             "token_refresh_codes": sorted(token_refresh_codes),
+            "jwt_identity_binding": jwt_identity_binding,
+            "biscuit_identity_binding": biscuit_identity_binding,
+            "biscuit_client_id_fact": biscuit_client_id_fact,
+            "strict_multi_client_startup_provisioning": strict_multi_client_startup,
             "mode": mode,
             "fanout_topic": fanout_topic,
             "biscuit_attenuate": biscuit_attenuate,
@@ -1713,6 +1830,9 @@ def main(
             "(e.g., 5/0x87 = Not authorized)"
         ),
     ),
+    jwt_identity_binding: str = typer.Option("off", envvar="JWT_IDENTITY_BINDING"),
+    biscuit_identity_binding: str = typer.Option("off", envvar="BISCUIT_IDENTITY_BINDING"),
+    biscuit_client_id_fact: str = typer.Option("client_id", envvar="BISCUIT_CLIENT_ID_FACT"),
     tls: bool = False,
     tls_ca_file: str | None = None,
     tls_insecure: bool = False,
@@ -1868,6 +1988,13 @@ def main(
 
     protocol = mqtt.MQTTv5  # MQTT v5 only
 
+    if jwt_identity_binding not in {"off", "strict"}:
+        raise typer.BadParameter("jwt_identity_binding must be 'off' or 'strict'")
+    if biscuit_identity_binding not in {"off", "strict"}:
+        raise typer.BadParameter("biscuit_identity_binding must be 'off' or 'strict'")
+    if not biscuit_client_id_fact:
+        raise typer.BadParameter("biscuit_client_id_fact must not be empty")
+
     parsed_refresh_codes = set()
     for part in str(token_refresh_codes).split(","):
         part = part.strip()
@@ -1960,6 +2087,9 @@ def main(
         token_issuer_no_default_roles=token_issuer_no_default_roles,
         token_issuer_no_default_grants=token_issuer_no_default_grants,
         token_refresh_codes=parsed_refresh_codes,
+        jwt_identity_binding=jwt_identity_binding,
+        biscuit_identity_binding=biscuit_identity_binding,
+        biscuit_client_id_fact=biscuit_client_id_fact,
         tls_enabled=tls,
         tls_ca_file=tls_ca_file,
         tls_insecure=tls_insecure,

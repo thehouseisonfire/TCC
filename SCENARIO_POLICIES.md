@@ -58,14 +58,41 @@ The authorizer collects `right/deny` facts and applies MQTT wildcard matching
 (`+`, `#`) against the request topic, with deny-over-allow semantics
 (@/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/biscuit_handler.rs#238-264).
 
-**Parity note:** JWT and Biscuit both honor wildcard topic filters in token-only mode, keeping policy templates aligned for fair comparisons.
+**Topic-matching parity note:** JWT and Biscuit both honor wildcard topic filters in token-only mode, keeping policy templates aligned for fair comparisons. This is not the same as `parity_identity_bound`: token-only scenarios remain `capability` unless the scenario is an explicit `-PARITY-` variant with strict binding enabled for both token types.
+
+## 1.1 Scenario Semantic Classes (Source Of Truth)
+
+The benchmark registry in `benchmarks/run_scenarios.py` classifies every runnable
+scenario with:
+
+- `semantic_class`: `capability`, `mixed`, or `parity_identity_bound`
+- `jwt_identity_binding`: `off` or `strict`
+- `biscuit_identity_binding`: `off` or `strict`
+
+The current inventory is:
+
+| Scenario family / IDs | semantic_class | JWT binding | Biscuit binding | Provisioning / interpretation |
+| --- | --- | --- | --- | --- |
+| `BASELINE-*`, `TOKEN-BASELINE-*`, `TOKEN-DENY-READ-JWT`, `TOKEN-ATTENUATED-DENY-BISCUIT`, `TOKEN-QOS*`, `NETWORK-MTU-*`, `TOKEN-THUNDERING-HERD-BISCUIT` | `capability` | `off` | `off` | Shared fixture tokens are allowed when the scenario declares bearer/capability semantics. |
+| `TOKEN-COMPLEXITY-*`, `TOKEN-AUTHORIZER-PROFILE-*` | `capability` | `off` | `off` | Cost-isolation scenarios, not identity-bound parity. |
+| `HTTP-LATENCY-*` without `-PARITY-`, `HTTP-PROFILE-*` without `-PARITY-`, `HYBRID-FALLBACK-AUTHZ-DOWN-JWT` | `capability` | `off` | `off` | Policy behavior may be compared, but these are not identity-bound parity claims. |
+| `HTTP-LATENCY-200MS-PARITY-*`, `HTTP-PROFILE-{SIMPLE,MED,COMPLEX}-PARITY-*` | `parity_identity_bound` | `strict` | `strict` | Single-client parity variants. JWT variants require strict JWT fixtures; Biscuit variants require strict Biscuit fixtures. |
+| `TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-*`, `TOKEN-ACL-READ-FANOUT-STRICT-*` without `-PARITY-`, `HTTP-ACL-READ-FANOUT-STRICT-*` without `-PARITY-`, `HYBRID-ACL-READ-FANOUT-STRICT-*` without `-PARITY-` | `capability` | `off` | `off` | Multi-client shared-token fan-out remains intentional here, so these strict `ACL_READ` scenarios are not parity scenarios. |
+| `HTTP-ACL-READ-FANOUT-STRICT-*-PARITY-*`, `HYBRID-ACL-READ-FANOUT-STRICT-*-PARITY-*` | `parity_identity_bound` | `strict` | `strict` | Runnable multi-client parity now depends on per-client strict provisioning at startup. The harness provisions one token per client identity instead of reusing a shared token. Token-backed strict fan-out stays `capability`, because runtime-issued startup tokens do not reproduce the fixture-specific fan-out grants/denies. |
+| `STATIC-ACL-*` | `capability` | `off` | `off` | Role-only tokens feed Mosquitto ACL evaluation; ACL files remain authoritative. |
+| `DYNAMIC-SECURITY-*` (including `DYNAMIC-SECURITY-ANONYMOUS-BASELINE`, control revoke/disable, fan-out churn) | `capability` | `off` | `off` | Policy source is Dynamic Security, not identity-bound parity. |
+| `SQLITE-ACL-READ-FANOUT-CHURN-*`, `SQLITE-RBAC-CHURN-*`, `SQLITE-RBAC-DEEP-CONFLICT-*` | `capability` | `off` | `off` | SQLite policy churn / conflict scenarios, not identity parity. |
+| `CONTROL-INTERLEAVED-DATA-*`, `CONTROL-CHURN-CONCURRENT-CONTROLLERS-*`, `CONTROL-CHURN-REPEAT-*`, `CONTROL-OVERHEAD-ACL-READ-NOTIFY-*` | `capability` | `off` | `off` | Control-plane measurements that intentionally keep shared-token-capability semantics. |
+| `CONTROL-OVERHEAD-KICK-REAUTH-*`, `CONTROL-CHURN-{CREATE-ROLE,GROUP-CLIENT,ACL-MODIFY,LARGE-STATE-GROUP-CLIENT,NOOP-GROUP-CLIENT}-*`, `SQLITE-RBAC-DEEP-CONTROL-*` | `mixed` | `strict` | `off` | JWT client binding is enabled, Biscuit client binding is not. These scenarios must not be described as parity. |
+| `TOKEN-MQTT5-REAUTH-*`, `TOKEN-LIFECYCLE-SHORT-RECONNECT-*` | `capability` | `off` | `off` | Lifecycle behavior with capability fixtures. |
+| `TOKEN-ATTENUATION-*`, `TOKEN-DELEGATION-*` | `capability` | `off` | `off` | Biscuit-only capability scenarios. They are intentionally not parity scenarios because attenuation/delegation are the feature under test. |
 
 ## 2) Scenario-To-Policy Mapping
 
 The scenario IDs are defined in `benchmarks/run_scenarios.py`
 (@/home/eagle/TCC2/mqtt-auth-biscuit/benchmarks/run_scenarios.py#421-800).
 
-### 2.1 Baseline Token-Only Parity
+### 2.1 Baseline Token-Only Comparison (`capability`, JWT `off`, Biscuit `off`)
 
 | Scenario | Token | Policy Source | Policy Detail | Expected Outcome |
 | --- | --- | --- | --- | --- |
@@ -117,7 +144,7 @@ defined in `gen-tokens` (see `biscuit_complex_*` in
 plugin-side authorizer template/rule complexity changes. Scenario outputs include
 `complexity.axis = "authorizer_template"`.
 
-### 2.3 HTTP Introspection (Parity Scenario)
+### 2.3 HTTP Introspection Capability Runs (`capability`, JWT `off`, Biscuit `off`)
 
 | Scenario | Token | Policy Source | Policy Detail | Expected Outcome |
 | --- | --- | --- | --- | --- |
@@ -139,7 +166,25 @@ with empty rules, which denies by default until the scenario applies an
 explicit profile or `custom` rule set. Benchmark scenarios must not rely on
 startup/reset state to silently provide allow semantics.
 
-### 2.3.1 Issue 37: Strict `ACL_READ` Fan-Out Across Policy Profiles
+The scenarios in this table are still `capability`, not `parity_identity_bound`.
+They may compare policy behavior under HTTP/hybrid authorization, but they do
+not enable strict identity binding for both token types.
+
+#### 2.3.1 HTTP Identity-Bound Parity Variants (`parity_identity_bound`, JWT `strict`, Biscuit `strict`)
+
+| Scenario | Token | Policy Source | Policy Detail | Expected Outcome |
+| --- | --- | --- | --- | --- |
+| HTTP-LATENCY-200MS-PARITY-JWT | JWT | HTTP | Same rule-engine slice as `HTTP-LATENCY-200MS-JWT`, but with strict JWT fixture and strict binding on both token types | Allows |
+| HTTP-LATENCY-200MS-PARITY-BISCUIT | Biscuit | HTTP | Same rule-engine slice as `HTTP-LATENCY-200MS-BISCUIT`, but with strict Biscuit fixture and strict binding on both token types | Allows |
+| HTTP-PROFILE-SIMPLE-PARITY-JWT/BISCUIT | JWT/Biscuit | HTTP | `simple` profile under strict identity binding for both token types | Allows |
+| HTTP-PROFILE-MED-PARITY-JWT/BISCUIT | JWT/Biscuit | HTTP | `med` profile under strict identity binding for both token types | Allows |
+| HTTP-PROFILE-COMPLEX-PARITY-JWT/BISCUIT | JWT/Biscuit | HTTP | `complex` profile under strict identity binding for both token types | Allows |
+
+These are the single-client HTTP scenarios that may honestly claim identity
+parity. They depend on strict token fixtures (`jwt_strict_sub_client_id`,
+`biscuit_strict_client_id`) rather than shared baseline tokens.
+
+### 2.3.2 Issue 37: Strict `ACL_READ` Fan-Out Across Policy Profiles
 
 Issue 37 adds strict fan-out (`plugin_opt_acl_read_full_authz=true`) scenarios for
 token-only, HTTP profiles (`simple|med|complex`), and hybrid profiles
@@ -157,6 +202,22 @@ token-only, HTTP profiles (`simple|med|complex`), and hybrid profiles
 | `HYBRID-ACL-READ-FANOUT-STRICT-{SIMPLE\|MED\|COMPLEX}-DENY-{JWT\|BISCUIT}-10` | JWT/Biscuit | Hybrid | Same as above with explicit deny(`read`) on fan-out topic | Delivery denied while subscribers stay connected |
 | `HYBRID-ACL-READ-FANOUT-STRICT-MED-ALLOW-{JWT\|BISCUIT}-{50,100}` | JWT/Biscuit | Hybrid | Balanced scaling slices for representative `med` profile | Read-path scaling under strict mode |
 
+These base strict fan-out families remain `capability` (`jwt_identity_binding=off`,
+`biscuit_identity_binding=off`). They exercise strict `ACL_READ` authorization,
+but they intentionally keep shared-token multi-client behavior, so they must not
+be labeled parity.
+
+Runnable identity-bound parity fan-out is represented by the generated
+HTTP/Hybrid `-PARITY-` families:
+
+- `HTTP-ACL-READ-FANOUT-STRICT-*-PARITY-*`
+- `HYBRID-ACL-READ-FANOUT-STRICT-*-PARITY-*`
+
+Those are `parity_identity_bound` scenarios with `jwt_identity_binding=strict`
+and `biscuit_identity_binding=strict`. Because they are multi-client runs, the
+harness provisions one strict-bound token per client identity at startup instead
+of reusing a shared token.
+
 Issue 37 metadata in benchmark outputs now includes:
 
 - `scenario_config.policy_source`
@@ -164,7 +225,7 @@ Issue 37 metadata in benchmark outputs now includes:
 - `scenario_config.acl_read_enforcement`
 - `scenario_config.subscriber_count`
 
-### 2.4 Static ACL (Compound Gate)
+### 2.4 Static ACL (Compound Gate, `capability`, JWT `off`, Biscuit `off`)
 
 | Scenario | Token | Policy Source | Policy Detail | Expected Outcome |
 | --- | --- | --- | --- | --- |
@@ -191,7 +252,7 @@ the authoritative access policy.
 - For static ACL benchmark mode, `acl_read_full_authz` is set to `false` in
   `mosquitto_static.conf` to keep `ACL_READ` as documented expiry-only behavior.
 
-### 2.5 Dynamic Security (Snapshot RBAC)
+### 2.5 Dynamic Security (Snapshot RBAC, `capability`, JWT `off`, Biscuit `off`)
 
 | Scenario | Token | Policy Source | Policy Detail | Expected Outcome |
 | --- | --- | --- | --- | --- |
@@ -207,7 +268,7 @@ Issue 30 dynamic-security notes:
 - Churn is applied mid-run (not between repeats), targeting already-subscribed clients.
 - Result payload includes pre/post churn receive counters under `fanout_churn`.
 
-### 2.5.1 SQLite Fan-Out Churn Coverage (Issue 30)
+### 2.5.1 SQLite Fan-Out Churn Coverage (Issue 30, `capability`, JWT `off`, Biscuit `off`)
 
 | Scenario | Token | Policy Source | Policy Detail | Expected Outcome |
 | --- | --- | --- | --- | --- |
@@ -233,7 +294,7 @@ Issue 30/22 sqlite notes:
   expose cache-sensitive authorization transitions under strict `ACL_READ`.
 
 
-### 2.6 Lifecycle And Reauthentication
+### 2.6 Lifecycle And Reauthentication (`capability`, JWT `off`, Biscuit `off`)
 
 | Scenario | Token | Policy Source | Policy Detail | Expected Outcome |
 | --- | --- | --- | --- | --- |
@@ -244,7 +305,7 @@ Issue 30/22 sqlite notes:
 
 Tokens are issued with the same default grants/rights in token-only mode.
 
-### 2.7 Biscuit-Only Capability Scenarios
+### 2.7 Biscuit-Only Capability Scenarios (`capability`, JWT `off`, Biscuit `off`)
 
 | Scenario | Policy Source | Policy Detail | Notes |
 | --- | --- | --- | --- |
@@ -257,9 +318,11 @@ Tokens are issued with the same default grants/rights in token-only mode.
 | TOKEN-DELEGATION-SIMULATED-BISCUIT | Token-only | Pre-generated delegated token | Baseline for delegation |
 
 These are marked `capability_flags.biscuit_only=true` in scenario output and **must not**
-be used in JWT-vs-Biscuit parity comparisons.
+be used in JWT-vs-Biscuit parity comparisons. Biscuit attenuation/delegation are
+intentionally not parity scenarios because the experiment is measuring a Biscuit
+capability that JWT does not provide in the same form.
 
-### 2.8 Anonymous Flow (DYNAMIC-SECURITY-ANONYMOUS-BASELINE)
+### 2.8 Anonymous Flow (DYNAMIC-SECURITY-ANONYMOUS-BASELINE, `capability`, JWT `off`, Biscuit `off`)
 
 | Scenario | Token | Policy Source | Policy Detail | Expected Outcome |
 | --- | --- | --- | --- | --- |

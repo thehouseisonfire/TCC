@@ -254,7 +254,7 @@ def test_multi_client_http_hybrid_jwt_parity_variants_enable_strict_authz_bindin
         assert authz_config["jwt_identity_binding"] == "strict"
 
 
-def test_requested_http_hybrid_multi_client_parity_scenarios_do_not_require_strict_fixture_tokens() -> (
+def test_requested_http_hybrid_multi_client_parity_scenarios_do_not_require_strict_fixture_tokens() -> (  # noqa: E501
     None
 ):
     tokens = _placeholder_tokens()

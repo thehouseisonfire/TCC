@@ -1315,6 +1315,7 @@ def _render_mosquitto_runtime_conf(
     *,
     jwt_identity_binding: IdentityBindingMode,
     biscuit_identity_binding: IdentityBindingMode,
+    biscuit_client_id_fact: str,
 ) -> str:
     lines = base_conf_text.splitlines()
     filtered_lines = [
@@ -1322,6 +1323,7 @@ def _render_mosquitto_runtime_conf(
         for line in lines
         if not line.strip().startswith("plugin_opt_jwt_identity_binding ")
         and not line.strip().startswith("plugin_opt_biscuit_identity_binding ")
+        and not line.strip().startswith("plugin_opt_biscuit_client_id_fact ")
     ]
     insertion_indices = [
         idx
@@ -1336,6 +1338,7 @@ def _render_mosquitto_runtime_conf(
     filtered_lines[insert_at:insert_at] = [
         f"plugin_opt_jwt_identity_binding {jwt_identity_binding}",
         f"plugin_opt_biscuit_identity_binding {biscuit_identity_binding}",
+        f"plugin_opt_biscuit_client_id_fact {biscuit_client_id_fact}",
     ]
     return "\n".join(filtered_lines) + "\n"
 
@@ -1345,19 +1348,22 @@ def _materialize_mosquitto_runtime_conf(
     *,
     jwt_identity_binding: IdentityBindingMode,
     biscuit_identity_binding: IdentityBindingMode,
+    biscuit_client_id_fact: str,
 ) -> str:
     base_conf_path = _resolve_compose_path(mosquitto_conf)
     rendered_conf = _render_mosquitto_runtime_conf(
         base_conf_path.read_text(encoding="utf-8"),
         jwt_identity_binding=jwt_identity_binding,
         biscuit_identity_binding=biscuit_identity_binding,
+        biscuit_client_id_fact=biscuit_client_id_fact,
     )
 
     base_conf_relative = _compose_relative_path(mosquitto_conf)
     generated_relative_dir = base_conf_relative.parent / ".generated"
     generated_name = (
         f"{base_conf_relative.stem}.jwt-{jwt_identity_binding}."
-        f"biscuit-{biscuit_identity_binding}{base_conf_relative.suffix}"
+        f"biscuit-{biscuit_identity_binding}."
+        f"fact-{biscuit_client_id_fact}{base_conf_relative.suffix}"
     )
     generated_relative_path = generated_relative_dir / generated_name
     generated_conf_path = _resolve_compose_path(generated_relative_path)
@@ -1375,6 +1381,7 @@ def _effective_mosquitto_runtime_conf(
     *,
     jwt_identity_binding: IdentityBindingMode,
     biscuit_identity_binding: IdentityBindingMode,
+    biscuit_client_id_fact: str,
 ) -> str:
     effective_conf_relative = _compose_relative_path(mosquitto_conf)
     if effective_conf_relative in MOSQUITTO_BASE_CONFIGS:
@@ -1383,6 +1390,7 @@ def _effective_mosquitto_runtime_conf(
         mosquitto_conf,
         jwt_identity_binding=jwt_identity_binding,
         biscuit_identity_binding=biscuit_identity_binding,
+        biscuit_client_id_fact=biscuit_client_id_fact,
     )
 
 
@@ -3533,6 +3541,10 @@ def main(
             biscuit_identity_binding=cast(
                 IdentityBindingMode,
                 scenario_semantics["biscuit_identity_binding"],
+            ),
+            biscuit_client_id_fact=cast(
+                str,
+                s.get("biscuit_client_id_fact", "client_id"),
             ),
         )
         extra_env = {"MOSQUITTO_CONF": runtime_mosq_conf}

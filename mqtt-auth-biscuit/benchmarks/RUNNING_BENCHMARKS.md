@@ -36,6 +36,11 @@ The scenario registry now classifies runnable scenarios explicitly:
 | `mixed` | `strict` | `off` | JWT is identity-bound, Biscuit is not. These scenarios are intentionally not parity. |
 | `parity_identity_bound` | `strict` | `strict` | The only class that may claim equivalent identity semantics. |
 
+Strict Biscuit binding uses a dedicated identity fact predicate. The default is
+`client_id`; if a scenario overrides it via `biscuit_client_id_fact`, the token
+issuer request and generated Mosquitto plugin config must use the same
+predicate.
+
 Current inventory rules:
 
 - Single-client HTTP parity lives in `HTTP-LATENCY-200MS-PARITY-*` and

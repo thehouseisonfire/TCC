@@ -107,6 +107,8 @@ Due to the architectural characteristics of each technology, the PIP query flow 
 
 **Scenario identity semantics:** The benchmark inventory now makes three classes explicit. `capability` scenarios set `jwt_identity_binding=off` and `biscuit_identity_binding=off`; `mixed` scenarios set `jwt_identity_binding=strict` and `biscuit_identity_binding=off`; `parity_identity_bound` scenarios set both to `strict`. Only the last class may claim equivalent identity semantics between JWT and Biscuit. Biscuit attenuation and delegation scenarios remain intentionally outside parity because they measure capability-specific features rather than matched identity binding.
 
+**Biscuit strict identity facts:** Strict Biscuit binding uses a dedicated identity fact predicate instead of overloading `right(...)` facts. The default predicate is `client_id`, but benchmark scenarios may override it via `biscuit_client_id_fact`. When they do, the token issuer and the generated Mosquitto plugin config must use the same predicate or strict authentication will fail.
+
 To ensure test parity and avoid bias, the project distinguishes policy parity from identity parity. Shared-token and fan-out scenarios can still be valid capability experiments, but they are not identity-bound parity scenarios. Runnable multi-client parity slices now require strict per-client provisioning at startup so each MQTT client receives its own strict-bound JWT or Biscuit instead of reusing a shared token.
 
 For reproducibility, HTTP/hybrid PDP experiments use an explicit rule-engine

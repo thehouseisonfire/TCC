@@ -737,6 +737,10 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - Clarified that runnable multi-client parity now depends on per-client
       strict provisioning at startup, while shared tokens remain valid for
       capability scenarios that intentionally model bearer reuse.
+    - Documented that strict Biscuit binding uses a dedicated identity fact
+      predicate, defaults to `client_id`, and must stay aligned between
+      issued tokens and generated Mosquitto plugin config when a scenario
+      overrides it via `biscuit_client_id_fact`.
 
 ---
 

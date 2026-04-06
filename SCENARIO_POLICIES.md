@@ -69,6 +69,11 @@ scenario with:
 - `jwt_identity_binding`: `off` or `strict`
 - `biscuit_identity_binding`: `off` or `strict`
 
+For strict Biscuit binding, the plugin also accepts `biscuit_client_id_fact`.
+The default predicate is `client_id`. Scenarios that override it must keep the
+issued Biscuit facts and generated Mosquitto plugin config aligned to the same
+predicate.
+
 The current inventory is:
 
 | Scenario family / IDs | semantic_class | JWT binding | Biscuit binding | Provisioning / interpretation |

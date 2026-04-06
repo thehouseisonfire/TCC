@@ -183,14 +183,37 @@ plugin_opt_ext_auth_method token
         base_conf,
         jwt_identity_binding="strict",
         biscuit_identity_binding="off",
+        biscuit_client_id_fact="client_id",
     )
 
     assert "plugin_opt_jwt_identity_binding strict\n" in rendered
     assert "plugin_opt_biscuit_identity_binding off\n" in rendered
+    assert "plugin_opt_biscuit_client_id_fact client_id\n" in rendered
     assert "listener 1883\n" in rendered
     assert "plugin_opt_policy_mode http\n" in rendered
     assert rendered.count("plugin_opt_jwt_identity_binding ") == 1
     assert rendered.count("plugin_opt_biscuit_identity_binding ") == 1
+    assert rendered.count("plugin_opt_biscuit_client_id_fact ") == 1
+
+
+def test_render_mosquitto_runtime_conf_replaces_existing_biscuit_client_id_fact() -> None:
+    base_conf = """listener 1883
+plugin /mosquitto/plugins/libmosquitto_auth_biscuit.so
+plugin_opt_jwt_key_file /mosquitto/config/jwt_public.pem
+plugin_opt_biscuit_root_key_file /mosquitto/config/biscuit_public.key
+plugin_opt_biscuit_client_id_fact old_fact
+"""
+
+    rendered = rs._render_mosquitto_runtime_conf(
+        base_conf,
+        jwt_identity_binding="off",
+        biscuit_identity_binding="strict",
+        biscuit_client_id_fact="device_id",
+    )
+
+    assert "plugin_opt_biscuit_client_id_fact old_fact\n" not in rendered
+    assert "plugin_opt_biscuit_client_id_fact device_id\n" in rendered
+    assert rendered.count("plugin_opt_biscuit_client_id_fact ") == 1
 
 
 def test_effective_mosquitto_runtime_conf_keeps_base_config_path() -> None:
@@ -199,6 +222,7 @@ def test_effective_mosquitto_runtime_conf_keeps_base_config_path() -> None:
             "./mosquitto_base.conf",
             jwt_identity_binding="strict",
             biscuit_identity_binding="off",
+            biscuit_client_id_fact="client_id",
         )
         == "./mosquitto_base.conf"
     )
@@ -210,13 +234,16 @@ def test_effective_mosquitto_runtime_conf_keeps_tls_base_config_path() -> None:
             "./tls/mosquitto_base.conf",
             jwt_identity_binding="strict",
             biscuit_identity_binding="off",
+            biscuit_client_id_fact="client_id",
         )
         == "./tls/mosquitto_base.conf"
     )
 
 
 def test_effective_mosquitto_runtime_conf_materializes_plugin_backed_config() -> None:
-    generated_conf = rs._resolve_compose_path(".generated/mosquitto.jwt-strict.biscuit-off.conf")
+    generated_conf = rs._resolve_compose_path(
+        ".generated/mosquitto.jwt-strict.biscuit-off.fact-client_id.conf"
+    )
     if generated_conf.exists():
         generated_conf.unlink()
 
@@ -225,9 +252,34 @@ def test_effective_mosquitto_runtime_conf_materializes_plugin_backed_config() ->
             "./mosquitto.conf",
             jwt_identity_binding="strict",
             biscuit_identity_binding="off",
+            biscuit_client_id_fact="client_id",
         )
-        assert rendered == "./.generated/mosquitto.jwt-strict.biscuit-off.conf"
+        assert rendered == "./.generated/mosquitto.jwt-strict.biscuit-off.fact-client_id.conf"
         assert generated_conf.exists()
+    finally:
+        if generated_conf.exists():
+            generated_conf.unlink()
+
+
+def test_effective_mosquitto_runtime_conf_materializes_custom_biscuit_client_id_fact() -> None:
+    generated_conf = rs._resolve_compose_path(
+        ".generated/mosquitto.jwt-off.biscuit-strict.fact-device_id.conf"
+    )
+    if generated_conf.exists():
+        generated_conf.unlink()
+
+    try:
+        rendered = rs._effective_mosquitto_runtime_conf(
+            "./mosquitto.conf",
+            jwt_identity_binding="off",
+            biscuit_identity_binding="strict",
+            biscuit_client_id_fact="device_id",
+        )
+        assert rendered == "./.generated/mosquitto.jwt-off.biscuit-strict.fact-device_id.conf"
+        assert generated_conf.exists()
+        assert "plugin_opt_biscuit_client_id_fact device_id\n" in generated_conf.read_text(
+            encoding="utf-8"
+        )
     finally:
         if generated_conf.exists():
             generated_conf.unlink()

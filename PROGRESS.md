@@ -291,7 +291,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     host scheduling noise and makes it harder to claim "N independent IoT nodes"
     when discussing external validity.
   - Deliverable:
-    - A containerized load generator image (Python + paho-mqtt) that can be
+    - A containerized load generator image (Python orchestration + Rust rumqttc MQTT I/O) that can be
       invoked by the scenario runner
     - Support for two benchmark client modes:
       - single loadgen container simulating N clients (baseline)

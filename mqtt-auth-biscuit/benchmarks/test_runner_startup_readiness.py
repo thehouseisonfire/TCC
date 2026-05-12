@@ -39,6 +39,38 @@ def test_wait_for_service_health_retries_until_ok(monkeypatch) -> None:
     assert attempts["count"] == 3
 
 
+def test_prometheus_query_uses_default_http_transport(monkeypatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"status": "success", "data": {"result": []}}
+
+    class FakeClient:
+        def __init__(self, **kwargs) -> None:  # noqa: ANN003
+            assert "transport" not in kwargs
+            assert kwargs["verify"] is True
+            assert kwargs["timeout"] == 5.0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # noqa: ANN001
+            return None
+
+        def get(self, url: str, params: dict[str, str]):
+            assert url == "http://localhost:9090/api/v1/query"
+            assert params == {"query": "up"}
+            return FakeResponse()
+
+    monkeypatch.setattr(rs.httpx, "Client", FakeClient)
+
+    result = rs._prom_query("http://localhost:9090", "up", None, False)
+
+    assert result["status"] == "success"
+
+
 def test_wait_for_non_empty_resource_snapshot_retries_until_valid(monkeypatch) -> None:
     attempts = {"count": 0}
     snapshot: dict[str, object] = {"prometheus": {"cpu": {}, "memory": {}}}

@@ -9,8 +9,8 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates/mosquitto-plugin ./crates/mosquitto-plugin
 COPY crates/token-issuer ./crates/token-issuer
-COPY crates/benchmarks ./crates/benchmarks
 COPY crates/authz-server ./crates/authz-server
+RUN printf '[workspace]\nmembers = ["crates/mosquitto-plugin"]\nresolver = "2"\n' > Cargo.toml
 
 RUN RUSTFLAGS="-C target-feature=-crt-static" cargo build --release -p mosquitto-auth-biscuit
 

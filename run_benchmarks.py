@@ -27,15 +27,6 @@ def require_cmd(cmd: str) -> None:
         raise SystemExit(f"Missing required command: {cmd}")
 
 
-def check_paho() -> None:
-    try:
-        import paho.mqtt.client  # noqa: F401
-    except ModuleNotFoundError as exc:
-        raise SystemExit(
-            "Missing dependency 'paho-mqtt'. Install it with: uv sync --locked"
-        ) from exc
-
-
 def detect_compose_bin(override: str | None) -> list[str]:
     if override:
         return shlex.split(override)
@@ -90,7 +81,6 @@ def main(
         raise SystemExit(f"Expected mqtt-auth-biscuit directory at {WORKDIR}")
 
     require_cmd("cargo")
-    check_paho()
 
     compose_cmd = detect_compose_bin(compose_bin)
     compose_files = ["docker/docker-compose.yml"]

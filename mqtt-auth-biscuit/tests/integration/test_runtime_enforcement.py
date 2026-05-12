@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import subprocess
@@ -14,6 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 TLS_CA_FILE = Path(__file__).resolve().parents[2] / "docker" / "tls" / "ca.pem"
 EXPIRED_TOKEN_TTL_S = 3
 EXPIRY_TRIGGER_DELAY_S = 4.2
+RAW_BISCUIT_MARKER = "b64:"
 
 
 class _IssuedTokenLike(Protocol):
@@ -114,6 +116,12 @@ def _issue_token(
     else:
         raise AssertionError(f"unsupported token kind: {token_kind}")
     return token.token
+
+
+def _auth_cli_token(token: str | bytes) -> str:
+    if isinstance(token, bytes):
+        return RAW_BISCUIT_MARKER + base64.urlsafe_b64encode(token).decode().rstrip("=")
+    return token
 
 
 def _upsert_acl(
@@ -1132,9 +1140,9 @@ def test_runtime_enhanced_auth_entrypoint_over_tcp_and_tls(
         "--auth-method",
         "token",
         "--token1",
-        token1,
+        _auth_cli_token(token1),
         "--token2",
-        token2,
+        _auth_cli_token(token2),
         "--sleep",
         "0.2",
     ]

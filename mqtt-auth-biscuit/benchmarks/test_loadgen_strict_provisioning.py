@@ -118,6 +118,141 @@ def _decode_fake_jwt_payload(token: str) -> dict[str, str]:
     return json.loads(base64.urlsafe_b64decode(payload_b64).decode("utf-8"))
 
 
+def _argv_value(argv: list[str], flag: str) -> str:
+    return argv[argv.index(flag) + 1]
+
+
+def test_rust_loadgen_command_forwards_programmatic_transition_options(monkeypatch) -> None:
+    monkeypatch.setattr(loadgen, "_resolve_rust_helper", lambda _binary: ["mqtt-loadgen"])
+    kwargs = _run_load_kwargs()
+    kwargs.pop("protocol")
+    kwargs.update(
+        {
+            "password": b"primary-token",
+            "fanout_publisher_username": "publisher",
+            "fanout_publisher_password": b"publisher-token",
+            "qos_distribution": [(0, 0.25), (1, 0.75)],
+            "sync_connect": True,
+            "token_issuer_ttl": 60,
+            "token_issuer_no_default_roles": True,
+            "token_issuer_no_default_grants": True,
+            "token_refresh_codes": {0x87, 5},
+            "tls_enabled": True,
+            "tls_ca_file": "ca.pem",
+            "tls_insecure": True,
+            "jwt_identity_binding": "strict",
+            "biscuit_identity_binding": "strict",
+            "biscuit_client_id_fact": "cid",
+            "mode": "fanout",
+            "fanout_topic": "fanout/all",
+            "biscuit_attenuate": True,
+            "biscuit_attenuate_denies": ['check if topic("blocked")'],
+            "biscuit_attenuate_checks": ['check if operation("read")'],
+            "biscuit_attenuate_topic": "sensors/{client_id}/temp",
+            "biscuit_attenuate_operation": "read",
+            "biscuit_attenuate_ttl": 30,
+            "biscuit_public_key_hex": "abcd",
+            "biscuit_public_key_file": "pubkey.pem",
+            "biscuit_attenuate_bin": "biscuit-attenuate",
+            "biscuit_delegate": True,
+            "biscuit_delegate_denies": ['check if topic("secret")'],
+            "biscuit_delegate_checks": ['check if operation("write")'],
+            "biscuit_delegate_topic": "delegated/{client_id}",
+            "biscuit_delegate_operation": "write",
+            "biscuit_delegate_ttl": 45,
+            "biscuit_delegate_public_key_hex": "dcba",
+            "biscuit_delegate_public_key_file": "delegate-pubkey.pem",
+            "biscuit_delegate_bin": "delegate-bin",
+            "biscuit_delegate_handoff": True,
+            "biscuit_delegate_handoff_topic": "handoff/topic",
+            "biscuit_delegate_handoff_token": b"handoff-token",
+            "biscuit_delegate_handoff_qos": 2,
+            "biscuit_delegate_handoff_no_retain": True,
+            "control_topic": "$CONTROL/dynamic-security/v1",
+            "control_payload": {"commands": [{"command": "noop"}]},
+            "control_mode": True,
+            "control_repeat": 3,
+            "control_qos": 2,
+            "control_after_messages": 4,
+            "fanout_churn_kind": "dynamic_security_control",
+            "fanout_churn_after_messages": 2,
+            "fanout_churn_interval_messages": 3,
+            "fanout_churn_max_events": 4,
+            "fanout_churn_settle_ms": 50,
+            "fanout_churn_dynamic_security_source": "dynsec.json",
+            "fanout_churn_control_topic": "$CONTROL/dynamic-security/v1",
+            "fanout_churn_control_payload": {"commands": [{"command": "deleteRole"}]},
+            "fanout_churn_sqlite_db": "policy.db",
+            "fanout_churn_sqlite_topic": "fanout/all",
+            "fanout_churn_sqlite_subscribers": 3,
+        }
+    )
+
+    argv = loadgen._rust_loadgen_cmd(**kwargs)
+
+    assert argv[0] == "mqtt-loadgen"
+    assert _argv_value(argv, "--password") == "b64:cHJpbWFyeS10b2tlbg"
+    assert _argv_value(argv, "--fanout-publisher-password") == "b64:cHVibGlzaGVyLXRva2Vu"
+    assert _argv_value(argv, "--qos-distribution") == "0:0.25,1:0.75"
+    assert "--sync-connect" in argv
+    assert _argv_value(argv, "--token-issuer-url") == "http://issuer"
+    assert _argv_value(argv, "--token-issuer-kind") == "jwt"
+    assert _argv_value(argv, "--token-issuer-ttl") == "60"
+    assert "--token-issuer-no-default-roles" in argv
+    assert "--token-issuer-no-default-grants" in argv
+    assert _argv_value(argv, "--token-refresh-codes") == "5,135"
+    assert _argv_value(argv, "--jwt-identity-binding") == "strict"
+    assert _argv_value(argv, "--biscuit-identity-binding") == "strict"
+    assert _argv_value(argv, "--biscuit-client-id-fact") == "cid"
+    assert "--tls" in argv
+    assert _argv_value(argv, "--tls-ca-file") == "ca.pem"
+    assert "--tls-insecure" in argv
+    assert "--biscuit-attenuate" in argv
+    assert _argv_value(argv, "--biscuit-attenuate-deny") == 'check if topic("blocked")'
+    assert _argv_value(argv, "--biscuit-attenuate-check") == 'check if operation("read")'
+    assert _argv_value(argv, "--biscuit-attenuate-topic") == "sensors/{client_id}/temp"
+    assert _argv_value(argv, "--biscuit-attenuate-op") == "read"
+    assert _argv_value(argv, "--biscuit-attenuate-ttl") == "30"
+    assert _argv_value(argv, "--biscuit-public-key-hex") == "abcd"
+    assert _argv_value(argv, "--biscuit-public-key-file") == "pubkey.pem"
+    assert _argv_value(argv, "--biscuit-attenuate-bin") == "biscuit-attenuate"
+    assert "--biscuit-delegate" in argv
+    assert _argv_value(argv, "--biscuit-delegate-deny") == 'check if topic("secret")'
+    assert _argv_value(argv, "--biscuit-delegate-check") == 'check if operation("write")'
+    assert _argv_value(argv, "--biscuit-delegate-topic") == "delegated/{client_id}"
+    assert _argv_value(argv, "--biscuit-delegate-op") == "write"
+    assert _argv_value(argv, "--biscuit-delegate-ttl") == "45"
+    assert _argv_value(argv, "--biscuit-delegate-public-key-hex") == "dcba"
+    assert _argv_value(argv, "--biscuit-delegate-public-key-file") == "delegate-pubkey.pem"
+    assert _argv_value(argv, "--biscuit-delegate-bin") == "delegate-bin"
+    assert "--biscuit-delegate-handoff" in argv
+    assert _argv_value(argv, "--biscuit-delegate-handoff-topic") == "handoff/topic"
+    assert _argv_value(argv, "--biscuit-delegate-handoff-token") == "b64:aGFuZG9mZi10b2tlbg"
+    assert _argv_value(argv, "--biscuit-delegate-handoff-qos") == "2"
+    assert "--biscuit-delegate-handoff-no-retain" in argv
+    assert _argv_value(argv, "--control-topic") == "$CONTROL/dynamic-security/v1"
+    assert json.loads(_argv_value(argv, "--control-payload")) == {
+        "commands": [{"command": "noop"}]
+    }
+    assert "--control-mode" in argv
+    assert _argv_value(argv, "--control-repeat") == "3"
+    assert _argv_value(argv, "--control-qos") == "2"
+    assert _argv_value(argv, "--control-after-messages") == "4"
+    assert _argv_value(argv, "--fanout-churn-kind") == "dynamic_security_control"
+    assert _argv_value(argv, "--fanout-churn-after-messages") == "2"
+    assert _argv_value(argv, "--fanout-churn-interval-messages") == "3"
+    assert _argv_value(argv, "--fanout-churn-max-events") == "4"
+    assert _argv_value(argv, "--fanout-churn-settle-ms") == "50"
+    assert _argv_value(argv, "--fanout-churn-dynamic-security-source") == "dynsec.json"
+    assert _argv_value(argv, "--fanout-churn-control-topic") == "$CONTROL/dynamic-security/v1"
+    assert json.loads(_argv_value(argv, "--fanout-churn-control-payload")) == {
+        "commands": [{"command": "deleteRole"}]
+    }
+    assert _argv_value(argv, "--fanout-churn-sqlite-db") == "policy.db"
+    assert _argv_value(argv, "--fanout-churn-sqlite-topic") == "fanout/all"
+    assert _argv_value(argv, "--fanout-churn-sqlite-subscribers") == "3"
+
+
 def test_strict_multi_client_jwt_startup_provisions_distinct_matching_tokens(
     monkeypatch,
 ) -> None:

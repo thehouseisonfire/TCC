@@ -343,7 +343,6 @@ def test_requested_partial_fixture_parity_scenario_is_selectable(monkeypatch) ->
 
     monkeypatch.setattr(rs, "setup_logging", lambda _log_level: None)
     monkeypatch.setattr(rs, "_read_tokens", lambda _path: tokens)
-    monkeypatch.setattr(rs, "_ensure_paho_mqtt", lambda: None)
     monkeypatch.setattr(
         rs,
         "_effective_mosquitto_runtime_conf",

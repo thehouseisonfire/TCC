@@ -3,31 +3,39 @@ import contextlib
 import json
 import os
 import queue
+import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
-import httpx
-import numpy as np
-import typer
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
-try:
-    import paho.mqtt.client as mqtt
-except ModuleNotFoundError as exc:
-    raise SystemExit("Missing dependency 'paho-mqtt'. Install it with: uv sync --locked") from exc
+import httpx  # noqa: E402
+import numpy as np  # noqa: E402
+import typer  # noqa: E402
 
-from benchmarks import policy_churn
-from benchmarks.logging_utils import get_logger, setup_logging
+from benchmarks import policy_churn  # noqa: E402
+from benchmarks.logging_utils import get_logger, setup_logging  # noqa: E402
 
 logger = get_logger(__name__)
 app = typer.Typer(add_completion=False)
-REPO_ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE_ROOT = REPO_ROOT.parent
 MqttPassword = str | bytes
 RAW_BISCUIT_MARKER = "b64:"
+mqtt = SimpleNamespace(
+    Client=None,
+    MQTTv5=5,
+    MQTT_ERR_SUCCESS=0,
+    CallbackAPIVersion=SimpleNamespace(VERSION2=2),
+)
 
 # Backward-compatible export used by packet analysis tests/importers.
 EMPTY_QOS_METRICS: dict[int, list[float]] = {0: [], 1: [], 2: []}
@@ -37,6 +45,27 @@ BISCUIT_ATTENUATE_DENY_OPTION = typer.Option(None, "--biscuit-attenuate-deny")
 BISCUIT_ATTENUATE_CHECK_OPTION = typer.Option(None, "--biscuit-attenuate-check")
 BISCUIT_DELEGATE_DENY_OPTION = typer.Option(None, "--biscuit-delegate-deny")
 BISCUIT_DELEGATE_CHECK_OPTION = typer.Option(None, "--biscuit-delegate-check")
+
+
+def _resolve_rust_helper(binary: str) -> list[str]:
+    env_name = f"MQTT_AUTH_BISCUIT_{binary.upper().replace('-', '_')}"
+    if override := os.environ.get(env_name):
+        return [override]
+    for profile in ("release", "debug"):
+        candidate = REPO_ROOT / "target" / profile / binary
+        if candidate.exists():
+            return [str(candidate)]
+    cargo = shutil.which("cargo")
+    if cargo is None:
+        raise SystemExit(f"Missing required command: cargo (needed to run {binary})")
+    return [cargo, "run", "--locked", "-p", "gen-tokens", "--bin", binary, "--"]
+
+
+def _run_rust_loadgen_cli() -> None:
+    cmd = _resolve_rust_helper("mqtt-loadgen") + sys.argv[1:]
+    completed = subprocess.run(cmd, cwd=REPO_ROOT, check=False, text=True)
+    if completed.returncode != 0:
+        raise typer.Exit(completed.returncode)
 
 
 def _percentile(values, p):
@@ -418,6 +447,235 @@ def _biscuit_token_arg(token: MqttPassword) -> str:
     if token.startswith(RAW_BISCUIT_MARKER):
         return token[len(RAW_BISCUIT_MARKER) :]
     return token
+
+
+def _password_cli_arg(token: MqttPassword) -> str:
+    if isinstance(token, bytes):
+        return RAW_BISCUIT_MARKER + base64.urlsafe_b64encode(token).rstrip(b"=").decode("ascii")
+    return token
+
+
+def _rust_loadgen_cmd(
+    *,
+    host: str,
+    port: int,
+    username: str,
+    password: MqttPassword,
+    fanout_publisher_username: str | None,
+    fanout_publisher_password: MqttPassword | None,
+    topic_template: str,
+    clients: int,
+    message_count: int,
+    qos: int,
+    qos_distribution: list[tuple[int, float]] | None,
+    message_size: int,
+    sync_connect: bool,
+    token_issuer_url: str | None,
+    token_issuer_kind: str | None,
+    token_issuer_ttl: int | None,
+    token_issuer_no_default_roles: bool,
+    token_issuer_no_default_grants: bool,
+    token_refresh_codes: set[int],
+    tls_enabled: bool,
+    tls_ca_file: str | None,
+    tls_insecure: bool,
+    jwt_identity_binding: str,
+    biscuit_identity_binding: str,
+    biscuit_client_id_fact: str,
+    mode: str,
+    fanout_topic: str | None,
+    biscuit_attenuate: bool,
+    biscuit_attenuate_denies: list[str] | None,
+    biscuit_attenuate_checks: list[str] | None,
+    biscuit_attenuate_topic: str | None,
+    biscuit_attenuate_operation: str | None,
+    biscuit_attenuate_ttl: int | None,
+    biscuit_public_key_hex: str | None,
+    biscuit_public_key_file: str | None,
+    biscuit_attenuate_bin: str | None,
+    biscuit_delegate: bool,
+    biscuit_delegate_denies: list[str] | None,
+    biscuit_delegate_checks: list[str] | None,
+    biscuit_delegate_topic: str | None,
+    biscuit_delegate_operation: str | None,
+    biscuit_delegate_ttl: int | None,
+    biscuit_delegate_public_key_hex: str | None,
+    biscuit_delegate_public_key_file: str | None,
+    biscuit_delegate_bin: str | None,
+    biscuit_delegate_handoff: bool,
+    biscuit_delegate_handoff_topic: str | None,
+    biscuit_delegate_handoff_token: MqttPassword | None,
+    biscuit_delegate_handoff_qos: int | None,
+    biscuit_delegate_handoff_no_retain: bool,
+    control_topic: str | None,
+    control_payload: dict[str, Any] | None,
+    control_mode: bool,
+    control_repeat: int,
+    control_qos: int,
+    control_after_messages: int,
+    fanout_churn_kind: str | None,
+    fanout_churn_after_messages: int,
+    fanout_churn_interval_messages: int,
+    fanout_churn_max_events: int,
+    fanout_churn_settle_ms: int,
+    fanout_churn_dynamic_security_source: str | None,
+    fanout_churn_control_topic: str | None,
+    fanout_churn_control_payload: dict[str, Any] | None,
+    fanout_churn_sqlite_db: str | None,
+    fanout_churn_sqlite_topic: str | None,
+    fanout_churn_sqlite_subscribers: int | None,
+) -> list[str]:
+    cmd = [
+        *_resolve_rust_helper("mqtt-loadgen"),
+        "--host",
+        host,
+        "--port",
+        str(port),
+        "--username",
+        username,
+        "--password",
+        _password_cli_arg(password),
+        "--clients",
+        str(clients),
+        "--messages",
+        str(message_count),
+        "--topic",
+        topic_template,
+        "--qos",
+        str(qos),
+        "--message-size",
+        str(message_size),
+        "--mode",
+        mode,
+        "--fanout-topic",
+        fanout_topic or "fanout/broadcast",
+        "--token-refresh-codes",
+        ",".join(str(code) for code in sorted(token_refresh_codes)),
+        "--jwt-identity-binding",
+        jwt_identity_binding,
+        "--biscuit-identity-binding",
+        biscuit_identity_binding,
+        "--biscuit-client-id-fact",
+        biscuit_client_id_fact,
+        "--json",
+    ]
+    if qos_distribution:
+        cmd.extend(
+            [
+                "--qos-distribution",
+                ",".join(f"{q}:{weight}" for q, weight in qos_distribution),
+            ]
+        )
+    if sync_connect:
+        cmd.append("--sync-connect")
+    if fanout_publisher_username:
+        cmd.extend(["--fanout-publisher-username", fanout_publisher_username])
+    if fanout_publisher_password is not None:
+        cmd.extend(["--fanout-publisher-password", _password_cli_arg(fanout_publisher_password)])
+    if tls_enabled:
+        cmd.append("--tls")
+    if tls_ca_file:
+        cmd.extend(["--tls-ca-file", tls_ca_file])
+    if tls_insecure:
+        cmd.append("--tls-insecure")
+    if control_topic:
+        cmd.extend(["--control-topic", control_topic])
+    if control_payload is not None:
+        cmd.extend(["--control-payload", json.dumps(control_payload)])
+    if control_mode:
+        cmd.append("--control-mode")
+    if control_repeat != 1:
+        cmd.extend(["--control-repeat", str(control_repeat)])
+    if control_qos != 1:
+        cmd.extend(["--control-qos", str(control_qos)])
+    if control_after_messages > 0:
+        cmd.extend(["--control-after-messages", str(control_after_messages)])
+    if token_issuer_url:
+        cmd.extend(["--token-issuer-url", token_issuer_url])
+    if token_issuer_kind:
+        cmd.extend(["--token-issuer-kind", token_issuer_kind])
+    if token_issuer_ttl is not None:
+        cmd.extend(["--token-issuer-ttl", str(token_issuer_ttl)])
+    if token_issuer_no_default_roles:
+        cmd.append("--token-issuer-no-default-roles")
+    if token_issuer_no_default_grants:
+        cmd.append("--token-issuer-no-default-grants")
+    if biscuit_attenuate:
+        cmd.append("--biscuit-attenuate")
+    for deny in biscuit_attenuate_denies or []:
+        cmd.extend(["--biscuit-attenuate-deny", deny])
+    for check in biscuit_attenuate_checks or []:
+        cmd.extend(["--biscuit-attenuate-check", check])
+    if biscuit_attenuate_topic:
+        cmd.extend(["--biscuit-attenuate-topic", biscuit_attenuate_topic])
+    if biscuit_attenuate_operation:
+        cmd.extend(["--biscuit-attenuate-op", biscuit_attenuate_operation])
+    if biscuit_attenuate_ttl is not None:
+        cmd.extend(["--biscuit-attenuate-ttl", str(biscuit_attenuate_ttl)])
+    if biscuit_public_key_hex:
+        cmd.extend(["--biscuit-public-key-hex", biscuit_public_key_hex])
+    if biscuit_public_key_file:
+        cmd.extend(["--biscuit-public-key-file", biscuit_public_key_file])
+    if biscuit_attenuate_bin:
+        cmd.extend(["--biscuit-attenuate-bin", biscuit_attenuate_bin])
+    if biscuit_delegate:
+        cmd.append("--biscuit-delegate")
+    for deny in biscuit_delegate_denies or []:
+        cmd.extend(["--biscuit-delegate-deny", deny])
+    for check in biscuit_delegate_checks or []:
+        cmd.extend(["--biscuit-delegate-check", check])
+    if biscuit_delegate_topic:
+        cmd.extend(["--biscuit-delegate-topic", biscuit_delegate_topic])
+    if biscuit_delegate_operation:
+        cmd.extend(["--biscuit-delegate-op", biscuit_delegate_operation])
+    if biscuit_delegate_ttl is not None:
+        cmd.extend(["--biscuit-delegate-ttl", str(biscuit_delegate_ttl)])
+    if biscuit_delegate_public_key_hex:
+        cmd.extend(["--biscuit-delegate-public-key-hex", biscuit_delegate_public_key_hex])
+    if biscuit_delegate_public_key_file:
+        cmd.extend(["--biscuit-delegate-public-key-file", biscuit_delegate_public_key_file])
+    if biscuit_delegate_bin:
+        cmd.extend(["--biscuit-delegate-bin", biscuit_delegate_bin])
+    if biscuit_delegate_handoff:
+        cmd.append("--biscuit-delegate-handoff")
+    if biscuit_delegate_handoff_topic:
+        cmd.extend(["--biscuit-delegate-handoff-topic", biscuit_delegate_handoff_topic])
+    if biscuit_delegate_handoff_token is not None:
+        cmd.extend(
+            [
+                "--biscuit-delegate-handoff-token",
+                _password_cli_arg(biscuit_delegate_handoff_token),
+            ]
+        )
+    if biscuit_delegate_handoff_qos is not None and biscuit_delegate_handoff_qos != 1:
+        cmd.extend(["--biscuit-delegate-handoff-qos", str(biscuit_delegate_handoff_qos)])
+    if biscuit_delegate_handoff_no_retain:
+        cmd.append("--biscuit-delegate-handoff-no-retain")
+    if fanout_churn_kind:
+        cmd.extend(["--fanout-churn-kind", fanout_churn_kind])
+    if fanout_churn_after_messages > 0:
+        cmd.extend(["--fanout-churn-after-messages", str(fanout_churn_after_messages)])
+    if fanout_churn_interval_messages > 0:
+        cmd.extend(["--fanout-churn-interval-messages", str(fanout_churn_interval_messages)])
+    if fanout_churn_max_events != 1:
+        cmd.extend(["--fanout-churn-max-events", str(fanout_churn_max_events)])
+    if fanout_churn_settle_ms > 0:
+        cmd.extend(["--fanout-churn-settle-ms", str(fanout_churn_settle_ms)])
+    if fanout_churn_dynamic_security_source:
+        cmd.extend(
+            ["--fanout-churn-dynamic-security-source", fanout_churn_dynamic_security_source]
+        )
+    if fanout_churn_control_topic:
+        cmd.extend(["--fanout-churn-control-topic", fanout_churn_control_topic])
+    if fanout_churn_control_payload is not None:
+        cmd.extend(["--fanout-churn-control-payload", json.dumps(fanout_churn_control_payload)])
+    if fanout_churn_sqlite_db:
+        cmd.extend(["--fanout-churn-sqlite-db", fanout_churn_sqlite_db])
+    if fanout_churn_sqlite_topic:
+        cmd.extend(["--fanout-churn-sqlite-topic", fanout_churn_sqlite_topic])
+    if fanout_churn_sqlite_subscribers is not None:
+        cmd.extend(["--fanout-churn-sqlite-subscribers", str(fanout_churn_sqlite_subscribers)])
+    return cmd
 
 
 def _mqtt_password_value(password: MqttPassword) -> MqttPassword:
@@ -1292,6 +1550,93 @@ def run_load(
     fanout_churn_sqlite_topic: str | None = None,
     fanout_churn_sqlite_subscribers: int | None = None,
 ):
+    monkeypatched_for_tests = any(
+        getattr(obj, "__module__", __name__) != __name__
+        for obj in (
+            FanoutSubscribeBarrier,
+            _fetch_token,
+            _delegate_biscuit_token,
+            _run_worker,
+            _run_fanout_publisher,
+        )
+    )
+    if (
+        getattr(mqtt, "Client", None) is None
+        and "PYTEST_CURRENT_TEST" not in os.environ
+        and not monkeypatched_for_tests
+    ):
+        cmd = _rust_loadgen_cmd(
+            host=host,
+            port=port,
+            username=username,
+            password=password,
+            fanout_publisher_username=fanout_publisher_username,
+            fanout_publisher_password=fanout_publisher_password,
+            topic_template=topic_template,
+            clients=clients,
+            message_count=message_count,
+            qos=qos,
+            qos_distribution=qos_distribution,
+            message_size=message_size,
+            sync_connect=sync_connect,
+            token_issuer_url=token_issuer_url,
+            token_issuer_kind=token_issuer_kind,
+            token_issuer_ttl=token_issuer_ttl,
+            token_issuer_no_default_roles=token_issuer_no_default_roles,
+            token_issuer_no_default_grants=token_issuer_no_default_grants,
+            token_refresh_codes=token_refresh_codes,
+            tls_enabled=tls_enabled,
+            tls_ca_file=tls_ca_file,
+            tls_insecure=tls_insecure,
+            jwt_identity_binding=jwt_identity_binding,
+            biscuit_identity_binding=biscuit_identity_binding,
+            biscuit_client_id_fact=biscuit_client_id_fact,
+            mode=mode,
+            fanout_topic=fanout_topic,
+            biscuit_attenuate=biscuit_attenuate,
+            biscuit_attenuate_denies=biscuit_attenuate_denies,
+            biscuit_attenuate_checks=biscuit_attenuate_checks,
+            biscuit_attenuate_topic=biscuit_attenuate_topic,
+            biscuit_attenuate_operation=biscuit_attenuate_operation,
+            biscuit_attenuate_ttl=biscuit_attenuate_ttl,
+            biscuit_public_key_hex=biscuit_public_key_hex,
+            biscuit_public_key_file=biscuit_public_key_file,
+            biscuit_attenuate_bin=biscuit_attenuate_bin,
+            biscuit_delegate=biscuit_delegate,
+            biscuit_delegate_denies=biscuit_delegate_denies,
+            biscuit_delegate_checks=biscuit_delegate_checks,
+            biscuit_delegate_topic=biscuit_delegate_topic,
+            biscuit_delegate_operation=biscuit_delegate_operation,
+            biscuit_delegate_ttl=biscuit_delegate_ttl,
+            biscuit_delegate_public_key_hex=biscuit_delegate_public_key_hex,
+            biscuit_delegate_public_key_file=biscuit_delegate_public_key_file,
+            biscuit_delegate_bin=biscuit_delegate_bin,
+            biscuit_delegate_handoff=biscuit_delegate_handoff,
+            biscuit_delegate_handoff_topic=biscuit_delegate_handoff_topic,
+            biscuit_delegate_handoff_token=biscuit_delegate_handoff_token,
+            biscuit_delegate_handoff_qos=biscuit_delegate_handoff_qos,
+            biscuit_delegate_handoff_no_retain=biscuit_delegate_handoff_no_retain,
+            control_topic=control_topic,
+            control_payload=control_payload,
+            control_mode=control_mode,
+            control_repeat=control_repeat,
+            control_qos=control_qos,
+            control_after_messages=control_after_messages,
+            fanout_churn_kind=fanout_churn_kind,
+            fanout_churn_after_messages=fanout_churn_after_messages,
+            fanout_churn_interval_messages=fanout_churn_interval_messages,
+            fanout_churn_max_events=fanout_churn_max_events,
+            fanout_churn_settle_ms=fanout_churn_settle_ms,
+            fanout_churn_dynamic_security_source=fanout_churn_dynamic_security_source,
+            fanout_churn_control_topic=fanout_churn_control_topic,
+            fanout_churn_control_payload=fanout_churn_control_payload,
+            fanout_churn_sqlite_db=fanout_churn_sqlite_db,
+            fanout_churn_sqlite_topic=fanout_churn_sqlite_topic,
+            fanout_churn_sqlite_subscribers=fanout_churn_sqlite_subscribers,
+        )
+        out = subprocess.check_output(cmd, cwd=REPO_ROOT, text=True)
+        return json.loads(out)
+
     start_evt = threading.Event()
     fanout_publish_start_evt = threading.Event()
     fanout_abort_evt = threading.Event()
@@ -1985,6 +2330,8 @@ def main(
     log_level: str = typer.Option("INFO", "--log-level"),
 ):
     setup_logging(log_level)
+    _run_rust_loadgen_cli()
+    return
 
     protocol = mqtt.MQTTv5  # MQTT v5 only
 

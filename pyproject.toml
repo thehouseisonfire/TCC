@@ -6,7 +6,6 @@ dependencies = [
   "dpkt==1.9.8",
   "httpx[http2]==0.28.1",
   "numpy==2.4.2",
-  "paho-mqtt==2.1.0",
   "pandas==3.0.1",
   "pydantic==2.12.5",
   "rich==14.3.3",

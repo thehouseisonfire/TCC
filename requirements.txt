@@ -4,6 +4,7 @@ annotated-doc==0.0.4
     # via typer
 annotated-types==0.7.0
     # via pydantic
+ansible-core==2.19.3
 anyio==4.12.1
     # via httpx
 black==26.1.0
@@ -11,6 +12,8 @@ certifi==2026.2.25
     # via
     #   httpcore
     #   httpx
+cffi==2.0.0 ; platform_python_implementation != 'PyPy'
+    # via cryptography
 click==8.3.1
     # via
     #   black
@@ -19,6 +22,8 @@ colorama==0.4.6 ; sys_platform == 'win32'
     # via
     #   click
     #   pytest
+cryptography==46.0.6
+    # via ansible-core
 dpkt==1.9.8
     # via token-benchmark
 h11==0.16.0
@@ -39,10 +44,14 @@ idna==3.11
     #   httpx
 iniconfig==2.3.0
     # via pytest
+jinja2==3.1.6
+    # via ansible-core
 librt==0.8.1 ; platform_python_implementation != 'PyPy'
     # via mypy
 markdown-it-py==4.0.0
     # via rich
+markupsafe==3.0.3
+    # via jinja2
 mdurl==0.1.2
     # via markdown-it-py
 mypy==1.19.1
@@ -57,10 +66,9 @@ numpy==2.4.2
     #   token-benchmark
 packaging==26.0
     # via
+    #   ansible-core
     #   black
     #   pytest
-paho-mqtt==2.1.0
-    # via token-benchmark
 pandas==3.0.1
     # via token-benchmark
 pandas-stubs==3.0.0.260204
@@ -72,6 +80,8 @@ platformdirs==4.9.4
     # via black
 pluggy==1.6.0
     # via pytest
+pycparser==3.0 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
+    # via cffi
 pydantic==2.12.5
     # via token-benchmark
 pydantic-core==2.41.5
@@ -85,6 +95,10 @@ python-dateutil==2.9.0.post0
     # via pandas
 pytokens==0.4.1
     # via black
+pyyaml==6.0.3
+    # via ansible-core
+resolvelib==1.2.1
+    # via ansible-core
 rich==14.3.3
     # via
     #   token-benchmark

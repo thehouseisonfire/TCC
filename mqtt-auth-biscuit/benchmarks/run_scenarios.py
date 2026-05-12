@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -48,6 +49,20 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 RAW_BISCUIT_MARKER = "b64:"
 IdentityBindingMode = Literal["off", "strict"]
 SemanticClass = Literal["capability", "mixed", "parity_identity_bound"]
+
+
+def _resolve_rust_helper(binary: str) -> list[str]:
+    env_name = f"MQTT_AUTH_BISCUIT_{binary.upper().replace('-', '_')}"
+    if override := os.environ.get(env_name):
+        return [override]
+    for profile in ("release", "debug"):
+        candidate = REPO_ROOT / "target" / profile / binary
+        if candidate.exists():
+            return [str(candidate)]
+    cargo = shutil.which("cargo")
+    if cargo is None:
+        raise SystemExit(f"Missing required command: cargo (needed to run {binary})")
+    return [cargo, "run", "--locked", "-p", "gen-tokens", "--bin", binary, "--"]
 ScenarioTokenKind = Literal["jwt", "biscuit"]
 
 
@@ -1598,15 +1613,6 @@ def _write_result(out_dir: str, name: str, payload: dict):
     return str(path)
 
 
-def _ensure_paho_mqtt():
-    try:
-        import paho.mqtt.client as _  # noqa: F401
-    except ModuleNotFoundError as exc:
-        raise SystemExit(
-            "Missing dependency 'paho-mqtt'. Install it with: uv sync --locked"
-        ) from exc
-
-
 def _generate_control_churn_payload(scenario_id: str, client_id: str) -> dict[str, Any] | None:
     """Generate Dynamic Security command payload for CONTROL-CHURN scenarios.
 
@@ -1721,8 +1727,7 @@ def _run_mqtt5_auth(
     tls_insecure: bool,
 ):
     cmd = [
-        sys.executable,
-        "benchmarks/mqtt_auth_client.py",
+        *_resolve_rust_helper("mqtt-auth-client"),
         "--host",
         host,
         "--port",
@@ -1744,7 +1749,6 @@ def _run_mqtt5_auth(
         cmd,
         cwd=REPO_ROOT,
         text=True,
-        env=_python_subprocess_env(),
     )
     return json.loads(out)
 
@@ -3518,9 +3522,6 @@ def main(
             logger.info("%s", scenario_id)
         logger.info("Append -TLS to any scenario id for TLS variants.")
         return
-
-    if any("mqtt5_auth" not in s for s in scenarios):
-        _ensure_paho_mqtt()
 
     for s in scenarios:
         scenario_semantics = _scenario_semantics_metadata(

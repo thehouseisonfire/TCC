@@ -9,16 +9,14 @@ import shutil
 import socket
 import subprocess
 import sys
-import threading
 import time
 import uuid
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import httpx
-import paho.mqtt.client as mqtt
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -29,6 +27,7 @@ DYNSEC_CONFIG_FILE = REPO_ROOT / "docker" / "dynamic-security.json"
 DOCKER_COMPOSE_PROJECT = "runtime_enforcement_semantics_integration"
 RUNTIME_ENFORCEMENT_ARTIFACT_DIR_ENV = "RUNTIME_ENFORCEMENT_ARTIFACT_DIR"
 _FAILED_NODEIDS: set[str] = set()
+_OBSERVED_HELPER_BUILT = False
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -341,131 +340,102 @@ class ObservedMqttClient:
     will_payload: str | bytes | None = None
     will_qos: int = 0
     will_retain: bool = False
-    _messages: list[tuple[str, bytes]] = field(default_factory=list)
-    _subacks: dict[int, list[int]] = field(default_factory=dict)
-    _pubacks: dict[int, int | None] = field(default_factory=dict)
     connect_reason: int | None = None
     disconnect_reason: int | None = None
 
     def __post_init__(self) -> None:
-        self._lock = threading.Lock()
-        self._connect_done = threading.Event()
-        self._disconnected = threading.Event()
-        try:
-            self._client = mqtt.Client(
-                callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
-                client_id=self.client_id,
-                protocol=mqtt.MQTTv5,
-                reconnect_on_failure=False,
+        self._proc: subprocess.Popen[str] | None = None
+
+    @staticmethod
+    def _b64(value: str | bytes | None) -> str:
+        if value is None:
+            data = b""
+        elif isinstance(value, bytes):
+            data = value
+        else:
+            data = value.encode()
+        return base64.urlsafe_b64encode(data).decode().rstrip("=")
+
+    @staticmethod
+    def _helper_path() -> Path:
+        global _OBSERVED_HELPER_BUILT
+        candidate = REPO_ROOT / "target" / "debug" / "observed-mqtt-client"
+        if not _OBSERVED_HELPER_BUILT:
+            subprocess.run(
+                ["cargo", "build", "-p", "gen-tokens", "--bin", "observed-mqtt-client"],
+                cwd=REPO_ROOT,
+                check=True,
             )
-        except TypeError:
-            # Backward-compatible fallback for older paho versions.
-            self._client = mqtt.Client(
-                callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
-                client_id=self.client_id,
-                protocol=mqtt.MQTTv5,
+            _OBSERVED_HELPER_BUILT = True
+        if not candidate.exists():
+            raise RuntimeError(f"observed-mqtt-client helper not found: {candidate}")
+        return candidate
+
+    def _ensure_proc(self) -> subprocess.Popen[str]:
+        if self._proc is None or self._proc.poll() is not None:
+            self._proc = subprocess.Popen(
+                [str(self._helper_path())],
+                cwd=REPO_ROOT,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
             )
-        if self.will_topic is not None:
-            self._client.will_set(
-                topic=self.will_topic,
-                payload=self.will_payload,
-                qos=self.will_qos,
-                retain=self.will_retain,
-            )
-        if self.username or self.password:
-            cast(Any, self._client).username_pw_set(self.username, self.password)
-        if self.tls:
-            self._client.tls_set(ca_certs=self.tls_ca_file)
-            if self.tls_insecure:
-                self._client.tls_insecure_set(True)
-        self._client.on_connect = self._on_connect
-        self._client.on_disconnect = self._on_disconnect
-        self._client.on_message = self._on_message
-        self._client.on_subscribe = self._on_subscribe
-        self._client.on_publish = self._on_publish
+        return self._proc
 
-    def _on_connect(
-        self,
-        _client: mqtt.Client,
-        _userdata: Any,
-        _connect_flags: Any,
-        reason_code: Any,
-        _properties: Any = None,
-    ) -> None:
-        self.connect_reason = _normalize_reason_code(reason_code)
-        self._connect_done.set()
-
-    def _on_disconnect(
-        self,
-        _client: mqtt.Client,
-        _userdata: Any,
-        _disconnect_flags: Any,
-        reason_code: Any,
-        _properties: Any = None,
-    ) -> None:
-        self.disconnect_reason = _normalize_reason_code(reason_code)
-        self._disconnected.set()
-
-    def _on_message(self, _client: mqtt.Client, _userdata: Any, msg: mqtt.MQTTMessage) -> None:
-        with self._lock:
-            self._messages.append((msg.topic, msg.payload or b""))
-
-    def _on_subscribe(
-        self,
-        _client: mqtt.Client,
-        _userdata: Any,
-        mid: int,
-        reason_codes: list[Any] | None,
-        _properties: Any = None,
-    ) -> None:
-        codes = [_normalize_reason_code(code) or -1 for code in reason_codes or []]
-        with self._lock:
-            self._subacks[mid] = codes
-
-    def _on_publish(
-        self,
-        _client: mqtt.Client,
-        _userdata: Any,
-        mid: int,
-        reason_code: Any,
-        _properties: Any = None,
-    ) -> None:
-        with self._lock:
-            self._pubacks[mid] = _normalize_reason_code(reason_code)
+    def _request(self, payload: dict[str, Any]) -> Any:
+        proc = self._ensure_proc()
+        if proc.stdin is None or proc.stdout is None:
+            raise AssertionError(f"{self.client_id}: helper pipes are unavailable")
+        proc.stdin.write(json.dumps(payload) + "\n")
+        proc.stdin.flush()
+        line = proc.stdout.readline()
+        if not line:
+            stderr = proc.stderr.read() if proc.stderr is not None else ""
+            raise AssertionError(f"{self.client_id}: helper exited unexpectedly: {stderr}")
+        response = json.loads(line)
+        if not response.get("ok"):
+            raise AssertionError(f"{self.client_id}: {response.get('error')}")
+        return response.get("value")
 
     @property
     def message_count(self) -> int:
-        with self._lock:
-            return len(self._messages)
+        return int(self._request({"cmd": "message_count"}))
 
     def message_count_for_topic(self, topic: str) -> int:
-        with self._lock:
-            return sum(1 for msg_topic, _ in self._messages if msg_topic == topic)
+        return int(self._request({"cmd": "message_count", "topic": topic}))
 
     def connect(self, timeout_s: float = 10.0) -> None:
-        self._client.connect(self.host, self.port, 30)
-        self._client.loop_start()
-        if not self._connect_done.wait(timeout=timeout_s):
-            raise AssertionError(f"{self.client_id}: timed out waiting for CONNACK")
+        value = self._request(
+            {
+                "cmd": "connect",
+                "host": self.host,
+                "port": self.port,
+                "client_id": self.client_id,
+                "username": self.username,
+                "password_b64": self._b64(self.password),
+                "tls": self.tls,
+                "tls_ca_file": self.tls_ca_file,
+                "tls_insecure": self.tls_insecure,
+                "will_topic": self.will_topic,
+                "will_payload_b64": self._b64(self.will_payload),
+                "will_qos": self.will_qos,
+                "will_retain": self.will_retain,
+            }
+        )
+        self.connect_reason = int(value["connect_reason"])
         if self.connect_reason != 0:
             raise AssertionError(
                 f"{self.client_id}: connect failed with reason {self.connect_reason}"
             )
 
     def subscribe(self, topic: str, qos: int = 1, timeout_s: float = 5.0) -> list[int]:
-        rc, mid = self._client.subscribe(topic, qos=qos)
-        if rc != mqtt.MQTT_ERR_SUCCESS:
-            raise AssertionError(f"{self.client_id}: subscribe rc={rc}")
-        if mid is None:
-            raise AssertionError(f"{self.client_id}: subscribe returned no message id")
-
-        if not _wait_until(lambda: mid in self._subacks, timeout_s):
-            raise AssertionError(f"{self.client_id}: no SUBACK for mid={mid}")
-        with self._lock:
-            suback = self._subacks.get(mid)
-        if suback is None:
-            raise AssertionError(f"{self.client_id}: missing SUBACK payload for mid={mid}")
-        return list(suback)
+        return list(
+            self._request(
+                {"cmd": "subscribe", "topic": topic, "qos": qos, "timeout_s": timeout_s}
+            )
+        )
 
     def publish(
         self,
@@ -474,35 +444,56 @@ class ObservedMqttClient:
         qos: int = 1,
         timeout_s: float = 5.0,
     ) -> int | None:
-        info = self._client.publish(topic, payload, qos=qos)
-        if qos == 0:
-            return None
-        info.wait_for_publish(timeout=timeout_s)
-        if not info.is_published():
-            raise AssertionError(f"{self.client_id}: publish timed out for mid={info.mid}")
-        return int(info.rc)
+        value = self._request(
+            {
+                "cmd": "publish",
+                "topic": topic,
+                "payload_b64": self._b64(payload),
+                "qos": qos,
+                "retain": False,
+                "timeout_s": timeout_s,
+            }
+        )
+        return None if value is None else int(value)
 
     def wait_for_messages(self, minimum: int, timeout_s: float = 5.0) -> bool:
-        return _wait_until(lambda: self.message_count >= minimum, timeout_s)
+        return bool(
+            self._request({"cmd": "wait_messages", "minimum": minimum, "timeout_s": timeout_s})
+        )
 
     def wait_for_topic_messages(self, topic: str, minimum: int, timeout_s: float = 5.0) -> bool:
-        return _wait_until(lambda: self.message_count_for_topic(topic) >= minimum, timeout_s)
+        return bool(
+            self._request(
+                {
+                    "cmd": "wait_topic_messages",
+                    "topic": topic,
+                    "minimum": minimum,
+                    "timeout_s": timeout_s,
+                }
+            )
+        )
 
     def wait_disconnected(self, timeout_s: float = 5.0) -> bool:
-        return self._disconnected.wait(timeout=timeout_s)
+        value = self._request({"cmd": "wait_disconnect", "timeout_s": timeout_s})
+        self.disconnect_reason = value.get("reason")
+        return bool(value.get("disconnected"))
 
     def assert_connected_for(self, duration_s: float) -> None:
-        if not _wait_until(lambda: self._disconnected.is_set(), duration_s):
+        if not self.wait_disconnected(timeout_s=duration_s):
             return
         raise AssertionError(
             f"{self.client_id}: disconnected unexpectedly (reason={self.disconnect_reason})"
         )
 
     def close(self) -> None:
+        if self._proc is None:
+            return
         with contextlib.suppress(Exception):
-            self._client.disconnect()
+            self._request({"cmd": "close"})
         with contextlib.suppress(Exception):
-            self._client.loop_stop()
+            self._proc.terminate()
+            self._proc.wait(timeout=1.0)
+        self._proc = None
 
 
 @pytest.hookimpl(hookwrapper=True)

@@ -35,8 +35,7 @@ def query_prometheus(query):
     """Query Prometheus and return the result."""
     try:
         url = f"http://localhost:9090/api/v1/query?query={urllib.parse.quote(query, safe='')}"
-        transport = httpx.HTTPTransport(http1=False, http2=True)
-        with httpx.Client(timeout=5.0, transport=transport) as client:
+        with httpx.Client(timeout=5.0) as client:
             resp = client.get(url)
             resp.raise_for_status()
             return resp.json()
@@ -112,20 +111,22 @@ def verify_resource_monitoring():
     mem_mb = float(mem_value) / (1024 * 1024)
     print(f"   ✅ Memory working set: {mem_value} bytes ({mem_mb:.2f} MB)")
 
-    # Test the current scenario runner queries (which should fail)
+    # Test the current scenario runner label-based queries.
     print("\n5. Testing current scenario runner queries...")
     current_cpu_result = query_prometheus(CURRENT_DOCKER_COMPOSE_CPU_QUERY)
 
-    if not current_cpu_result.get("data", {}).get("result"):
-        print("   ⚠️  Current scenario runner CPU query returns empty (expected)")
+    current_cpu_ok = bool(current_cpu_result.get("data", {}).get("result"))
+    if not current_cpu_ok:
+        print("   ⚠️  Current scenario runner CPU query returns empty")
         print("      This is because Docker Compose labels are not available in cAdvisor")
     else:
         print("   ✅ Current scenario runner CPU query works")
 
     current_mem_result = query_prometheus(CURRENT_DOCKER_COMPOSE_MEM_QUERY)
 
-    if not current_mem_result.get("data", {}).get("result"):
-        print("   ⚠️  Current scenario runner memory query returns empty (expected)")
+    current_mem_ok = bool(current_mem_result.get("data", {}).get("result"))
+    if not current_mem_ok:
+        print("   ⚠️  Current scenario runner memory query returns empty")
         print("      This is because Docker Compose labels are not available in cAdvisor")
     else:
         print("   ✅ Current scenario runner memory query works")
@@ -133,11 +134,15 @@ def verify_resource_monitoring():
     print("\n=== Summary ===")
     print("✅ Prometheus is accessible and collecting container metrics")
     print("✅ CPU and memory metrics are available for mosquitto container")
-    print("⚠️  Current scenario runner queries need to be updated to use container IDs")
-    print("\n=== Phase 6.2 Status ===")
-    print("🔧 RESOURCE MONITORING NEEDS FIX: The Prometheus queries in run_scenarios.py")
-    print("   need to be updated to use container ID-based queries instead of Docker")
-    print("   Compose labels, which are not available in the current cAdvisor setup.")
+    if current_cpu_ok and current_mem_ok:
+        print("✅ Current scenario runner label-based queries return data")
+        print("\n=== Phase 6.2 Status ===")
+        print("✅ RESOURCE MONITORING OK")
+    else:
+        print("⚠️  Current scenario runner label-based queries return empty vectors")
+        print("\n=== Phase 6.2 Status ===")
+        print("🔧 RESOURCE MONITORING PARTIAL: Prometheus is healthy, but label-based")
+        print("   queries are empty. Use container ID-based queries for this cAdvisor setup.")
 
     return True
 
@@ -185,7 +190,7 @@ if __name__ == "__main__":
     if success:
         test_fixed_queries()
         print("\n🎯 PHASE 6.2 VERIFICATION COMPLETE")
-        print("   Resource monitoring infrastructure is working, but queries need fixes.")
+        print("   Resource monitoring infrastructure is working.")
         sys.exit(0)
     else:
         print("\n❌ PHASE 6.2 VERIFICATION FAILED")

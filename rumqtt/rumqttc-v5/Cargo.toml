@@ -1,0 +1,128 @@
+[package]
+name = "rumqttc-v5-next"
+version = "0.33.0"
+publish = true
+autoexamples = false
+description = "Explicit MQTT 5 client crate in the rumqttc-next family"
+keywords = ["mqtt", "iot", "coap", "http"]
+categories = ["network-programming"]
+rust-version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+authors.workspace = true
+readme = "README.md"
+
+[lib]
+name = "rumqttc"
+
+[package.metadata.docs.rs]
+features = ["use-rustls", "use-rustls-no-provider", "use-native-tls", "websocket", "proxy", "auth-scram", "url"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+default = ["use-rustls"]
+use-rustls = ["use-rustls-aws-lc"]
+use-rustls-no-provider = ["dep:tokio-rustls", "dep:rustls-webpki", "dep:rustls-pki-types", "dep:rustls-native-certs", "async-tungstenite?/tokio-rustls-native-certs", "rumqttc-core/use-rustls-no-provider"]
+use-rustls-ring = ["use-rustls-no-provider", "tokio-rustls/ring", "rustls-webpki/ring", "rumqttc-core/use-rustls-ring"]
+use-rustls-aws-lc = ["use-rustls-no-provider", "tokio-rustls/aws_lc_rs", "rustls-webpki/aws-lc-rs", "rumqttc-core/use-rustls-aws-lc"]
+use-native-tls = ["dep:tokio-native-tls", "dep:native-tls", "async-tungstenite?/tokio-native-tls", "rumqttc-core/use-native-tls"]
+websocket = ["dep:async-tungstenite", "dep:futures-io", "dep:http", "rumqttc-core/websocket"]
+proxy = ["dep:async-http-proxy", "rumqttc-core/proxy"]
+auth-scram = ["dep:scram"]
+url = ["dep:url", "dep:percent-encoding"]
+
+[dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+futures-io = { version = "0.3", optional = true }
+tokio = { version = "1.40", features = ["rt", "macros", "io-util", "net", "time", "sync"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+bytes = "1.5"
+log = "0.4"
+flume = { version = "0.12", default-features = false, features = ["async"] }
+thiserror = "2.0.8"
+rumqttc-core = { package = "rumqttc-core-next", path = "../rumqttc-core", version = "0.33.0", default-features = false }
+mqttbytes-core = { package = "mqttbytes-core-next", path = "../mqttbytes-core", version = "0.33.0" }
+
+# Optional
+# rustls
+tokio-rustls = { version = "0.26.0", optional = true, default-features = false }
+rustls-webpki = { version = "0.103.12", optional = true }
+rustls-pki-types = { version = "1.14.0", optional = true }
+rustls-native-certs = { version = "0.8.1", optional = true }
+# websockets
+async-tungstenite = { version = "0.34.0", default-features = false, features = ["tokio-runtime", "futures-03-sink"], optional = true }
+http = { version = "1.0.0", optional = true }
+# native-tls
+tokio-native-tls = { version = "0.3.1", optional = true }
+native-tls = { version = "0.2.12", optional = true }
+# url
+percent-encoding = { version = "2", optional = true }
+url = { version = "2", default-features = false, optional = true }
+# proxy
+async-http-proxy = { version = "1.2.5", features = ["runtime-tokio", "basic-auth"], optional = true }
+fixedbitset = "0.5.7"
+#auth
+scram = { package = "scram-rs", version = "0.21.1", default-features = false, features = ["std"], optional = true }
+
+[dev-dependencies]
+wincode = { version = "0.5.1", features = ["derive"] }
+color-backtrace = "0.7.2"
+matches = "0.1"
+pretty_assertions = "1"
+pretty_env_logger = "0.5"
+serde = { version = "1", features = ["derive"] }
+tokio-tungstenite = "0.29"
+rcgen = "0.14"
+criterion = "0.8.2"
+
+[[example]]
+name = "async_auth_oauth"
+path = "examples/async_auth_oauth.rs"
+required-features = ["use-rustls-no-provider"]
+
+[[example]]
+name = "async_auth_scram"
+path = "examples/async_auth_scram.rs"
+required-features = ["auth-scram"]
+
+[[example]]
+name = "async_manual_acks_v5"
+path = "examples/async_manual_acks_v5.rs"
+
+[[example]]
+name = "asyncpubsub_v5"
+path = "examples/asyncpubsub_v5.rs"
+
+[[example]]
+name = "auth_v5"
+path = "examples/auth.rs"
+
+[[example]]
+name = "subscription_ids"
+path = "examples/subscription_ids.rs"
+
+[[example]]
+name = "sync_auth_scram"
+path = "examples/sync_auth_scram.rs"
+required-features = ["auth-scram"]
+
+[[example]]
+name = "syncpubsub_v5"
+path = "examples/syncpubsub_v5.rs"
+
+[[example]]
+name = "syncrecv_v5"
+path = "examples/syncrecv_v5.rs"
+
+[[example]]
+name = "topic_alias"
+path = "examples/topic_alias.rs"
+
+[[example]]
+name = "tracked_notices_v5"
+path = "examples/tracked_notices_v5.rs"
+
+[[example]]
+name = "unbounded_v5"
+path = "examples/unbounded.rs"

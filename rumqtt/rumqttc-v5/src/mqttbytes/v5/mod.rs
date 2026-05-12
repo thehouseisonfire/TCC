@@ -1,0 +1,865 @@
+use std::slice::Iter;
+
+pub use self::{
+    auth::{Auth, AuthProperties, AuthReasonCode},
+    codec::Codec,
+    connack::{ConnAck, ConnAckProperties, ConnectReturnCode},
+    connect::{Connect, ConnectAuth, ConnectProperties, LastWill, LastWillProperties},
+    disconnect::{Disconnect, DisconnectProperties, DisconnectReasonCode},
+    ping::{PingReq, PingResp},
+    puback::{PubAck, PubAckProperties, PubAckReason},
+    pubcomp::{PubComp, PubCompProperties, PubCompReason},
+    publish::{Publish, PublishProperties},
+    pubrec::{PubRec, PubRecProperties, PubRecReason},
+    pubrel::{PubRel, PubRelProperties, PubRelReason},
+    suback::{SubAck, SubAckProperties, SubscribeReasonCode},
+    subscribe::{Filter, RetainForwardRule, Subscribe, SubscribeProperties},
+    unsuback::{UnsubAck, UnsubAckProperties, UnsubAckReason},
+    unsubscribe::{Unsubscribe, UnsubscribeProperties},
+};
+
+use super::{Error, QoS, qos};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use mqttbytes_core::primitives::{self as core_primitives, Error as PrimitiveError};
+
+#[allow(clippy::missing_errors_doc)]
+mod auth;
+#[allow(clippy::missing_errors_doc)]
+mod codec;
+#[allow(clippy::missing_errors_doc)]
+mod connack;
+#[allow(clippy::missing_errors_doc)]
+mod connect;
+#[allow(clippy::missing_errors_doc)]
+mod disconnect;
+#[allow(clippy::missing_errors_doc)]
+mod ping;
+#[allow(clippy::missing_errors_doc)]
+mod puback;
+#[allow(clippy::missing_errors_doc)]
+mod pubcomp;
+#[allow(clippy::missing_errors_doc)]
+mod publish;
+#[allow(clippy::missing_errors_doc)]
+mod pubrec;
+#[allow(clippy::missing_errors_doc)]
+mod pubrel;
+#[allow(clippy::missing_errors_doc)]
+mod suback;
+#[allow(clippy::missing_errors_doc)]
+mod subscribe;
+#[allow(clippy::missing_errors_doc)]
+mod unsuback;
+#[allow(clippy::missing_errors_doc)]
+mod unsubscribe;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Packet {
+    Auth(Auth),
+    Connect(Connect, Option<LastWill>, ConnectAuth),
+    ConnAck(ConnAck),
+    Publish(Publish),
+    PubAck(PubAck),
+    PingReq(PingReq),
+    PingResp(PingResp),
+    Subscribe(Subscribe),
+    SubAck(SubAck),
+    PubRec(PubRec),
+    PubRel(PubRel),
+    PubComp(PubComp),
+    Unsubscribe(Unsubscribe),
+    UnsubAck(UnsubAck),
+    Disconnect(Disconnect),
+}
+
+impl From<PrimitiveError> for Error {
+    fn from(error: PrimitiveError) -> Self {
+        match error {
+            PrimitiveError::PayloadTooLong => Self::PayloadTooLong,
+            PrimitiveError::BoundaryCrossed(len) => Self::BoundaryCrossed(len),
+            PrimitiveError::MalformedPacket => Self::MalformedPacket,
+            PrimitiveError::MalformedRemainingLength => Self::MalformedRemainingLength,
+            PrimitiveError::TopicNotUtf8 => Self::TopicNotUtf8,
+            PrimitiveError::InsufficientBytes(required) => Self::InsufficientBytes(required),
+        }
+    }
+}
+
+impl Packet {
+    #[must_use]
+    pub const fn packet_type(&self) -> PacketType {
+        match self {
+            Self::Auth(_) => PacketType::Auth,
+            Self::Connect(_, _, _) => PacketType::Connect,
+            Self::ConnAck(_) => PacketType::ConnAck,
+            Self::Publish(_) => PacketType::Publish,
+            Self::PubAck(_) => PacketType::PubAck,
+            Self::PingReq(_) => PacketType::PingReq,
+            Self::PingResp(_) => PacketType::PingResp,
+            Self::Subscribe(_) => PacketType::Subscribe,
+            Self::SubAck(_) => PacketType::SubAck,
+            Self::PubRec(_) => PacketType::PubRec,
+            Self::PubRel(_) => PacketType::PubRel,
+            Self::PubComp(_) => PacketType::PubComp,
+            Self::Unsubscribe(_) => PacketType::Unsubscribe,
+            Self::UnsubAck(_) => PacketType::UnsubAck,
+            Self::Disconnect(_) => PacketType::Disconnect,
+        }
+    }
+
+    /// Reads the next MQTT v5 packet from the buffered stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the packet is incomplete, malformed, or exceeds the
+    /// configured packet-size limit.
+    pub fn read(stream: &mut BytesMut, max_size: Option<u32>) -> Result<Self, Error> {
+        let fixed_header = check(stream.iter(), max_size)?;
+
+        // Test with a stream with exactly the size to check border panics
+        let packet = stream.split_to(fixed_header.frame_length());
+        let packet_type = fixed_header.packet_type()?;
+        validate_fixed_header_flags(packet_type, fixed_header.byte1)?;
+
+        if fixed_header.remaining_len == 0 {
+            // no payload packets, Disconnect still has a bit more info
+            return match packet_type {
+                PacketType::PingReq => Ok(Self::PingReq(PingReq)),
+                PacketType::PingResp => Ok(Self::PingResp(PingResp)),
+                PacketType::Disconnect => {
+                    Disconnect::read(fixed_header, packet.freeze()).map(Self::Disconnect)
+                }
+                _ => Err(Error::PayloadRequired),
+            };
+        }
+
+        let packet = packet.freeze();
+        let packet = match packet_type {
+            PacketType::Connect => {
+                let (connect, will, auth) = Connect::read(fixed_header, packet)?;
+                Self::Connect(connect, will, auth)
+            }
+            PacketType::Publish => {
+                let publish = Publish::read(fixed_header, packet)?;
+                Self::Publish(publish)
+            }
+            PacketType::Subscribe => {
+                let subscribe = Subscribe::read(fixed_header, packet)?;
+                Self::Subscribe(subscribe)
+            }
+            PacketType::Unsubscribe => {
+                let unsubscribe = Unsubscribe::read(fixed_header, packet)?;
+                Self::Unsubscribe(unsubscribe)
+            }
+            PacketType::ConnAck => {
+                let connack = ConnAck::read(fixed_header, packet)?;
+                Self::ConnAck(connack)
+            }
+            PacketType::PubAck => {
+                let puback = PubAck::read(fixed_header, packet)?;
+                Self::PubAck(puback)
+            }
+            PacketType::PubRec => {
+                let pubrec = PubRec::read(fixed_header, packet)?;
+                Self::PubRec(pubrec)
+            }
+            PacketType::PubRel => {
+                let pubrel = PubRel::read(fixed_header, packet)?;
+                Self::PubRel(pubrel)
+            }
+            PacketType::PubComp => {
+                let pubcomp = PubComp::read(fixed_header, packet)?;
+                Self::PubComp(pubcomp)
+            }
+            PacketType::SubAck => {
+                let suback = SubAck::read(fixed_header, packet)?;
+                Self::SubAck(suback)
+            }
+            PacketType::UnsubAck => {
+                let unsuback = UnsubAck::read(fixed_header, packet)?;
+                Self::UnsubAck(unsuback)
+            }
+            PacketType::PingReq => Self::PingReq(PingReq),
+            PacketType::PingResp => Self::PingResp(PingResp),
+            PacketType::Disconnect => {
+                let disconnect = Disconnect::read(fixed_header, packet)?;
+                Self::Disconnect(disconnect)
+            }
+            PacketType::Auth => {
+                let auth = Auth::read(fixed_header, packet)?;
+                Self::Auth(auth)
+            }
+        };
+
+        Ok(packet)
+    }
+
+    /// Serializes this MQTT v5 packet into the output buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the packet cannot be encoded within the configured
+    /// packet-size limit or violates MQTT encoding rules.
+    pub fn write(&self, write: &mut BytesMut, max_size: Option<u32>) -> Result<usize, Error> {
+        if let Some(max_size) = max_size
+            && self.size() > max_size as usize
+        {
+            return Err(Error::OutgoingPacketTooLarge {
+                pkt_size: u32::try_from(self.size()).unwrap_or(u32::MAX),
+                max: max_size,
+            });
+        }
+
+        match self {
+            Self::Auth(auth) => auth.write(write),
+            Self::Publish(publish) => publish.write(write),
+            Self::Subscribe(subscription) => subscription.write(write),
+            Self::Unsubscribe(unsubscribe) => unsubscribe.write(write),
+            Self::ConnAck(ack) => ack.write(write),
+            Self::PubAck(ack) => ack.write(write),
+            Self::SubAck(ack) => ack.write(write),
+            Self::UnsubAck(unsuback) => unsuback.write(write),
+            Self::PubRec(pubrec) => pubrec.write(write),
+            Self::PubRel(pubrel) => pubrel.write(write),
+            Self::PubComp(pubcomp) => pubcomp.write(write),
+            Self::Connect(connect, will, auth) => connect.write(will, auth, write),
+            Self::PingReq(_) => PingReq::write(write),
+            Self::PingResp(_) => PingResp::write(write),
+            Self::Disconnect(disconnect) => disconnect.write(write),
+        }
+    }
+
+    pub fn size(&self) -> usize {
+        match self {
+            Self::Auth(auth) => auth.size(),
+            Self::Publish(publish) => publish.size(),
+            Self::Subscribe(subscription) => subscription.size(),
+            Self::Unsubscribe(unsubscribe) => unsubscribe.size(),
+            Self::ConnAck(ack) => ack.size(),
+            Self::PubAck(ack) => ack.size(),
+            Self::SubAck(ack) => ack.size(),
+            Self::UnsubAck(unsuback) => unsuback.size(),
+            Self::PubRec(pubrec) => pubrec.size(),
+            Self::PubRel(pubrel) => pubrel.size(),
+            Self::PubComp(pubcomp) => pubcomp.size(),
+            Self::Connect(connect, will, auth) => connect.size(will, auth),
+            Self::PingReq(req) => req.size(),
+            Self::PingResp(resp) => resp.size(),
+            Self::Disconnect(disconnect) => disconnect.size(),
+        }
+    }
+}
+
+/// MQTT packet type
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PacketType {
+    Connect = 1,
+    ConnAck,
+    Publish,
+    PubAck,
+    PubRec,
+    PubRel,
+    PubComp,
+    Subscribe,
+    SubAck,
+    Unsubscribe,
+    UnsubAck,
+    PingReq,
+    PingResp,
+    Disconnect,
+    Auth,
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PropertyType {
+    PayloadFormatIndicator = 1,
+    MessageExpiryInterval = 2,
+    ContentType = 3,
+    ResponseTopic = 8,
+    CorrelationData = 9,
+    SubscriptionIdentifier = 11,
+    SessionExpiryInterval = 17,
+    AssignedClientIdentifier = 18,
+    ServerKeepAlive = 19,
+    AuthenticationMethod = 21,
+    AuthenticationData = 22,
+    RequestProblemInformation = 23,
+    WillDelayInterval = 24,
+    RequestResponseInformation = 25,
+    ResponseInformation = 26,
+    ServerReference = 28,
+    ReasonString = 31,
+    ReceiveMaximum = 33,
+    TopicAliasMaximum = 34,
+    TopicAlias = 35,
+    MaximumQos = 36,
+    RetainAvailable = 37,
+    UserProperty = 38,
+    MaximumPacketSize = 39,
+    WildcardSubscriptionAvailable = 40,
+    SubscriptionIdentifierAvailable = 41,
+    SharedSubscriptionAvailable = 42,
+}
+
+/// Packet type from a byte
+///
+/// ```text
+///          7                          3                          0
+///          +--------------------------+--------------------------+
+/// byte 1   | MQTT Control Packet Type | Flags for each type      |
+///          +--------------------------+--------------------------+
+///          |         Remaining Bytes Len  (1/2/3/4 bytes)        |
+///          +-----------------------------------------------------+
+///
+/// <https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html#_Toc385349207>
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd)]
+pub struct FixedHeader {
+    /// First byte of the stream. Used to identify packet types and
+    /// several flags
+    byte1: u8,
+    /// Length of fixed header. Byte 1 + (1..4) bytes. So fixed header
+    /// len can vary from 2 bytes to 5 bytes
+    /// 1..4 bytes are variable length encoded to represent remaining length
+    header_len: usize,
+    /// Remaining length of the packet. Doesn't include fixed header bytes
+    /// Represents variable header + payload size
+    remaining_len: usize,
+}
+
+impl FixedHeader {
+    #[must_use]
+    pub const fn new(byte1: u8, remaining_len_len: usize, remaining_len: usize) -> Self {
+        Self {
+            byte1,
+            header_len: remaining_len_len + 1,
+            remaining_len,
+        }
+    }
+
+    /// Returns the MQTT packet type represented by this fixed header.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the packet type nibble is not a valid MQTT v5 packet
+    /// type.
+    pub const fn packet_type(&self) -> Result<PacketType, Error> {
+        let num = self.byte1 >> 4;
+        match num {
+            1 => Ok(PacketType::Connect),
+            2 => Ok(PacketType::ConnAck),
+            3 => Ok(PacketType::Publish),
+            4 => Ok(PacketType::PubAck),
+            5 => Ok(PacketType::PubRec),
+            6 => Ok(PacketType::PubRel),
+            7 => Ok(PacketType::PubComp),
+            8 => Ok(PacketType::Subscribe),
+            9 => Ok(PacketType::SubAck),
+            10 => Ok(PacketType::Unsubscribe),
+            11 => Ok(PacketType::UnsubAck),
+            12 => Ok(PacketType::PingReq),
+            13 => Ok(PacketType::PingResp),
+            14 => Ok(PacketType::Disconnect),
+            15 => Ok(PacketType::Auth),
+            _ => Err(Error::InvalidPacketType(num)),
+        }
+    }
+
+    /// Returns the fixed-header flag bits (lower 4 bits of byte 1).
+    #[must_use]
+    pub const fn flags(&self) -> u8 {
+        self.byte1 & 0x0F
+    }
+
+    /// Returns the size of full packet (fixed header + variable header + payload)
+    /// Fixed header is enough to get the size of a frame in the stream
+    #[must_use]
+    pub const fn frame_length(&self) -> usize {
+        self.header_len + self.remaining_len
+    }
+}
+
+const fn property(num: u8) -> Result<PropertyType, Error> {
+    let property = match num {
+        1 => PropertyType::PayloadFormatIndicator,
+        2 => PropertyType::MessageExpiryInterval,
+        3 => PropertyType::ContentType,
+        8 => PropertyType::ResponseTopic,
+        9 => PropertyType::CorrelationData,
+        11 => PropertyType::SubscriptionIdentifier,
+        17 => PropertyType::SessionExpiryInterval,
+        18 => PropertyType::AssignedClientIdentifier,
+        19 => PropertyType::ServerKeepAlive,
+        21 => PropertyType::AuthenticationMethod,
+        22 => PropertyType::AuthenticationData,
+        23 => PropertyType::RequestProblemInformation,
+        24 => PropertyType::WillDelayInterval,
+        25 => PropertyType::RequestResponseInformation,
+        26 => PropertyType::ResponseInformation,
+        28 => PropertyType::ServerReference,
+        31 => PropertyType::ReasonString,
+        33 => PropertyType::ReceiveMaximum,
+        34 => PropertyType::TopicAliasMaximum,
+        35 => PropertyType::TopicAlias,
+        36 => PropertyType::MaximumQos,
+        37 => PropertyType::RetainAvailable,
+        38 => PropertyType::UserProperty,
+        39 => PropertyType::MaximumPacketSize,
+        40 => PropertyType::WildcardSubscriptionAvailable,
+        41 => PropertyType::SubscriptionIdentifierAvailable,
+        42 => PropertyType::SharedSubscriptionAvailable,
+        num => return Err(Error::InvalidPropertyType(num)),
+    };
+
+    Ok(property)
+}
+
+/// Validates that the fixed-header flag bits match the expected values for
+/// the given packet type, as required by [MQTT-2.1.3-1].
+///
+/// | Packet type        | Expected flags |
+/// |-------------------|---------------|
+/// | PUBLISH           | any (flags carry meaning) |
+/// | PUBREL            | 0b0010 |
+/// | SUBSCRIBE         | 0b0010 |
+/// | UNSUBSCRIBE       | 0b0010 |
+/// | All others        | 0b0000 |
+///
+/// [MQTT-2.1.3-1]: https://docs.oasis-open.org/mqtt/mqtt/v5.0/os/mqtt-v5.0-os.html#_Toc353481062
+const fn validate_fixed_header_flags(packet_type: PacketType, byte1: u8) -> Result<(), Error> {
+    let flags = byte1 & 0x0F;
+    let valid = match packet_type {
+        PacketType::Publish => true,
+        PacketType::PubRel | PacketType::Subscribe | PacketType::Unsubscribe => flags == 0b0010,
+        PacketType::Connect
+        | PacketType::ConnAck
+        | PacketType::PubAck
+        | PacketType::PubRec
+        | PacketType::PubComp
+        | PacketType::SubAck
+        | PacketType::UnsubAck
+        | PacketType::PingReq
+        | PacketType::PingResp
+        | PacketType::Disconnect
+        | PacketType::Auth => flags == 0,
+    };
+
+    if valid {
+        Ok(())
+    } else {
+        Err(Error::IncorrectPacketFormat)
+    }
+}
+
+/// Checks whether the stream contains a complete MQTT v5 packet within the
+/// configured size limit.
+///
+/// The fixed header is returned only if the existing bytes are enough to frame
+/// the packet. The passed stream does not modify the parent stream's cursor. If
+/// this function returns an error, the next `check` on the same parent stream
+/// starts again with the cursor at `0`.
+///
+/// # Errors
+///
+/// Returns an error if the frame is incomplete, malformed, or exceeds
+/// `max_packet_size`.
+pub fn check(stream: Iter<u8>, max_packet_size: Option<u32>) -> Result<FixedHeader, Error> {
+    let stream_len = stream.len();
+    let fixed_header = parse_fixed_header(stream)?;
+
+    // Don't let rogue connections attack with huge payloads.
+    // Disconnect them before reading all that data
+    let packet_size = fixed_header.frame_length();
+    if let Some(max_size) = max_packet_size
+        && packet_size > max_size as usize
+    {
+        return Err(Error::PayloadSizeLimitExceeded {
+            pkt_size: packet_size,
+            max: max_size,
+        });
+    }
+
+    let frame_length = fixed_header.frame_length();
+    if stream_len < frame_length {
+        return Err(Error::InsufficientBytes(frame_length - stream_len));
+    }
+
+    Ok(fixed_header)
+}
+
+fn parse_fixed_header(stream: Iter<u8>) -> Result<FixedHeader, Error> {
+    let fixed_header = core_primitives::parse_fixed_header(stream).map_err(Error::from)?;
+    Ok(FixedHeader::new(
+        fixed_header.byte1,
+        fixed_header.remaining_len_len,
+        fixed_header.remaining_len,
+    ))
+}
+
+/// Parses variable byte integer in the stream and returns the length
+/// and number of bytes that make it. Used for remaining length calculation
+/// as well as for calculating property lengths
+fn length(stream: Iter<u8>) -> Result<(usize, usize), Error> {
+    core_primitives::length(stream).map_err(Error::from)
+}
+
+/// Reads a series of bytes with a length from a byte stream
+fn read_mqtt_bytes(stream: &mut Bytes) -> Result<Bytes, Error> {
+    core_primitives::read_mqtt_bytes(stream).map_err(Error::from)
+}
+
+/// Reads a string from bytes stream
+fn read_mqtt_string(stream: &mut Bytes) -> Result<String, Error> {
+    core_primitives::read_mqtt_string(stream).map_err(Error::from)
+}
+
+/// Validates MQTT UTF-8 encoded string bytes without allocating.
+fn validate_mqtt_string(bytes: &[u8]) -> Result<&str, Error> {
+    core_primitives::validate_mqtt_string(bytes).map_err(Error::from)
+}
+
+/// Serializes bytes to stream (including length)
+fn write_mqtt_bytes(stream: &mut BytesMut, bytes: &[u8]) -> Result<(), Error> {
+    core_primitives::write_mqtt_bytes(stream, bytes).map_err(Error::from)
+}
+
+/// Serializes a string to stream
+fn write_mqtt_string(stream: &mut BytesMut, string: &str) -> Result<(), Error> {
+    validate_mqtt_string(string.as_bytes())?;
+    core_primitives::write_mqtt_string(stream, string).map_err(Error::from)
+}
+
+/// Writes remaining length to stream and returns number of bytes for remaining length
+fn write_remaining_length(stream: &mut BytesMut, len: usize) -> Result<usize, Error> {
+    core_primitives::write_remaining_length(stream, len).map_err(Error::from)
+}
+
+/// Return number of remaining length bytes required for encoding length
+const fn len_len(len: usize) -> usize {
+    core_primitives::len_len(len)
+}
+
+/// After collecting enough bytes to frame a packet (packet's `frame()`)
+/// , It's possible that content itself in the stream is wrong. Like expected
+/// packet id or qos not being present. In cases where `read_mqtt_string` or
+/// `read_mqtt_bytes` exhausted remaining length but packet framing expects to
+/// parse qos next, these pre checks will prevent `bytes` crashes
+fn read_u16(stream: &mut Bytes) -> Result<u16, Error> {
+    core_primitives::read_u16(stream).map_err(Error::from)
+}
+
+fn read_u8(stream: &mut Bytes) -> Result<u8, Error> {
+    core_primitives::read_u8(stream).map_err(Error::from)
+}
+
+fn read_u32(stream: &mut Bytes) -> Result<u32, Error> {
+    core_primitives::read_u32(stream).map_err(Error::from)
+}
+
+mod test {
+    // These are used in tests by packets
+    #[allow(dead_code)]
+    pub const USER_PROP_KEY: &str = "property";
+    #[allow(dead_code)]
+    pub const USER_PROP_VAL: &str = "a value thats really long............................................................................................................";
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::{Bytes, BytesMut};
+
+    use super::{
+        Auth, AuthReasonCode, ConnAck, Connect, ConnectAuth, ConnectReturnCode, Disconnect,
+        DisconnectReasonCode, Error, Filter, Packet, PacketType, PubAck, PubAckReason, PubComp,
+        PubCompReason, PubRec, PubRecReason, PubRel, PubRelReason, Publish, QoS, SubAck, Subscribe,
+        SubscribeReasonCode, UnsubAck, UnsubAckReason, Unsubscribe, validate_fixed_header_flags,
+    };
+
+    fn assert_packet_bytes_round_trip(packet: Packet, expected: &[u8]) {
+        let mut encoded = BytesMut::new();
+        packet.write(&mut encoded, None).unwrap();
+
+        assert_eq!(&encoded[..], expected);
+
+        let decoded = Packet::read(&mut encoded, None).unwrap();
+        assert_eq!(decoded, packet);
+        assert!(encoded.is_empty());
+    }
+
+    #[test]
+    fn property_bearing_packets_emit_and_read_explicit_zero_property_lengths() {
+        assert_packet_bytes_round_trip(
+            Packet::Connect(
+                Connect {
+                    keep_alive: 60,
+                    client_id: "c".into(),
+                    clean_start: true,
+                    properties: None,
+                },
+                None,
+                ConnectAuth::None,
+            ),
+            &[
+                0x10, 0x0E, 0x00, 0x04, b'M', b'Q', b'T', b'T', 0x05, 0x02, 0x00, 0x3C, 0x00, 0x00,
+                0x01, b'c',
+            ],
+        );
+        assert_packet_bytes_round_trip(
+            Packet::ConnAck(ConnAck {
+                session_present: false,
+                code: ConnectReturnCode::Success,
+                properties: None,
+            }),
+            &[0x20, 0x03, 0x00, 0x00, 0x00],
+        );
+        assert_packet_bytes_round_trip(
+            Packet::Publish(Publish::new("a", QoS::AtMostOnce, Bytes::new(), None)),
+            &[0x30, 0x04, 0x00, 0x01, b'a', 0x00],
+        );
+
+        let mut puback = PubAck::new(1, None);
+        puback.reason = PubAckReason::NoMatchingSubscribers;
+        assert_packet_bytes_round_trip(
+            Packet::PubAck(puback),
+            &[0x40, 0x04, 0x00, 0x01, 0x10, 0x00],
+        );
+
+        let mut pubrec = PubRec::new(1, None);
+        pubrec.reason = PubRecReason::NoMatchingSubscribers;
+        assert_packet_bytes_round_trip(
+            Packet::PubRec(pubrec),
+            &[0x50, 0x04, 0x00, 0x01, 0x10, 0x00],
+        );
+
+        let mut pubrel = PubRel::new(1, None);
+        pubrel.reason = PubRelReason::PacketIdentifierNotFound;
+        assert_packet_bytes_round_trip(
+            Packet::PubRel(pubrel),
+            &[0x62, 0x04, 0x00, 0x01, 0x92, 0x00],
+        );
+
+        let mut pubcomp = PubComp::new(1, None);
+        pubcomp.reason = PubCompReason::PacketIdentifierNotFound;
+        assert_packet_bytes_round_trip(
+            Packet::PubComp(pubcomp),
+            &[0x70, 0x04, 0x00, 0x01, 0x92, 0x00],
+        );
+
+        assert_packet_bytes_round_trip(
+            Packet::Subscribe(Subscribe {
+                pkid: 1,
+                filters: vec![Filter::new("a", QoS::AtMostOnce)],
+                properties: None,
+            }),
+            &[0x82, 0x07, 0x00, 0x01, 0x00, 0x00, 0x01, b'a', 0x00],
+        );
+        assert_packet_bytes_round_trip(
+            Packet::SubAck(SubAck {
+                pkid: 1,
+                return_codes: vec![SubscribeReasonCode::Success(QoS::AtMostOnce)],
+                properties: None,
+            }),
+            &[0x90, 0x04, 0x00, 0x01, 0x00, 0x00],
+        );
+        assert_packet_bytes_round_trip(
+            Packet::Unsubscribe(Unsubscribe {
+                pkid: 1,
+                ..Unsubscribe::new("a", None)
+            }),
+            &[0xA2, 0x06, 0x00, 0x01, 0x00, 0x00, 0x01, b'a'],
+        );
+        assert_packet_bytes_round_trip(
+            Packet::UnsubAck(UnsubAck {
+                pkid: 1,
+                reasons: vec![UnsubAckReason::Success],
+                properties: None,
+            }),
+            &[0xB0, 0x04, 0x00, 0x01, 0x00, 0x00],
+        );
+
+        let mut disconnect = Disconnect::new(DisconnectReasonCode::UnspecifiedError);
+        disconnect.properties = None;
+        assert_packet_bytes_round_trip(Packet::Disconnect(disconnect), &[0xE0, 0x02, 0x80, 0x00]);
+        assert_packet_bytes_round_trip(
+            Packet::Auth(Auth::new(AuthReasonCode::Continue, None)),
+            &[0xF0, 0x02, 0x18, 0x00],
+        );
+    }
+
+    #[test]
+    fn check_rejects_oversized_packet_on_partial_frame() {
+        let stream = [0x30, 0x14];
+        let result = super::check(stream.iter(), Some(10));
+
+        assert!(matches!(
+            result,
+            Err(Error::PayloadSizeLimitExceeded {
+                pkt_size: 22,
+                max: 10,
+            })
+        ));
+    }
+
+    #[test]
+    fn check_rejects_when_total_packet_size_exceeds_limit() {
+        let stream = [0x30, 0x09];
+        let result = super::check(stream.iter(), Some(10));
+
+        assert!(matches!(
+            result,
+            Err(Error::PayloadSizeLimitExceeded {
+                pkt_size: 11,
+                max: 10,
+            })
+        ));
+    }
+
+    // MQTT-2.1.3-1: Reserved flag bits MUST be set to the required value.
+    // For most packet types the lower 4 bits of byte 1 must be 0.
+    // SUBSCRIBE, UNSUBSCRIBE, and PUBREL require flags == 0b0010.
+    // PUBLISH uses the flag bits for DUP/QoS/RETAIN, so any value is valid.
+
+    #[test]
+    fn read_rejects_connect_with_nonzero_reserved_flags() {
+        // CONNECT is type 1 (0x10), flags must be 0. 0x11 has flags=1.
+        let mut stream = BytesMut::from(&[0x11, 0x00][..]);
+        let result = Packet::read(&mut stream, Some(1024));
+        assert!(matches!(result, Err(Error::IncorrectPacketFormat)));
+    }
+
+    #[test]
+    fn read_rejects_connack_with_nonzero_reserved_flags() {
+        // CONNACK is type 2 (0x20), flags must be 0. 0x2F has flags=0xF.
+        let mut stream = BytesMut::from(&[0x2F, 0x03, 0x00, 0x00, 0x00][..]);
+        let result = Packet::read(&mut stream, Some(1024));
+        assert!(matches!(result, Err(Error::IncorrectPacketFormat)));
+    }
+
+    #[test]
+    fn read_rejects_puback_with_nonzero_reserved_flags() {
+        // PUBACK is type 4 (0x40), flags must be 0. 0x41 has flags=1.
+        let mut stream = BytesMut::from(&[0x41, 0x02, 0x00, 0x01][..]);
+        let result = Packet::read(&mut stream, Some(1024));
+        assert!(matches!(result, Err(Error::IncorrectPacketFormat)));
+    }
+
+    #[test]
+    fn read_rejects_pubrec_with_nonzero_reserved_flags() {
+        // PUBREC is type 5 (0x50), flags must be 0. 0x51 has flags=1.
+        let mut stream = BytesMut::from(&[0x51, 0x02, 0x00, 0x01][..]);
+        let result = Packet::read(&mut stream, Some(1024));
+        assert!(matches!(result, Err(Error::IncorrectPacketFormat)));
+    }
+
+    #[test]
+    fn read_rejects_pubrel_with_wrong_reserved_flags() {
+        // PUBREL is type 6 (0x62), flags must be 0b0010. 0x60 has flags=0.
+        let mut stream = BytesMut::from(&[0x60, 0x02, 0x00, 0x01][..]);
+        let result = Packet::read(&mut stream, Some(1024));
+        assert!(matches!(result, Err(Error::IncorrectPacketFormat)));
+    }
+
+    #[test]
+    fn read_rejects_pubcomp_with_nonzero_reserved_flags() {
+        // PUBCOMP is type 7 (0x70), flags must be 0. 0x71 has flags=1.
+        let mut stream = BytesMut::from(&[0x71, 0x02, 0x00, 0x01][..]);
+        let result = Packet::read(&mut stream, Some(1024));
+        assert!(matches!(result, Err(Error::IncorrectPacketFormat)));
+    }
+
+    #[test]
+    fn read_rejects_subscribe_with_wrong_reserved_flags() {
+        // SUBSCRIBE is type 8 (0x82), flags must be 0b0010. 0x80 has flags=0.
+        let mut stream = BytesMut::from(&[0x80, 0x02, 0x00, 0x01][..]);
+        let result = Packet::read(&mut stream, Some(1024));
+        assert!(matches!(result, Err(Error::IncorrectPacketFormat)));
+    }
+
+    #[test]
+    fn read_rejects_suback_with_nonzero_reserved_flags() {
+        // SUBACK is type 9 (0x90), flags must be 0. 0x91 has flags=1.
+        let mut stream = BytesMut::from(&[0x91, 0x03, 0x00, 0x01, 0x00][..]);
+        let result = Packet::read(&mut stream, Some(1024));
+        assert!(matches!(result, Err(Error::IncorrectPacketFormat)));
+    }
+
+    #[test]
+    fn read_rejects_unsubscribe_with_wrong_reserved_flags() {
+        // UNSUBSCRIBE is type 10 (0xA2), flags must be 0b0010. 0xA0 has flags=0.
+        let mut stream = BytesMut::from(&[0xA0, 0x02, 0x00, 0x01][..]);
+        let result = Packet::read(&mut stream, Some(1024));
+        assert!(matches!(result, Err(Error::IncorrectPacketFormat)));
+    }
+
+    #[test]
+    fn read_rejects_unsuback_with_nonzero_reserved_flags() {
+        // UNSUBACK is type 11 (0xB0), flags must be 0. 0xB1 has flags=1.
+        let mut stream = BytesMut::from(&[0xB1, 0x03, 0x00, 0x01, 0x00][..]);
+        let result = Packet::read(&mut stream, Some(1024));
+        assert!(matches!(result, Err(Error::IncorrectPacketFormat)));
+    }
+
+    #[test]
+    fn read_rejects_pingreq_with_nonzero_reserved_flags() {
+        // PINGREQ is type 12 (0xC0), flags must be 0. 0xC1 has flags=1.
+        let mut stream = BytesMut::from(&[0xC1, 0x00][..]);
+        let result = Packet::read(&mut stream, Some(1024));
+        assert!(matches!(result, Err(Error::IncorrectPacketFormat)));
+    }
+
+    #[test]
+    fn read_rejects_pingresp_with_nonzero_reserved_flags() {
+        // PINGRESP is type 13 (0xD0), flags must be 0. 0xD1 has flags=1.
+        let mut stream = BytesMut::from(&[0xD1, 0x00][..]);
+        let result = Packet::read(&mut stream, Some(1024));
+        assert!(matches!(result, Err(Error::IncorrectPacketFormat)));
+    }
+
+    #[test]
+    fn read_rejects_disconnect_with_nonzero_reserved_flags() {
+        // DISCONNECT is type 14 (0xE0), flags must be 0. 0xE1 has flags=1.
+        let mut stream = BytesMut::from(&[0xE1, 0x00][..]);
+        let result = Packet::read(&mut stream, Some(1024));
+        assert!(matches!(result, Err(Error::IncorrectPacketFormat)));
+    }
+
+    #[test]
+    fn read_rejects_auth_with_nonzero_reserved_flags() {
+        // AUTH is type 15 (0xF0), flags must be 0. 0xF1 has flags=1.
+        let mut stream = BytesMut::from(&[0xF1, 0x00][..]);
+        let result = Packet::read(&mut stream, Some(1024));
+        assert!(matches!(result, Err(Error::IncorrectPacketFormat)));
+    }
+
+    #[test]
+    fn read_accepts_publish_with_any_flag_combination() {
+        // PUBLISH uses flag bits for DUP/QoS/RETAIN, so all combinations are valid
+        // at the fixed-header level. Only QoS 3 is rejected later by Publish::read.
+        // 0x3F = PUBLISH with all flag bits set (QoS 3, DUP=1, RETAIN=1).
+        // This should pass flag validation but fail in Publish::read with MalformedPacket.
+        let mut stream = BytesMut::from(&[0x3F, 0x02, 0x00, 0x01][..]);
+        let result = Packet::read(&mut stream, Some(1024));
+        // Flag validation passes; Publish::read rejects QoS 3
+        assert!(matches!(result, Err(Error::MalformedPacket)));
+    }
+
+    #[test]
+    fn validate_flags_const_fn_works_for_all_types() {
+        // Smoke test that the const fn compiles and returns correct results
+        assert!(validate_fixed_header_flags(PacketType::Publish, 0x3F).is_ok());
+        assert!(validate_fixed_header_flags(PacketType::PubRel, 0x62).is_ok());
+        assert!(validate_fixed_header_flags(PacketType::Subscribe, 0x82).is_ok());
+        assert!(validate_fixed_header_flags(PacketType::Unsubscribe, 0xA2).is_ok());
+        assert!(validate_fixed_header_flags(PacketType::Connect, 0x10).is_ok());
+        assert!(validate_fixed_header_flags(PacketType::ConnAck, 0x20).is_ok());
+        assert!(validate_fixed_header_flags(PacketType::Disconnect, 0xE0).is_ok());
+        assert!(validate_fixed_header_flags(PacketType::Auth, 0xF0).is_ok());
+
+        assert!(validate_fixed_header_flags(PacketType::PubRel, 0x60).is_err());
+        assert!(validate_fixed_header_flags(PacketType::Subscribe, 0x80).is_err());
+        assert!(validate_fixed_header_flags(PacketType::ConnAck, 0x2F).is_err());
+        assert!(validate_fixed_header_flags(PacketType::Disconnect, 0xE1).is_err());
+    }
+}

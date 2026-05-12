@@ -1,0 +1,167 @@
+on:
+  pull_request:
+    branches:
+      - main
+      - mqtt5-client
+    paths:
+      - '**.rs'
+      - 'Cargo.*'
+      - '*/Cargo.*'
+      - '.github/workflows/*'
+  push:
+    branches:
+      - main
+
+name: CI
+
+env:
+  RUSTFLAGS: "-D warnings"
+  CARGO_INCREMENTAL: 0
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: Build and test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macOS-latest
+          - windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # use mold linker instead of the default linker only on linux
+      - uses: rui314/setup-mold@v1
+        if: ${{ runner.os == 'Linux' }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ runner.os }}-cargo
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack,cargo-llvm-cov,nextest
+
+      # - name: Check benchmarks
+      #   uses: actions-rs/cargo@v1
+      #   env:
+      #     RUSTFLAGS: "-D warnings"
+      #   # NOTE: benchmarks are limited to compiling only on non windows systems, without any features enabled.
+      #   if: ${{ matrix.os != 'windows-latest' && matrix.features == '--no-default-features' }}
+      #   with:
+      #     command: clippy
+      #     args: --verbose --all-targets -p benchmarks
+
+      - name: Check rumqttc
+        env:
+          RUSTFLAGS: "-D warnings -W clippy::pedantic -W clippy::nursery"
+        run: |
+            cargo hack clippy --fix --allow-dirty --verbose --each-feature --exclude-all-features --no-dev-deps --optional-deps url -p rumqttc-v4
+            cargo hack clippy --fix --allow-dirty --verbose --each-feature --exclude-all-features --no-dev-deps --optional-deps url -p rumqttc-v5
+
+      - name: Check standalone crates
+        env:
+          RUSTFLAGS: "-D warnings -W clippy::pedantic -W clippy::nursery"
+        run: |
+            cargo clippy --fix --allow-dirty --verbose --all-targets -p mqttbytes-core-next
+            cargo hack clippy --fix --allow-dirty --verbose --each-feature --exclude-all-features --no-dev-deps -p rumqttc-core-next
+            cargo hack clippy --fix --allow-dirty --verbose --each-feature --exclude-all-features --no-dev-deps -p rumqttc-next
+
+      - name: Check docs
+        if: ${{ matrix.os != 'windows-latest' }}
+        run: |
+            cargo hack doc --verbose --no-deps --each-feature --exclude-all-features --no-dev-deps --optional-deps url -p rumqttc-v4
+            cargo hack doc --verbose --no-deps --each-feature --exclude-all-features --no-dev-deps --optional-deps url -p rumqttc-v5
+
+      - name: Check standalone crate docs
+        if: ${{ matrix.os != 'windows-latest' }}
+        run: |
+            cargo doc --verbose --no-deps -p mqttbytes-core-next
+            cargo hack doc --verbose --no-deps --each-feature --exclude-all-features --no-dev-deps -p rumqttc-core-next
+            cargo hack doc --verbose --no-deps --each-feature --exclude-all-features --no-dev-deps -p rumqttc-next
+
+      - name: Doctests
+        run: |
+            cargo hack --each-feature --exclude-all-features --optional-deps url test --doc -p rumqttc-v4
+            cargo hack --each-feature --exclude-all-features --optional-deps url test --doc -p rumqttc-v5
+
+      - name: Standalone crate doctests
+        run: |
+            cargo test --doc -p mqttbytes-core-next
+            cargo hack --each-feature --exclude-all-features test --doc -p rumqttc-core-next
+            cargo hack --each-feature --exclude-all-features test --doc -p rumqttc-next
+
+      - name: Test rumqttc
+        run: |
+            cargo hack --each-feature --exclude-all-features --optional-deps url llvm-cov -p rumqttc-v4 --no-report nextest
+            cargo hack --each-feature --exclude-all-features --optional-deps url llvm-cov -p rumqttc-v5 --no-report nextest
+
+      - name: Test standalone crates
+        run: |
+            cargo test -p mqttbytes-core-next
+            cargo hack --each-feature --exclude-all-features test -p rumqttc-core-next
+            cargo hack --each-feature --exclude-all-features test -p rumqttc-next
+
+      - name: Test native-tls WSS integration
+        run: |
+            cargo test --manifest-path rumqttc-v4/Cargo.toml --no-default-features --features "websocket,use-native-tls" --test websocket_integration
+            cargo test --manifest-path rumqttc-v5/Cargo.toml --no-default-features --features "websocket,use-native-tls" --test websocket_integration
+
+      - name: Verify rustls provider conflict guard
+        run: |
+            if cargo check -p rumqttc-v4 --no-default-features --features "use-rustls-aws-lc,use-rustls-ring"; then
+              echo "Expected mutually-exclusive rustls provider feature check for rumqttc-v4 to fail, but it succeeded."
+              exit 1
+            fi
+            if cargo check -p rumqttc-v5 --no-default-features --features "use-rustls-aws-lc,use-rustls-ring"; then
+              echo "Expected mutually-exclusive rustls provider feature check for rumqttc-v5 to fail, but it succeeded."
+              exit 1
+            fi
+            echo "Mutually-exclusive rustls provider feature guards failed as expected."
+
+      - name: Verify cross-crate transport feature isolation
+        run: |
+            cargo check -p rumqttc-v4 -p rumqttc-v5 --no-default-features -F rumqttc-v5/websocket
+            cargo check -p rumqttc-v4 -p rumqttc-v5 --no-default-features -F rumqttc-v4/websocket
+            cargo check -p rumqttc-v4 -p rumqttc-v5 --no-default-features --features "rumqttc-v4/use-rustls-ring rumqttc-v5/use-rustls-aws-lc"
+            cargo check -p rumqttc-v4 -p rumqttc-v5 --no-default-features --features "rumqttc-v4/use-rustls-aws-lc rumqttc-v5/use-rustls-ring"
+
+      - name: Verify rumqttc-next feature forwarding
+        run: |
+            cargo check -p rumqttc-next --no-default-features --features websocket
+            cargo check -p rumqttc-next --no-default-features --features use-native-tls
+            cargo check -p rumqttc-next --no-default-features --features "auth-scram,url"
+
+      - name: Check workspace
+        run: cargo check --workspace
+
+      - name: Combine coverage
+        run: cargo llvm-cov report --lcov --output-path coverage.lcov
+
+      - name: Upload Coverage Report
+        uses: coverallsapp/github-action@v2.2.3
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          file: ./coverage.lcov
+          parallel: true
+          flag-name: run-${{ matrix.os }}-cargo
+
+  finish-coverage:
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Finish Coverage Report
+        uses: coverallsapp/github-action@v2.2.3
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          parallel-finished: true

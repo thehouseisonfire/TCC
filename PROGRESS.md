@@ -844,7 +844,7 @@ verification latency during MQTT v5 enhanced authentication flows, specifically
 reauthentication via `AUTH` packets (reason code `0x19`) for token renewal
 without disconnection.
 
-**Implementation Decision**: Paho Python does not provide a straightforward
+**Implementation Decision**: Paho Python did not provide a straightforward
 public API for programmatically sending `AUTH` packets after connection
 establishment. The library supports enhanced authentication during the initial
 CONNECT/CONNACK handshake but lacks methods like `send_auth()` or
@@ -856,6 +856,9 @@ MQTT5 client that:
 - Sends `CONNECT` with Authentication Method/Data
 - After connection establishment, sends an `AUTH` packet with updated token data
 - Measures connect latency and reauth latency separately
+
+**Update Note**: The client has been migrated to Rumqttc in part as a result of
+this limitation.
 
 **Impact on Research Validity**:
 

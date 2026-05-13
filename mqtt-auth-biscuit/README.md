@@ -69,6 +69,11 @@ The main entrypoint is:
 
 `benchmarks/run_scenarios.py`
 
+Python benchmark code orchestrates scenarios, Docker state, and result
+aggregation. The MQTT benchmark client implementation is Rust `mqtt-loadgen`;
+`benchmarks/loadgen.py` is only a compatibility wrapper that forwards to that
+Rust binary.
+
 For running the benchmark scripts:
   - Install dependencies: `uv sync --locked`
 

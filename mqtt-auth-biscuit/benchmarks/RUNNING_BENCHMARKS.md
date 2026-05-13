@@ -125,11 +125,14 @@ the external PDP before timing begins.
 
 ### Client-Side (Online) Attenuation
 
-To exercise **online attenuation** (client-side block append), use the new
-`biscuit-attenuate` helper and the `TOKEN-ATTENUATION-CLIENT-BISCUIT` scenario.
+To exercise **online attenuation** (client-side block append), use the
+`TOKEN-ATTENUATION-CLIENT-BISCUIT` scenario. The Rust `mqtt-loadgen` path now
+performs Biscuit attenuation in-process, so the reported `attenuation` and
+`delegation` timings measure parse/block-append/serialization work without
+subprocess startup overhead.
 
-**Requirement:** build the helper before running benchmarks:
-`cargo build -p gen-tokens --bin biscuit-attenuate`.
+The standalone `biscuit-attenuate` binary remains available as a thin CLI
+wrapper around the same shared attenuation function for manual token inspection.
 
 `biscuit-attenuate` takes a base64 Biscuit token and appends an attenuation
 block with checks or deny facts. It mirrors how a constrained MQTT client would
@@ -351,8 +354,8 @@ Semantic interpretation:
   HTTP/Hybrid strict `ACL_READ` fan-out families. Those runs set both binding
   modes to `strict`.
 - For multi-client `-PARITY-` runs, the scenario password is intentionally left
-  blank so `loadgen.py` provisions one token per client identity via the token
-  issuer. Reusing a shared token would contradict the parity semantics.
+  blank so Rust `mqtt-loadgen` provisions one token per client identity via the
+  token issuer. Reusing a shared token would contradict the parity semantics.
 - Token-backed strict fan-out stays outside parity: startup-issued tokens do not
   preserve the source fixture's explicit fan-out allow/deny claims, so those
   runs remain `capability` scenarios.
@@ -469,8 +472,7 @@ Run only the benchmark flow unit tests used by CI:
 ```bash
 cd mqtt-auth-biscuit
 pytest \
-  benchmarks/test_loadgen_worker_suback.py \
-  benchmarks/test_loadgen_fanout_sync.py \
+  benchmarks/test_loadgen_wrapper.py \
   benchmarks/test_acl_read_fanout_churn_coverage.py \
   benchmarks/test_static_acl_coverage.py \
   benchmarks/test_authz_config_state.py \
@@ -769,18 +771,21 @@ These use `fanout_churn_kind=dynamic_security_control` and publish the configure
 
 ### CLI Options For Control Messages
 
-The `loadgen.py` script supports direct control message testing:
+Python orchestrates scenarios and invokes the Rust `mqtt-loadgen` client for all
+MQTT benchmark execution. `benchmarks/loadgen.py` remains only as a
+compatibility wrapper around Rust `mqtt-loadgen`; direct control-message testing
+can use either entrypoint:
 
 ```bash
 # Publish a control message with custom payload
-python3 benchmarks/loadgen.py \
+cargo run --locked -p gen-tokens --bin mqtt-loadgen -- \
   --control-mode \
   --control-topic '$CONTROL/dynamic-security/v1' \
   --control-payload '{"commands":[{"command":"createRole","rolename":"test"}]}' \
   --control-repeat 3
 
 # Load payload from file
-python3 benchmarks/loadgen.py \
+cargo run --locked -p gen-tokens --bin mqtt-loadgen -- \
   --control-mode \
   --control-payload-file /path/to/commands.json \
   --username admin \
@@ -851,7 +856,7 @@ Example output structure:
 python3 benchmarks/run_scenarios.py --scenarios CONTROL-INTERLEAVED-DATA-JWT
 
 # Direct loadgen usage with interleaved control
-python3 benchmarks/loadgen.py \
+cargo run --locked -p gen-tokens --bin mqtt-loadgen -- \
   --username jwt \
   --password "$(cat jwt_token.txt)" \
   --control-topic '$CONTROL/dynamic-security/v1' \

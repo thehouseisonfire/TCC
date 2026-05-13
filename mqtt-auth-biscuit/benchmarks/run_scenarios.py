@@ -220,11 +220,9 @@ class ScenarioConfig(TypedDict, total=False):
     biscuit_attenuate: BiscuitAttenuateConfig
     biscuit_public_key_hex: str | None
     biscuit_public_key_file: str | None
-    biscuit_attenuate_bin: str | None
     biscuit_delegate: BiscuitDelegateConfig
     biscuit_delegate_public_key_hex: str | None
     biscuit_delegate_public_key_file: str | None
-    biscuit_delegate_bin: str | None
     complexity_axis: (
         Literal["chain_length", "datalog", "http_profile", "authorizer_template"] | None
     )
@@ -771,7 +769,6 @@ def _run_loadgen(
     biscuit_attenuate_ttl: int | None,
     biscuit_public_key_hex: str | None,
     biscuit_public_key_file: str | None,
-    biscuit_attenuate_bin: str | None,
     biscuit_delegate: bool,
     biscuit_delegate_denies: list[str] | None,
     biscuit_delegate_checks: list[str] | None,
@@ -780,7 +777,6 @@ def _run_loadgen(
     biscuit_delegate_ttl: int | None,
     biscuit_delegate_public_key_hex: str | None,
     biscuit_delegate_public_key_file: str | None,
-    biscuit_delegate_bin: str | None,
     biscuit_delegate_handoff: bool,
     biscuit_delegate_handoff_topic: str | None,
     biscuit_delegate_handoff_token: str | None,
@@ -805,8 +801,7 @@ def _run_loadgen(
     fanout_churn_sqlite_subscribers: int | None = None,
 ):
     cmd = [
-        sys.executable,
-        "benchmarks/loadgen.py",
+        *_resolve_rust_helper("mqtt-loadgen"),
         "--host",
         host,
         "--port",
@@ -881,8 +876,6 @@ def _run_loadgen(
         cmd.extend(["--biscuit-public-key-hex", biscuit_public_key_hex])
     if biscuit_public_key_file:
         cmd.extend(["--biscuit-public-key-file", biscuit_public_key_file])
-    if biscuit_attenuate_bin:
-        cmd.extend(["--biscuit-attenuate-bin", biscuit_attenuate_bin])
     if biscuit_delegate:
         cmd.append("--biscuit-delegate")
     for deny in biscuit_delegate_denies or []:
@@ -899,8 +892,6 @@ def _run_loadgen(
         cmd.extend(["--biscuit-delegate-public-key-hex", biscuit_delegate_public_key_hex])
     if biscuit_delegate_public_key_file:
         cmd.extend(["--biscuit-delegate-public-key-file", biscuit_delegate_public_key_file])
-    if biscuit_delegate_bin:
-        cmd.extend(["--biscuit-delegate-bin", biscuit_delegate_bin])
     if biscuit_delegate_handoff:
         cmd.append("--biscuit-delegate-handoff")
     if biscuit_delegate_handoff_topic:
@@ -959,7 +950,6 @@ def _run_loadgen(
         cmd,
         cwd=REPO_ROOT,
         text=True,
-        env=_python_subprocess_env(),
     )
     return json.loads(out)
 
@@ -4000,7 +3990,6 @@ def main(
                             biscuit_public_key_file=s.get(
                                 "biscuit_public_key_file", "docker/biscuit_public.key"
                             ),
-                            biscuit_attenuate_bin=s.get("biscuit_attenuate_bin"),
                             biscuit_delegate=bool(s.get("biscuit_delegate")),
                             biscuit_delegate_denies=(
                                 s.get("biscuit_delegate", {}).get("denies")
@@ -4034,7 +4023,6 @@ def main(
                                 "biscuit_delegate_public_key_file",
                                 "docker/biscuit_public.key",
                             ),
-                            biscuit_delegate_bin=s.get("biscuit_delegate_bin"),
                             biscuit_delegate_handoff=bool(
                                 s.get("biscuit_delegate", {}).get("handoff")
                                 if s.get("biscuit_delegate")

@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 
-from benchmarks.loadgen import EMPTY_QOS_METRICS
 from benchmarks.packet_analysis import (
     PacketMetrics,
     StreamMetrics,
@@ -23,15 +22,6 @@ from benchmarks.packet_analysis import (
     parse_pcap,
     parse_pcap_with_dpkt,
 )
-
-
-def test_empty_qos_metrics():
-    """Test that EMPTY_QOS_METRICS has the expected structure."""
-    assert EMPTY_QOS_METRICS == {0: [], 1: [], 2: []}
-    # Ensure it's a new dict each time (not a shared mutable default)
-    copy = {k: list(v) for k, v in EMPTY_QOS_METRICS.items()}
-    copy[0].append(1.0)
-    assert EMPTY_QOS_METRICS[0] == []
 
 
 def test_stream_metrics_stream_id():

@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -41,6 +42,20 @@ def _python_subprocess_env() -> dict[str, str]:
     else:
         env["PYTHONPATH"] = repo_pythonpath
     return env
+
+
+def _resolve_rust_helper(binary: str) -> list[str]:
+    env_name = f"MQTT_AUTH_BISCUIT_{binary.upper().replace('-', '_')}"
+    if override := os.environ.get(env_name):
+        return [override]
+    for profile in ("release", "debug"):
+        candidate = REPO_ROOT / "target" / profile / binary
+        if candidate.exists():
+            return [str(candidate)]
+    cargo = shutil.which("cargo")
+    if cargo is None:
+        raise SystemExit(f"Missing required command: cargo (needed to run {binary})")
+    return [cargo, "run", "--locked", "-p", "gen-tokens", "--bin", binary, "--"]
 
 
 def _http_client(
@@ -98,8 +113,7 @@ def _run_loadgen(
     tls_insecure: bool,
 ):
     cmd = [
-        sys.executable,
-        "benchmarks/loadgen.py",
+        *_resolve_rust_helper("mqtt-loadgen"),
         "--host",
         host,
         "--port",
@@ -130,7 +144,6 @@ def _run_loadgen(
         cmd,
         cwd=REPO_ROOT,
         text=True,
-        env=_python_subprocess_env(),
     )
     return json.loads(out)
 

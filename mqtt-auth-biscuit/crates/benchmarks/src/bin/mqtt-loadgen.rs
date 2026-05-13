@@ -1,7 +1,11 @@
 #![recursion_limit = "256"]
 
 use base64::{Engine as _, engine::general_purpose};
+use biscuit_auth::PublicKey;
 use clap::Parser;
+use gen_tokens::biscuit_attenuation::{
+    BiscuitAttenuationOptions, attenuate_biscuit_token, load_public_key_hex,
+};
 use gen_tokens::mqtt_helpers::{
     ClientSpec, MqttHelperError, Result, connect, decode_token_arg, poll_until, print_json,
     puback_reason_code, qos,
@@ -14,7 +18,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -283,7 +286,7 @@ impl QosDistribution {
             let qos_value = qos_raw.trim().parse::<u8>().map_err(|err| {
                 MqttHelperError::Message(format!("invalid qos value {qos_raw:?}: {err}"))
             })?;
-            if !matches!(qos_value, 0 | 1 | 2) {
+            if !matches!(qos_value, 0..=2) {
                 return Err(MqttHelperError::Message(format!(
                     "invalid qos value: {qos_value}"
                 )));
@@ -452,10 +455,10 @@ impl PublishGateParticipant {
 
 impl Drop for PublishGateParticipant {
     fn drop(&mut self) {
-        if !self.ready {
-            if let Some(gate) = &self.gate {
-                gate.mark_unavailable();
-            }
+        if !self.ready
+            && let Some(gate) = &self.gate
+        {
+            gate.mark_unavailable();
         }
     }
 }
@@ -733,30 +736,47 @@ fn fill_nonce() -> String {
     hex::encode(bytes)
 }
 
-fn resolve_biscuit_attenuate_cmd(custom_bin: Option<&str>) -> Result<String> {
-    if let Some(custom_bin) = custom_bin {
-        return Ok(custom_bin.to_string());
-    }
-    if let Ok(env_bin) = std::env::var("BISCUIT_ATTENUATE_BIN") {
-        return Ok(env_bin);
-    }
-    for candidate in [
-        "target/release/biscuit-attenuate",
-        "target/debug/biscuit-attenuate",
-    ] {
-        if std::path::Path::new(candidate).exists() {
-            return Ok(candidate.to_string());
-        }
-    }
-    Err(MqttHelperError::Message(
-        "biscuit-attenuate binary not found; build it first (cargo build -p gen-tokens --bin biscuit-attenuate)".to_string(),
-    ))
-}
-
 struct BiscuitTransform {
     password: Vec<u8>,
     elapsed_ms: f64,
     token_len: f64,
+}
+
+fn load_biscuit_public_key(
+    public_key_hex: Option<&str>,
+    public_key_file: Option<&str>,
+) -> Result<PublicKey> {
+    let hex_value = if let Some(public_key_hex) = public_key_hex {
+        public_key_hex.to_string()
+    } else if let Some(public_key_file) = public_key_file {
+        fs::read_to_string(public_key_file)
+            .map_err(|err| {
+                MqttHelperError::Message(format!(
+                    "failed to read public key file {public_key_file}: {err}"
+                ))
+            })?
+            .trim()
+            .to_string()
+    } else {
+        std::env::var("BISCUIT_PUBLIC_KEY_HEX")
+            .map_err(|_| MqttHelperError::Message("public key hex required".to_string()))?
+    };
+    load_public_key_hex(&hex_value).map_err(MqttHelperError::Message)
+}
+
+fn reject_custom_biscuit_transform_bin(custom_bin: Option<&str>, label: &str) -> Result<()> {
+    if custom_bin.is_some() {
+        return Err(MqttHelperError::Message(format!(
+            "{label} custom helper binaries are no longer supported; mqtt-loadgen now attenuates Biscuit tokens in-process"
+        )));
+    }
+    if std::env::var_os("BISCUIT_ATTENUATE_BIN").is_some() {
+        return Err(MqttHelperError::Message(
+            "BISCUIT_ATTENUATE_BIN is no longer supported; mqtt-loadgen now attenuates Biscuit tokens in-process"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn transform_biscuit_token(
@@ -770,53 +790,31 @@ fn transform_biscuit_token(
     denies: &[String],
     checks: &[String],
 ) -> Result<BiscuitTransform> {
-    let mut command = Command::new(resolve_biscuit_attenuate_cmd(custom_bin)?);
-    command
-        .arg("--token")
-        .arg(general_purpose::URL_SAFE_NO_PAD.encode(token));
-    if let Some(public_key_hex) = public_key_hex {
-        command.arg("--public-key-hex").arg(public_key_hex);
-    }
-    if let Some(public_key_file) = public_key_file {
-        command.arg("--public-key-file").arg(public_key_file);
-    }
-    if let Some(restrict_topic) = restrict_topic {
-        command.arg("--restrict-topic").arg(restrict_topic);
-    }
-    if let Some(restrict_operation) = restrict_operation {
-        command.arg("--restrict-op").arg(restrict_operation);
-    }
-    if let Some(ttl_seconds) = ttl_seconds {
-        command.arg("--ttl-seconds").arg(ttl_seconds.to_string());
-    }
-    for deny in denies {
-        command.arg("--deny").arg(deny);
-    }
-    for check in checks {
-        command.arg("--check").arg(check);
-    }
-
+    reject_custom_biscuit_transform_bin(custom_bin, "Biscuit transform")?;
+    let public_key = load_biscuit_public_key(public_key_hex, public_key_file)?;
+    let ttl_seconds = ttl_seconds
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| MqttHelperError::Message("ttl seconds exceeds i64 range".to_string()))?;
     let started = Instant::now();
-    let output = command.output()?;
+    let password = attenuate_biscuit_token(
+        token,
+        public_key,
+        &BiscuitAttenuationOptions {
+            denies: denies.to_vec(),
+            checks: checks.to_vec(),
+            restrict_topic: restrict_topic.map(str::to_string),
+            restrict_operation: restrict_operation.map(str::to_string),
+            ttl_seconds,
+        },
+    )
+    .map_err(MqttHelperError::Message)?;
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(MqttHelperError::Message(format!(
-            "biscuit-attenuate failed: {stderr}"
-        )));
-    }
-    let token_out = String::from_utf8(output.stdout)
-        .map_err(|err| MqttHelperError::Message(format!("biscuit output was not UTF-8: {err}")))?;
-    let token_out = token_out.trim();
-    if token_out.is_empty() {
+    if password.is_empty() {
         return Err(MqttHelperError::Message(
             "biscuit transform produced empty token".to_string(),
         ));
     }
-    let padding = "=".repeat((4 - token_out.len() % 4) % 4);
-    let password = general_purpose::URL_SAFE
-        .decode(format!("{token_out}{padding}"))
-        .map_err(|err| MqttHelperError::Message(format!("invalid transformed biscuit: {err}")))?;
     let token_len = password.len() as f64;
     Ok(BiscuitTransform {
         password,
@@ -1232,6 +1230,7 @@ fn inputs_json(
         "jwt_identity_binding": args.jwt_identity_binding,
         "biscuit_identity_binding": args.biscuit_identity_binding,
         "biscuit_client_id_fact": args.biscuit_client_id_fact,
+        "biscuit_transform_mode": "in_process",
         "strict_multi_client_startup_provisioning": strict_multi_client_startup(args),
         "mode": mode,
         "fanout_topic": args.fanout_topic,
@@ -1494,7 +1493,7 @@ async fn subscribe_handoff_receiver(args: &Args, client_id: &str) -> Result<Hand
     .map_err(|err| {
         MqttHelperError::Message(format!("delegation_handoff_subscribe_failed:{err}"))
     })?;
-    if !codes.iter().all(|code| matches!(code, 0 | 1 | 2)) {
+    if !codes.iter().all(|code| matches!(code, 0..=2)) {
         return Err(MqttHelperError::Message(format!(
             "delegation_handoff_subscribe_rc:{}",
             codes
@@ -1815,7 +1814,7 @@ async fn run_fanout(args: Args) -> Result<Output> {
                 match subscribe_and_wait(&client, &mut eventloop, &args.fanout_topic, subscribe_qos)
                     .await
                 {
-                    Ok(codes) if codes.iter().all(|code| matches!(code, 0 | 1 | 2)) => {
+                    Ok(codes) if codes.iter().all(|code| matches!(code, 0..=2)) => {
                         ready_subscribers += 1;
                         subscribers.push(FanoutSubscriber { eventloop, result });
                     }
@@ -2624,6 +2623,7 @@ mod tests {
         ]);
         let control_inputs = inputs_json(&control_args, "publish", None, &[135], None);
         assert_eq!(control_inputs["control"]["mode"], true);
+        assert_eq!(control_inputs["biscuit_transform_mode"], "in_process");
         assert_eq!(
             control_inputs["token_refresh_codes"],
             serde_json::json!([135])
@@ -2642,6 +2642,16 @@ mod tests {
         let fanout_inputs = inputs_json(&fanout_args, "fanout", Some(&distribution), &[], None);
         assert_eq!(fanout_inputs["mode"], "fanout");
         assert_eq!(fanout_inputs["qos_distribution"][0]["qos"], 0);
+    }
+
+    #[test]
+    fn biscuit_transform_rejects_custom_helper_binary() {
+        let err =
+            reject_custom_biscuit_transform_bin(Some("biscuit-attenuate"), "Biscuit transform")
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("custom helper binaries are no longer supported"));
+        assert!(err.contains("in-process"));
     }
 
     #[test]

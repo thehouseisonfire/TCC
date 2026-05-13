@@ -258,6 +258,26 @@ struct WorkerInvocation {
     publish_gate: Option<Arc<PublishStartGate>>,
 }
 
+struct StandardMetrics {
+    connect: Vec<f64>,
+    token_refresh: Vec<f64>,
+    token_refresh_len: Vec<f64>,
+    delegation: Vec<f64>,
+    delegation_len: Vec<f64>,
+    attenuation: Vec<f64>,
+    attenuation_len: Vec<f64>,
+    publish: Vec<f64>,
+    publish_qos_0: Vec<f64>,
+    publish_qos_1: Vec<f64>,
+    publish_qos_2: Vec<f64>,
+    receive: Vec<f64>,
+    control: Vec<f64>,
+    control_injection: Vec<f64>,
+    errors: Vec<String>,
+    publish_throughput_mps: f64,
+    receive_throughput_mps: f64,
+}
+
 #[derive(Debug, Clone)]
 struct HandoffPlan {
     nonce: String,
@@ -766,7 +786,10 @@ struct BiscuitTransformRequest<'a> {
 }
 
 fn usize_as_f64(value: usize) -> f64 {
-    f64::from(u32::try_from(value).unwrap_or(u32::MAX))
+    u32::try_from(value).map_or_else(
+        |_| value.to_string().parse::<f64>().unwrap_or(f64::INFINITY),
+        f64::from,
+    )
 }
 
 fn load_biscuit_public_key(
@@ -1693,6 +1716,29 @@ struct FanoutRuntime {
     handoff_required: bool,
 }
 
+struct FanoutMetrics {
+    connect: Vec<f64>,
+    delegation: Vec<f64>,
+    delegation_len: Vec<f64>,
+    attenuation: Vec<f64>,
+    attenuation_len: Vec<f64>,
+    receive: Vec<f64>,
+    received_pre: Option<usize>,
+    received_post: Option<usize>,
+    publish_throughput_mps: f64,
+    receive_throughput_mps: f64,
+}
+
+struct FanoutOutputParts<'a> {
+    qos_distribution: Option<&'a QosDistribution>,
+    token_refresh_codes: &'a [u16],
+    runtime: FanoutRuntime,
+    fanout_publish_ms: Vec<f64>,
+    fanout_publish_by_qos: &'a [Vec<f64>; 3],
+    churn_state: &'a FanoutChurnState,
+    metrics: &'a FanoutMetrics,
+}
+
 struct WorkerPublishPlan<'a> {
     topic: &'a str,
     control_topic: Option<&'a str>,
@@ -1972,7 +2018,7 @@ fn spawn_fanout_collectors(
     subscribers: Vec<FanoutSubscriber>,
     expected_messages: usize,
     churn_after_messages: usize,
-    publishing_done: Arc<AtomicBool>,
+    publishing_done: &Arc<AtomicBool>,
 ) -> Vec<tokio::task::JoinHandle<WorkerResult>> {
     let mut subscriber_tasks = Vec::new();
     for subscriber in subscribers {
@@ -1981,7 +2027,7 @@ fn spawn_fanout_collectors(
             start,
             expected_messages,
             churn_after_messages,
-            Arc::clone(&publishing_done),
+            Arc::clone(publishing_done),
         )));
     }
     subscriber_tasks
@@ -2006,6 +2052,115 @@ async fn collect_fanout_results(
     results
 }
 
+async fn connect_fanout_publisher(
+    args: &Args,
+    fallback_password: &[u8],
+) -> Result<(AsyncClient, rumqttc::EventLoop)> {
+    let publisher_username = args
+        .fanout_publisher_username
+        .clone()
+        .unwrap_or_else(|| args.username.clone());
+    let publisher_password = if let Some(password) = args.fanout_publisher_password.as_deref() {
+        decode_token_arg(password)?
+    } else if should_provision_fanout_publisher(args, &publisher_username)? {
+        let kind = resolved_token_issuer_kind(args).ok_or_else(|| {
+            MqttHelperError::Message(
+                "strict multi-client startup provisioning requires token kind".to_string(),
+            )
+        })?;
+        fetch_token(args, &kind, "fanout_publisher", &args.fanout_topic).await?
+    } else {
+        fallback_password.to_vec()
+    };
+    let publisher_spec = ClientSpec {
+        host: args.host.clone(),
+        port: args.port,
+        client_id: "fanout_publisher".to_string(),
+        username: publisher_username,
+        password: publisher_password,
+        tls: args.tls,
+        tls_ca_file: args.tls_ca_file.clone(),
+        tls_insecure: args.tls_insecure,
+        auth_method: None,
+        auth_data: None,
+    };
+    let (publisher, publisher_eventloop, _report) = connect(&publisher_spec).await?;
+    Ok((publisher, publisher_eventloop))
+}
+
+fn fanout_metrics(
+    results: &[WorkerResult],
+    fanout_publish_ms: &[f64],
+    duration_s: f64,
+    churn_enabled: bool,
+) -> FanoutMetrics {
+    let receive: Vec<_> = results.iter().flat_map(|r| r.receive_ms.clone()).collect();
+    FanoutMetrics {
+        connect: results.iter().filter_map(|r| r.connect_ms).collect(),
+        delegation: results.iter().filter_map(|r| r.delegation_ms).collect(),
+        delegation_len: results.iter().filter_map(|r| r.delegation_len).collect(),
+        attenuation: results.iter().filter_map(|r| r.attenuation_ms).collect(),
+        attenuation_len: results.iter().filter_map(|r| r.attenuation_len).collect(),
+        received_pre: churn_enabled.then(|| results.iter().map(|r| r.receive_pre_churn).sum()),
+        received_post: churn_enabled.then(|| results.iter().map(|r| r.receive_post_churn).sum()),
+        publish_throughput_mps: usize_as_f64(fanout_publish_ms.len()) / duration_s,
+        receive_throughput_mps: usize_as_f64(receive.len()) / duration_s,
+        receive,
+    }
+}
+
+fn fanout_output(args: &Args, parts: FanoutOutputParts<'_>) -> Output {
+    let metrics = parts.metrics;
+    Output {
+        inputs: inputs_json(
+            args,
+            "fanout",
+            parts.qos_distribution,
+            parts.token_refresh_codes,
+            parts
+                .runtime
+                .handoff_plan
+                .as_ref()
+                .map(|plan| plan.nonce.as_str()),
+        ),
+        connect: summarize(&metrics.connect),
+        token_refresh: Summary::default(),
+        token_refresh_len: Summary::default(),
+        delegation: summarize(&metrics.delegation),
+        delegation_len: summarize(&metrics.delegation_len),
+        attenuation: summarize(&metrics.attenuation),
+        attenuation_len: summarize(&metrics.attenuation_len),
+        publish: summarize(&parts.fanout_publish_ms),
+        publish_qos_0: summarize(&parts.fanout_publish_by_qos[0]),
+        publish_qos_1: summarize(&parts.fanout_publish_by_qos[1]),
+        publish_qos_2: summarize(&parts.fanout_publish_by_qos[2]),
+        qos_distribution_actual: serde_json::json!({
+            "qos_0_count": parts.fanout_publish_by_qos[0].len(),
+            "qos_1_count": parts.fanout_publish_by_qos[1].len(),
+            "qos_2_count": parts.fanout_publish_by_qos[2].len(),
+        }),
+        receive: summarize(&metrics.receive),
+        control: Summary::default(),
+        control_injection_delay: Summary::default(),
+        throughput_mps: metrics.receive_throughput_mps,
+        publish_throughput_mps: metrics.publish_throughput_mps,
+        receive_throughput_mps: metrics.receive_throughput_mps,
+        received_messages: serde_json::json!({
+            "count": metrics.receive.len(),
+            "expected": args.messages * args.clients,
+        }),
+        fanout_churn: fanout_churn_json(
+            args,
+            "fanout",
+            Some(parts.churn_state),
+            metrics.received_pre,
+            metrics.received_post,
+        ),
+        raw_publish_ms: parts.fanout_publish_ms,
+        errors: parts.runtime.errors,
+    }
+}
+
 async fn run_fanout(args: Args) -> Result<Output> {
     let start = Instant::now();
     let mut runtime = init_fanout_runtime(&args).await;
@@ -2023,35 +2178,8 @@ async fn run_fanout(args: Args) -> Result<Output> {
             .errors
             .push("fanout_subscribe_ready_timeout".to_string());
     }
-    let publisher_username = args
-        .fanout_publisher_username
-        .clone()
-        .unwrap_or_else(|| args.username.clone());
-    let publisher_password = if let Some(password) = args.fanout_publisher_password.as_deref() {
-        decode_token_arg(password)?
-    } else if should_provision_fanout_publisher(&args, &publisher_username)? {
-        let kind = resolved_token_issuer_kind(&args).ok_or_else(|| {
-            MqttHelperError::Message(
-                "strict multi-client startup provisioning requires token kind".to_string(),
-            )
-        })?;
-        fetch_token(&args, &kind, "fanout_publisher", &args.fanout_topic).await?
-    } else {
-        fallback_password.clone()
-    };
-    let publisher_spec = ClientSpec {
-        host: args.host.clone(),
-        port: args.port,
-        client_id: "fanout_publisher".to_string(),
-        username: publisher_username,
-        password: publisher_password,
-        tls: args.tls,
-        tls_ca_file: args.tls_ca_file.clone(),
-        tls_insecure: args.tls_insecure,
-        auth_method: None,
-        auth_data: None,
-    };
-    let (publisher, mut publisher_eventloop, _report) = connect(&publisher_spec).await?;
+    let (publisher, mut publisher_eventloop) =
+        connect_fanout_publisher(&args, &fallback_password).await?;
     let publishing_done = Arc::new(AtomicBool::new(false));
     let subscriber_tasks = if fanout_ready {
         Some(spawn_fanout_collectors(
@@ -2059,7 +2187,7 @@ async fn run_fanout(args: Args) -> Result<Output> {
             std::mem::take(&mut subscribers),
             args.messages,
             args.fanout_churn_after_messages,
-            Arc::clone(&publishing_done),
+            &publishing_done,
         ))
     } else {
         None
@@ -2088,71 +2216,24 @@ async fn run_fanout(args: Args) -> Result<Output> {
     for result in &mut results {
         runtime.errors.append(&mut result.errors);
     }
-    let connect: Vec<_> = results.iter().filter_map(|r| r.connect_ms).collect();
-    let delegation: Vec<_> = results.iter().filter_map(|r| r.delegation_ms).collect();
-    let delegation_len: Vec<_> = results.iter().filter_map(|r| r.delegation_len).collect();
-    let attenuation: Vec<_> = results.iter().filter_map(|r| r.attenuation_ms).collect();
-    let attenuation_len: Vec<_> = results.iter().filter_map(|r| r.attenuation_len).collect();
-    let receive: Vec<_> = results.iter().flat_map(|r| r.receive_ms.clone()).collect();
-    let received_pre = if args.fanout_churn_kind.is_some() {
-        Some(results.iter().map(|r| r.receive_pre_churn).sum())
-    } else {
-        None
-    };
-    let received_post = if args.fanout_churn_kind.is_some() {
-        Some(results.iter().map(|r| r.receive_post_churn).sum())
-    } else {
-        None
-    };
-    let publish_throughput_mps = usize_as_f64(fanout_publish_ms.len()) / duration_s;
-    let receive_throughput_mps = usize_as_f64(receive.len()) / duration_s;
-    Ok(Output {
-        inputs: inputs_json(
-            &args,
-            "fanout",
-            qos_distribution.as_ref(),
-            &token_refresh_codes,
-            runtime
-                .handoff_plan
-                .as_ref()
-                .map(|plan| plan.nonce.as_str()),
-        ),
-        connect: summarize(&connect),
-        token_refresh: Summary::default(),
-        token_refresh_len: Summary::default(),
-        delegation: summarize(&delegation),
-        delegation_len: summarize(&delegation_len),
-        attenuation: summarize(&attenuation),
-        attenuation_len: summarize(&attenuation_len),
-        publish: summarize(&fanout_publish_ms),
-        publish_qos_0: summarize(&fanout_publish_by_qos[0]),
-        publish_qos_1: summarize(&fanout_publish_by_qos[1]),
-        publish_qos_2: summarize(&fanout_publish_by_qos[2]),
-        qos_distribution_actual: serde_json::json!({
-            "qos_0_count": fanout_publish_by_qos[0].len(),
-            "qos_1_count": fanout_publish_by_qos[1].len(),
-            "qos_2_count": fanout_publish_by_qos[2].len(),
-        }),
-        receive: summarize(&receive),
-        control: Summary::default(),
-        control_injection_delay: Summary::default(),
-        throughput_mps: receive_throughput_mps,
-        publish_throughput_mps,
-        receive_throughput_mps,
-        received_messages: serde_json::json!({
-            "count": receive.len(),
-            "expected": args.messages * args.clients,
-        }),
-        fanout_churn: fanout_churn_json(
-            &args,
-            "fanout",
-            Some(&churn_state),
-            received_pre,
-            received_post,
-        ),
-        raw_publish_ms: fanout_publish_ms,
-        errors: runtime.errors,
-    })
+    let metrics = fanout_metrics(
+        &results,
+        &fanout_publish_ms,
+        duration_s,
+        args.fanout_churn_kind.is_some(),
+    );
+    Ok(fanout_output(
+        &args,
+        FanoutOutputParts {
+            qos_distribution: qos_distribution.as_ref(),
+            token_refresh_codes: &token_refresh_codes,
+            runtime,
+            fanout_publish_ms,
+            fanout_publish_by_qos: &fanout_publish_by_qos,
+            churn_state: &churn_state,
+            metrics: &metrics,
+        },
+    ))
 }
 
 async fn resolve_worker_password(
@@ -2340,6 +2421,49 @@ async fn run_publish_mode(
     }
 }
 
+async fn run_worker_session(
+    args: &Args,
+    client_id: &str,
+    topic: &str,
+    qos_distribution: Option<&QosDistribution>,
+    client: &AsyncClient,
+    eventloop: &mut rumqttc::EventLoop,
+    result: &mut WorkerResult,
+) {
+    let control_topic = args
+        .control_topic
+        .as_deref()
+        .map(|topic| expand_client_template(topic, client_id));
+    let control_payload = expand_control_payload(&load_control_payload(args, result), client_id);
+    let data_payload = vec![b'A'; args.message_size];
+    if args.control_mode {
+        run_control_mode(
+            args,
+            client,
+            eventloop,
+            control_topic.as_deref(),
+            &control_payload,
+            result,
+        )
+        .await;
+    } else {
+        run_publish_mode(
+            args,
+            client,
+            eventloop,
+            WorkerPublishPlan {
+                topic,
+                control_topic: control_topic.as_deref(),
+                control_payload: &control_payload,
+                data_payload: &data_payload,
+                qos_distribution,
+            },
+            result,
+        )
+        .await;
+    }
+}
+
 async fn run_worker(job: WorkerInvocation) -> WorkerResult {
     let WorkerInvocation {
         args,
@@ -2418,41 +2542,144 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
         gate.wait_released().await;
     }
 
-    let control_topic = args
-        .control_topic
-        .as_deref()
-        .map(|topic| expand_client_template(topic, &client_id));
-    let control_payload =
-        expand_control_payload(&load_control_payload(&args, &mut result), &client_id);
-    let data_payload = vec![b'A'; args.message_size];
-    if args.control_mode {
-        run_control_mode(
-            &args,
-            &client,
-            &mut eventloop,
-            control_topic.as_deref(),
-            &control_payload,
-            &mut result,
-        )
-        .await;
-    } else {
-        run_publish_mode(
-            &args,
-            &client,
-            &mut eventloop,
-            WorkerPublishPlan {
-                topic: &topic,
-                control_topic: control_topic.as_deref(),
-                control_payload: &control_payload,
-                data_payload: &data_payload,
-                qos_distribution: qos_distribution.as_ref(),
-            },
-            &mut result,
-        )
-        .await;
-    }
+    run_worker_session(
+        &args,
+        &client_id,
+        &topic,
+        qos_distribution.as_ref(),
+        &client,
+        &mut eventloop,
+        &mut result,
+    )
+    .await;
     let _ = client.disconnect().await;
     result
+}
+
+async fn collect_worker_results(
+    tasks: Vec<tokio::task::JoinHandle<WorkerResult>>,
+) -> Vec<WorkerResult> {
+    let mut results = Vec::new();
+    for task in tasks {
+        match task.await {
+            Ok(result) => results.push(result),
+            Err(err) => {
+                let mut result = WorkerResult::default();
+                result.errors.push(format!("worker_join_failed:{err}"));
+                results.push(result);
+            }
+        }
+    }
+    results
+}
+
+fn standard_metrics(
+    results: Vec<WorkerResult>,
+    duration_s: f64,
+    handoff_plan: Option<&HandoffPlan>,
+    handoff_errors: Vec<String>,
+) -> StandardMetrics {
+    let connect = results.iter().filter_map(|r| r.connect_ms).collect();
+    let token_refresh = results.iter().filter_map(|r| r.token_refresh_ms).collect();
+    let token_refresh_len = results.iter().filter_map(|r| r.token_refresh_len).collect();
+    let delegation = results.iter().filter_map(|r| r.delegation_ms).collect();
+    let delegation_len = results.iter().filter_map(|r| r.delegation_len).collect();
+    let attenuation = results.iter().filter_map(|r| r.attenuation_ms).collect();
+    let attenuation_len = results.iter().filter_map(|r| r.attenuation_len).collect();
+    let publish: Vec<_> = results.iter().flat_map(|r| r.publish_ms.clone()).collect();
+    let publish_qos_0 = results
+        .iter()
+        .flat_map(|r| r.publish_by_qos[0].clone())
+        .collect();
+    let publish_qos_1 = results
+        .iter()
+        .flat_map(|r| r.publish_by_qos[1].clone())
+        .collect();
+    let publish_qos_2 = results
+        .iter()
+        .flat_map(|r| r.publish_by_qos[2].clone())
+        .collect();
+    let receive: Vec<_> = results.iter().flat_map(|r| r.receive_ms.clone()).collect();
+    let control = results.iter().flat_map(|r| r.control_ms.clone()).collect();
+    let control_injection = results
+        .iter()
+        .flat_map(|r| r.control_injection_ms.clone())
+        .collect();
+    let mut errors: Vec<_> = results.into_iter().flat_map(|r| r.errors).collect();
+    if let Some(plan) = handoff_plan {
+        errors.extend(plan.errors.clone());
+    }
+    errors.extend(handoff_errors);
+    StandardMetrics {
+        publish_throughput_mps: usize_as_f64(publish.len()) / duration_s,
+        receive_throughput_mps: usize_as_f64(receive.len()) / duration_s,
+        connect,
+        token_refresh,
+        token_refresh_len,
+        delegation,
+        delegation_len,
+        attenuation,
+        attenuation_len,
+        publish,
+        publish_qos_0,
+        publish_qos_1,
+        publish_qos_2,
+        receive,
+        control,
+        control_injection,
+        errors,
+    }
+}
+
+fn standard_output(
+    args: &Args,
+    qos_distribution: Option<&QosDistribution>,
+    token_refresh_codes: &[u16],
+    handoff_nonce: Option<&str>,
+    metrics: StandardMetrics,
+) -> Output {
+    Output {
+        inputs: inputs_json(
+            args,
+            args.mode.as_str(),
+            qos_distribution,
+            token_refresh_codes,
+            handoff_nonce,
+        ),
+        connect: summarize(&metrics.connect),
+        token_refresh: summarize(&metrics.token_refresh),
+        token_refresh_len: summarize(&metrics.token_refresh_len),
+        delegation: summarize(&metrics.delegation),
+        delegation_len: summarize(&metrics.delegation_len),
+        attenuation: summarize(&metrics.attenuation),
+        attenuation_len: summarize(&metrics.attenuation_len),
+        publish: summarize(&metrics.publish),
+        publish_qos_0: summarize(&metrics.publish_qos_0),
+        publish_qos_1: summarize(&metrics.publish_qos_1),
+        publish_qos_2: summarize(&metrics.publish_qos_2),
+        qos_distribution_actual: serde_json::json!({
+            "qos_0_count": metrics.publish_qos_0.len(),
+            "qos_1_count": metrics.publish_qos_1.len(),
+            "qos_2_count": metrics.publish_qos_2.len(),
+        }),
+        receive: summarize(&metrics.receive),
+        control: summarize(&metrics.control),
+        control_injection_delay: summarize(&metrics.control_injection),
+        throughput_mps: if args.mode == "fanout" {
+            metrics.receive_throughput_mps
+        } else {
+            metrics.publish_throughput_mps
+        },
+        publish_throughput_mps: metrics.publish_throughput_mps,
+        receive_throughput_mps: metrics.receive_throughput_mps,
+        received_messages: serde_json::json!({
+            "count": metrics.receive.len(),
+            "expected": if args.mode == "fanout" { args.messages * args.clients } else { 0 },
+        }),
+        fanout_churn: fanout_churn_json(args, args.mode.as_str(), None, None, None),
+        raw_publish_ms: metrics.publish,
+        errors: metrics.errors,
+    }
 }
 
 async fn run_standard_mode(
@@ -2504,94 +2731,21 @@ async fn run_standard_mode(
         }
         start
     };
-    let mut results = Vec::new();
-    for task in tasks {
-        match task.await {
-            Ok(result) => results.push(result),
-            Err(err) => {
-                let mut result = WorkerResult::default();
-                result.errors.push(format!("worker_join_failed:{err}"));
-                results.push(result);
-            }
-        }
-    }
+    let results = collect_worker_results(tasks).await;
     let duration_s = start.elapsed().as_secs_f64().max(1e-9);
-    let connect: Vec<_> = results.iter().filter_map(|r| r.connect_ms).collect();
-    let token_refresh: Vec<_> = results.iter().filter_map(|r| r.token_refresh_ms).collect();
-    let token_refresh_len: Vec<_> = results.iter().filter_map(|r| r.token_refresh_len).collect();
-    let delegation: Vec<_> = results.iter().filter_map(|r| r.delegation_ms).collect();
-    let delegation_len: Vec<_> = results.iter().filter_map(|r| r.delegation_len).collect();
-    let attenuation: Vec<_> = results.iter().filter_map(|r| r.attenuation_ms).collect();
-    let attenuation_len: Vec<_> = results.iter().filter_map(|r| r.attenuation_len).collect();
-    let publish: Vec<_> = results.iter().flat_map(|r| r.publish_ms.clone()).collect();
-    let publish_qos_0: Vec<_> = results
-        .iter()
-        .flat_map(|r| r.publish_by_qos[0].clone())
-        .collect();
-    let publish_qos_1: Vec<_> = results
-        .iter()
-        .flat_map(|r| r.publish_by_qos[1].clone())
-        .collect();
-    let publish_qos_2: Vec<_> = results
-        .iter()
-        .flat_map(|r| r.publish_by_qos[2].clone())
-        .collect();
-    let receive: Vec<_> = results.iter().flat_map(|r| r.receive_ms.clone()).collect();
-    let control: Vec<_> = results.iter().flat_map(|r| r.control_ms.clone()).collect();
-    let control_injection: Vec<_> = results
-        .iter()
-        .flat_map(|r| r.control_injection_ms.clone())
-        .collect();
-    let mut errors: Vec<_> = results.into_iter().flat_map(|r| r.errors).collect();
-    if let Some(plan) = &handoff_plan {
-        errors.extend(plan.errors.clone());
-    }
-    errors.extend(handoff_errors);
-    let publish_throughput_mps = usize_as_f64(publish.len()) / duration_s;
-    let receive_throughput_mps = usize_as_f64(receive.len()) / duration_s;
-
-    let output = Output {
-        inputs: inputs_json(
-            &args,
-            args.mode.as_str(),
-            qos_distribution.as_ref(),
-            &token_refresh_codes,
-            handoff_nonce.as_deref(),
-        ),
-        connect: summarize(&connect),
-        token_refresh: summarize(&token_refresh),
-        token_refresh_len: summarize(&token_refresh_len),
-        delegation: summarize(&delegation),
-        delegation_len: summarize(&delegation_len),
-        attenuation: summarize(&attenuation),
-        attenuation_len: summarize(&attenuation_len),
-        publish: summarize(&publish),
-        publish_qos_0: summarize(&publish_qos_0),
-        publish_qos_1: summarize(&publish_qos_1),
-        publish_qos_2: summarize(&publish_qos_2),
-        qos_distribution_actual: serde_json::json!({
-            "qos_0_count": publish_qos_0.len(),
-            "qos_1_count": publish_qos_1.len(),
-            "qos_2_count": publish_qos_2.len(),
-        }),
-        receive: summarize(&receive),
-        control: summarize(&control),
-        control_injection_delay: summarize(&control_injection),
-        throughput_mps: if args.mode == "fanout" {
-            receive_throughput_mps
-        } else {
-            publish_throughput_mps
-        },
-        publish_throughput_mps,
-        receive_throughput_mps,
-        received_messages: serde_json::json!({
-            "count": receive.len(),
-            "expected": if args.mode == "fanout" { args.messages * args.clients } else { 0 },
-        }),
-        fanout_churn: fanout_churn_json(&args, args.mode.as_str(), None, None, None),
-        raw_publish_ms: publish,
-        errors,
-    };
+    let metrics = standard_metrics(
+        results,
+        duration_s,
+        handoff_plan.as_ref(),
+        handoff_errors,
+    );
+    let output = standard_output(
+        &args,
+        qos_distribution.as_ref(),
+        &token_refresh_codes,
+        handoff_nonce.as_deref(),
+        metrics,
+    );
     print_json(&output)
 }
 

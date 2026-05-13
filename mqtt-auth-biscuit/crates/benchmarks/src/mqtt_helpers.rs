@@ -6,9 +6,8 @@ use rumqttc::{AsyncClient, Event, MqttOptions, TlsConfiguration, Transport};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
+use rustls_pki_types::pem::PemObject;
 use serde::Serialize;
-use std::fs::File;
-use std::io::BufReader;
 use std::sync::Arc;
 use std::sync::Once;
 use std::time::{Duration, Instant};
@@ -187,8 +186,8 @@ pub const fn puback_reason_code(code: PubAckReason) -> u16 {
 fn root_store(ca_file: Option<&str>) -> Result<RootCertStore> {
     let mut roots = RootCertStore::empty();
     if let Some(path) = ca_file {
-        let mut reader = BufReader::new(File::open(path)?);
-        let certs = rustls_pemfile::certs(&mut reader)
+        let certs = CertificateDer::pem_file_iter(path)
+            .map_err(|err| MqttHelperError::Message(format!("invalid CA file: {err}")))?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|err| MqttHelperError::Message(format!("invalid CA file: {err}")))?;
         roots.add_parsable_certificates(certs);

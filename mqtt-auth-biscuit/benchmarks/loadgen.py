@@ -662,9 +662,7 @@ def _rust_loadgen_cmd(
     if fanout_churn_settle_ms > 0:
         cmd.extend(["--fanout-churn-settle-ms", str(fanout_churn_settle_ms)])
     if fanout_churn_dynamic_security_source:
-        cmd.extend(
-            ["--fanout-churn-dynamic-security-source", fanout_churn_dynamic_security_source]
-        )
+        cmd.extend(["--fanout-churn-dynamic-security-source", fanout_churn_dynamic_security_source])
     if fanout_churn_control_topic:
         cmd.extend(["--fanout-churn-control-topic", fanout_churn_control_topic])
     if fanout_churn_control_payload is not None:

@@ -231,9 +231,7 @@ def test_rust_loadgen_command_forwards_programmatic_transition_options(monkeypat
     assert _argv_value(argv, "--biscuit-delegate-handoff-qos") == "2"
     assert "--biscuit-delegate-handoff-no-retain" in argv
     assert _argv_value(argv, "--control-topic") == "$CONTROL/dynamic-security/v1"
-    assert json.loads(_argv_value(argv, "--control-payload")) == {
-        "commands": [{"command": "noop"}]
-    }
+    assert json.loads(_argv_value(argv, "--control-payload")) == {"commands": [{"command": "noop"}]}
     assert "--control-mode" in argv
     assert _argv_value(argv, "--control-repeat") == "3"
     assert _argv_value(argv, "--control-qos") == "2"

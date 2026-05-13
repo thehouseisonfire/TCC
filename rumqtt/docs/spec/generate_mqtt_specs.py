@@ -23,9 +23,7 @@ from lxml import html
 
 REQUIREMENT_RE = re.compile(r"MQTT-\d+(?:\.\d+)+-\d+")
 HEADING_RE = re.compile(r"^(\d+(?:\.\d+)*)\s+(.+)$")
-NORMATIVE_RE = re.compile(
-    r"\b(MUST NOT|SHALL NOT|SHOULD NOT|MUST|SHALL|SHOULD|MAY|REQUIRED)\b"
-)
+NORMATIVE_RE = re.compile(r"\b(MUST NOT|SHALL NOT|SHOULD NOT|MUST|SHALL|SHOULD|MAY|REQUIRED)\b")
 
 
 @dataclass
@@ -222,7 +220,9 @@ def section_for_node_idx(sections: list[Section], idx: int) -> Section | None:
     return None
 
 
-def mapping_for_section(version: str, section_number: str, section_title: str) -> tuple[list[str], str]:
+def mapping_for_section(
+    version: str, section_number: str, section_title: str
+) -> tuple[list[str], str]:
     packet_map = V4_PACKET_MAP if version == "3.1.1" else V5_PACKET_MAP
     base_paths = (
         [
@@ -264,13 +264,19 @@ def mapping_for_section(version: str, section_number: str, section_title: str) -
     sec_prefix = section_number if len(sec_prefix_parts) < 2 else ".".join(sec_prefix_parts[:2])
 
     if sec_prefix in packet_map:
-        return packet_map[sec_prefix], f"Heuristic mapping from section prefix {sec_prefix} to packet module."
+        return (
+            packet_map[sec_prefix],
+            f"Heuristic mapping from section prefix {sec_prefix} to packet module.",
+        )
 
     if section_number.startswith("2.") or section_number.startswith("1."):
         return base_paths, "Heuristic mapping to core packet framing and codec modules."
 
     if section_number.startswith("4."):
-        return ops_paths, "Heuristic mapping to state machine, event loop, and topic behavior modules."
+        return (
+            ops_paths,
+            "Heuristic mapping to state machine, event loop, and topic behavior modules.",
+        )
 
     if section_number.startswith("6."):
         return ws_paths, "Heuristic mapping to websocket and transport modules."
@@ -312,7 +318,7 @@ def find_obligation_with_lookback(node: Any, text: str) -> str:
     if prev is not None:
         prev_text = normalize_text(prev.text_content())
         current_text = normalize_text(REQUIREMENT_RE.sub("", text))
-        tail_fragment = re.split(r'(?<=[.!?;:])\s+', prev_text)[-1]
+        tail_fragment = re.split(r"(?<=[.!?;:])\s+", prev_text)[-1]
         tail_fragment = normalize_text(REQUIREMENT_RE.sub("", tail_fragment))
         if (
             prev.tag == node.tag
@@ -335,7 +341,9 @@ def find_obligation_with_lookback(node: Any, text: str) -> str:
     return "UNSPECIFIED"
 
 
-def extract_requirements(doc: Any, sections: list[Section], config: SpecConfig) -> list[dict[str, Any]]:
+def extract_requirements(
+    doc: Any, sections: list[Section], config: SpecConfig
+) -> list[dict[str, Any]]:
     all_nodes = list(doc.iter())
     node_index = {id(node): i for i, node in enumerate(all_nodes)}
 
@@ -375,7 +383,9 @@ def extract_requirements(doc: Any, sections: list[Section], config: SpecConfig) 
         summary = clean_summary(text)
 
         for req_id in req_ids:
-            mapping_paths, mapping_reason = mapping_for_section(config.version, section.number, section.title)
+            mapping_paths, mapping_reason = mapping_for_section(
+                config.version, section.number, section.title
+            )
 
             req = requirement_items.get(req_id)
             if req is None:
@@ -404,7 +414,9 @@ def extract_requirements(doc: Any, sections: list[Section], config: SpecConfig) 
                 ):
                     req["obligation"] = obligation
 
-    requirements = sorted(requirement_items.values(), key=lambda item: requirement_sort_key(item["id"]))
+    requirements = sorted(
+        requirement_items.values(), key=lambda item: requirement_sort_key(item["id"])
+    )
     if len(requirements) < config.min_requirements:
         raise RuntimeError(
             f"Requirement extraction too low for {config.key}: got {len(requirements)} "
@@ -441,7 +453,9 @@ def render_markdown(
         key = (req["section_number"], req["section_title"])
         section_map.setdefault(key, []).append(req)
 
-    ordered_sections = sorted(section_map.keys(), key=lambda key: tuple(int(p) for p in key[0].split(".")))
+    ordered_sections = sorted(
+        section_map.keys(), key=lambda key: tuple(int(p) for p in key[0].split("."))
+    )
 
     lines: list[str] = []
     lines.append(f"# {config.title} Compliance Digest")
@@ -460,7 +474,9 @@ def render_markdown(
     for section_number, section_title in ordered_sections:
         section_slug = slugify(section_number, section_title)
         count = len(section_map[(section_number, section_title)])
-        lines.append(f"- [{section_number} {section_title}](#{section_slug}) ({count} requirements)")
+        lines.append(
+            f"- [{section_number} {section_title}](#{section_slug}) ({count} requirements)"
+        )
 
     lines.append("")
     lines.append("## Compliance Sections")
@@ -519,7 +535,9 @@ def load_source(
             payload = json.loads(meta_path.read_text(encoding="utf-8"))
             last_modified = payload.get("source_last_modified", "unknown")
         else:
-            last_modified = dt.datetime.fromtimestamp(source_path.stat().st_mtime, tz=dt.timezone.utc).isoformat()
+            last_modified = dt.datetime.fromtimestamp(
+                source_path.stat().st_mtime, tz=dt.UTC
+            ).isoformat()
         return content, last_modified
 
     content, last_modified = fetch_source(config.url, timeout_seconds)
@@ -527,9 +545,11 @@ def load_source(
     meta_payload = {
         "source_url": config.url,
         "source_last_modified": last_modified,
-        "cached_at_utc": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),
+        "cached_at_utc": dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat(),
     }
-    meta_path.write_text(json.dumps(meta_payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    meta_path.write_text(
+        json.dumps(meta_payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8"
+    )
     return content, last_modified
 
 
@@ -570,7 +590,9 @@ def process_spec(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate MQTT compliance docs from official specs")
+    parser = argparse.ArgumentParser(
+        description="Generate MQTT compliance docs from official specs"
+    )
     parser.add_argument(
         "--versions",
         nargs="+",
@@ -608,12 +630,14 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     repo_root = Path(__file__).resolve().parents[2]
 
-    generated_at_utc = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+    generated_at_utc = dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
 
     for version_key in args.versions:
         config = SPEC_CONFIGS[version_key]
         try:
-            process_spec(config, out_dir, args.timeout_seconds, generated_at_utc, args.offline, repo_root)
+            process_spec(
+                config, out_dir, args.timeout_seconds, generated_at_utc, args.offline, repo_root
+            )
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Failed to fetch {config.url}: {exc}") from exc
 

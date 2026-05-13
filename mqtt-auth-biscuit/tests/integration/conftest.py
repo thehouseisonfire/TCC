@@ -432,9 +432,7 @@ class ObservedMqttClient:
 
     def subscribe(self, topic: str, qos: int = 1, timeout_s: float = 5.0) -> list[int]:
         return list(
-            self._request(
-                {"cmd": "subscribe", "topic": topic, "qos": qos, "timeout_s": timeout_s}
-            )
+            self._request({"cmd": "subscribe", "topic": topic, "qos": qos, "timeout_s": timeout_s})
         )
 
     def publish(

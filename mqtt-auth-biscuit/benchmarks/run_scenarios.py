@@ -63,6 +63,8 @@ def _resolve_rust_helper(binary: str) -> list[str]:
     if cargo is None:
         raise SystemExit(f"Missing required command: cargo (needed to run {binary})")
     return [cargo, "run", "--locked", "-p", "gen-tokens", "--bin", binary, "--"]
+
+
 ScenarioTokenKind = Literal["jwt", "biscuit"]
 
 

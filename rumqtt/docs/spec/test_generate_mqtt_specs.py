@@ -19,7 +19,8 @@ from generate_mqtt_specs import (
 class FindObligationWithLookbackTests(unittest.TestCase):
     def test_uses_keyword_from_same_element(self) -> None:
         doc = html.fromstring(
-            "<p>If the Will Flag is set to 0, a Will Message MUST NOT be published [MQTT-3.1.2-12].</p>"
+            "<p>If the Will Flag is set to 0, a Will Message MUST NOT be "
+            "published [MQTT-3.1.2-12].</p>"
         )
         node = doc.xpath("//p")[0]
 
@@ -32,7 +33,8 @@ class FindObligationWithLookbackTests(unittest.TestCase):
             <table>
               <tr>
                 <td><p>[MQTT-3.1.2-11]</p></td>
-                <td><p>If the Will Flag is set to 0, then the Will QoS MUST be set to 0 (0x00).</p></td>
+                <td><p>If the Will Flag is set to 0, then the Will QoS MUST be set to 0
+                (0x00).</p></td>
               </tr>
             </table>
             """)
@@ -46,7 +48,8 @@ class FindObligationWithLookbackTests(unittest.TestCase):
         doc = html.fromstring("""
             <div>
               <p>The Server MUST validate the packet.</p>
-              <p>If the Will Flag is set to 1, the value of Will QoS can be 0 (0x00), 1 (0x01), or 2 (0x02) [MQTT-3.1.2-12].</p>
+              <p>If the Will Flag is set to 1, the value of Will QoS can be 0 (0x00),
+              1 (0x01), or 2 (0x02) [MQTT-3.1.2-12].</p>
             </div>
             """)
         node = doc.xpath("//p[contains(., 'MQTT-3.1.2-12')]")[0]
@@ -58,8 +61,10 @@ class FindObligationWithLookbackTests(unittest.TestCase):
     def test_uses_immediately_preceding_unfinished_clause_fragment(self) -> None:
         doc = html.fromstring("""
             <div>
-              <p>The Server MUST allow ClientIds which are between 1 and 23 UTF-8 encoded bytes in length, and that contain only the characters</p>
-              <p>"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ" [MQTT-3.1.3-5].</p>
+              <p>The Server MUST allow ClientIds which are between 1 and 23 UTF-8
+              encoded bytes in length, and that contain only the characters</p>
+              <p>"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+              [MQTT-3.1.3-5].</p>
             </div>
             """)
         node = doc.xpath("//p[contains(., 'MQTT-3.1.3-5')]")[0]

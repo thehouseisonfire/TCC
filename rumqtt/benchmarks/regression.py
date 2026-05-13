@@ -154,7 +154,8 @@ def choose_metric_object(
             return (
                 None,
                 {},
-                f"expected exactly one benchmark payload for mode '{expected_mode}', found {len(filtered)}",
+                "expected exactly one benchmark payload for mode "
+                f"'{expected_mode}', found {len(filtered)}",
             )
         return filtered[0][0], filtered[0][1], None
 
@@ -412,8 +413,8 @@ def compute_paired_metric_comparisons(
     paired_run_ids = sorted(set(baseline_by_run.keys()) & set(target_by_run.keys()))
     metrics: set[str] = set()
     for run_id in paired_run_ids:
-        metrics.update(k for k in baseline_by_run[run_id].keys() if isinstance(k, str))
-        metrics.update(k for k in target_by_run[run_id].keys() if isinstance(k, str))
+        metrics.update(k for k in baseline_by_run[run_id] if isinstance(k, str))
+        metrics.update(k for k in target_by_run[run_id] if isinstance(k, str))
 
     results: dict[str, dict[str, Any]] = {}
     for metric in sorted(metrics):
@@ -488,7 +489,7 @@ def build_html_report(
     quality: dict[str, Any] | None = None,
 ) -> None:
     metrics = sorted(
-        {metric for branch_data in per_branch.values() for metric in branch_data["metrics"].keys()}
+        {metric for branch_data in per_branch.values() for metric in branch_data["metrics"]}
     )
 
     html_parts: list[str] = []
@@ -501,10 +502,19 @@ def build_html_report(
     body { font-family: "Helvetica Neue", Arial, sans-serif; margin: 24px; color: #1d1d1f; }
     h1, h2, h3 { margin: 0 0 10px 0; }
     .meta { margin-bottom: 24px; padding: 12px; background: #f4f7fa; border-radius: 8px; }
-    .quality-pass { margin-bottom: 16px; padding: 10px; border-radius: 8px; background: #e9f8ef; color: #0f8a39; }
-    .quality-fail { margin-bottom: 16px; padding: 10px; border-radius: 8px; background: #fdecec; color: #b3261e; }
+    .quality-pass {
+      margin-bottom: 16px; padding: 10px; border-radius: 8px;
+      background: #e9f8ef; color: #0f8a39;
+    }
+    .quality-fail {
+      margin-bottom: 16px; padding: 10px; border-radius: 8px;
+      background: #fdecec; color: #b3261e;
+    }
     .metric { margin: 22px 0; padding: 14px; border: 1px solid #e6e6e6; border-radius: 8px; }
-    .grid { display: grid; grid-template-columns: 180px 80px 1fr 120px; gap: 8px; align-items: center; }
+    .grid {
+      display: grid; grid-template-columns: 180px 80px 1fr 120px;
+      gap: 8px; align-items: center;
+    }
     .bar-wrap { background: #f0f0f0; height: 16px; border-radius: 999px; overflow: hidden; }
     .bar { height: 100%; }
     .branch-a { background: #2f80ed; }
@@ -620,7 +630,8 @@ def build_html_report(
         html_parts.append("<h2>Paired Run Comparison</h2>")
         html_parts.append(
             "<table><thead><tr>"
-            "<th>Metric</th><th>Paired Runs</th><th>Median % Delta</th><th>95% CI [%]</th><th>Class</th>"
+            "<th>Metric</th><th>Paired Runs</th><th>Median % Delta</th>"
+            "<th>95% CI [%]</th><th>Class</th>"
             "</tr></thead><tbody>"
         )
         for metric in sorted(paired_comparisons.keys()):
@@ -1251,7 +1262,10 @@ def main() -> int:
     parser.add_argument(
         "--cross-library",
         action="store_true",
-        help="Run cross-library benchmark matrix (rumqtt-v5 vs mqttv5-cli) instead of git branch comparison.",
+        help=(
+            "Run cross-library benchmark matrix (rumqtt-v5 vs mqttv5-cli) "
+            "instead of git branch comparison."
+        ),
     )
     parser.add_argument("--rumqtt-root", default=None, help="Path to rumqtt repository root.")
     parser.add_argument("--mqttlib-root", default=None, help="Path to mqtt-lib repository root.")
@@ -1329,7 +1343,10 @@ def main() -> int:
         "--interleaved",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Interleave baseline/target runs in branch comparison mode (A/B then B/A alternating).",
+        help=(
+            "Interleave baseline/target runs in branch comparison mode "
+            "(A/B then B/A alternating)."
+        ),
     )
     parser.add_argument(
         "--paired-analysis",
@@ -1403,8 +1420,9 @@ def main() -> int:
                 capture=True,
             )
             if proc.returncode != 0:
+                worktree_error = proc.stderr.strip() or proc.stdout.strip()
                 raise RuntimeError(
-                    f"Failed to create worktree for '{branch_name}': {proc.stderr.strip() or proc.stdout.strip()}"
+                    f"Failed to create worktree for '{branch_name}': {worktree_error}"
                 )
             worktrees[branch_label] = wt_path
 

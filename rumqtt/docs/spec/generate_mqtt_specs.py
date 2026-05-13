@@ -487,7 +487,9 @@ def render_markdown(
         lines.append("")
         rows = section_map[(section_number, section_title)]
         lines.append(
-            f"Compliance digest: {len(rows)} requirement IDs extracted and mapped to candidate implementation files."
+            "Compliance digest: "
+            f"{len(rows)} requirement IDs extracted and mapped "
+            "to candidate implementation files."
         )
         lines.append("")
         lines.append("| ID | Obligation | Summary | Anchor | Candidate Code | Mapping Status |")
@@ -499,7 +501,8 @@ def render_markdown(
             candidate = "<br>".join(req["candidate_paths"])
             summary = req["summary"].replace("|", "\\|")
             lines.append(
-                f"| {req['id']} | {req['obligation']} | {summary} | {anchor_link} | {candidate} | {req['mapping_status']} |"
+                f"| {req['id']} | {req['obligation']} | {summary} | "
+                f"{anchor_link} | {candidate} | {req['mapping_status']} |"
             )
 
         lines.append("")

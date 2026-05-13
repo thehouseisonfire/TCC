@@ -2,7 +2,7 @@ use base64::{Engine as _, engine::general_purpose};
 use biscuit_auth::{Biscuit, BlockBuilder, KeyPair, PrivateKey};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use p256::SecretKey;
-use pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
+use p256::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::env;

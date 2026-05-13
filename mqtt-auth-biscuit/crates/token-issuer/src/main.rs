@@ -9,7 +9,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use p256::SecretKey;
-use pkcs8::{EncodePrivateKey, LineEnding};
+use p256::pkcs8::{EncodePrivateKey, LineEnding};
 use rustls::ServerConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};

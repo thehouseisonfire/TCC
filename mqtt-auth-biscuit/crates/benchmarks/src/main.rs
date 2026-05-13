@@ -676,7 +676,7 @@ mod tests {
         let biscuit = Biscuit::from(&bytes, public_key).unwrap();
         let mut authorizer = AuthorizerBuilder::new().build(&biscuit).unwrap();
         let identities: Vec<(String,)> = authorizer
-            .query_all(r#"data($id) <- client_id($id)"#)
+            .query_all(r"data($id) <- client_id($id)")
             .unwrap();
 
         assert_eq!(identities, vec![("client_1".to_string(),)]);

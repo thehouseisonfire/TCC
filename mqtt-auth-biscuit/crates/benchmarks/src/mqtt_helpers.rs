@@ -97,17 +97,30 @@ impl ServerCertVerifier for NoVerifier {
     }
 }
 
+/// Decode a token CLI argument.
+///
+/// Arguments prefixed with `b64:` are interpreted as unpadded base64url.
+///
+/// # Errors
+///
+/// Returns an error when a `b64:` token is not valid base64url.
 pub fn decode_token_arg(raw: &str) -> Result<Vec<u8>> {
-    if let Some(encoded) = raw.strip_prefix(RAW_BISCUIT_MARKER) {
-        let padding = "=".repeat((4 - encoded.len() % 4) % 4);
-        general_purpose::URL_SAFE
-            .decode(format!("{encoded}{padding}"))
-            .map_err(|err| MqttHelperError::Message(format!("invalid base64url token: {err}")))
-    } else {
-        Ok(raw.as_bytes().to_vec())
-    }
+    raw.strip_prefix(RAW_BISCUIT_MARKER).map_or_else(
+        || Ok(raw.as_bytes().to_vec()),
+        |encoded| {
+            let padding = "=".repeat((4 - encoded.len() % 4) % 4);
+            general_purpose::URL_SAFE
+                .decode(format!("{encoded}{padding}"))
+                .map_err(|err| MqttHelperError::Message(format!("invalid base64url token: {err}")))
+        },
+    )
 }
 
+/// Convert a numeric `QoS` level into a rumqttc `QoS` value.
+///
+/// # Errors
+///
+/// Returns an error when `value` is not `0`, `1`, or `2`.
 pub fn qos(value: u8) -> Result<V5QoS> {
     match value {
         0 => Ok(V5QoS::AtMostOnce),
@@ -117,7 +130,8 @@ pub fn qos(value: u8) -> Result<V5QoS> {
     }
 }
 
-pub fn subscribe_reason_code(code: SubscribeReasonCode) -> u16 {
+#[must_use]
+pub const fn subscribe_reason_code(code: SubscribeReasonCode) -> u16 {
     match code {
         SubscribeReasonCode::Success(V5QoS::AtMostOnce) => 0,
         SubscribeReasonCode::Success(V5QoS::AtLeastOnce) => 1,
@@ -134,7 +148,8 @@ pub fn subscribe_reason_code(code: SubscribeReasonCode) -> u16 {
     }
 }
 
-pub fn connect_reason_code(code: ConnectReturnCode) -> u16 {
+#[must_use]
+pub const fn connect_reason_code(code: ConnectReturnCode) -> u16 {
     match code {
         ConnectReturnCode::Success => 0,
         ConnectReturnCode::RefusedProtocolVersion => 1,
@@ -164,7 +179,8 @@ pub fn connect_reason_code(code: ConnectReturnCode) -> u16 {
     }
 }
 
-pub fn puback_reason_code(code: PubAckReason) -> u16 {
+#[must_use]
+pub const fn puback_reason_code(code: PubAckReason) -> u16 {
     code as u16
 }
 
@@ -197,6 +213,11 @@ fn tls_config(ca_file: Option<&str>, insecure: bool) -> Result<TlsConfiguration>
     Ok(TlsConfiguration::Rustls(Arc::new(config)))
 }
 
+/// Build MQTT options from a benchmark client specification.
+///
+/// # Errors
+///
+/// Returns an error when TLS configuration cannot be built.
 pub fn mqtt_options(spec: &ClientSpec) -> Result<MqttOptions> {
     let mut options = MqttOptions::new(spec.client_id.clone(), (spec.host.as_str(), spec.port));
     if !spec.username.is_empty() || !spec.password.is_empty() {
@@ -217,6 +238,11 @@ pub fn mqtt_options(spec: &ClientSpec) -> Result<MqttOptions> {
     Ok(options)
 }
 
+/// Connect to the broker and wait for a `CONNACK`.
+///
+/// # Errors
+///
+/// Returns an error when connection setup fails or times out.
 pub async fn connect(
     spec: &ClientSpec,
 ) -> Result<(AsyncClient, rumqttc::EventLoop, ConnectReport)> {
@@ -240,6 +266,44 @@ pub async fn connect(
             ));
         }
     }
+}
+
+/// Poll an MQTT eventloop until `f` returns a value or the timeout expires.
+///
+/// # Errors
+///
+/// Returns an error when event polling fails or the timeout elapses.
+pub async fn poll_until<F, T>(
+    eventloop: &mut rumqttc::EventLoop,
+    timeout: Duration,
+    mut f: F,
+) -> Result<T>
+where
+    F: FnMut(Event) -> Option<T>,
+{
+    let deadline = Instant::now() + timeout;
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(MqttHelperError::Message("mqtt_event_timeout".to_string()));
+        }
+        let event = tokio::time::timeout(deadline - now, eventloop.poll())
+            .await
+            .map_err(|_| MqttHelperError::Message("mqtt_event_timeout".to_string()))??;
+        if let Some(value) = f(event) {
+            return Ok(value);
+        }
+    }
+}
+
+/// Print a serializable value as pretty JSON.
+///
+/// # Errors
+///
+/// Returns an error when serialization fails.
+pub fn print_json<T: Serialize>(value: &T) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -290,32 +354,4 @@ mod tests {
             }
         );
     }
-}
-
-pub async fn poll_until<F, T>(
-    eventloop: &mut rumqttc::EventLoop,
-    timeout: Duration,
-    mut f: F,
-) -> Result<T>
-where
-    F: FnMut(Event) -> Option<T>,
-{
-    let deadline = Instant::now() + timeout;
-    loop {
-        let now = Instant::now();
-        if now >= deadline {
-            return Err(MqttHelperError::Message("mqtt_event_timeout".to_string()));
-        }
-        let event = tokio::time::timeout(deadline - now, eventloop.poll())
-            .await
-            .map_err(|_| MqttHelperError::Message("mqtt_event_timeout".to_string()))??;
-        if let Some(value) = f(event) {
-            return Ok(value);
-        }
-    }
-}
-
-pub fn print_json<T: Serialize>(value: &T) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(value)?);
-    Ok(())
 }

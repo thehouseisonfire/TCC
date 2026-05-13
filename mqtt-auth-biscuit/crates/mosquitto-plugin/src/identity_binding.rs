@@ -60,9 +60,8 @@ pub fn resolve_jwt_effective_identity<'a>(
         (Some(sub), Some(client_id)) if sub != client_id => {
             Err(IdentityBindingError::InconsistentJwtIdentity)
         }
-        (Some(sub), Some(_)) => Ok(Some(sub)),
+        (Some(sub), Some(_) | None) => Ok(Some(sub)),
         (None, Some(client_id)) => Ok(Some(client_id)),
-        (Some(sub), None) => Ok(Some(sub)),
         (None, None) => Ok(None),
     }
 }
@@ -115,7 +114,7 @@ fn live_client_id(value: Option<&str>) -> Result<&str, IdentityBindingError> {
     identity_or_missing(value).ok_or(IdentityBindingError::MissingLiveClientId)
 }
 
-fn biscuit_from_token(token: &TokenType) -> Option<&Arc<Biscuit>> {
+const fn biscuit_from_token(token: &TokenType) -> Option<&Arc<Biscuit>> {
     match token {
         TokenType::Biscuit {
             biscuit: Some(biscuit),
@@ -153,11 +152,11 @@ pub fn enforce_identity_binding(
             }
 
             let live_client_id = live_client_id(live_client_id_value)?;
-            let biscuit = biscuit_from_token(token).ok_or(
+            let biscuit = biscuit_from_token(token).ok_or_else(|| {
                 IdentityBindingError::BiscuitIdentityExtractionFailed {
                     predicate: config.biscuit_client_id_fact.clone(),
-                },
-            )?;
+                }
+            })?;
             let identity = resolve_biscuit_identity(
                 biscuit.as_ref(),
                 &config.biscuit_client_id_fact,

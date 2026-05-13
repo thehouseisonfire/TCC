@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
     let reauth = tokio::select! {
         result = notice.wait_async() => result.map(|_| ()).map_err(|err| err.to_string()),
         result = wait => result.map_err(|err| err.to_string()),
-        _ = tokio::time::sleep(Duration::from_secs(10)) => Err("reauth_timeout".to_string()),
+        () = tokio::time::sleep(Duration::from_secs(10)) => Err("reauth_timeout".to_string()),
     };
     let reauth_ms = start.elapsed().as_secs_f64() * 1000.0;
     let _ = client.disconnect().await;

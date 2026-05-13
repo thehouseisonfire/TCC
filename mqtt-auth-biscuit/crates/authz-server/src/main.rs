@@ -543,8 +543,7 @@ fn resolve_jwt_effective_identity(claims: &JwtClaimsLite) -> Option<Result<&str,
 
     match (sub, client_id) {
         (Some(sub), Some(client_id)) if sub != client_id => Some(Err(())),
-        (Some(sub), Some(_)) => Some(Ok(sub)),
-        (Some(sub), None) => Some(Ok(sub)),
+        (Some(sub), Some(_) | None) => Some(Ok(sub)),
         (None, Some(client_id)) => Some(Ok(client_id)),
         (None, None) => None,
     }

@@ -716,8 +716,8 @@ mod tests {
             .expect("identity query should succeed")
     }
 
-    fn issue_status(path: &str, body: serde_json::Value, cfg: &IssuerConfig) -> StatusCode {
-        let bytes = serde_json::to_vec(&body).expect("body should serialize");
+    fn issue_status(path: &str, body: &serde_json::Value, cfg: &IssuerConfig) -> StatusCode {
+        let bytes = serde_json::to_vec(body).expect("body should serialize");
         let err = issue_request(path, &bytes, cfg).expect_err("request should fail");
         err.into_response_parts().0
     }
@@ -845,7 +845,7 @@ mod tests {
         let cfg = test_cfg();
         let status = issue_status(
             "/biscuit",
-            serde_json::json!({
+            &serde_json::json!({
                 "client_id": "client_7",
                 "identity_fact_predicate": "client_id"
             }),
@@ -859,7 +859,7 @@ mod tests {
         let cfg = test_cfg();
         let status = issue_status(
             "/biscuit",
-            serde_json::json!({
+            &serde_json::json!({
                 "client_id": "client_7",
                 "identity_fact_predicate": "client-id",
                 "identity_fact_value": "client_7"
@@ -874,7 +874,7 @@ mod tests {
         let cfg = test_cfg();
         let status = issue_status(
             "/biscuit/binary",
-            serde_json::json!({
+            &serde_json::json!({
                 "client_id": "client_7",
                 "identity_fact_value": "client_7"
             }),
@@ -888,7 +888,7 @@ mod tests {
         let cfg = test_cfg();
         let status = issue_status(
             "/biscuit/binary",
-            serde_json::json!({
+            &serde_json::json!({
                 "client_id": "client_7",
                 "identity_fact_predicate": "client_id",
                 "identity_fact_value": ""

@@ -94,11 +94,11 @@ fn decode_b64(raw: Option<&str>) -> Result<Vec<u8>> {
         .map_err(|err| MqttHelperError::Message(format!("invalid base64url payload: {err}")))
 }
 
-fn response(ok: bool, value: Option<Value>, error: Option<String>) -> Response {
+const fn response(ok: bool, value: Option<Value>, error: Option<String>) -> Response {
     Response { ok, value, error }
 }
 
-fn disconnect_reason_code(code: DisconnectReasonCode) -> u16 {
+const fn disconnect_reason_code(code: DisconnectReasonCode) -> u16 {
     code as u16
 }
 
@@ -117,6 +117,7 @@ where
     false
 }
 
+#[allow(clippy::too_many_lines)]
 async fn handle(cmd: Command, state: &mut Option<ClientState>) -> Result<Response> {
     match cmd {
         Command::Connect {
@@ -314,14 +315,17 @@ async fn handle(cmd: Command, state: &mut Option<ClientState>) -> Result<Respons
                 .as_ref()
                 .ok_or_else(|| MqttHelperError::Message("not_connected".to_string()))?;
             let observed = state.observed.lock().await;
-            let count = match topic {
-                Some(topic) => observed
-                    .messages
-                    .iter()
-                    .filter(|(msg_topic, _)| msg_topic == &topic)
-                    .count(),
-                None => observed.messages.len(),
-            };
+            let count = topic.map_or_else(
+                || observed.messages.len(),
+                |topic| {
+                    observed
+                        .messages
+                        .iter()
+                        .filter(|(msg_topic, _)| msg_topic == &topic)
+                        .count()
+                },
+            );
+            drop(observed);
             Ok(response(true, Some(serde_json::json!(count)), None))
         }
         Command::Close => {

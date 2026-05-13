@@ -7,12 +7,12 @@ use gen_tokens::biscuit_attenuation::{
     BiscuitAttenuationOptions, attenuate_biscuit_token, load_public_key_hex,
 };
 use gen_tokens::mqtt_helpers::{
-    ClientSpec, MqttHelperError, Result, connect, decode_token_arg, poll_until, print_json,
-    puback_reason_code, qos,
+    ClientSpec, ConnectReport, MqttHelperError, Result, connect, decode_token_arg, poll_until,
+    print_json, puback_reason_code, qos,
 };
 use rand::{Rng as _, RngExt as _};
 use rumqttc::mqttbytes::v5::Packet;
-use rumqttc::{Event, Outgoing};
+use rumqttc::{AsyncClient, Event, Outgoing};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -27,7 +27,9 @@ use tokio::sync::Notify;
 
 const SYNC_CONNECT_RELEASE_DELAY: Duration = Duration::from_millis(200);
 const DEFAULT_CONTROL_TOPIC: &str = "$CONTROL/dynamic-security/v1";
+const CLIENT_ID_PLACEHOLDER: &str = "{client_id}";
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Parser, Clone)]
 struct Args {
     #[arg(long, env = "MQTT_HOST", default_value = "localhost")]
@@ -245,6 +247,17 @@ struct WorkerBootstrap {
     attenuation_len: Option<f64>,
 }
 
+struct WorkerInvocation {
+    args: Args,
+    index: usize,
+    bootstrap: WorkerBootstrap,
+    handoff_nonce: Option<String>,
+    handoff_password: Option<Vec<u8>>,
+    handoff_required: bool,
+    sync_connect: Option<Arc<SyncConnectGate>>,
+    publish_gate: Option<Arc<PublishStartGate>>,
+}
+
 #[derive(Debug, Clone)]
 struct HandoffPlan {
     nonce: String,
@@ -324,7 +337,7 @@ impl QosDistribution {
             }
             sample -= *weight;
         }
-        self.0.last().map(|(qos_value, _)| *qos_value).unwrap_or(0)
+        self.0.last().map_or(0, |(qos_value, _)| *qos_value)
     }
 
     fn subscribe_qos(&self) -> u8 {
@@ -441,7 +454,7 @@ struct PublishGateParticipant {
 }
 
 impl PublishGateParticipant {
-    fn new(gate: Option<Arc<PublishStartGate>>) -> Self {
+    const fn new(gate: Option<Arc<PublishStartGate>>) -> Self {
         Self { gate, ready: false }
     }
 
@@ -473,12 +486,10 @@ fn parse_token_refresh_codes(raw: Option<&str>) -> Result<Vec<u16>> {
         if part.is_empty() {
             continue;
         }
-        let value =
-            if let Some(hex) = part.strip_prefix("0x").or_else(|| part.strip_prefix("0X")) {
-                u16::from_str_radix(hex, 16)
-            } else {
-                part.parse::<u16>()
-            }
+        let value = part
+            .strip_prefix("0x")
+            .or_else(|| part.strip_prefix("0X"))
+            .map_or_else(|| part.parse::<u16>(), |hex| u16::from_str_radix(hex, 16))
             .map_err(|err| {
                 MqttHelperError::Message(format!("invalid token refresh code {part:?}: {err}"))
             })?;
@@ -726,7 +737,7 @@ fn handoff_topic(args: &Args) -> Option<String> {
     }
 }
 
-fn handoff_retain(args: &Args) -> bool {
+const fn handoff_retain(args: &Args) -> bool {
     !args.biscuit_delegate_handoff_no_retain
 }
 
@@ -740,6 +751,22 @@ struct BiscuitTransform {
     password: Vec<u8>,
     elapsed_ms: f64,
     token_len: f64,
+}
+
+struct BiscuitTransformRequest<'a> {
+    token: &'a [u8],
+    custom_bin: Option<&'a str>,
+    public_key_hex: Option<&'a str>,
+    public_key_file: Option<&'a str>,
+    restrict_topic: Option<&'a str>,
+    restrict_operation: Option<&'a str>,
+    ttl_seconds: Option<u64>,
+    denies: &'a [String],
+    checks: &'a [String],
+}
+
+fn usize_as_f64(value: usize) -> f64 {
+    f64::from(u32::try_from(value).unwrap_or(u32::MAX))
 }
 
 fn load_biscuit_public_key(
@@ -779,32 +806,23 @@ fn reject_custom_biscuit_transform_bin(custom_bin: Option<&str>, label: &str) ->
     Ok(())
 }
 
-fn transform_biscuit_token(
-    token: &[u8],
-    custom_bin: Option<&str>,
-    public_key_hex: Option<&str>,
-    public_key_file: Option<&str>,
-    restrict_topic: Option<&str>,
-    restrict_operation: Option<&str>,
-    ttl_seconds: Option<u64>,
-    denies: &[String],
-    checks: &[String],
-) -> Result<BiscuitTransform> {
-    reject_custom_biscuit_transform_bin(custom_bin, "Biscuit transform")?;
-    let public_key = load_biscuit_public_key(public_key_hex, public_key_file)?;
-    let ttl_seconds = ttl_seconds
+fn transform_biscuit_token(request: &BiscuitTransformRequest<'_>) -> Result<BiscuitTransform> {
+    reject_custom_biscuit_transform_bin(request.custom_bin, "Biscuit transform")?;
+    let public_key = load_biscuit_public_key(request.public_key_hex, request.public_key_file)?;
+    let ttl_seconds = request
+        .ttl_seconds
         .map(i64::try_from)
         .transpose()
         .map_err(|_| MqttHelperError::Message("ttl seconds exceeds i64 range".to_string()))?;
     let started = Instant::now();
     let password = attenuate_biscuit_token(
-        token,
+        request.token,
         public_key,
         &BiscuitAttenuationOptions {
-            denies: denies.to_vec(),
-            checks: checks.to_vec(),
-            restrict_topic: restrict_topic.map(str::to_string),
-            restrict_operation: restrict_operation.map(str::to_string),
+            denies: request.denies.to_vec(),
+            checks: request.checks.to_vec(),
+            restrict_topic: request.restrict_topic.map(str::to_string),
+            restrict_operation: request.restrict_operation.map(str::to_string),
             ttl_seconds,
         },
     )
@@ -815,7 +833,7 @@ fn transform_biscuit_token(
             "biscuit transform produced empty token".to_string(),
         ));
     }
-    let token_len = password.len() as f64;
+    let token_len = usize_as_f64(password.len());
     Ok(BiscuitTransform {
         password,
         elapsed_ms,
@@ -824,7 +842,7 @@ fn transform_biscuit_token(
 }
 
 fn expand_client_template(value: &str, client_id: &str) -> String {
-    value.replace("{client_id}", client_id)
+    value.replace(CLIENT_ID_PLACEHOLDER, client_id)
 }
 
 fn expand_client_templates(values: &[String], client_id: &str) -> Vec<String> {
@@ -852,15 +870,18 @@ fn expand_client_placeholders(value: &mut Value, client_id: &str) {
 }
 
 fn expand_control_payload(raw: &[u8], client_id: &str) -> Vec<u8> {
-    match serde_json::from_slice::<Value>(raw) {
-        Ok(mut value) => {
+    serde_json::from_slice::<Value>(raw).map_or_else(
+        |_| {
+            std::str::from_utf8(raw).map_or_else(
+                |_| raw.to_vec(),
+                |payload| expand_client_template(payload, client_id).into_bytes(),
+            )
+        },
+        |mut value| {
             expand_client_placeholders(&mut value, client_id);
             serde_json::to_vec(&value).unwrap_or_else(|_| raw.to_vec())
-        }
-        Err(_) => std::str::from_utf8(raw)
-            .map(|payload| expand_client_template(payload, client_id).into_bytes())
-            .unwrap_or_else(|_| raw.to_vec()),
-    }
+        },
+    )
 }
 
 fn load_control_payload(args: &Args, result: &mut WorkerResult) -> Vec<u8> {
@@ -879,7 +900,7 @@ fn load_control_payload(args: &Args, result: &mut WorkerResult) -> Vec<u8> {
     }
 }
 
-fn should_apply_worker_biscuit_transforms(
+const fn should_apply_worker_biscuit_transforms(
     handoff_nonce: Option<&str>,
     handoff_password_supplied: bool,
     handoff_required: bool,
@@ -900,17 +921,17 @@ fn apply_biscuit_transforms(
             .map(|topic| expand_client_template(topic, client_id));
         let denies = expand_client_templates(&args.biscuit_attenuate_deny, client_id);
         let checks = expand_client_templates(&args.biscuit_attenuate_check, client_id);
-        match transform_biscuit_token(
-            password,
-            args.biscuit_attenuate_bin.as_deref(),
-            args.biscuit_public_key_hex.as_deref(),
-            args.biscuit_public_key_file.as_deref(),
-            restrict_topic.as_deref(),
-            args.biscuit_attenuate_op.as_deref(),
-            args.biscuit_attenuate_ttl,
-            &denies,
-            &checks,
-        ) {
+        match transform_biscuit_token(&BiscuitTransformRequest {
+            token: password,
+            custom_bin: args.biscuit_attenuate_bin.as_deref(),
+            public_key_hex: args.biscuit_public_key_hex.as_deref(),
+            public_key_file: args.biscuit_public_key_file.as_deref(),
+            restrict_topic: restrict_topic.as_deref(),
+            restrict_operation: args.biscuit_attenuate_op.as_deref(),
+            ttl_seconds: args.biscuit_attenuate_ttl,
+            denies: &denies,
+            checks: &checks,
+        }) {
             Ok(transform) => {
                 *password = transform.password;
                 result.attenuation_ms = Some(transform.elapsed_ms);
@@ -929,17 +950,17 @@ fn apply_biscuit_transforms(
             .map(|topic| expand_client_template(topic, client_id));
         let denies = expand_client_templates(&args.biscuit_delegate_deny, client_id);
         let checks = expand_client_templates(&args.biscuit_delegate_check, client_id);
-        match transform_biscuit_token(
-            password,
-            args.biscuit_delegate_bin.as_deref(),
-            args.biscuit_delegate_public_key_hex.as_deref(),
-            args.biscuit_delegate_public_key_file.as_deref(),
-            restrict_topic.as_deref(),
-            args.biscuit_delegate_op.as_deref(),
-            args.biscuit_delegate_ttl,
-            &denies,
-            &checks,
-        ) {
+        match transform_biscuit_token(&BiscuitTransformRequest {
+            token: password,
+            custom_bin: args.biscuit_delegate_bin.as_deref(),
+            public_key_hex: args.biscuit_delegate_public_key_hex.as_deref(),
+            public_key_file: args.biscuit_delegate_public_key_file.as_deref(),
+            restrict_topic: restrict_topic.as_deref(),
+            restrict_operation: args.biscuit_delegate_op.as_deref(),
+            ttl_seconds: args.biscuit_delegate_ttl,
+            denies: &denies,
+            checks: &checks,
+        }) {
             Ok(transform) => {
                 *password = transform.password;
                 result.delegation_ms = Some(transform.elapsed_ms);
@@ -964,8 +985,8 @@ async fn prepare_handoff(args: &Args, mode_topic: &str) -> Option<HandoffPlan> {
     let mut errors = Vec::new();
     for index in 0..args.clients {
         let client_id = format!("client_{}", index + 1);
-        let topic = if mode_topic.contains("{client_id}") {
-            mode_topic.replace("{client_id}", &client_id)
+        let topic = if mode_topic.contains(CLIENT_ID_PLACEHOLDER) {
+            expand_client_template(mode_topic, &client_id)
         } else {
             mode_topic.to_string()
         };
@@ -1113,7 +1134,7 @@ fn sqlite_toggle_private_deny(db_path: &str, topic: &str) -> Result<()> {
     Ok(())
 }
 
-fn should_apply_churn(args: &Args, sequence_id: usize, state: &FanoutChurnState) -> bool {
+const fn should_apply_churn(args: &Args, sequence_id: usize, state: &FanoutChurnState) -> bool {
     if args.fanout_churn_kind.is_none()
         || sequence_id < args.fanout_churn_after_messages
         || state.applied_events >= args.fanout_churn_max_events
@@ -1286,8 +1307,8 @@ fn fanout_churn_json(
     received_post_churn: Option<usize>,
 ) -> Value {
     let enabled = mode == "fanout" && args.fanout_churn_kind.is_some();
-    let triggered = state.map(|state| state.triggered).unwrap_or(false);
-    let applied_events = state.map(|state| state.applied_events).unwrap_or(0);
+    let triggered = state.is_some_and(|state| state.triggered);
+    let applied_events = state.map_or(0, |state| state.applied_events);
     let expected_pre = if enabled {
         Some(args.messages.min(args.fanout_churn_after_messages) * args.clients)
     } else {
@@ -1303,7 +1324,9 @@ fn fanout_churn_json(
         None
     };
     let post_ratio = match (received_post_churn, expected_post) {
-        (Some(received), Some(expected)) if expected > 0 => Some(received as f64 / expected as f64),
+        (Some(received), Some(expected)) if expected > 0 => {
+            Some(usize_as_f64(received) / usize_as_f64(expected))
+        }
         _ => None,
     };
     let cache_validity = match (expected_post, received_post_churn) {
@@ -1319,13 +1342,26 @@ fn fanout_churn_json(
         "settle_ms": if mode == "fanout" { Some(args.fanout_churn_settle_ms) } else { None },
         "triggered": if mode == "fanout" { Some(triggered) } else { None },
         "applied_events": if mode == "fanout" { Some(applied_events) } else { None },
-        "received_pre_churn": if mode == "fanout" { received_pre_churn.map(Value::from).unwrap_or(Value::Null) } else { Value::Null },
-        "received_post_churn": if mode == "fanout" { received_post_churn.map(Value::from).unwrap_or(Value::Null) } else { Value::Null },
-        "expected_pre_churn": if mode == "fanout" { expected_pre.map(Value::from).unwrap_or(Value::Null) } else { Value::Null },
-        "expected_post_churn": if mode == "fanout" { expected_post.map(Value::from).unwrap_or(Value::Null) } else { Value::Null },
-        "post_churn_delivery_ratio": if mode == "fanout" { post_ratio.map(Value::from).unwrap_or(Value::Null) } else { Value::Null },
-        "cache_validity_signal": if mode == "fanout" { cache_validity.map(Value::from).unwrap_or(Value::Null) } else { Value::Null },
+        "received_pre_churn": if mode == "fanout" { received_pre_churn.map_or(Value::Null, Value::from) } else { Value::Null },
+        "received_post_churn": if mode == "fanout" { received_post_churn.map_or(Value::Null, Value::from) } else { Value::Null },
+        "expected_pre_churn": if mode == "fanout" { expected_pre.map_or(Value::Null, Value::from) } else { Value::Null },
+        "expected_post_churn": if mode == "fanout" { expected_post.map_or(Value::Null, Value::from) } else { Value::Null },
+        "post_churn_delivery_ratio": if mode == "fanout" { post_ratio.map_or(Value::Null, Value::from) } else { Value::Null },
+        "cache_validity_signal": if mode == "fanout" { cache_validity.map_or(Value::Null, Value::from) } else { Value::Null },
     })
+}
+
+fn percentile_ratio(sorted: &[f64], numerator: usize, denominator: usize) -> f64 {
+    let rank_numerator = numerator.saturating_mul(sorted.len() - 1);
+    let lo = rank_numerator / denominator;
+    let remainder = rank_numerator % denominator;
+    if remainder == 0 {
+        return sorted[lo];
+    }
+
+    let hi = lo + 1;
+    let weight = usize_as_f64(remainder) / usize_as_f64(denominator);
+    (sorted[hi] - sorted[lo]).mul_add(weight, sorted[lo])
 }
 
 fn summarize(values: &[f64]) -> Summary {
@@ -1334,26 +1370,16 @@ fn summarize(values: &[f64]) -> Summary {
     }
     let mut sorted = values.to_vec();
     sorted.sort_by(f64::total_cmp);
-    let percentile = |p: f64| {
-        let rank = (p / 100.0) * ((sorted.len() - 1) as f64);
-        let lo = rank.floor() as usize;
-        let hi = rank.ceil() as usize;
-        if lo == hi {
-            sorted[lo]
-        } else {
-            sorted[lo] + (sorted[hi] - sorted[lo]) * (rank - lo as f64)
-        }
-    };
     let sum = sorted.iter().sum::<f64>();
     Summary {
         count: sorted.len(),
         min_ms: sorted.first().copied(),
-        p50_ms: Some(percentile(50.0)),
-        p95_ms: Some(percentile(95.0)),
-        p99_ms: Some(percentile(99.0)),
+        p50_ms: Some(percentile_ratio(&sorted, 50, 100)),
+        p95_ms: Some(percentile_ratio(&sorted, 95, 100)),
+        p99_ms: Some(percentile_ratio(&sorted, 99, 100)),
         max_ms: sorted.last().copied(),
-        mean_ms: Some(sum / sorted.len() as f64),
-        median_ms: Some(percentile(50.0)),
+        mean_ms: Some(sum / usize_as_f64(sorted.len())),
+        median_ms: Some(percentile_ratio(&sorted, 50, 100)),
     }
 }
 
@@ -1406,7 +1432,7 @@ async fn publish_with_retain_and_wait(
         .await?;
     } else {
         poll_until(eventloop, Duration::from_secs(10), |event| match event {
-            Event::Incoming(Packet::PubAck(_)) | Event::Incoming(Packet::PubComp(_)) => Some(()),
+            Event::Incoming(Packet::PubAck(_) | Packet::PubComp(_)) => Some(()),
             _ => None,
         })
         .await?;
@@ -1436,7 +1462,7 @@ async fn subscribe_and_wait(
             result?;
             return Err(MqttHelperError::Message("subscribe_eventloop_stopped".to_string()));
         }
-        _ = tokio::time::sleep(Duration::from_secs(10)) => {
+        () = tokio::time::sleep(Duration::from_secs(10)) => {
             return Err(MqttHelperError::Message("subscribe_timeout".to_string()));
         }
     };
@@ -1654,6 +1680,27 @@ struct FanoutSubscriber {
     result: WorkerResult,
 }
 
+struct FanoutPreparedClient {
+    client_id: String,
+    password: Vec<u8>,
+    bootstrap: WorkerBootstrap,
+}
+
+struct FanoutRuntime {
+    handoff_plan: Option<HandoffPlan>,
+    handoff_passwords: HashMap<String, Vec<u8>>,
+    errors: Vec<String>,
+    handoff_required: bool,
+}
+
+struct WorkerPublishPlan<'a> {
+    topic: &'a str,
+    control_topic: Option<&'a str>,
+    control_payload: &'a [u8],
+    data_payload: &'a [u8],
+    qos_distribution: Option<&'a QosDistribution>,
+}
+
 async fn collect_fanout_subscriber(
     mut subscriber: FanoutSubscriber,
     start: Instant,
@@ -1725,144 +1772,257 @@ async fn collect_fanout_subscriber(
     subscriber.result
 }
 
-async fn run_fanout(args: Args) -> Result<Output> {
-    let start = Instant::now();
-    let handoff_plan = prepare_handoff(&args, &args.fanout_topic).await;
-    let handoff_nonce = handoff_plan.as_ref().map(|plan| plan.nonce.as_str());
+async fn init_fanout_runtime(args: &Args) -> FanoutRuntime {
+    let handoff_plan = prepare_handoff(args, &args.fanout_topic).await;
     let handoff_required = handoff_plan.is_some();
-    let mut subscribers = Vec::new();
     let mut errors = Vec::new();
     if let Some(plan) = &handoff_plan {
         errors.extend(plan.errors.clone());
     }
     let mut handoff_passwords = HashMap::new();
     if let Some(plan) = &handoff_plan {
-        let (passwords, handoff_errors) = receive_handoff_tokens(&args, plan).await;
+        let (passwords, handoff_errors) = receive_handoff_tokens(args, plan).await;
         handoff_passwords = passwords;
         errors.extend(handoff_errors);
     }
+    FanoutRuntime {
+        handoff_plan,
+        handoff_passwords,
+        errors,
+        handoff_required,
+    }
+}
+
+async fn prepare_fanout_client(
+    args: &Args,
+    client_id: String,
+    runtime: &mut FanoutRuntime,
+) -> Option<FanoutPreparedClient> {
+    let mut bootstrap = runtime
+        .handoff_plan
+        .as_ref()
+        .and_then(|plan| plan.workers.get(&client_id).cloned())
+        .unwrap_or_default();
+    let password = if let Some(password) = runtime.handoff_passwords.remove(&client_id) {
+        password
+    } else if runtime.handoff_required {
+        runtime.errors.push(format!(
+            "delegation_handoff_failed:{client_id}:delegation_handoff_missing_token"
+        ));
+        return None;
+    } else {
+        let mut password = match startup_password(args, &client_id, &args.fanout_topic).await {
+            Ok(password) => password,
+            Err(err) => {
+                runtime
+                    .errors
+                    .push(format!("startup_provisioning_failed:{client_id}:{err}"));
+                return None;
+            }
+        };
+        let mut worker_result = WorkerResult::default();
+        if !apply_biscuit_transforms(args, &client_id, &mut worker_result, &mut password) {
+            runtime.errors.extend(worker_result.errors);
+            return None;
+        }
+        bootstrap.delegation_ms = worker_result.delegation_ms;
+        bootstrap.delegation_len = worker_result.delegation_len;
+        bootstrap.attenuation_ms = worker_result.attenuation_ms;
+        bootstrap.attenuation_len = worker_result.attenuation_len;
+        password
+    };
+    Some(FanoutPreparedClient {
+        client_id,
+        password,
+        bootstrap,
+    })
+}
+
+async fn connect_fanout_subscriber(
+    args: &Args,
+    prepared: FanoutPreparedClient,
+    subscribe_qos: u8,
+) -> Result<(FanoutSubscriber, bool)> {
+    let spec = ClientSpec {
+        host: args.host.clone(),
+        port: args.port,
+        client_id: prepared.client_id.clone(),
+        username: args.username.clone(),
+        password: prepared.password,
+        tls: args.tls,
+        tls_ca_file: args.tls_ca_file.clone(),
+        tls_insecure: args.tls_insecure,
+        auth_method: None,
+        auth_data: None,
+    };
+    let (client, mut eventloop, report) = connect(&spec).await?;
+    let mut result = WorkerResult {
+        connect_ms: Some(report.connect_ms),
+        delegation_ms: prepared.bootstrap.delegation_ms,
+        delegation_len: prepared.bootstrap.delegation_len,
+        attenuation_ms: prepared.bootstrap.attenuation_ms,
+        attenuation_len: prepared.bootstrap.attenuation_len,
+        ..WorkerResult::default()
+    };
+    if !report.connect_ok {
+        result
+            .errors
+            .push(format!("connect_denied:{:?}", report.connect_reason));
+        return Ok((FanoutSubscriber { eventloop, result }, false));
+    }
+    match subscribe_and_wait(&client, &mut eventloop, &args.fanout_topic, subscribe_qos).await {
+        Ok(codes) if codes.iter().all(|code| matches!(code, 0..=2)) => {
+            Ok((FanoutSubscriber { eventloop, result }, true))
+        }
+        Ok(codes) => {
+            result.errors.push(format!(
+                "fanout_suback_rejected:{}",
+                codes
+                    .iter()
+                    .map(u16::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+            Ok((FanoutSubscriber { eventloop, result }, false))
+        }
+        Err(err) => {
+            result.errors.push(format!("subscribe_failed:{err}"));
+            Ok((FanoutSubscriber { eventloop, result }, false))
+        }
+    }
+}
+
+async fn build_fanout_subscribers(
+    args: &Args,
+    runtime: &mut FanoutRuntime,
+    subscribe_qos: u8,
+) -> Vec<FanoutSubscriber> {
+    let mut subscribers = Vec::new();
+    for index in 0..args.clients {
+        let client_id = format!("client_{}", index + 1);
+        let Some(prepared) = prepare_fanout_client(args, client_id.clone(), runtime).await else {
+            continue;
+        };
+        match connect_fanout_subscriber(args, prepared, subscribe_qos).await {
+            Ok((subscriber, _)) => subscribers.push(subscriber),
+            Err(err) => runtime
+                .errors
+                .push(format!("connect_failed:{client_id}:{err}")),
+        }
+    }
+    subscribers
+}
+
+fn count_ready_fanout_subscribers(subscribers: &[FanoutSubscriber]) -> usize {
+    subscribers
+        .iter()
+        .filter(|subscriber| subscriber.result.errors.is_empty())
+        .count()
+}
+
+async fn publish_fanout(
+    args: &Args,
+    start: Instant,
+    publisher: &AsyncClient,
+    publisher_eventloop: &mut rumqttc::EventLoop,
+    qos_distribution: Option<&QosDistribution>,
+    errors: &mut Vec<String>,
+) -> (Vec<f64>, [Vec<f64>; 3], FanoutChurnState) {
+    let mut fanout_publish_ms = Vec::new();
+    let mut fanout_publish_by_qos: [Vec<f64>; 3] = Default::default();
+    let mut churn_state = FanoutChurnState::default();
+    for sequence_id in 0..args.messages {
+        if should_apply_churn(args, sequence_id, &churn_state) {
+            if let Some(err) = apply_fanout_churn(args, publisher, publisher_eventloop).await {
+                errors.push(err);
+            } else {
+                churn_state.triggered = true;
+                churn_state.applied_events += 1;
+            }
+        }
+        let publish_qos = qos_distribution.map_or(args.qos, QosDistribution::choose);
+        let sent = start.elapsed().as_secs_f64();
+        let mut payload = format!("{sent:.9}|{sequence_id}|").into_bytes();
+        if args.message_size > payload.len() {
+            payload.extend(vec![b'A'; args.message_size - payload.len()]);
+        }
+        match publish_and_wait(
+            publisher,
+            publisher_eventloop,
+            &args.fanout_topic,
+            payload,
+            publish_qos,
+        )
+        .await
+        {
+            Ok(ms) => {
+                fanout_publish_ms.push(ms);
+                if let Some(bucket) = fanout_publish_by_qos.get_mut(usize::from(publish_qos)) {
+                    bucket.push(ms);
+                }
+            }
+            Err(err) => errors.push(format!("fanout_publish_failed:{err}")),
+        }
+    }
+    (fanout_publish_ms, fanout_publish_by_qos, churn_state)
+}
+
+fn spawn_fanout_collectors(
+    start: Instant,
+    subscribers: Vec<FanoutSubscriber>,
+    expected_messages: usize,
+    churn_after_messages: usize,
+    publishing_done: Arc<AtomicBool>,
+) -> Vec<tokio::task::JoinHandle<WorkerResult>> {
+    let mut subscriber_tasks = Vec::new();
+    for subscriber in subscribers {
+        subscriber_tasks.push(tokio::spawn(collect_fanout_subscriber(
+            subscriber,
+            start,
+            expected_messages,
+            churn_after_messages,
+            Arc::clone(&publishing_done),
+        )));
+    }
+    subscriber_tasks
+}
+
+async fn collect_fanout_results(
+    subscriber_tasks: Vec<tokio::task::JoinHandle<WorkerResult>>,
+) -> Vec<WorkerResult> {
+    let mut results = Vec::new();
+    for task in subscriber_tasks {
+        match task.await {
+            Ok(result) => results.push(result),
+            Err(err) => {
+                let mut result = WorkerResult::default();
+                result
+                    .errors
+                    .push(format!("fanout_receive_join_failed:{err}"));
+                results.push(result);
+            }
+        }
+    }
+    results
+}
+
+async fn run_fanout(args: Args) -> Result<Output> {
+    let start = Instant::now();
+    let mut runtime = init_fanout_runtime(&args).await;
     let fallback_password = decode_token_arg(&args.password)?;
     let qos_distribution = QosDistribution::parse(args.qos_distribution.as_deref())?;
     let subscribe_qos = qos_distribution
         .as_ref()
-        .map(QosDistribution::subscribe_qos)
-        .unwrap_or(args.qos);
+        .map_or(args.qos, QosDistribution::subscribe_qos);
     let token_refresh_codes = parse_token_refresh_codes(args.token_refresh_codes.as_deref())?;
-    let mut ready_subscribers = 0usize;
-
-    for index in 0..args.clients {
-        let client_id = format!("client_{}", index + 1);
-        let mut transform_result = handoff_plan
-            .as_ref()
-            .and_then(|plan| plan.workers.get(&client_id).cloned())
-            .unwrap_or_default();
-        let password = if let Some(password) = handoff_passwords.remove(&client_id) {
-            password
-        } else if handoff_required {
-            errors.push(format!(
-                "delegation_handoff_failed:{client_id}:delegation_handoff_missing_token"
-            ));
-            continue;
-        } else {
-            let mut password = match startup_password(&args, &client_id, &args.fanout_topic).await {
-                Ok(password) => password,
-                Err(err) => {
-                    errors.push(format!("startup_provisioning_failed:{client_id}:{err}"));
-                    continue;
-                }
-            };
-            let mut worker_result = WorkerResult::default();
-            if !apply_biscuit_transforms(&args, &client_id, &mut worker_result, &mut password) {
-                errors.extend(worker_result.errors);
-                continue;
-            }
-            transform_result.delegation_ms = worker_result.delegation_ms;
-            transform_result.delegation_len = worker_result.delegation_len;
-            transform_result.attenuation_ms = worker_result.attenuation_ms;
-            transform_result.attenuation_len = worker_result.attenuation_len;
-            password
-        };
-        let spec = ClientSpec {
-            host: args.host.clone(),
-            port: args.port,
-            client_id: client_id.clone(),
-            username: args.username.clone(),
-            password: password.clone(),
-            tls: args.tls,
-            tls_ca_file: args.tls_ca_file.clone(),
-            tls_insecure: args.tls_insecure,
-            auth_method: None,
-            auth_data: None,
-        };
-        match connect(&spec).await {
-            Ok((client, mut eventloop, report)) => {
-                let mut result = WorkerResult {
-                    connect_ms: Some(report.connect_ms),
-                    delegation_ms: transform_result.delegation_ms,
-                    delegation_len: transform_result.delegation_len,
-                    attenuation_ms: transform_result.attenuation_ms,
-                    attenuation_len: transform_result.attenuation_len,
-                    ..WorkerResult::default()
-                };
-                if !report.connect_ok {
-                    result
-                        .errors
-                        .push(format!("connect_denied:{:?}", report.connect_reason));
-                    subscribers.push(FanoutSubscriber { eventloop, result });
-                    continue;
-                }
-                match subscribe_and_wait(&client, &mut eventloop, &args.fanout_topic, subscribe_qos)
-                    .await
-                {
-                    Ok(codes) if codes.iter().all(|code| matches!(code, 0..=2)) => {
-                        ready_subscribers += 1;
-                        subscribers.push(FanoutSubscriber { eventloop, result });
-                    }
-                    Ok(codes) => {
-                        result.errors.push(format!(
-                            "fanout_suback_rejected:{}",
-                            codes
-                                .iter()
-                                .map(u16::to_string)
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        ));
-                        subscribers.push(FanoutSubscriber { eventloop, result });
-                    }
-                    Err(err) => {
-                        result.errors.push(format!("subscribe_failed:{err}"));
-                        subscribers.push(FanoutSubscriber { eventloop, result });
-                    }
-                }
-            }
-            Err(err) => {
-                let mut result = WorkerResult::default();
-                result.errors.push(format!("connect_failed:{err}"));
-                errors.push(format!("connect_failed:{client_id}:{err}"));
-                let spec = ClientSpec {
-                    host: args.host.clone(),
-                    port: args.port,
-                    client_id,
-                    username: args.username.clone(),
-                    password: password.clone(),
-                    tls: args.tls,
-                    tls_ca_file: args.tls_ca_file.clone(),
-                    tls_insecure: args.tls_insecure,
-                    auth_method: None,
-                    auth_data: None,
-                };
-                if let Ok((_client, eventloop, _report)) = connect(&spec).await {
-                    subscribers.push(FanoutSubscriber { eventloop, result });
-                }
-            }
-        }
-    }
-
+    let mut subscribers = build_fanout_subscribers(&args, &mut runtime, subscribe_qos).await;
+    let ready_subscribers = count_ready_fanout_subscribers(&subscribers);
     let fanout_ready = ready_subscribers == args.clients;
     if !fanout_ready {
-        errors.push("fanout_subscribe_ready_timeout".to_string());
+        runtime
+            .errors
+            .push("fanout_subscribe_ready_timeout".to_string());
     }
-
     let publisher_username = args
         .fanout_publisher_username
         .clone()
@@ -1892,81 +2052,41 @@ async fn run_fanout(args: Args) -> Result<Output> {
         auth_data: None,
     };
     let (publisher, mut publisher_eventloop, _report) = connect(&publisher_spec).await?;
-    let mut fanout_publish_ms = Vec::new();
-    let mut fanout_publish_by_qos: [Vec<f64>; 3] = Default::default();
-    let mut churn_state = FanoutChurnState::default();
     let publishing_done = Arc::new(AtomicBool::new(false));
-    let mut subscriber_tasks = Vec::new();
-    if fanout_ready {
-        for subscriber in subscribers.drain(..) {
-            subscriber_tasks.push(tokio::spawn(collect_fanout_subscriber(
-                subscriber,
-                start,
-                args.messages,
-                args.fanout_churn_after_messages,
-                Arc::clone(&publishing_done),
-            )));
-        }
-    }
-    if fanout_ready {
-        for sequence_id in 0..args.messages {
-            if should_apply_churn(&args, sequence_id, &churn_state) {
-                if let Some(err) =
-                    apply_fanout_churn(&args, &publisher, &mut publisher_eventloop).await
-                {
-                    errors.push(err);
-                } else {
-                    churn_state.triggered = true;
-                    churn_state.applied_events += 1;
-                }
-            }
-            let publish_qos = qos_distribution
-                .as_ref()
-                .map(QosDistribution::choose)
-                .unwrap_or(args.qos);
-            let sent = start.elapsed().as_secs_f64();
-            let mut payload = format!("{sent:.9}|{sequence_id}|").into_bytes();
-            if args.message_size > payload.len() {
-                payload.extend(vec![b'A'; args.message_size - payload.len()]);
-            }
-            match publish_and_wait(
-                &publisher,
-                &mut publisher_eventloop,
-                &args.fanout_topic,
-                payload,
-                publish_qos,
-            )
-            .await
-            {
-                Ok(ms) => {
-                    fanout_publish_ms.push(ms);
-                    if let Some(bucket) = fanout_publish_by_qos.get_mut(publish_qos as usize) {
-                        bucket.push(ms);
-                    }
-                }
-                Err(err) => errors.push(format!("fanout_publish_failed:{err}")),
-            }
-        }
-    }
+    let subscriber_tasks = if fanout_ready {
+        Some(spawn_fanout_collectors(
+            start,
+            std::mem::take(&mut subscribers),
+            args.messages,
+            args.fanout_churn_after_messages,
+            Arc::clone(&publishing_done),
+        ))
+    } else {
+        None
+    };
+    let (fanout_publish_ms, fanout_publish_by_qos, churn_state) = if fanout_ready {
+        publish_fanout(
+            &args,
+            start,
+            &publisher,
+            &mut publisher_eventloop,
+            qos_distribution.as_ref(),
+            &mut runtime.errors,
+        )
+        .await
+    } else {
+        (Vec::new(), Default::default(), FanoutChurnState::default())
+    };
     publishing_done.store(true, Ordering::Release);
     let _ = publisher.disconnect().await;
-
-    let mut results: Vec<WorkerResult> = subscribers.into_iter().map(|sub| sub.result).collect();
-    for task in subscriber_tasks {
-        match task.await {
-            Ok(result) => results.push(result),
-            Err(err) => {
-                let mut result = WorkerResult::default();
-                result
-                    .errors
-                    .push(format!("fanout_receive_join_failed:{err}"));
-                results.push(result);
-            }
-        }
-    }
+    let mut results = if let Some(subscriber_tasks) = subscriber_tasks {
+        collect_fanout_results(subscriber_tasks).await
+    } else {
+        subscribers.into_iter().map(|sub| sub.result).collect()
+    };
     let duration_s = start.elapsed().as_secs_f64().max(1e-9);
     for result in &mut results {
-        errors.append(&mut result.errors);
+        runtime.errors.append(&mut result.errors);
     }
     let connect: Vec<_> = results.iter().filter_map(|r| r.connect_ms).collect();
     let delegation: Vec<_> = results.iter().filter_map(|r| r.delegation_ms).collect();
@@ -1984,15 +2104,18 @@ async fn run_fanout(args: Args) -> Result<Output> {
     } else {
         None
     };
-    let publish_throughput_mps = fanout_publish_ms.len() as f64 / duration_s;
-    let receive_throughput_mps = receive.len() as f64 / duration_s;
+    let publish_throughput_mps = usize_as_f64(fanout_publish_ms.len()) / duration_s;
+    let receive_throughput_mps = usize_as_f64(receive.len()) / duration_s;
     Ok(Output {
         inputs: inputs_json(
             &args,
             "fanout",
             qos_distribution.as_ref(),
             &token_refresh_codes,
-            handoff_nonce,
+            runtime
+                .handoff_plan
+                .as_ref()
+                .map(|plan| plan.nonce.as_str()),
         ),
         connect: summarize(&connect),
         token_refresh: Summary::default(),
@@ -2028,54 +2151,226 @@ async fn run_fanout(args: Args) -> Result<Output> {
             received_post,
         ),
         raw_publish_ms: fanout_publish_ms,
-        errors,
+        errors: runtime.errors,
     })
 }
 
-async fn run_worker(
-    args: Args,
-    index: usize,
-    bootstrap: WorkerBootstrap,
-    handoff_nonce: Option<String>,
+async fn resolve_worker_password(
+    args: &Args,
+    client_id: &str,
+    topic: &str,
+    handoff_nonce: Option<&str>,
     handoff_password: Option<Vec<u8>>,
     handoff_required: bool,
-    sync_connect: Option<Arc<SyncConnectGate>>,
-    publish_gate: Option<Arc<PublishStartGate>>,
-) -> WorkerResult {
-    let mut result = WorkerResult::default();
-    let mut publish_gate_participant = PublishGateParticipant::new(publish_gate);
-    let client_id = format!("client_{}", index + 1);
-    let topic = args.topic.replace("{client_id}", &client_id);
-    result.delegation_ms = bootstrap.delegation_ms;
-    result.delegation_len = bootstrap.delegation_len;
-    result.attenuation_ms = bootstrap.attenuation_ms;
-    result.attenuation_len = bootstrap.attenuation_len;
+    result: &mut WorkerResult,
+) -> Option<(Vec<u8>, bool)> {
     let handoff_password_supplied = handoff_password.is_some();
-    let mut password = if let Some(value) = handoff_password {
+    let password = if let Some(value) = handoff_password {
         value
-    } else if let Some(nonce) = handoff_nonce.as_deref() {
-        match receive_handoff_token(&args, &client_id, nonce).await {
+    } else if let Some(nonce) = handoff_nonce {
+        match receive_handoff_token(args, client_id, nonce).await {
             Ok(value) => value,
             Err(err) => {
                 result
                     .errors
                     .push(format!("delegation_handoff_failed:{err}"));
-                return result;
+                return None;
             }
         }
     } else if handoff_required {
         result
             .errors
             .push("delegation_handoff_failed:delegation_handoff_missing_token".to_string());
-        return result;
+        return None;
     } else {
-        match startup_password(&args, &client_id, &topic).await {
+        match startup_password(args, client_id, topic).await {
             Ok(value) => value,
             Err(err) => {
                 result.errors.push(format!("startup_password_failed:{err}"));
-                return result;
+                return None;
             }
         }
+    };
+    Some((password, handoff_password_supplied))
+}
+
+fn worker_specs(args: &Args, client_id: &str, password: Vec<u8>) -> ClientSpec {
+    ClientSpec {
+        host: args.host.clone(),
+        port: args.port,
+        client_id: client_id.to_string(),
+        username: args.username.clone(),
+        password,
+        tls: args.tls,
+        tls_ca_file: args.tls_ca_file.clone(),
+        tls_insecure: args.tls_insecure,
+        auth_method: None,
+        auth_data: None,
+    }
+}
+
+async fn connect_worker(
+    args: &Args,
+    client_id: &str,
+    topic: &str,
+    token_refresh_codes: &[u16],
+    spec: &mut ClientSpec,
+    result: &mut WorkerResult,
+) -> Option<(AsyncClient, rumqttc::EventLoop, ConnectReport)> {
+    loop {
+        let connect_result = match connect(spec).await {
+            Ok(value) => value,
+            Err(err) => {
+                result.errors.push(format!("connect_failed:{err}"));
+                return None;
+            }
+        };
+        if connect_result.2.connect_ok {
+            return Some(connect_result);
+        }
+
+        let reason = connect_result.2.connect_reason.unwrap_or(u16::MAX);
+        result.connect_ms = Some(connect_result.2.connect_ms);
+        if result.token_refresh_ms.is_some()
+            || !token_refresh_codes.contains(&reason)
+            || args.token_issuer_url.is_none()
+        {
+            result.errors.push(format!("connect_denied:{reason:?}"));
+            return None;
+        }
+        let Some(kind) = resolved_token_issuer_kind(args) else {
+            result.errors.push(format!("connect_denied:{reason:?}"));
+            return None;
+        };
+        let started = Instant::now();
+        match fetch_token(args, &kind, client_id, topic).await {
+            Ok(refreshed) => {
+                result.token_refresh_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
+                result.token_refresh_len = Some(usize_as_f64(refreshed.len()));
+                spec.password = refreshed;
+            }
+            Err(err) => {
+                result.errors.push(format!("token_refresh_failed:{err}"));
+                return None;
+            }
+        }
+    }
+}
+
+async fn run_control_mode(
+    args: &Args,
+    client: &AsyncClient,
+    eventloop: &mut rumqttc::EventLoop,
+    control_topic: Option<&str>,
+    control_payload: &[u8],
+    result: &mut WorkerResult,
+) {
+    if let Some(topic) = control_topic {
+        for _ in 0..args.control_repeat {
+            match publish_and_wait(
+                client,
+                eventloop,
+                topic,
+                control_payload.to_vec(),
+                args.control_qos,
+            )
+            .await
+            {
+                Ok(ms) => result.control_ms.push(ms),
+                Err(err) => result.errors.push(format!("control_publish_failed:{err}")),
+            }
+        }
+    }
+}
+
+async fn run_publish_mode(
+    args: &Args,
+    client: &AsyncClient,
+    eventloop: &mut rumqttc::EventLoop,
+    plan: WorkerPublishPlan<'_>,
+    result: &mut WorkerResult,
+) {
+    let mut since_control = 0usize;
+    for _ in 0..args.messages {
+        if args.control_after_messages > 0 && since_control >= args.control_after_messages {
+            if let Some(topic) = plan.control_topic {
+                let start = Instant::now();
+                match publish_and_wait(
+                    client,
+                    eventloop,
+                    topic,
+                    plan.control_payload.to_vec(),
+                    args.control_qos,
+                )
+                .await
+                {
+                    Ok(ms) => result.control_ms.push(ms),
+                    Err(err) => result.errors.push(format!("control_publish_failed:{err}")),
+                }
+                result
+                    .control_injection_ms
+                    .push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            since_control = 0;
+        }
+        let publish_qos = plan
+            .qos_distribution
+            .map_or(args.qos, QosDistribution::choose);
+        match publish_and_wait(
+            client,
+            eventloop,
+            plan.topic,
+            plan.data_payload.to_vec(),
+            publish_qos,
+        )
+        .await
+        {
+            Ok(ms) => {
+                result.publish_ms.push(ms);
+                if let Some(bucket) = result.publish_by_qos.get_mut(usize::from(publish_qos)) {
+                    bucket.push(ms);
+                }
+            }
+            Err(err) => {
+                result.errors.push(format!("publish_failed:{err}"));
+                break;
+            }
+        }
+        since_control += 1;
+    }
+}
+
+async fn run_worker(job: WorkerInvocation) -> WorkerResult {
+    let WorkerInvocation {
+        args,
+        index,
+        bootstrap,
+        handoff_nonce,
+        handoff_password,
+        handoff_required,
+        sync_connect,
+        publish_gate,
+    } = job;
+    let mut result = WorkerResult::default();
+    let mut publish_gate_participant = PublishGateParticipant::new(publish_gate);
+    let client_id = format!("client_{}", index + 1);
+    let topic = expand_client_template(&args.topic, &client_id);
+    result.delegation_ms = bootstrap.delegation_ms;
+    result.delegation_len = bootstrap.delegation_len;
+    result.attenuation_ms = bootstrap.attenuation_ms;
+    result.attenuation_len = bootstrap.attenuation_len;
+    let Some((mut password, handoff_password_supplied)) = resolve_worker_password(
+        &args,
+        &client_id,
+        &topic,
+        handoff_nonce.as_deref(),
+        handoff_password,
+        handoff_required,
+        &mut result,
+    )
+    .await
+    else {
+        return result;
     };
     let token_refresh_codes = match parse_token_refresh_codes(args.token_refresh_codes.as_deref()) {
         Ok(codes) => codes,
@@ -2101,59 +2396,21 @@ async fn run_worker(
     {
         return result;
     }
-    let mut spec = ClientSpec {
-        host: args.host.clone(),
-        port: args.port,
-        client_id: client_id.clone(),
-        username: args.username.clone(),
-        password: password.clone(),
-        tls: args.tls,
-        tls_ca_file: args.tls_ca_file.clone(),
-        tls_insecure: args.tls_insecure,
-        auth_method: None,
-        auth_data: None,
-    };
+    let mut spec = worker_specs(&args, &client_id, password.clone());
     if let Some(sync_connect) = sync_connect {
         sync_connect.wait().await;
     }
-    let (client, mut eventloop, report) = loop {
-        let connect_result = match connect(&spec).await {
-            Ok(value) => value,
-            Err(err) => {
-                result.errors.push(format!("connect_failed:{err}"));
-                return result;
-            }
-        };
-        if connect_result.2.connect_ok {
-            break connect_result;
-        }
-
-        let reason = connect_result.2.connect_reason.unwrap_or(u16::MAX);
-        result.connect_ms = Some(connect_result.2.connect_ms);
-        if result.token_refresh_ms.is_some()
-            || !token_refresh_codes.contains(&reason)
-            || args.token_issuer_url.is_none()
-        {
-            result.errors.push(format!("connect_denied:{reason:?}"));
-            return result;
-        }
-        let Some(kind) = resolved_token_issuer_kind(&args) else {
-            result.errors.push(format!("connect_denied:{reason:?}"));
-            return result;
-        };
-        let started = Instant::now();
-        match fetch_token(&args, &kind, &client_id, &topic).await {
-            Ok(refreshed) => {
-                result.token_refresh_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
-                result.token_refresh_len = Some(refreshed.len() as f64);
-                password = refreshed;
-                spec.password = password.clone();
-            }
-            Err(err) => {
-                result.errors.push(format!("token_refresh_failed:{err}"));
-                return result;
-            }
-        }
+    let Some((client, mut eventloop, report)) = connect_worker(
+        &args,
+        &client_id,
+        &topic,
+        &token_refresh_codes,
+        &mut spec,
+        &mut result,
+    )
+    .await
+    else {
+        return result;
     };
     result.connect_ms = Some(report.connect_ms);
 
@@ -2169,88 +2426,40 @@ async fn run_worker(
         expand_control_payload(&load_control_payload(&args, &mut result), &client_id);
     let data_payload = vec![b'A'; args.message_size];
     if args.control_mode {
-        if let Some(topic) = control_topic.as_deref() {
-            for _ in 0..args.control_repeat {
-                match publish_and_wait(
-                    &client,
-                    &mut eventloop,
-                    topic,
-                    control_payload.clone(),
-                    args.control_qos,
-                )
-                .await
-                {
-                    Ok(ms) => result.control_ms.push(ms),
-                    Err(err) => result.errors.push(format!("control_publish_failed:{err}")),
-                }
-            }
-        }
+        run_control_mode(
+            &args,
+            &client,
+            &mut eventloop,
+            control_topic.as_deref(),
+            &control_payload,
+            &mut result,
+        )
+        .await;
     } else {
-        let mut since_control = 0usize;
-        for _ in 0..args.messages {
-            if args.control_after_messages > 0 && since_control >= args.control_after_messages {
-                if let Some(topic) = control_topic.as_deref() {
-                    let start = Instant::now();
-                    match publish_and_wait(
-                        &client,
-                        &mut eventloop,
-                        topic,
-                        control_payload.clone(),
-                        args.control_qos,
-                    )
-                    .await
-                    {
-                        Ok(ms) => result.control_ms.push(ms),
-                        Err(err) => result.errors.push(format!("control_publish_failed:{err}")),
-                    }
-                    result
-                        .control_injection_ms
-                        .push(start.elapsed().as_secs_f64() * 1000.0);
-                }
-                since_control = 0;
-            }
-            let publish_qos = qos_distribution
-                .as_ref()
-                .map(QosDistribution::choose)
-                .unwrap_or(args.qos);
-            match publish_and_wait(
-                &client,
-                &mut eventloop,
-                &topic,
-                data_payload.clone(),
-                publish_qos,
-            )
-            .await
-            {
-                Ok(ms) => {
-                    result.publish_ms.push(ms);
-                    if let Some(bucket) = result.publish_by_qos.get_mut(publish_qos as usize) {
-                        bucket.push(ms);
-                    }
-                }
-                Err(err) => {
-                    result.errors.push(format!("publish_failed:{err}"));
-                    break;
-                }
-            }
-            since_control += 1;
-        }
+        run_publish_mode(
+            &args,
+            &client,
+            &mut eventloop,
+            WorkerPublishPlan {
+                topic: &topic,
+                control_topic: control_topic.as_deref(),
+                control_payload: &control_payload,
+                data_payload: &data_payload,
+                qos_distribution: qos_distribution.as_ref(),
+            },
+            &mut result,
+        )
+        .await;
     }
     let _ = client.disconnect().await;
     result
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let mut args = Args::parse();
-    apply_legacy_defaults(&mut args);
-    validate_startup_provisioning(&args)?;
-    let qos_distribution = QosDistribution::parse(args.qos_distribution.as_deref())?;
-    let token_refresh_codes = parse_token_refresh_codes(args.token_refresh_codes.as_deref())?;
-    if args.mode == "fanout" {
-        let output = run_fanout(args).await?;
-        return print_json(&output);
-    }
+async fn run_standard_mode(
+    args: Args,
+    qos_distribution: Option<QosDistribution>,
+    token_refresh_codes: Vec<u16>,
+) -> Result<()> {
     let handoff_plan = prepare_handoff(&args, &args.topic).await;
     let handoff_nonce = handoff_plan.as_ref().map(|plan| plan.nonce.clone());
     let handoff_required = handoff_plan.is_some();
@@ -2270,16 +2479,16 @@ async fn main() -> Result<()> {
             .as_ref()
             .and_then(|plan| plan.workers.get(&client_id).cloned())
             .unwrap_or_default();
-        tasks.push(tokio::spawn(run_worker(
-            args.clone(),
+        tasks.push(tokio::spawn(run_worker(WorkerInvocation {
+            args: args.clone(),
             index,
             bootstrap,
-            None,
-            handoff_passwords.remove(&client_id),
+            handoff_nonce: None,
+            handoff_password: handoff_passwords.remove(&client_id),
             handoff_required,
-            sync_connect.clone(),
-            publish_gate.clone(),
-        )));
+            sync_connect: sync_connect.clone(),
+            publish_gate: publish_gate.clone(),
+        })));
     }
 
     let start = if let Some(publish_gate) = &publish_gate {
@@ -2338,8 +2547,8 @@ async fn main() -> Result<()> {
         errors.extend(plan.errors.clone());
     }
     errors.extend(handoff_errors);
-    let publish_throughput_mps = publish.len() as f64 / duration_s;
-    let receive_throughput_mps = receive.len() as f64 / duration_s;
+    let publish_throughput_mps = usize_as_f64(publish.len()) / duration_s;
+    let receive_throughput_mps = usize_as_f64(receive.len()) / duration_s;
 
     let output = Output {
         inputs: inputs_json(
@@ -2384,6 +2593,20 @@ async fn main() -> Result<()> {
         errors,
     };
     print_json(&output)
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let mut args = Args::parse();
+    apply_legacy_defaults(&mut args);
+    validate_startup_provisioning(&args)?;
+    let qos_distribution = QosDistribution::parse(args.qos_distribution.as_deref())?;
+    let token_refresh_codes = parse_token_refresh_codes(args.token_refresh_codes.as_deref())?;
+    if args.mode == "fanout" {
+        let output = run_fanout(args).await?;
+        return print_json(&output);
+    }
+    run_standard_mode(args, qos_distribution, token_refresh_codes).await
 }
 
 #[cfg(test)]

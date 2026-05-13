@@ -10,6 +10,12 @@ pub struct BiscuitAttenuationOptions {
     pub ttl_seconds: Option<i64>,
 }
 
+/// Parse a hex-encoded Ed25519 Biscuit public key.
+///
+/// # Errors
+///
+/// Returns an error when the input is malformed or does not decode to a valid
+/// 32-byte public key.
 pub fn load_public_key_hex(hex_value: &str) -> Result<PublicKey, String> {
     let bytes = hex::decode(hex_value.trim()).map_err(|e| format!("invalid hex: {e}"))?;
     if bytes.len() != 32 {
@@ -19,6 +25,12 @@ pub fn load_public_key_hex(hex_value: &str) -> Result<PublicKey, String> {
         .map_err(|e| format!("invalid public key: {e}"))
 }
 
+/// Append attenuation rules to a Biscuit token using the current system time.
+///
+/// # Errors
+///
+/// Returns an error when the clock cannot be read, the token cannot be parsed,
+/// or the attenuation block cannot be built or encoded.
 pub fn attenuate_biscuit_token(
     token_bytes: &[u8],
     public_key: PublicKey,
@@ -34,6 +46,12 @@ pub fn attenuate_biscuit_token(
     attenuate_biscuit_token_at(token_bytes, public_key, options, now)
 }
 
+/// Append attenuation rules to a Biscuit token using an explicit timestamp.
+///
+/// # Errors
+///
+/// Returns an error when the token cannot be parsed, when no attenuation rules
+/// are provided, or when the attenuation block cannot be built or encoded.
 pub fn attenuate_biscuit_token_at(
     token_bytes: &[u8],
     public_key: PublicKey,
@@ -172,9 +190,9 @@ mod tests {
             .unwrap()
             .fact(r#"operation("publish")"#)
             .unwrap()
-            .rule(r#"data($op, $res) <- deny($op, $res)"#)
+            .rule(r"data($op, $res) <- deny($op, $res)")
             .unwrap()
-            .rule(r#"data($op, $res) <- right($op, $res)"#)
+            .rule(r"data($op, $res) <- right($op, $res)")
             .unwrap()
             .build(&biscuit)
             .unwrap();

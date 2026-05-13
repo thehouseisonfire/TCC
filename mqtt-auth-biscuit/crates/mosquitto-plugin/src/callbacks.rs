@@ -78,12 +78,9 @@ pub extern "C" fn basic_auth_callback(
                     return MOSQ_ERR_AUTH;
                 }
             };
-            let client_id = match mosq_client_id_string(evt.client) {
-                Some(client_id) => client_id,
-                None => {
-                    log_debug("Authentication rejected: live MQTT client_id missing");
-                    return MOSQ_ERR_AUTH;
-                }
+            let Some(client_id) = mosq_client_id_string(evt.client) else {
+                log_debug("Authentication rejected: live MQTT client_id missing");
+                return MOSQ_ERR_AUTH;
             };
             if let Err(err) =
                 enforce_identity_binding(&token_type, Some(client_id.as_str()), &state.config)
@@ -163,12 +160,9 @@ pub extern "C" fn ext_auth_start_callback(
                     return MOSQ_ERR_AUTH;
                 }
             };
-            let client_id = match mosq_client_id_string(evt.client) {
-                Some(client_id) => client_id,
-                None => {
-                    log_debug("Enhanced auth rejected: live MQTT client_id missing");
-                    return MOSQ_ERR_AUTH;
-                }
+            let Some(client_id) = mosq_client_id_string(evt.client) else {
+                log_debug("Enhanced auth rejected: live MQTT client_id missing");
+                return MOSQ_ERR_AUTH;
             };
             if let Err(err) =
                 enforce_identity_binding(&token_type, Some(client_id.as_str()), &state.config)

@@ -2733,12 +2733,7 @@ async fn run_standard_mode(
     };
     let results = collect_worker_results(tasks).await;
     let duration_s = start.elapsed().as_secs_f64().max(1e-9);
-    let metrics = standard_metrics(
-        results,
-        duration_s,
-        handoff_plan.as_ref(),
-        handoff_errors,
-    );
+    let metrics = standard_metrics(results, duration_s, handoff_plan.as_ref(), handoff_errors);
     let output = standard_output(
         &args,
         qos_distribution.as_ref(),

@@ -22,6 +22,18 @@ repos:
         language: system
         pass_filenames: false
         stages: [commit, push]
+      - id: cargo-fmt-xtask
+        name: cargo fmt xtask
+        entry: cargo fmt --all --manifest-path Cargo.toml -- --check
+        language: system
+        pass_filenames: false
+        stages: [commit, push]
+      - id: cargo-test-xtask
+        name: cargo test xtask
+        entry: cargo test --locked --workspace
+        language: system
+        pass_filenames: false
+        stages: [commit, push]
       - id: ruff-check
         name: ruff check
         entry: bash -c 'uv run --locked --group dev ruff check --fix --exit-zero . && uv run --locked --group dev ruff check .'
@@ -42,7 +54,7 @@ repos:
         stages: [commit, push]
       - id: pin-audit
         name: reproducibility audit
-        entry: uv run --locked python scripts/check_pins.py
+        entry: ./scripts/check-pins
         language: system
         pass_filenames: false
         stages: [commit, push]

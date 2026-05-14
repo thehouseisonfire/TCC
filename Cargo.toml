@@ -1,0 +1,5 @@
+[workspace]
+members = ["xtask"]
+default-members = ["xtask"]
+exclude = ["mqtt-auth-biscuit", "rumqtt"]
+resolver = "3"

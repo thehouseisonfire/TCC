@@ -18,7 +18,8 @@ The benchmark-host path is intentionally small and explicit:
 
 - `infra/terraform/`: pinned Terraform root for creating the benchmark VM
 - `infra/ansible/`: host convergence for the already-created benchmark VM
-- `scripts/benchmark_host_helper.py`: machine-readable path contract
+- `scripts/`: operator-facing launchers for benchmark-host tooling
+- `xtask/`: Rust implementation and tests for the benchmark-host tools
 
 ## Current Boundary
 
@@ -81,13 +82,13 @@ After Terraform has created the host and inventory has been rendered, use the
 repo-local smoke path to converge and verify the machine:
 
 ```bash
-uv run --locked python scripts/benchmark_host_smoke.py --inventory infra/ansible/inventory.yml
+./scripts/benchmark-host-smoke --inventory infra/ansible/inventory.yml
 ```
 
 To rerun verification without applying changes again:
 
 ```bash
-uv run --locked python scripts/benchmark_host_smoke.py --inventory infra/ansible/inventory.yml --verify-only
+./scripts/benchmark-host-smoke --inventory infra/ansible/inventory.yml --verify-only
 ```
 
 The smoke path applies `infra/ansible/playbook.yml` and then runs the separate
@@ -98,9 +99,13 @@ verification playbook `infra/ansible/verify.yml`.
 Use the helper when scripts or docs need the canonical path contract:
 
 ```bash
-uv run --locked python scripts/benchmark_host_helper.py
-uv run --locked python scripts/benchmark_host_helper.py --json
+./scripts/benchmark-host-helper
+./scripts/benchmark-host-helper --json
 ```
+
+Each launcher in `scripts/` is a thin bash wrapper around `cargo run -p repo-xtask`.
+That keeps the repo-local command surface stable while the implementation and
+tests live in Rust under `xtask/`.
 
 ## Terraform Usage
 
@@ -120,7 +125,7 @@ terraform -chdir=infra/terraform apply -var-file=terraform.tfvars
 Generate the live inventory from Terraform outputs:
 
 ```bash
-uv run --locked python scripts/render_benchmark_inventory.py --from-terraform > infra/ansible/inventory.yml
+./scripts/render-benchmark-inventory --from-terraform > infra/ansible/inventory.yml
 ```
 
 Then converge the host:
@@ -133,8 +138,25 @@ uv run --locked --group dev ansible-playbook -i inventory.yml playbook.yml
 Or run the combined converge-and-verify smoke path from the repo root:
 
 ```bash
-uv run --locked python scripts/benchmark_host_smoke.py --inventory infra/ansible/inventory.yml
+./scripts/benchmark-host-smoke --inventory infra/ansible/inventory.yml
 ```
+
+## Tooling Commands
+
+The benchmark-host tooling now has two stable entry styles:
+
+- preferred operator entrypoint: `./scripts/<tool-name>`
+- direct implementation entrypoint: `cargo run --locked -p repo-xtask --bin <tool-name> -- ...`
+
+Available launchers:
+
+- `./scripts/benchmark-host-helper`
+- `./scripts/benchmark-host-smoke`
+- `./scripts/check-pins`
+- `./scripts/render-benchmark-inventory`
+
+Use the `scripts/` launchers in docs, shell workflows, and ad hoc local runs.
+Use direct Cargo commands when you need explicit Rust crate targeting.
 
 The committed `inventory.example.yml` exists only as a syntax-checkable example.
 Do not edit a real inventory into the repository.

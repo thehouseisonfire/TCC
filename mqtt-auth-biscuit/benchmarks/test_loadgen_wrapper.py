@@ -35,6 +35,10 @@ class _RustLoadgenKwargs(TypedDict):
     token_issuer_no_default_roles: bool
     token_issuer_no_default_grants: bool
     token_refresh_codes: set[int]
+    proactive_refresh: bool
+    proactive_refresh_margin_seconds: int | None
+    proactive_refresh_timeout_seconds: int | None
+    proactive_refresh_assert_continuity: bool
     tls_enabled: bool
     tls_ca_file: str | None
     tls_insecure: bool
@@ -66,6 +70,10 @@ def _base_kwargs() -> _RustLoadgenKwargs:
         "token_issuer_no_default_roles": False,
         "token_issuer_no_default_grants": False,
         "token_refresh_codes": set(),
+        "proactive_refresh": False,
+        "proactive_refresh_margin_seconds": None,
+        "proactive_refresh_timeout_seconds": None,
+        "proactive_refresh_assert_continuity": False,
         "jwt_identity_binding": "off",
         "biscuit_identity_binding": "off",
         "biscuit_client_id_fact": "client_id",
@@ -95,6 +103,10 @@ def test_rust_loadgen_command_forwards_programmatic_transition_options(monkeypat
             "token_issuer_no_default_roles": True,
             "token_issuer_no_default_grants": True,
             "token_refresh_codes": {0x87, 5},
+            "proactive_refresh": True,
+            "proactive_refresh_margin_seconds": 60,
+            "proactive_refresh_timeout_seconds": 10,
+            "proactive_refresh_assert_continuity": True,
             "tls_enabled": True,
             "tls_ca_file": "ca.pem",
             "tls_insecure": True,
@@ -159,6 +171,10 @@ def test_rust_loadgen_command_forwards_programmatic_transition_options(monkeypat
     assert "--token-issuer-no-default-roles" in argv
     assert "--token-issuer-no-default-grants" in argv
     assert _argv_value(argv, "--token-refresh-codes") == "5,135"
+    assert "--proactive-refresh" in argv
+    assert _argv_value(argv, "--proactive-refresh-margin-seconds") == "60"
+    assert _argv_value(argv, "--proactive-refresh-timeout-seconds") == "10"
+    assert "--proactive-refresh-assert-continuity" in argv
     assert _argv_value(argv, "--jwt-identity-binding") == "strict"
     assert _argv_value(argv, "--biscuit-identity-binding") == "strict"
     assert _argv_value(argv, "--biscuit-client-id-fact") == "cid"

@@ -11,7 +11,7 @@ use gen_tokens::mqtt_helpers::{
     print_json, puback_reason_code, qos,
 };
 use rand::{Rng as _, RngExt as _};
-use rumqttc::mqttbytes::v5::Packet;
+use rumqttc::mqttbytes::v5::{AuthProperties, Packet};
 use rumqttc::{AsyncClient, Event, Outgoing};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -22,7 +22,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Notify;
 
 const SYNC_CONNECT_RELEASE_DELAY: Duration = Duration::from_millis(200);
@@ -98,6 +98,22 @@ struct Args {
     token_issuer_no_default_grants: bool,
     #[arg(long, env = "TOKEN_REFRESH_CODES", default_value = "5,135")]
     token_refresh_codes: Option<String>,
+    #[arg(long, env = "MQTT_PROACTIVE_REFRESH")]
+    proactive_refresh: bool,
+    #[arg(
+        long,
+        env = "MQTT_PROACTIVE_REFRESH_MARGIN_SECONDS",
+        default_value_t = 60
+    )]
+    proactive_refresh_margin_seconds: u64,
+    #[arg(
+        long,
+        env = "MQTT_PROACTIVE_REFRESH_TIMEOUT_SECONDS",
+        default_value_t = 10
+    )]
+    proactive_refresh_timeout_seconds: u64,
+    #[arg(long, env = "MQTT_PROACTIVE_REFRESH_ASSERT_CONTINUITY")]
+    proactive_refresh_assert_continuity: bool,
     #[arg(long, env = "JWT_IDENTITY_BINDING", default_value = "off")]
     jwt_identity_binding: String,
     #[arg(long, env = "BISCUIT_IDENTITY_BINDING", default_value = "off")]
@@ -199,6 +215,13 @@ struct Output {
     connect: Summary,
     token_refresh: Summary,
     token_refresh_len: Summary,
+    proactive_refresh: Summary,
+    proactive_refresh_len: Summary,
+    proactive_refresh_attempts: usize,
+    proactive_refresh_successes: usize,
+    proactive_refresh_failures: usize,
+    session_continuity_ok: bool,
+    expiry_denial_count: usize,
     delegation: Summary,
     delegation_len: Summary,
     attenuation: Summary,
@@ -225,6 +248,12 @@ struct WorkerResult {
     connect_ms: Option<f64>,
     token_refresh_ms: Option<f64>,
     token_refresh_len: Option<f64>,
+    proactive_refresh_ms: Vec<f64>,
+    proactive_refresh_len: Vec<f64>,
+    proactive_refresh_attempts: usize,
+    proactive_refresh_successes: usize,
+    proactive_refresh_failures: usize,
+    expiry_denial_count: usize,
     delegation_ms: Option<f64>,
     delegation_len: Option<f64>,
     attenuation_ms: Option<f64>,
@@ -262,6 +291,12 @@ struct StandardMetrics {
     connect: Vec<f64>,
     token_refresh: Vec<f64>,
     token_refresh_len: Vec<f64>,
+    proactive_refresh: Vec<f64>,
+    proactive_refresh_len: Vec<f64>,
+    proactive_refresh_attempts: usize,
+    proactive_refresh_successes: usize,
+    proactive_refresh_failures: usize,
+    expiry_denial_count: usize,
     delegation: Vec<f64>,
     delegation_len: Vec<f64>,
     attenuation: Vec<f64>,
@@ -297,6 +332,18 @@ struct HandoffPayload {
 struct FanoutChurnState {
     triggered: bool,
     applied_events: usize,
+}
+
+#[derive(Debug, Clone)]
+struct IssuedToken {
+    bytes: Vec<u8>,
+    exp: Option<i64>,
+}
+
+impl IssuedToken {
+    fn static_token(bytes: Vec<u8>) -> Self {
+        Self { bytes, exp: None }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -566,6 +613,55 @@ fn apply_legacy_defaults(args: &mut Args) {
 }
 
 fn validate_startup_provisioning(args: &Args) -> Result<()> {
+    if args.proactive_refresh {
+        if args.mode == "fanout" {
+            return Err(MqttHelperError::Message(
+                "proactive refresh is not currently supported in fanout mode.".to_string(),
+            ));
+        }
+        if args.token_issuer_url.is_none() {
+            return Err(MqttHelperError::Message(
+                "proactive refresh requires token_issuer_url".to_string(),
+            ));
+        }
+        if resolved_token_issuer_kind(args).is_none() {
+            return Err(MqttHelperError::Message(
+                "proactive refresh requires token_issuer_kind or username 'jwt'/'biscuit'"
+                    .to_string(),
+            ));
+        }
+        if let Some(ttl) = args.token_issuer_ttl
+            && ttl <= args.proactive_refresh_margin_seconds
+        {
+            return Err(MqttHelperError::Message(format!(
+                "proactive refresh requires token_issuer_ttl ({ttl}s) to be greater than proactive_refresh_margin_seconds ({}s)",
+                args.proactive_refresh_margin_seconds
+            )));
+        }
+        for (label, ttl) in [
+            (
+                "biscuit_attenuate_ttl",
+                args.biscuit_attenuate
+                    .then_some(args.biscuit_attenuate_ttl)
+                    .flatten(),
+            ),
+            (
+                "biscuit_delegate_ttl",
+                args.biscuit_delegate
+                    .then_some(args.biscuit_delegate_ttl)
+                    .flatten(),
+            ),
+        ] {
+            if let Some(ttl) = ttl
+                && ttl <= args.proactive_refresh_margin_seconds
+            {
+                return Err(MqttHelperError::Message(format!(
+                    "proactive refresh requires {label} ({ttl}s) to be greater than proactive_refresh_margin_seconds ({}s)",
+                    args.proactive_refresh_margin_seconds
+                )));
+            }
+        }
+    }
     if !strict_multi_client_startup(args) {
         return Ok(());
     }
@@ -619,7 +715,7 @@ fn should_provision_fanout_publisher(args: &Args, publisher_username: &str) -> R
     Ok(true)
 }
 
-async fn fetch_token(args: &Args, kind: &str, client_id: &str, topic: &str) -> Result<Vec<u8>> {
+async fn fetch_token(args: &Args, kind: &str, client_id: &str, topic: &str) -> Result<IssuedToken> {
     let issuer_url = args
         .token_issuer_url
         .as_ref()
@@ -697,6 +793,7 @@ async fn fetch_token(args: &Args, kind: &str, client_id: &str, topic: &str) -> R
     let body: Value = response.json().await.map_err(|err| {
         MqttHelperError::Message(format!("token issuer response JSON failed: {err}"))
     })?;
+    let exp = body.get("exp").and_then(Value::as_i64);
     if kind == "biscuit" {
         let encoded = body
             .get("data_b64")
@@ -705,26 +802,28 @@ async fn fetch_token(args: &Args, kind: &str, client_id: &str, topic: &str) -> R
                 MqttHelperError::Message("token issuer response missing data_b64".to_string())
             })?;
         let padding = "=".repeat((4 - encoded.len() % 4) % 4);
-        return general_purpose::URL_SAFE
+        let bytes = general_purpose::URL_SAFE
             .decode(format!("{encoded}{padding}"))
-            .map_err(|err| MqttHelperError::Message(format!("invalid data_b64 token: {err}")));
+            .map_err(|err| MqttHelperError::Message(format!("invalid data_b64 token: {err}")))?;
+        return Ok(IssuedToken { bytes, exp });
     }
     let token = body.get("token").and_then(Value::as_str).ok_or_else(|| {
         MqttHelperError::Message("token issuer response missing token".to_string())
     })?;
-    Ok(token.as_bytes().to_vec())
+    Ok(IssuedToken {
+        bytes: token.as_bytes().to_vec(),
+        exp,
+    })
 }
 
-async fn startup_password(args: &Args, client_id: &str, topic: &str) -> Result<Vec<u8>> {
-    if strict_multi_client_startup(args) {
+async fn startup_password(args: &Args, client_id: &str, topic: &str) -> Result<IssuedToken> {
+    if strict_multi_client_startup(args) || args.proactive_refresh {
         let kind = resolved_token_issuer_kind(args).ok_or_else(|| {
-            MqttHelperError::Message(
-                "strict multi-client startup provisioning requires token kind".to_string(),
-            )
+            MqttHelperError::Message("startup provisioning requires token kind".to_string())
         })?;
         fetch_token(args, &kind, client_id, topic).await
     } else {
-        decode_token_arg(&args.password)
+        decode_token_arg(&args.password).map(IssuedToken::static_token)
     }
 }
 
@@ -790,6 +889,72 @@ fn usize_as_f64(value: usize) -> f64 {
         |_| value.to_string().parse::<f64>().unwrap_or(f64::INFINITY),
         f64::from,
     )
+}
+
+fn unix_timestamp_now() -> Result<i64> {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| MqttHelperError::Message(format!("system clock before epoch: {err}")))?;
+    i64::try_from(duration.as_secs())
+        .map_err(|_| MqttHelperError::Message("system timestamp exceeds i64 range".to_string()))
+}
+
+fn should_proactively_refresh(exp: Option<i64>, margin_seconds: u64, now: i64) -> bool {
+    let Some(exp) = exp else {
+        return false;
+    };
+    let Ok(margin) = i64::try_from(margin_seconds) else {
+        return true;
+    };
+    now >= exp.saturating_sub(margin)
+}
+
+fn proactive_refresh_delay(exp: Option<i64>, margin_seconds: u64, now: i64) -> Option<Duration> {
+    let exp = exp?;
+    if exp <= now {
+        return Some(Duration::ZERO);
+    }
+    let margin = i64::try_from(margin_seconds).unwrap_or(i64::MAX);
+    let deadline = exp.saturating_sub(margin);
+    if deadline > now {
+        return u64::try_from(deadline - now).ok().map(Duration::from_secs);
+    }
+    Some(Duration::ZERO)
+}
+
+fn proactive_assertion_wait_timeout(args: &Args, exp: Option<i64>) -> Duration {
+    let delay = unix_timestamp_now()
+        .ok()
+        .and_then(|now| proactive_refresh_delay(exp, args.proactive_refresh_margin_seconds, now))
+        .unwrap_or_default();
+    delay
+        + Duration::from_secs(args.proactive_refresh_timeout_seconds.max(1))
+        + Duration::from_secs(1)
+}
+
+fn validate_proactive_refresh_assertion(args: &Args, output: &Output) -> Result<()> {
+    if !args.proactive_refresh_assert_continuity {
+        return Ok(());
+    }
+    if output.proactive_refresh_attempts == 0 {
+        return Err(MqttHelperError::Message(
+            "proactive refresh continuity assertion failed: no proactive refresh ran".to_string(),
+        ));
+    }
+    if !output.session_continuity_ok {
+        return Err(MqttHelperError::Message(
+            "proactive refresh continuity assertion failed: session continuity was not maintained"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn expiry_denial_error(error: &str) -> bool {
+    error.contains("NotAuthorized")
+        || error.contains("not authorized")
+        || error.contains("AuthenticationFailed")
+        || error.contains("authentication failed")
 }
 
 fn load_biscuit_public_key(
@@ -998,6 +1163,35 @@ fn apply_biscuit_transforms(
     true
 }
 
+fn transformed_biscuit_expiry(args: &Args, current_exp: Option<i64>) -> Result<Option<i64>> {
+    let now = unix_timestamp_now()?;
+    let mut exp = current_exp;
+    for ttl in [
+        args.biscuit_attenuate
+            .then_some(args.biscuit_attenuate_ttl)
+            .flatten(),
+        args.biscuit_delegate
+            .then_some(args.biscuit_delegate_ttl)
+            .flatten(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let ttl = i64::try_from(ttl)
+            .map_err(|_| MqttHelperError::Message("ttl seconds exceeds i64 range".to_string()))?;
+        let transform_exp = now.saturating_add(ttl);
+        exp = Some(exp.map_or(transform_exp, |existing| existing.min(transform_exp)));
+    }
+    Ok(exp)
+}
+
+fn refresh_token_expiry(args: &Args, token: &mut IssuedToken, transformed: bool) -> Result<()> {
+    if transformed {
+        token.exp = transformed_biscuit_expiry(args, token.exp)?;
+    }
+    Ok(())
+}
+
 async fn prepare_handoff(args: &Args, mode_topic: &str) -> Option<HandoffPlan> {
     if !(args.biscuit_delegate && args.biscuit_delegate_handoff) {
         return None;
@@ -1021,7 +1215,7 @@ async fn prepare_handoff(args: &Args, mode_topic: &str) -> Option<HandoffPlan> {
                 continue;
             }
         };
-        if !apply_biscuit_transforms(args, &client_id, &mut result, &mut password) {
+        if !apply_biscuit_transforms(args, &client_id, &mut result, &mut password.bytes) {
             errors.extend(
                 result
                     .errors
@@ -1032,7 +1226,7 @@ async fn prepare_handoff(args: &Args, mode_topic: &str) -> Option<HandoffPlan> {
         }
         published_tokens.insert(
             client_id.clone(),
-            general_purpose::URL_SAFE_NO_PAD.encode(&password),
+            general_purpose::URL_SAFE_NO_PAD.encode(&password.bytes),
         );
         workers.insert(
             client_id,
@@ -1271,6 +1465,10 @@ fn inputs_json(
         "token_issuer_no_default_roles": args.token_issuer_no_default_roles,
         "token_issuer_no_default_grants": args.token_issuer_no_default_grants,
         "token_refresh_codes": token_refresh_codes,
+        "proactive_refresh": args.proactive_refresh,
+        "proactive_refresh_margin_seconds": args.proactive_refresh_margin_seconds,
+        "proactive_refresh_timeout_seconds": args.proactive_refresh_timeout_seconds,
+        "proactive_refresh_assert_continuity": args.proactive_refresh_assert_continuity,
         "jwt_identity_binding": args.jwt_identity_binding,
         "biscuit_identity_binding": args.biscuit_identity_binding,
         "biscuit_client_id_fact": args.biscuit_client_id_fact,
@@ -1433,6 +1631,23 @@ async fn publish_and_wait(
         })
         .await?;
     }
+    Ok(start.elapsed().as_secs_f64() * 1000.0)
+}
+
+async fn publish_tracked_and_wait(
+    client: &rumqttc::AsyncClient,
+    topic: &str,
+    payload: Vec<u8>,
+    qos_value: u8,
+) -> Result<f64> {
+    let start = Instant::now();
+    let notice = client
+        .publish_tracked(topic, qos(qos_value)?, false, payload)
+        .await?;
+    tokio::time::timeout(Duration::from_secs(10), notice.wait_completion_async())
+        .await
+        .map_err(|_| MqttHelperError::Message("publish_timeout".to_string()))?
+        .map_err(|err| MqttHelperError::Message(format!("publish_failed:{err}")))?;
     Ok(start.elapsed().as_secs_f64() * 1000.0)
 }
 
@@ -1867,7 +2082,7 @@ async fn prepare_fanout_client(
             }
         };
         let mut worker_result = WorkerResult::default();
-        if !apply_biscuit_transforms(args, &client_id, &mut worker_result, &mut password) {
+        if !apply_biscuit_transforms(args, &client_id, &mut worker_result, &mut password.bytes) {
             runtime.errors.extend(worker_result.errors);
             return None;
         }
@@ -1875,7 +2090,7 @@ async fn prepare_fanout_client(
         bootstrap.delegation_len = worker_result.delegation_len;
         bootstrap.attenuation_ms = worker_result.attenuation_ms;
         bootstrap.attenuation_len = worker_result.attenuation_len;
-        password
+        password.bytes
     };
     Some(FanoutPreparedClient {
         client_id,
@@ -2068,7 +2283,9 @@ async fn connect_fanout_publisher(
                 "strict multi-client startup provisioning requires token kind".to_string(),
             )
         })?;
-        fetch_token(args, &kind, "fanout_publisher", &args.fanout_topic).await?
+        fetch_token(args, &kind, "fanout_publisher", &args.fanout_topic)
+            .await?
+            .bytes
     } else {
         fallback_password.to_vec()
     };
@@ -2126,6 +2343,13 @@ fn fanout_output(args: &Args, parts: FanoutOutputParts<'_>) -> Output {
         connect: summarize(&metrics.connect),
         token_refresh: Summary::default(),
         token_refresh_len: Summary::default(),
+        proactive_refresh: Summary::default(),
+        proactive_refresh_len: Summary::default(),
+        proactive_refresh_attempts: 0,
+        proactive_refresh_successes: 0,
+        proactive_refresh_failures: 0,
+        session_continuity_ok: !args.proactive_refresh,
+        expiry_denial_count: 0,
         delegation: summarize(&metrics.delegation),
         delegation_len: summarize(&metrics.delegation_len),
         attenuation: summarize(&metrics.attenuation),
@@ -2244,13 +2468,13 @@ async fn resolve_worker_password(
     handoff_password: Option<Vec<u8>>,
     handoff_required: bool,
     result: &mut WorkerResult,
-) -> Option<(Vec<u8>, bool)> {
+) -> Option<(IssuedToken, bool)> {
     let handoff_password_supplied = handoff_password.is_some();
     let password = if let Some(value) = handoff_password {
-        value
+        IssuedToken::static_token(value)
     } else if let Some(nonce) = handoff_nonce {
         match receive_handoff_token(args, client_id, nonce).await {
-            Ok(value) => value,
+            Ok(value) => IssuedToken::static_token(value),
             Err(err) => {
                 result
                     .errors
@@ -2275,7 +2499,41 @@ async fn resolve_worker_password(
     Some((password, handoff_password_supplied))
 }
 
+async fn fetch_worker_token(
+    args: &Args,
+    kind: &str,
+    client_id: &str,
+    topic: &str,
+    result: &mut WorkerResult,
+) -> Result<IssuedToken> {
+    let mut token = fetch_token(args, kind, client_id, topic).await?;
+    if !apply_biscuit_transforms(args, client_id, result, &mut token.bytes) {
+        let err = result
+            .errors
+            .last()
+            .cloned()
+            .unwrap_or_else(|| "biscuit_transform_failed".to_string());
+        return Err(MqttHelperError::Message(err));
+    }
+    refresh_token_expiry(args, &mut token, true)?;
+    Ok(token)
+}
+
 fn worker_specs(args: &Args, client_id: &str, password: Vec<u8>) -> ClientSpec {
+    if args.proactive_refresh {
+        return ClientSpec {
+            host: args.host.clone(),
+            port: args.port,
+            client_id: client_id.to_string(),
+            username: String::new(),
+            password: Vec::new(),
+            tls: args.tls,
+            tls_ca_file: args.tls_ca_file.clone(),
+            tls_insecure: args.tls_insecure,
+            auth_method: Some("token".to_string()),
+            auth_data: Some(password),
+        };
+    }
     ClientSpec {
         host: args.host.clone(),
         port: args.port,
@@ -2295,9 +2553,11 @@ async fn connect_worker(
     client_id: &str,
     topic: &str,
     token_refresh_codes: &[u16],
+    apply_refresh_transforms: bool,
     spec: &mut ClientSpec,
     result: &mut WorkerResult,
-) -> Option<(AsyncClient, rumqttc::EventLoop, ConnectReport)> {
+) -> Option<(AsyncClient, rumqttc::EventLoop, ConnectReport, Option<i64>)> {
+    let mut current_exp = None;
     loop {
         let connect_result = match connect(spec).await {
             Ok(value) => value,
@@ -2307,7 +2567,12 @@ async fn connect_worker(
             }
         };
         if connect_result.2.connect_ok {
-            return Some(connect_result);
+            return Some((
+                connect_result.0,
+                connect_result.1,
+                connect_result.2,
+                current_exp,
+            ));
         }
 
         let reason = connect_result.2.connect_reason.unwrap_or(u16::MAX);
@@ -2324,11 +2589,21 @@ async fn connect_worker(
             return None;
         };
         let started = Instant::now();
-        match fetch_token(args, &kind, client_id, topic).await {
+        let refreshed = if apply_refresh_transforms {
+            fetch_worker_token(args, &kind, client_id, topic, result).await
+        } else {
+            fetch_token(args, &kind, client_id, topic).await
+        };
+        match refreshed {
             Ok(refreshed) => {
                 result.token_refresh_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
-                result.token_refresh_len = Some(usize_as_f64(refreshed.len()));
-                spec.password = refreshed;
+                result.token_refresh_len = Some(usize_as_f64(refreshed.bytes.len()));
+                current_exp = refreshed.exp;
+                if args.proactive_refresh {
+                    spec.auth_data = Some(refreshed.bytes);
+                } else {
+                    spec.password = refreshed.bytes;
+                }
             }
             Err(err) => {
                 result.errors.push(format!("token_refresh_failed:{err}"));
@@ -2338,20 +2613,217 @@ async fn connect_worker(
     }
 }
 
+async fn perform_proactive_reauth(
+    args: &Args,
+    client_id: &str,
+    topic: &str,
+    client: &AsyncClient,
+    current_exp: &mut Option<i64>,
+    result: &mut WorkerResult,
+    shutdown: Option<&Notify>,
+    apply_refresh_transforms: bool,
+) -> bool {
+    if !args.proactive_refresh {
+        return true;
+    }
+    if args.token_issuer_url.is_none() {
+        result
+            .errors
+            .push("proactive_refresh_failed:token_issuer_url_required".to_string());
+        result.proactive_refresh_failures += 1;
+        return false;
+    }
+    let Some(kind) = resolved_token_issuer_kind(args) else {
+        result
+            .errors
+            .push("proactive_refresh_failed:token_kind_required".to_string());
+        result.proactive_refresh_failures += 1;
+        return false;
+    };
+    result.proactive_refresh_attempts += 1;
+    let started = Instant::now();
+    let refreshed = if apply_refresh_transforms {
+        fetch_worker_token(args, &kind, client_id, topic, result).await
+    } else {
+        fetch_token(args, &kind, client_id, topic).await
+    };
+    let refreshed = match refreshed {
+        Ok(token) => token,
+        Err(err) => {
+            result.proactive_refresh_failures += 1;
+            result
+                .errors
+                .push(format!("proactive_refresh_failed:{err}"));
+            return false;
+        }
+    };
+    let token_len = refreshed.bytes.len();
+    let props = AuthProperties {
+        method: Some("token".to_string()),
+        data: Some(bytes::Bytes::from(refreshed.bytes)),
+        reason: None,
+        user_properties: Vec::new(),
+    };
+    let notice = match client.reauth_tracked(Some(props)).await {
+        Ok(notice) => notice,
+        Err(err) => {
+            result.proactive_refresh_failures += 1;
+            result
+                .errors
+                .push(format!("proactive_refresh_failed:reauth_send:{err}"));
+            return false;
+        }
+    };
+    let timeout = Duration::from_secs(args.proactive_refresh_timeout_seconds.max(1));
+    let wait_reauth = async {
+        if let Some(shutdown) = shutdown {
+            tokio::select! {
+                result = notice.wait_async() => result.map(|_| ()).map_err(|err| err.to_string()),
+                () = shutdown.notified() => Err("reauth_cancelled".to_string()),
+            }
+        } else {
+            notice
+                .wait_async()
+                .await
+                .map(|_| ())
+                .map_err(|err| err.to_string())
+        }
+    };
+    let outcome = tokio::select! {
+        result = wait_reauth => result,
+        () = tokio::time::sleep(timeout) => Err("reauth_timeout".to_string()),
+    };
+    match outcome {
+        Ok(()) => {
+            result
+                .proactive_refresh_ms
+                .push(started.elapsed().as_secs_f64() * 1000.0);
+            result.proactive_refresh_len.push(usize_as_f64(token_len));
+            result.proactive_refresh_successes += 1;
+            *current_exp = refreshed.exp;
+            true
+        }
+        Err(err) if err == "reauth_cancelled" => true,
+        Err(err) => {
+            result.proactive_refresh_failures += 1;
+            if expiry_denial_error(&err) {
+                result.expiry_denial_count += 1;
+            }
+            result
+                .errors
+                .push(format!("proactive_refresh_failed:reauth:{err}"));
+            false
+        }
+    }
+}
+
+async fn drive_worker_eventloop(
+    mut eventloop: rumqttc::EventLoop,
+    shutdown: Arc<Notify>,
+    shutdown_requested: Arc<AtomicBool>,
+) -> Option<String> {
+    loop {
+        if shutdown_requested.load(Ordering::Acquire) {
+            return None;
+        }
+        tokio::select! {
+            () = shutdown.notified() => return None,
+            result = eventloop.poll() => {
+                if let Err(err) = result {
+                    return Some(format!("eventloop_failed:{err}"));
+                }
+            }
+        }
+    }
+}
+
+async fn run_proactive_refresh_timer(
+    args: Args,
+    client_id: String,
+    topic: String,
+    client: AsyncClient,
+    mut current_exp: Option<i64>,
+    shutdown: Arc<Notify>,
+    shutdown_requested: Arc<AtomicBool>,
+    first_attempt_notify: Arc<Notify>,
+    first_attempt_observed: Arc<AtomicBool>,
+    apply_refresh_transforms: bool,
+) -> WorkerResult {
+    let mut result = WorkerResult::default();
+    if !args.proactive_refresh {
+        return result;
+    }
+    loop {
+        if shutdown_requested.load(Ordering::Acquire) {
+            return result;
+        }
+        let now = match unix_timestamp_now() {
+            Ok(now) => now,
+            Err(_) => {
+                result
+                    .errors
+                    .push("proactive_refresh_failed:timestamp_unavailable".to_string());
+                result.proactive_refresh_failures += 1;
+                return result;
+            }
+        };
+        let Some(delay) =
+            proactive_refresh_delay(current_exp, args.proactive_refresh_margin_seconds, now)
+        else {
+            return result;
+        };
+        tokio::select! {
+            () = shutdown.notified() => return result,
+            () = tokio::time::sleep(delay) => {}
+        }
+        if shutdown_requested.load(Ordering::Acquire) {
+            return result;
+        }
+        let refresh_ok = perform_proactive_reauth(
+            &args,
+            &client_id,
+            &topic,
+            &client,
+            &mut current_exp,
+            &mut result,
+            Some(&shutdown),
+            apply_refresh_transforms,
+        )
+        .await;
+        first_attempt_observed.store(true, Ordering::Release);
+        first_attempt_notify.notify_waiters();
+        if !refresh_ok {
+            return result;
+        }
+    }
+}
+
+fn merge_proactive_result(result: &mut WorkerResult, proactive: &mut WorkerResult) {
+    result
+        .proactive_refresh_ms
+        .append(&mut proactive.proactive_refresh_ms);
+    result
+        .proactive_refresh_len
+        .append(&mut proactive.proactive_refresh_len);
+    result.proactive_refresh_attempts += proactive.proactive_refresh_attempts;
+    result.proactive_refresh_successes += proactive.proactive_refresh_successes;
+    result.proactive_refresh_failures += proactive.proactive_refresh_failures;
+    result.expiry_denial_count += proactive.expiry_denial_count;
+    result.errors.append(&mut proactive.errors);
+}
+
 async fn run_control_mode(
     args: &Args,
     client: &AsyncClient,
-    eventloop: &mut rumqttc::EventLoop,
     control_topic: Option<&str>,
     control_payload: &[u8],
     result: &mut WorkerResult,
 ) {
-    if let Some(topic) = control_topic {
+    if let Some(control_topic) = control_topic {
         for _ in 0..args.control_repeat {
-            match publish_and_wait(
+            match publish_tracked_and_wait(
                 client,
-                eventloop,
-                topic,
+                control_topic,
                 control_payload.to_vec(),
                 args.control_qos,
             )
@@ -2367,7 +2839,6 @@ async fn run_control_mode(
 async fn run_publish_mode(
     args: &Args,
     client: &AsyncClient,
-    eventloop: &mut rumqttc::EventLoop,
     plan: WorkerPublishPlan<'_>,
     result: &mut WorkerResult,
 ) {
@@ -2376,9 +2847,8 @@ async fn run_publish_mode(
         if args.control_after_messages > 0 && since_control >= args.control_after_messages {
             if let Some(topic) = plan.control_topic {
                 let start = Instant::now();
-                match publish_and_wait(
+                match publish_tracked_and_wait(
                     client,
-                    eventloop,
                     topic,
                     plan.control_payload.to_vec(),
                     args.control_qos,
@@ -2397,14 +2867,8 @@ async fn run_publish_mode(
         let publish_qos = plan
             .qos_distribution
             .map_or(args.qos, QosDistribution::choose);
-        match publish_and_wait(
-            client,
-            eventloop,
-            plan.topic,
-            plan.data_payload.to_vec(),
-            publish_qos,
-        )
-        .await
+        match publish_tracked_and_wait(client, plan.topic, plan.data_payload.to_vec(), publish_qos)
+            .await
         {
             Ok(ms) => {
                 result.publish_ms.push(ms);
@@ -2427,7 +2891,6 @@ async fn run_worker_session(
     topic: &str,
     qos_distribution: Option<&QosDistribution>,
     client: &AsyncClient,
-    eventloop: &mut rumqttc::EventLoop,
     result: &mut WorkerResult,
 ) {
     let control_topic = args
@@ -2440,7 +2903,6 @@ async fn run_worker_session(
         run_control_mode(
             args,
             client,
-            eventloop,
             control_topic.as_deref(),
             &control_payload,
             result,
@@ -2450,7 +2912,6 @@ async fn run_worker_session(
         run_publish_mode(
             args,
             client,
-            eventloop,
             WorkerPublishPlan {
                 topic,
                 control_topic: control_topic.as_deref(),
@@ -2462,6 +2923,28 @@ async fn run_worker_session(
         )
         .await;
     }
+}
+
+async fn wait_for_proactive_assertion_attempt(
+    args: &Args,
+    current_exp: Option<i64>,
+    first_attempt_notify: &Notify,
+    first_attempt_observed: &AtomicBool,
+) {
+    if !args.proactive_refresh_assert_continuity || first_attempt_observed.load(Ordering::Acquire) {
+        return;
+    }
+    let timeout = proactive_assertion_wait_timeout(args, current_exp);
+    let wait = async {
+        loop {
+            let notified = first_attempt_notify.notified();
+            if first_attempt_observed.load(Ordering::Acquire) {
+                break;
+            }
+            notified.await;
+        }
+    };
+    let _ = tokio::time::timeout(timeout, wait).await;
 }
 
 async fn run_worker(job: WorkerInvocation) -> WorkerResult {
@@ -2483,7 +2966,7 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
     result.delegation_len = bootstrap.delegation_len;
     result.attenuation_ms = bootstrap.attenuation_ms;
     result.attenuation_len = bootstrap.attenuation_len;
-    let Some((mut password, handoff_password_supplied)) = resolve_worker_password(
+    let Some((issued_token, handoff_password_supplied)) = resolve_worker_password(
         &args,
         &client_id,
         &topic,
@@ -2496,6 +2979,8 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
     else {
         return result;
     };
+    let mut issued_token = issued_token;
+    let mut password = issued_token.bytes;
     let token_refresh_codes = match parse_token_refresh_codes(args.token_refresh_codes.as_deref()) {
         Ok(codes) => codes,
         Err(err) => {
@@ -2512,23 +2997,34 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
             return result;
         }
     };
-    if should_apply_worker_biscuit_transforms(
+    let apply_refresh_transforms = should_apply_worker_biscuit_transforms(
         handoff_nonce.as_deref(),
         handoff_password_supplied,
         handoff_required,
-    ) && !apply_biscuit_transforms(&args, &client_id, &mut result, &mut password)
+    );
+    if apply_refresh_transforms
+        && !apply_biscuit_transforms(&args, &client_id, &mut result, &mut password)
     {
         return result;
     }
+    issued_token.bytes = password.clone();
+    if let Err(err) = refresh_token_expiry(&args, &mut issued_token, apply_refresh_transforms) {
+        result
+            .errors
+            .push(format!("startup_token_expiry_failed:{err}"));
+        return result;
+    }
+    let mut current_exp = issued_token.exp;
     let mut spec = worker_specs(&args, &client_id, password.clone());
     if let Some(sync_connect) = sync_connect {
         sync_connect.wait().await;
     }
-    let Some((client, mut eventloop, report)) = connect_worker(
+    let Some((client, eventloop, report, refreshed_exp)) = connect_worker(
         &args,
         &client_id,
         &topic,
         &token_refresh_codes,
+        apply_refresh_transforms,
         &mut spec,
         &mut result,
     )
@@ -2536,11 +3032,36 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
     else {
         return result;
     };
+    if refreshed_exp.is_some() {
+        current_exp = refreshed_exp;
+    }
     result.connect_ms = Some(report.connect_ms);
 
     if let Some(gate) = publish_gate_participant.mark_ready() {
         gate.wait_released().await;
     }
+
+    let shutdown = Arc::new(Notify::new());
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    let first_attempt_notify = Arc::new(Notify::new());
+    let first_attempt_observed = Arc::new(AtomicBool::new(false));
+    let eventloop_task = tokio::spawn(drive_worker_eventloop(
+        eventloop,
+        Arc::clone(&shutdown),
+        Arc::clone(&shutdown_requested),
+    ));
+    let proactive_task = tokio::spawn(run_proactive_refresh_timer(
+        args.clone(),
+        client_id.clone(),
+        topic.clone(),
+        client.clone(),
+        current_exp,
+        Arc::clone(&shutdown),
+        Arc::clone(&shutdown_requested),
+        Arc::clone(&first_attempt_notify),
+        Arc::clone(&first_attempt_observed),
+        apply_refresh_transforms,
+    ));
 
     run_worker_session(
         &args,
@@ -2548,11 +3069,30 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
         &topic,
         qos_distribution.as_ref(),
         &client,
-        &mut eventloop,
         &mut result,
     )
     .await;
+    wait_for_proactive_assertion_attempt(
+        &args,
+        current_exp,
+        &first_attempt_notify,
+        &first_attempt_observed,
+    )
+    .await;
     let _ = client.disconnect().await;
+    shutdown_requested.store(true, Ordering::Release);
+    shutdown.notify_waiters();
+    match proactive_task.await {
+        Ok(mut proactive_result) => merge_proactive_result(&mut result, &mut proactive_result),
+        Err(err) => result
+            .errors
+            .push(format!("proactive_refresh_join_failed:{err}")),
+    }
+    match eventloop_task.await {
+        Ok(Some(err)) => result.errors.push(err),
+        Ok(None) => {}
+        Err(err) => result.errors.push(format!("eventloop_join_failed:{err}")),
+    }
     result
 }
 
@@ -2582,6 +3122,18 @@ fn standard_metrics(
     let connect = results.iter().filter_map(|r| r.connect_ms).collect();
     let token_refresh = results.iter().filter_map(|r| r.token_refresh_ms).collect();
     let token_refresh_len = results.iter().filter_map(|r| r.token_refresh_len).collect();
+    let proactive_refresh = results
+        .iter()
+        .flat_map(|r| r.proactive_refresh_ms.clone())
+        .collect();
+    let proactive_refresh_len = results
+        .iter()
+        .flat_map(|r| r.proactive_refresh_len.clone())
+        .collect();
+    let proactive_refresh_attempts = results.iter().map(|r| r.proactive_refresh_attempts).sum();
+    let proactive_refresh_successes = results.iter().map(|r| r.proactive_refresh_successes).sum();
+    let proactive_refresh_failures = results.iter().map(|r| r.proactive_refresh_failures).sum();
+    let expiry_denial_count = results.iter().map(|r| r.expiry_denial_count).sum();
     let delegation = results.iter().filter_map(|r| r.delegation_ms).collect();
     let delegation_len = results.iter().filter_map(|r| r.delegation_len).collect();
     let attenuation = results.iter().filter_map(|r| r.attenuation_ms).collect();
@@ -2616,6 +3168,12 @@ fn standard_metrics(
         connect,
         token_refresh,
         token_refresh_len,
+        proactive_refresh,
+        proactive_refresh_len,
+        proactive_refresh_attempts,
+        proactive_refresh_successes,
+        proactive_refresh_failures,
+        expiry_denial_count,
         delegation,
         delegation_len,
         attenuation,
@@ -2649,6 +3207,16 @@ fn standard_output(
         connect: summarize(&metrics.connect),
         token_refresh: summarize(&metrics.token_refresh),
         token_refresh_len: summarize(&metrics.token_refresh_len),
+        proactive_refresh: summarize(&metrics.proactive_refresh),
+        proactive_refresh_len: summarize(&metrics.proactive_refresh_len),
+        proactive_refresh_attempts: metrics.proactive_refresh_attempts,
+        proactive_refresh_successes: metrics.proactive_refresh_successes,
+        proactive_refresh_failures: metrics.proactive_refresh_failures,
+        session_continuity_ok: !args.proactive_refresh
+            || (metrics.proactive_refresh_attempts > 0
+                && metrics.proactive_refresh_failures == 0
+                && metrics.expiry_denial_count == 0),
+        expiry_denial_count: metrics.expiry_denial_count,
         delegation: summarize(&metrics.delegation),
         delegation_len: summarize(&metrics.delegation_len),
         attenuation: summarize(&metrics.attenuation),
@@ -2741,6 +3309,7 @@ async fn run_standard_mode(
         handoff_nonce.as_deref(),
         metrics,
     );
+    validate_proactive_refresh_assertion(&args, &output)?;
     print_json(&output)
 }
 
@@ -2752,7 +3321,8 @@ async fn main() -> Result<()> {
     let qos_distribution = QosDistribution::parse(args.qos_distribution.as_deref())?;
     let token_refresh_codes = parse_token_refresh_codes(args.token_refresh_codes.as_deref())?;
     if args.mode == "fanout" {
-        let output = run_fanout(args).await?;
+        let output = run_fanout(args.clone()).await?;
+        validate_proactive_refresh_assertion(&args, &output)?;
         return print_json(&output);
     }
     run_standard_mode(args, qos_distribution, token_refresh_codes).await
@@ -2773,6 +3343,13 @@ mod tests {
             connect: Summary::default(),
             token_refresh: Summary::default(),
             token_refresh_len: Summary::default(),
+            proactive_refresh: Summary::default(),
+            proactive_refresh_len: Summary::default(),
+            proactive_refresh_attempts: 0,
+            proactive_refresh_successes: 0,
+            proactive_refresh_failures: 0,
+            session_continuity_ok: true,
+            expiry_denial_count: 0,
             delegation: Summary::default(),
             delegation_len: Summary::default(),
             attenuation: Summary::default(),
@@ -2814,6 +3391,34 @@ mod tests {
             .find(|arg| arg.get_id() == arg_id)
             .and_then(|arg| arg.get_env())
             .map(|env| env.to_string_lossy().into_owned())
+    }
+
+    fn empty_standard_metrics() -> StandardMetrics {
+        StandardMetrics {
+            connect: Vec::new(),
+            token_refresh: Vec::new(),
+            token_refresh_len: Vec::new(),
+            proactive_refresh: Vec::new(),
+            proactive_refresh_len: Vec::new(),
+            proactive_refresh_attempts: 0,
+            proactive_refresh_successes: 0,
+            proactive_refresh_failures: 0,
+            expiry_denial_count: 0,
+            delegation: Vec::new(),
+            delegation_len: Vec::new(),
+            attenuation: Vec::new(),
+            attenuation_len: Vec::new(),
+            publish: Vec::new(),
+            publish_qos_0: Vec::new(),
+            publish_qos_1: Vec::new(),
+            publish_qos_2: Vec::new(),
+            receive: Vec::new(),
+            control: Vec::new(),
+            control_injection: Vec::new(),
+            errors: Vec::new(),
+            publish_throughput_mps: 0.0,
+            receive_throughput_mps: 0.0,
+        }
     }
 
     #[test]
@@ -2964,8 +3569,14 @@ mod tests {
                 "delegation",
                 "delegation_len",
                 "errors",
+                "expiry_denial_count",
                 "fanout_churn",
                 "inputs",
+                "proactive_refresh",
+                "proactive_refresh_attempts",
+                "proactive_refresh_failures",
+                "proactive_refresh_len",
+                "proactive_refresh_successes",
                 "publish",
                 "publish_qos_0",
                 "publish_qos_1",
@@ -2976,6 +3587,7 @@ mod tests {
                 "receive",
                 "receive_throughput_mps",
                 "received_messages",
+                "session_continuity_ok",
                 "throughput_mps",
                 "token_refresh",
                 "token_refresh_len",
@@ -2996,6 +3608,7 @@ mod tests {
         let control_inputs = inputs_json(&control_args, "publish", None, &[135], None);
         assert_eq!(control_inputs["control"]["mode"], true);
         assert_eq!(control_inputs["biscuit_transform_mode"], "in_process");
+        assert_eq!(control_inputs["proactive_refresh"], false);
         assert_eq!(
             control_inputs["token_refresh_codes"],
             serde_json::json!([135])
@@ -3053,6 +3666,212 @@ mod tests {
             args.control_topic.as_deref(),
             Some("custom/control/{client_id}")
         );
+    }
+
+    #[test]
+    fn proactive_refresh_deadline_uses_exp_minus_margin() {
+        assert!(!should_proactively_refresh(Some(1_000), 60, 939));
+        assert!(should_proactively_refresh(Some(1_000), 60, 940));
+        assert!(!should_proactively_refresh(None, 60, 940));
+        assert_eq!(
+            proactive_refresh_delay(Some(1_000), 60, 939),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(
+            proactive_refresh_delay(Some(1_000), 60, 940),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            proactive_refresh_delay(Some(1_060), 60, 1_000),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            proactive_refresh_delay(Some(1_000), 60, 1_000),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(proactive_refresh_delay(None, 60, 940), None);
+    }
+
+    #[test]
+    fn proactive_refresh_assertion_requires_successful_continuity() {
+        let args = Args::parse_from([
+            "mqtt-loadgen",
+            "--proactive-refresh",
+            "--proactive-refresh-assert-continuity",
+        ]);
+
+        let no_refresh = standard_output(&args, None, &[], None, empty_standard_metrics());
+        assert!(
+            validate_proactive_refresh_assertion(&args, &no_refresh)
+                .unwrap_err()
+                .to_string()
+                .contains("no proactive refresh ran")
+        );
+
+        let mut failed_metrics = empty_standard_metrics();
+        failed_metrics.proactive_refresh_attempts = 1;
+        failed_metrics.proactive_refresh_failures = 1;
+        let failed_continuity = standard_output(&args, None, &[], None, failed_metrics);
+        assert!(
+            validate_proactive_refresh_assertion(&args, &failed_continuity)
+                .unwrap_err()
+                .to_string()
+                .contains("session continuity was not maintained")
+        );
+
+        let mut successful_metrics = empty_standard_metrics();
+        successful_metrics.proactive_refresh_attempts = 1;
+        successful_metrics.proactive_refresh_successes = 1;
+        let successful = standard_output(&args, None, &[], None, successful_metrics);
+        validate_proactive_refresh_assertion(&args, &successful)
+            .expect("successful proactive refresh should satisfy continuity assertion");
+    }
+
+    #[test]
+    fn expiry_denial_classification_ignores_reauth_transport_errors() {
+        assert!(expiry_denial_error("AuthenticationFailed: expired"));
+        assert!(expiry_denial_error("authentication failed: token expired"));
+        assert!(expiry_denial_error("NotAuthorized"));
+        assert!(!expiry_denial_error("reauth_timeout"));
+        assert!(!expiry_denial_error("reauth_send: channel closed"));
+    }
+
+    #[test]
+    fn transformed_biscuit_expiry_uses_shortest_transform_ttl() {
+        let args = Args::parse_from([
+            "mqtt-loadgen",
+            "--biscuit-attenuate",
+            "--biscuit-attenuate-ttl",
+            "30",
+            "--biscuit-delegate",
+            "--biscuit-delegate-ttl",
+            "45",
+        ]);
+        let now = unix_timestamp_now().expect("system time should be available");
+        let exp = transformed_biscuit_expiry(&args, Some(now + 300))
+            .expect("expiry should calculate")
+            .expect("transformed expiry should exist");
+
+        assert!(exp >= now + 29);
+        assert!(exp <= now + 31);
+    }
+
+    #[test]
+    fn refresh_token_expiry_updates_initial_transformed_token_expiry() {
+        let args = Args::parse_from([
+            "mqtt-loadgen",
+            "--biscuit-attenuate",
+            "--biscuit-attenuate-ttl",
+            "30",
+        ]);
+        let now = unix_timestamp_now().expect("system time should be available");
+        let mut token = IssuedToken {
+            bytes: b"token".to_vec(),
+            exp: Some(now + 300),
+        };
+
+        refresh_token_expiry(&args, &mut token, true).expect("expiry should update");
+        let exp = token.exp.expect("transformed token should retain expiry");
+
+        assert!(exp >= now + 29);
+        assert!(exp <= now + 31);
+    }
+
+    #[test]
+    fn transformed_biscuit_expiry_ignores_ttl_for_disabled_transforms() {
+        let args = Args::parse_from([
+            "mqtt-loadgen",
+            "--biscuit-attenuate-ttl",
+            "30",
+            "--biscuit-delegate-ttl",
+            "45",
+        ]);
+        let now = unix_timestamp_now().expect("system time should be available");
+
+        assert_eq!(
+            transformed_biscuit_expiry(&args, Some(now + 300)).expect("expiry should calculate"),
+            Some(now + 300)
+        );
+    }
+
+    #[test]
+    fn proactive_startup_validation_requires_issuer_and_kind() {
+        let missing_url = Args::parse_from(["mqtt-loadgen", "--proactive-refresh"]);
+        assert!(validate_startup_provisioning(&missing_url).is_err());
+
+        let valid = Args::parse_from([
+            "mqtt-loadgen",
+            "--proactive-refresh",
+            "--token-issuer-url",
+            "http://issuer",
+            "--token-issuer-kind",
+            "jwt",
+        ]);
+        assert!(validate_startup_provisioning(&valid).is_ok());
+        let inputs = inputs_json(&valid, "publish", None, &[], None);
+        assert_eq!(inputs["proactive_refresh"], true);
+        assert_eq!(inputs["proactive_refresh_margin_seconds"], 60);
+
+        let invalid_ttl = Args::parse_from([
+            "mqtt-loadgen",
+            "--proactive-refresh",
+            "--token-issuer-url",
+            "http://issuer",
+            "--token-issuer-kind",
+            "jwt",
+            "--token-issuer-ttl",
+            "60",
+            "--proactive-refresh-margin-seconds",
+            "60",
+        ]);
+        assert!(validate_startup_provisioning(&invalid_ttl).is_err());
+
+        let invalid_transform_ttl = Args::parse_from([
+            "mqtt-loadgen",
+            "--proactive-refresh",
+            "--token-issuer-url",
+            "http://issuer",
+            "--token-issuer-kind",
+            "biscuit",
+            "--biscuit-attenuate",
+            "--biscuit-attenuate-ttl",
+            "60",
+            "--proactive-refresh-margin-seconds",
+            "60",
+        ]);
+        assert!(validate_startup_provisioning(&invalid_transform_ttl).is_err());
+
+        let fanout = Args::parse_from([
+            "mqtt-loadgen",
+            "--mode",
+            "fanout",
+            "--proactive-refresh",
+            "--token-issuer-url",
+            "http://issuer",
+            "--token-issuer-kind",
+            "jwt",
+        ]);
+        let err = validate_startup_provisioning(&fanout)
+            .expect_err("fanout proactive refresh should be rejected");
+        assert!(err.to_string().contains("fanout mode"));
+    }
+
+    #[test]
+    fn proactive_worker_connect_uses_enhanced_auth_data() {
+        let args = Args::parse_from([
+            "mqtt-loadgen",
+            "--proactive-refresh",
+            "--token-issuer-url",
+            "http://issuer",
+            "--token-issuer-kind",
+            "jwt",
+        ]);
+        let spec = worker_specs(&args, "client_1", b"fresh-token".to_vec());
+
+        assert_eq!(spec.username, "");
+        assert!(spec.password.is_empty());
+        assert_eq!(spec.auth_method.as_deref(), Some("token"));
+        assert_eq!(spec.auth_data.as_deref(), Some(&b"fresh-token"[..]));
     }
 
     #[test]

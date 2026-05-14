@@ -121,6 +121,24 @@ def test_capability_scenarios_keep_identity_binding_disabled(scenario_id: str) -
 
 
 @pytest.mark.parametrize(
+    ("scenario_id", "kind"),
+    (
+        ("TOKEN-LIFECYCLE-PROACTIVE-REAUTH-JWT", "jwt"),
+        ("TOKEN-LIFECYCLE-PROACTIVE-REAUTH-BISCUIT", "biscuit"),
+    ),
+)
+def test_proactive_reauth_lifecycle_scenarios_are_timer_driven(scenario_id: str, kind: str) -> None:
+    scenarios = _scenario_registry()
+    scenario = scenarios[scenario_id]
+
+    assert scenario["proactive_refresh"] is True
+    assert scenario["proactive_refresh_margin_seconds"] == 60
+    assert scenario["proactive_refresh_assert_continuity"] is True
+    assert scenario["token_refresh"] == {"kind": kind, "ttl_seconds": 75}
+    assert scenario["client_count"] == 1
+
+
+@pytest.mark.parametrize(
     ("scenario_id", "username"),
     (
         ("TEST-STRICT-MULTI-CLIENT-JWT", "jwt"),

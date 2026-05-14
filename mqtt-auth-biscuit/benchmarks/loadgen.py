@@ -59,6 +59,10 @@ def _rust_loadgen_cmd(
     token_issuer_no_default_roles: bool,
     token_issuer_no_default_grants: bool,
     token_refresh_codes: set[int],
+    proactive_refresh: bool,
+    proactive_refresh_margin_seconds: int | None,
+    proactive_refresh_timeout_seconds: int | None,
+    proactive_refresh_assert_continuity: bool,
     tls_enabled: bool,
     tls_ca_file: str | None,
     tls_insecure: bool,
@@ -177,6 +181,14 @@ def _rust_loadgen_cmd(
         cmd.append("--token-issuer-no-default-roles")
     if token_issuer_no_default_grants:
         cmd.append("--token-issuer-no-default-grants")
+    if proactive_refresh:
+        cmd.append("--proactive-refresh")
+    if proactive_refresh_margin_seconds is not None:
+        cmd.extend(["--proactive-refresh-margin-seconds", str(proactive_refresh_margin_seconds)])
+    if proactive_refresh_timeout_seconds is not None:
+        cmd.extend(["--proactive-refresh-timeout-seconds", str(proactive_refresh_timeout_seconds)])
+    if proactive_refresh_assert_continuity:
+        cmd.append("--proactive-refresh-assert-continuity")
     if biscuit_attenuate:
         cmd.append("--biscuit-attenuate")
     for deny in biscuit_attenuate_denies or []:

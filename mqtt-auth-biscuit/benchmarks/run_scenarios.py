@@ -233,6 +233,10 @@ class ScenarioConfig(TypedDict, total=False):
     repeat: int
     sleep_between: int
     token_refresh: TokenRefreshConfig
+    proactive_refresh: bool
+    proactive_refresh_margin_seconds: int
+    proactive_refresh_timeout_seconds: int
+    proactive_refresh_assert_continuity: bool
     dynamic_security_config: str
     dynamic_security_generated_profile: str
     dynamic_security_churn: list[str]
@@ -755,6 +759,10 @@ def _run_loadgen(
     token_issuer_no_default_roles: bool,
     token_issuer_no_default_grants: bool,
     token_refresh_codes: str | None,
+    proactive_refresh: bool,
+    proactive_refresh_margin_seconds: int | None,
+    proactive_refresh_timeout_seconds: int | None,
+    proactive_refresh_assert_continuity: bool,
     jwt_identity_binding: IdentityBindingMode,
     biscuit_identity_binding: IdentityBindingMode,
     biscuit_client_id_fact: str,
@@ -851,6 +859,14 @@ def _run_loadgen(
         cmd.append("--token-issuer-no-default-grants")
     if token_refresh_codes:
         cmd.extend(["--token-refresh-codes", token_refresh_codes])
+    if proactive_refresh:
+        cmd.append("--proactive-refresh")
+    if proactive_refresh_margin_seconds is not None:
+        cmd.extend(["--proactive-refresh-margin-seconds", str(proactive_refresh_margin_seconds)])
+    if proactive_refresh_timeout_seconds is not None:
+        cmd.extend(["--proactive-refresh-timeout-seconds", str(proactive_refresh_timeout_seconds)])
+    if proactive_refresh_assert_continuity:
+        cmd.append("--proactive-refresh-assert-continuity")
     cmd.extend(["--jwt-identity-binding", jwt_identity_binding])
     cmd.extend(["--biscuit-identity-binding", biscuit_identity_binding])
     cmd.extend(["--biscuit-client-id-fact", biscuit_client_id_fact])
@@ -2967,6 +2983,38 @@ def _build_available_scenarios(
             "sleep_between": 2,
             "token_refresh": {"kind": "biscuit", "ttl_seconds": 5},
         },
+        "TOKEN-LIFECYCLE-PROACTIVE-REAUTH-JWT": {
+            "mosquitto_conf": "./mosquitto_shortcache.conf",
+            "username": "jwt",
+            "password": tokens["jwt_short"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "repeat": 2,
+            "client_count": 1,
+            "token_refresh": {"kind": "jwt", "ttl_seconds": 75},
+            "proactive_refresh": True,
+            "proactive_refresh_margin_seconds": 60,
+            "proactive_refresh_timeout_seconds": 10,
+            "proactive_refresh_assert_continuity": True,
+        },
+        "TOKEN-LIFECYCLE-PROACTIVE-REAUTH-BISCUIT": {
+            "mosquitto_conf": "./mosquitto_shortcache.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit_short"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "repeat": 2,
+            "client_count": 1,
+            "token_refresh": {"kind": "biscuit", "ttl_seconds": 75},
+            "proactive_refresh": True,
+            "proactive_refresh_margin_seconds": 60,
+            "proactive_refresh_timeout_seconds": 10,
+            "proactive_refresh_assert_continuity": True,
+        },
         "DYNAMIC-SECURITY-BASELINE": {
             "mosquitto_conf": "./mosquitto_dynsec.conf",
             "username": "dynsec_client_1",
@@ -3781,6 +3829,12 @@ def main(
                 "qos_distribution": qos_distribution,
                 "token_issuer_no_default_roles": token_issuer_no_default_roles,
                 "token_issuer_no_default_grants": token_issuer_no_default_grants,
+                "proactive_refresh": s.get("proactive_refresh", False),
+                "proactive_refresh_margin_seconds": s.get("proactive_refresh_margin_seconds"),
+                "proactive_refresh_timeout_seconds": s.get("proactive_refresh_timeout_seconds"),
+                "proactive_refresh_assert_continuity": s.get(
+                    "proactive_refresh_assert_continuity", False
+                ),
                 "traffic_pattern": s.get("traffic_pattern"),
                 "fanout_topic": s.get("fanout_topic"),
                 "subscriber_count": s.get("subscriber_count"),
@@ -3899,6 +3953,7 @@ def main(
                         )
                     else:
                         token_refresh = s.get("token_refresh")
+                        proactive_refresh = bool(s.get("proactive_refresh", False))
                         scenario_qos = int(s.get("qos", qos))
                         scenario_qos_distribution = s.get("qos_distribution", qos_distribution)
                         scenario_clients = _effective_scenario_client_count(s, clients)
@@ -3933,7 +3988,9 @@ def main(
                             sync_connect=bool(s.get("sync_connect", False)),
                             token_issuer_url=(
                                 token_issuer_base
-                                if token_refresh or strict_startup_provisioning is not None
+                                if token_refresh
+                                or proactive_refresh
+                                or strict_startup_provisioning is not None
                                 else None
                             ),
                             token_issuer_kind=(
@@ -3945,6 +4002,16 @@ def main(
                             token_issuer_no_default_roles=token_issuer_no_default_roles,
                             token_issuer_no_default_grants=token_issuer_no_default_grants,
                             token_refresh_codes=token_refresh_codes,
+                            proactive_refresh=proactive_refresh,
+                            proactive_refresh_margin_seconds=s.get(
+                                "proactive_refresh_margin_seconds"
+                            ),
+                            proactive_refresh_timeout_seconds=s.get(
+                                "proactive_refresh_timeout_seconds"
+                            ),
+                            proactive_refresh_assert_continuity=bool(
+                                s.get("proactive_refresh_assert_continuity", False)
+                            ),
                             jwt_identity_binding=cast(
                                 IdentityBindingMode,
                                 scenario_semantics["jwt_identity_binding"],
@@ -4072,6 +4139,15 @@ def main(
                                 "fanout_churn_sqlite_subscribers"
                             ),
                         )
+                    if s.get("proactive_refresh_assert_continuity"):
+                        if not res.get("session_continuity_ok"):
+                            raise RuntimeError(
+                                f"{s['id']}: proactive refresh did not preserve session continuity"
+                            )
+                        if res.get("expiry_denial_count", 0) != 0:
+                            raise RuntimeError(f"{s['id']}: proactive refresh saw expiry denials")
+                        if res.get("proactive_refresh_attempts", 0) <= 0:
+                            raise RuntimeError(f"{s['id']}: proactive refresh did not execute")
                 finally:
                     policy_churn.cleanup_dynsec_snapshot(generated_dynsec_path)
                 # Small delay to ensure container metrics are available after loadgen

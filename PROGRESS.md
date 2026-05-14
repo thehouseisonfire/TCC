@@ -274,8 +274,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 ## 8) Open Issues (Next Steps, Grouped)
 
 ### Priority List
-1. Issue 23: Proactive client re-authentication
-2. Issue 41: Containerized benchmark topology
+1. Issue 41: Containerized benchmark topology
 ---
 
 #### A) Policy Source Parity
@@ -306,19 +305,6 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 
 #### B) Matrix Coverage (Benchmark Verification)
 
-- [ ] **Issue 23: Proactive client reauthentication before expiry**
-  - Goal: Clients refresh tokens proactively and initiate MQTT v5 reauth at
-    least one minute before token expiration, minimizing ACL denials.
-  - Current gap: lifecycle coverage validates a single AUTH exchange, but not
-    timer-driven proactive refresh before expiry in long-lived sessions.
-  - Deliverable:
-    - Client-side refresh timer logic using the token `exp` claim.
-    - Request a new token from the Token Issuer and send an AUTH packet with
-      fresh credentials at least 60 seconds before expiry.
-    - Update benchmark clients/scenarios to exercise proactive refresh flow.
-    - Add runtime assertions proving session continuity without expiry-driven
-      disconnects during proactive-refresh runs.
-
 #### C) Dependency Tracking
 
 - [ ] **Issue 42: Bump Mosquitto image to 2.1.3-alpine when published**
@@ -328,6 +314,19 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 ---
 
 ## 9) Completed Issues (Backlog)
+
+- [x] **Issue 23: Proactive client reauthentication before expiry** — **COMPLETED 2026-05-13**
+  - **Summary**: Added timer-driven proactive refresh to the Rust MQTT v5 load
+    generator. Clients now fetch Token Issuer credentials with expiry metadata,
+    trigger tracked MQTT v5 `AUTH` reauthentication before `exp` minus the
+    configured margin (default 60 seconds), and continue the same MQTT session.
+  - **Coverage**: Added JWT and Biscuit lifecycle scenarios
+    (`TOKEN-LIFECYCLE-PROACTIVE-REAUTH-*`) plus runtime continuity assertions
+    (`session_continuity_ok`, proactive attempt/success/failure counts, and
+    expiry-denial count).
+  - **Research Alignment**: Keeps JWT as text and Biscuit as raw binary MQTT
+    authentication data, preserving token transport parity while measuring
+    lifecycle renewal cost without expiry-driven reconnect bias.
 
 - [x] **Issue 1: Add Dynamic Security module comparison**
   - **Completed**: Full Dynamic Security module implementation with JSON-based policy loading, role-based access control, and comprehensive ACL support. Added anonymous access, benchmark scenarios, and Docker configurations. Provides production-grade comparison against token-based approaches.

@@ -2,4 +2,4 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-exec cargo run --locked -p repo-xtask --bin benchmark-host-helper -- "$@"
+exec cargo run --locked -p repo-benchmark-host-helper --bin benchmark-host-helper -- "$@"

@@ -72,15 +72,20 @@ From the repository root, you can run the full workflow (build, token generation
 scenario run, cleanup) with:
 
 ```bash
-uv run --locked python run_benchmarks.py
+./scripts/run-benchmarks
 ```
 
 To run a subset of scenarios or enable TLS, pass flags through:
 
 ```bash
-uv run --locked python run_benchmarks.py --scenarios TOKEN-BASELINE-JWT,TOKEN-BASELINE-BISCUIT
-uv run --locked python run_benchmarks.py --tls
+./scripts/run-benchmarks --scenarios TOKEN-BASELINE-JWT,TOKEN-BASELINE-BISCUIT
+./scripts/run-benchmarks --tls
 ```
+
+The `scripts/run-benchmarks` launcher is a thin bash wrapper around the Rust
+crate `tools/run-benchmarks`. It keeps the repo-local command surface stable
+while the orchestration logic lives in Rust. The scenario harness it invokes
+remains `benchmarks/run_scenarios.py`.
 
 ## Step 1: Build the Plugin
 

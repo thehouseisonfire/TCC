@@ -22,14 +22,14 @@ repos:
         language: system
         pass_filenames: false
         stages: [commit, push]
-      - id: cargo-fmt-xtask
-        name: cargo fmt xtask
+      - id: cargo-fmt-tools
+        name: cargo fmt tools
         entry: cargo fmt --all --manifest-path Cargo.toml -- --check
         language: system
         pass_filenames: false
         stages: [commit, push]
-      - id: cargo-test-xtask
-        name: cargo test xtask
+      - id: cargo-test-tools
+        name: cargo test tools
         entry: cargo test --locked --workspace
         language: system
         pass_filenames: false

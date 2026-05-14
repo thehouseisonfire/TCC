@@ -2,4 +2,4 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-exec cargo run --locked -p repo-xtask --bin render-benchmark-inventory -- "$@"
+exec cargo run --locked -p repo-render-benchmark-inventory --bin render-benchmark-inventory -- "$@"

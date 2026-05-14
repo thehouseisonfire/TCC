@@ -1,0 +1,16 @@
+[package]
+name = "repo-benchmark-host-smoke"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "benchmark-host-smoke"
+path = "src/main.rs"

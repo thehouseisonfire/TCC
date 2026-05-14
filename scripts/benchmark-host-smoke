@@ -2,4 +2,4 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-exec cargo run --locked -p repo-xtask --bin benchmark-host-smoke -- "$@"
+exec cargo run --locked -p repo-benchmark-host-smoke --bin benchmark-host-smoke -- "$@"

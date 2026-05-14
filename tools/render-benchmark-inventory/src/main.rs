@@ -2,15 +2,47 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use clap::{Args, Parser};
 use serde_json::Value;
 
-use crate::repo_root;
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct InventoryHost {
+    host_alias: String,
+    ansible_host: String,
+    ansible_user: String,
+}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct InventoryHost {
-    pub host_alias: String,
-    pub ansible_host: String,
-    pub ansible_user: String,
+enum InventorySource {
+    Terraform,
+    JsonFile(PathBuf),
+}
+
+#[derive(Debug, Parser)]
+#[command(about = "Render the benchmark-host Ansible inventory from Terraform outputs.")]
+struct Cli {
+    #[command(flatten)]
+    source: Source,
+}
+
+#[derive(Debug, Args)]
+#[group(required = true, multiple = false)]
+struct Source {
+    #[arg(long)]
+    from_terraform: bool,
+
+    #[arg(long, value_name = "PATH")]
+    terraform_json: Option<PathBuf>,
+}
+
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect(
+            "tools/render-benchmark-inventory should live at <repo>/tools/render-benchmark-inventory",
+        )
+        .to_path_buf()
 }
 
 fn extract_string(candidate: &Value, key: &str) -> Result<String> {
@@ -28,7 +60,7 @@ fn extract_string(candidate: &Value, key: &str) -> Result<String> {
     Ok(value)
 }
 
-pub fn extract_inventory_host(payload: Value) -> Result<InventoryHost> {
+fn extract_inventory_host(payload: Value) -> Result<InventoryHost> {
     let candidate = payload
         .get("ansible_inventory")
         .map(|inventory| inventory.get("value").unwrap_or(inventory))
@@ -57,7 +89,7 @@ pub fn extract_inventory_host(payload: Value) -> Result<InventoryHost> {
     })
 }
 
-pub fn load_inventory_from_json_file(json_path: &Path) -> Result<InventoryHost> {
+fn load_inventory_from_json_file(json_path: &Path) -> Result<InventoryHost> {
     let text = std::fs::read_to_string(json_path)
         .with_context(|| format!("failed to read {}", json_path.display()))?;
     let payload = serde_json::from_str(&text)
@@ -65,7 +97,7 @@ pub fn load_inventory_from_json_file(json_path: &Path) -> Result<InventoryHost> 
     extract_inventory_host(payload)
 }
 
-pub fn load_inventory_from_terraform() -> Result<InventoryHost> {
+fn load_inventory_from_terraform() -> Result<InventoryHost> {
     let terraform_dir = repo_root().join("infra/terraform");
     let output = Command::new("terraform")
         .arg(format!("-chdir={}", terraform_dir.display()))
@@ -87,7 +119,7 @@ pub fn load_inventory_from_terraform() -> Result<InventoryHost> {
     extract_inventory_host(payload)
 }
 
-pub fn render_inventory_yaml(inventory_host: &InventoryHost) -> Result<String> {
+fn render_inventory_yaml(inventory_host: &InventoryHost) -> Result<String> {
     let host_alias = serde_json::to_string(&inventory_host.host_alias)?;
     let ansible_host = serde_json::to_string(&inventory_host.ansible_host)?;
     let ansible_user = serde_json::to_string(&inventory_host.ansible_user)?;
@@ -104,21 +136,41 @@ pub fn render_inventory_yaml(inventory_host: &InventoryHost) -> Result<String> {
     .join("\n"))
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub enum InventorySource {
-    Terraform,
-    JsonFile(PathBuf),
-}
-
-pub fn load_inventory(source: &InventorySource) -> Result<InventoryHost> {
+fn load_inventory(source: &InventorySource) -> Result<InventoryHost> {
     match source {
         InventorySource::Terraform => load_inventory_from_terraform(),
         InventorySource::JsonFile(path) => load_inventory_from_json_file(path),
     }
 }
 
+fn run() -> Result<()> {
+    let cli = Cli::parse();
+    let source = if cli.source.from_terraform {
+        InventorySource::Terraform
+    } else {
+        InventorySource::JsonFile(
+            cli.source
+                .terraform_json
+                .expect("clap requires one inventory source"),
+        )
+    };
+
+    let inventory_host = load_inventory(&source)?;
+    print!("{}", render_inventory_yaml(&inventory_host)?);
+    Ok(())
+}
+
+fn main() {
+    if let Err(err) = run() {
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use assert_cmd::Command;
+
     use super::{InventoryHost, load_inventory_from_json_file, render_inventory_yaml};
 
     #[test]
@@ -166,10 +218,52 @@ mod tests {
         )?;
 
         let host = load_inventory_from_json_file(&terraform_output)?;
-
         assert_eq!(host.host_alias, "tcc2-bench-host");
         assert_eq!(host.ansible_host, "203.0.113.20");
         assert_eq!(host.ansible_user, "benchmark");
+
+        Ok(())
+    }
+
+    #[test]
+    fn render_inventory_cli_reads_saved_terraform_output() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let terraform_output = temp.path().join("terraform-output.json");
+        std::fs::write(
+            &terraform_output,
+            r#"
+{
+  "ansible_inventory": {
+    "sensitive": false,
+    "type": [
+      "object",
+      {
+        "ansible_host": "string",
+        "ansible_user": "string",
+        "host_alias": "string"
+      }
+    ],
+    "value": {
+      "host_alias": "tcc2-bench-host",
+      "ansible_host": "203.0.113.20",
+      "ansible_user": "benchmark"
+    }
+  }
+}
+"#
+            .trim_start(),
+        )?;
+
+        let output = Command::cargo_bin("render-benchmark-inventory")?
+            .arg("--terraform-json")
+            .arg(&terraform_output)
+            .output()?;
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout)?;
+        assert!(stdout.contains("\"tcc2-bench-host\":"));
+        assert!(stdout.contains("ansible_host: \"203.0.113.20\""));
+        assert!(stdout.contains("ansible_user: \"benchmark\""));
 
         Ok(())
     }

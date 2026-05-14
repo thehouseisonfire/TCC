@@ -1,0 +1,15 @@
+[package]
+name = "repo-check-pins"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1"
+regex = "1"
+serde_yaml = "0.9"
+toml = "0.8"
+
+[[bin]]
+name = "check-pins"
+path = "src/main.rs"

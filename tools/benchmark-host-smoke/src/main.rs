@@ -2,30 +2,50 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-
-use crate::repo_root;
+use clap::Parser;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct AnsibleCommand {
-    pub program: String,
-    pub args: Vec<String>,
-    pub cwd: PathBuf,
-    pub playbook: String,
+struct AnsibleCommand {
+    program: String,
+    args: Vec<String>,
+    cwd: PathBuf,
+    playbook: String,
 }
 
 impl AnsibleCommand {
-    pub fn command_line(&self) -> Vec<String> {
+    fn command_line(&self) -> Vec<String> {
         std::iter::once(self.program.clone())
             .chain(self.args.iter().cloned())
             .collect()
     }
 }
 
-pub fn ansible_dir() -> PathBuf {
+#[derive(Debug, Parser)]
+#[command(about = "Apply and verify the benchmark-host smoke path for a fresh host.")]
+struct Args {
+    #[arg(long)]
+    inventory: PathBuf,
+
+    #[arg(long)]
+    limit: Option<String>,
+
+    #[arg(long)]
+    verify_only: bool,
+}
+
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("tools/benchmark-host-smoke should live at <repo>/tools/benchmark-host-smoke")
+        .to_path_buf()
+}
+
+fn ansible_dir() -> PathBuf {
     repo_root().join("infra/ansible")
 }
 
-pub fn ansible_playbook_command(
+fn ansible_playbook_command(
     inventory: &Path,
     playbook: &str,
     limit: Option<&str>,
@@ -54,7 +74,7 @@ pub fn ansible_playbook_command(
     }
 }
 
-pub fn smoke_command_plan(
+fn smoke_command_plan(
     inventory: &Path,
     limit: Option<&str>,
     verify_only: bool,
@@ -98,11 +118,23 @@ fn run_ansible_command(command: &AnsibleCommand) -> Result<()> {
     Ok(())
 }
 
-pub fn run_smoke(inventory: &Path, limit: Option<&str>, verify_only: bool) -> Result<()> {
+fn run_smoke(inventory: &Path, limit: Option<&str>, verify_only: bool) -> Result<()> {
     for command in smoke_command_plan(inventory, limit, verify_only)? {
         run_ansible_command(&command)?;
     }
     Ok(())
+}
+
+fn run() -> Result<()> {
+    let args = Args::parse();
+    run_smoke(&args.inventory, args.limit.as_deref(), args.verify_only)
+}
+
+fn main() {
+    if let Err(err) = run() {
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]

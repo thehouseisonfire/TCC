@@ -1,0 +1,17 @@
+[package]
+name = "repo-run-benchmarks"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+shlex = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[[bin]]
+name = "run-benchmarks"
+path = "src/main.rs"

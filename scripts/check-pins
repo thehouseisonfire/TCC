@@ -2,4 +2,4 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-exec cargo run --locked -p repo-xtask --bin check-pins -- "$@"
+exec cargo run --locked -p repo-check-pins --bin check-pins -- "$@"

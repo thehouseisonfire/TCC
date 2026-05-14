@@ -1,5 +1,17 @@
 [workspace]
-members = ["xtask"]
-default-members = ["xtask"]
+members = [
+  "tools/benchmark-host-helper",
+  "tools/benchmark-host-smoke",
+  "tools/check-pins",
+  "tools/render-benchmark-inventory",
+  "tools/run-benchmarks",
+]
+default-members = [
+  "tools/benchmark-host-helper",
+  "tools/benchmark-host-smoke",
+  "tools/check-pins",
+  "tools/render-benchmark-inventory",
+  "tools/run-benchmarks",
+]
 exclude = ["mqtt-auth-biscuit", "rumqtt"]
 resolver = "3"

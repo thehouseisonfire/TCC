@@ -19,7 +19,7 @@ The benchmark-host path is intentionally small and explicit:
 - `infra/terraform/`: pinned Terraform root for creating the benchmark VM
 - `infra/ansible/`: host convergence for the already-created benchmark VM
 - `scripts/`: operator-facing launchers for benchmark-host tooling
-- `xtask/`: Rust implementation and tests for the benchmark-host tools
+- `tools/`: Rust implementation crates for benchmark-host tools
 
 ## Current Boundary
 
@@ -103,9 +103,9 @@ Use the helper when scripts or docs need the canonical path contract:
 ./scripts/benchmark-host-helper --json
 ```
 
-Each launcher in `scripts/` is a thin bash wrapper around `cargo run -p repo-xtask`.
-That keeps the repo-local command surface stable while the implementation and
-tests live in Rust under `xtask/`.
+Each launcher in `scripts/` is a thin bash wrapper around the corresponding
+crate in `tools/`. That keeps the repo-local command surface stable while the
+implementation and tests live in dedicated Rust tool crates.
 
 ## Terraform Usage
 
@@ -146,7 +146,7 @@ Or run the combined converge-and-verify smoke path from the repo root:
 The benchmark-host tooling now has two stable entry styles:
 
 - preferred operator entrypoint: `./scripts/<tool-name>`
-- direct implementation entrypoint: `cargo run --locked -p repo-xtask --bin <tool-name> -- ...`
+- direct implementation entrypoint: `cargo run --locked -p <tool-package> --bin <tool-name> -- ...`
 
 Available launchers:
 

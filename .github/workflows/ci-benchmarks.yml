@@ -12,13 +12,14 @@ on:
       - 'mqtt-auth-biscuit/pytest.ini'
       - '.github/workflows/ci-benchmarks.yml'
       - 'TODO2.md'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - 'pyproject.toml'
       - 'uv.lock'
       - 'requirements.txt'
-      - 'run_benchmarks.py'
       - 'run_python_tests.sh'
       - 'scripts/**'
-      - 'tests/**'
+      - 'tools/**'
   pull_request:
     branches: [master, main]
     paths:
@@ -30,13 +31,14 @@ on:
       - 'mqtt-auth-biscuit/pytest.ini'
       - '.github/workflows/ci-benchmarks.yml'
       - 'TODO2.md'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - 'pyproject.toml'
       - 'uv.lock'
       - 'requirements.txt'
-      - 'run_benchmarks.py'
       - 'run_python_tests.sh'
       - 'scripts/**'
-      - 'tests/**'
+      - 'tools/**'
   schedule:
     - cron: '0 3 * * *'
   workflow_dispatch:
@@ -62,13 +64,23 @@ jobs:
       - name: Sync Python dependencies
         run: uv sync --locked
 
+      - name: Install Rust 1.93.1
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: 1.93.1
+
       - name: Install Terraform 1.13.5
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
         with:
           terraform_version: 1.13.5
 
-      - name: Test benchmark-host helper
-        run: uv run --locked --group dev pytest -q tests/test_benchmark_host_helper.py tests/test_render_benchmark_inventory.py tests/test_benchmark_host_package_locks.py
+      - name: Test benchmark-host tool crates
+        run: |
+          cargo test --locked \
+            -p repo-benchmark-host-helper \
+            -p repo-benchmark-host-smoke \
+            -p repo-check-pins \
+            -p repo-render-benchmark-inventory
 
       - name: Check Terraform formatting
         run: terraform -chdir=infra/terraform fmt -check
@@ -107,7 +119,7 @@ jobs:
         run: uv sync --locked
 
       - name: Run reproducibility audit
-        run: uv run --locked python scripts/check_pins.py
+        run: ./scripts/check-pins
 
       - name: Install Rust 1.93.1
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9

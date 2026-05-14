@@ -65,14 +65,19 @@ rule-engine baseline (`authz_profile=custom`, empty rules, default deny).
 Scenarios must apply an explicit profile or custom rule set; benchmark semantics
 are no longer inherited from implicit startup behavior.
 
+The top-level benchmark workflow entrypoint is:
+
+`../scripts/run-benchmarks`
+
 The main entrypoint is:
 
 `benchmarks/run_scenarios.py`
 
-Python benchmark code orchestrates scenarios, Docker state, and result
-aggregation. The MQTT benchmark client implementation is Rust `mqtt-loadgen`;
-`benchmarks/loadgen.py` is only a compatibility wrapper that forwards to that
-Rust binary.
+The repo-level workflow wrapper is now Rust, but scenario orchestration,
+Docker-state handling, and result aggregation still live in Python under
+`benchmarks/run_scenarios.py`. The MQTT benchmark client implementation is Rust
+`mqtt-loadgen`; `benchmarks/loadgen.py` is only a compatibility wrapper that
+forwards to that Rust binary.
 
 For running the benchmark scripts:
   - Install dependencies: `uv sync --locked`

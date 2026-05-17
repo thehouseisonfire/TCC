@@ -2,7 +2,7 @@
 
 **Project**: Eclipse Mosquitto Auth Biscuit Plugin (Rust)\
 **Started**: 2026-01-04\
-**Last Updated**: 2026-03-19\
+**Last Updated**: 2026-05-17\
 
 ---
 
@@ -15,19 +15,21 @@ implemented in Rust that supports:
 - MQTT v5 enhanced auth (server-side support via Mosquitto callbacks)
 - Authorization via:
   - token-only evaluation
+  - static ACL compound authorization
+  - Dynamic Security snapshot/runtime policy backend
   - SQLite policy backend
   - external HTTP policy/introspection
   - hybrid HTTP-preferred with token-only fallback on HTTP failure
 
 The Docker + benchmark stack is now set up to run the experimental scenarios
-described in `ARTICLE.MD`, including a controllable HTTP authz service and a
+described in `ARTICLE.md`, including a controllable HTTP authz service and a
 `netem` helper for MTU/latency/loss experiments.
 
 ---
 
 ## 2) Architecture & Crate Map
 
-### 2.1 Logical Roles (ARTICLE.MD Terminology)
+### 2.1 Logical Roles (`ARTICLE.md` Terminology)
 
 - **Token Issuer (implemented)**: the `token-issuer` service is the only
   component that may ever hold **private signing keys** (JWT ES256 private key
@@ -208,9 +210,9 @@ Each file contains:
   - `benchmarks/run_scenarios.py`
   - `benchmarks/mqtt_auth_client.py`
 
-### Execution Status (2026-02-23)
+### Historical Execution Status (2026-02-23)
 
-End-to-end execution has now been performed for the Issue 33 parity slice:
+End-to-end execution was performed for the Issue 33 parity slice:
 
 - HTTP policy parity matrix:
   - `HTTP-PROFILE-SIMPLE-JWT`, `HTTP-PROFILE-MED-JWT`,
@@ -369,7 +371,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     lifetimes).
 
 - [x] **Issue 14: Add iperf3 baseline (throughput interpretation)** — **COMPLETED 2026-02-06**
-  - **Summary**: Implemented `iperf3` integration to measure nominal channel capacity as specified in ARTICLE.MD methodology. Added `iperf3` service to docker-compose.yml, created `benchmarks/iperf3_baseline.py` module with measurement, parsing, and validity checking functions. Integrated automated baseline measurement into `run_scenarios.py` with CLI options (`--iperf3/--no-iperf3`, `--iperf3-host`, `--iperf3-port`, `--iperf3-duration`, `--iperf3-streams`, `--iperf3-min-mbps`). Network capacity data included in scenario results JSON under `network_baseline` field with throughput, RTT, retransmits, and validity assessment. Warns when network constraints may affect test validity.
+  - **Summary**: Implemented `iperf3` integration to measure nominal channel capacity as specified in `ARTICLE.md` methodology. Added `iperf3` service to docker-compose.yml, created `benchmarks/iperf3_baseline.py` module with measurement, parsing, and validity checking functions. Integrated automated baseline measurement into `run_scenarios.py` with CLI options (`--iperf3/--no-iperf3`, `--iperf3-host`, `--iperf3-port`, `--iperf3-duration`, `--iperf3-streams`, `--iperf3-min-mbps`). Network capacity data included in scenario results JSON under `network_baseline` field with throughput, RTT, retransmits, and validity assessment. Warns when network constraints may affect test validity.
 
 - [x] **Issue 15: Add packet-level analysis with tcpdump for fragmentation studies**
   - **Completed**: Integrated tcpdump capture and automated packet analysis for MTU stress test scenarios.
@@ -835,15 +837,13 @@ establishment. The library supports enhanced authentication during the initial
 CONNECT/CONNACK handshake but lacks methods like `send_auth()` or
 `reauthenticate()` for triggering mid-session re-authentication.
 
-**Workaround**: `benchmarks/mqtt_auth_client.py` implements a minimal raw-socket
-MQTT5 client that:
+**Current implementation**: `benchmarks/mqtt_auth_client.py` is a compatibility
+wrapper that invokes the Rust `mqtt-auth-client` binary from the benchmark
+crate. The Rust client:
 
 - Sends `CONNECT` with Authentication Method/Data
 - After connection establishment, sends an `AUTH` packet with updated token data
 - Measures connect latency and reauth latency separately
-
-**Update Note**: The client has been migrated to Rumqttc in part as a result of
-this limitation.
 
 **Impact on Research Validity**:
 
@@ -851,9 +851,9 @@ this limitation.
   logic is independent of client transport implementation. Both JWT and Biscuit
   tokens are tested under identical client conditions, preserving comparative
   validity
-- **Improved isolation**: Raw socket control provides more precise timing
-  measurements by eliminating Paho's internal state management overhead,
-  actually **strengthening** the isolation of broker-side processing costs.
+- **Improved isolation**: The dedicated Rust client avoids Paho's missing
+  mid-session `AUTH` API and keeps the client transport implementation
+  consistent with the Rust benchmark load-generation stack.
 - **No hypothesis compromise**: The hypothesis focus on broker-side functional
   viability, cryptographic verification costs, and policy evaluation latency
   are measured server-side and unaffected by client implementation details.

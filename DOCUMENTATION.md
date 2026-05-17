@@ -9,6 +9,8 @@ Use this file as the entry point to project documentation.
 - Scenario policy semantics and parity: `SCENARIO_POLICIES.md`
 - Project status and backlog: `PROGRESS.md`
 - Perf-specific operator guide: `mqtt-auth-biscuit/benchmarks/PERF_PROFILING.md`
+- Benchmark host infrastructure: `infra/README.md`
+- Custom Mosquitto build path: `BUILD-MOSQUITTO.md`
 
 ## Research Context
 

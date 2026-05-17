@@ -4,7 +4,7 @@ This document is the perf-specific companion to
 `RUNNING_BENCHMARKS.md`.
 
 - Benchmark execution workflow and scenario orchestration: `RUNNING_BENCHMARKS.md`
-- Project status and issue tracking: `../PROGRESS.md`
+- Project status and issue tracking: `../../PROGRESS.md`
 
 ## Scope
 
@@ -100,14 +100,14 @@ Key fields:
 
 When callgraph is enabled, files are written under `benchmarks/results/perf`:
 
-- `perf-<pid>-<timestamp>.data`
-- `perf-<pid>-<timestamp>.script`
+- `perf-record-<pid>-<timestamp>.data`
+- `perf-record-<pid>-<timestamp>.script`
 
 Manual inspection:
 
 ```bash
 cd benchmarks/results/perf
-perf report -i perf-<pid>-<timestamp>.data
+perf report -i perf-record-<pid>-<timestamp>.data
 ```
 
 ## Interpreting CPU Counters
@@ -154,6 +154,6 @@ No Mosquitto PID / empty samples:
 ## References
 
 - `RUNNING_BENCHMARKS.md`
-- `../PROGRESS.md`
-- `../ARTICLE.md`
+- `../../PROGRESS.md`
+- `../../ARTICLE.md`
 - `man perf`

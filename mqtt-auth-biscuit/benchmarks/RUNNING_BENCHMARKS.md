@@ -219,11 +219,14 @@ docker compose -f docker/docker-compose.yml up --build -d
 
 ## Step 4: Run Benchmarks
 
-You can run the benchmark script to measure latency and throughput:
+Use the scenario harness for reproducible latency and throughput runs:
 
 ```bash
-python3 benchmarks/metrics_collector.py
+python3 benchmarks/run_scenarios.py --scenarios TOKEN-BASELINE-JWT,TOKEN-BASELINE-BISCUIT
 ```
+
+`benchmarks/metrics_collector.py` remains available only for legacy/manual
+single-run spot checks.
 
 ### Static ACL Scenarios (Compound Gate with Two Authorization Sources)
 
@@ -536,7 +539,7 @@ Timing bounds and flake-control strategy:
 - If host load is high, rerun the marker suite once before classifying as a
   regression
 
-You can also run the full scenario battery from `ARTICLE.MD` (MTU sweep, thundering herd, policy complexity, HTTP introspection latency/loss, hybrid contingency, and MQTT reauthentication):
+You can also run the full scenario battery from `ARTICLE.md` (MTU sweep, thundering herd, policy complexity, HTTP introspection latency/loss, hybrid contingency, and MQTT reauthentication):
 
 ```bash
 python3 benchmarks/run_scenarios.py
@@ -825,7 +828,7 @@ Current limitation: `container-per-client` is intentionally rejected for fan-out
 scenarios because those require coordinated subscriber readiness plus a separate
 publisher/controller role. Use `container-single` for ACL_READ fan-out matrices.
 
-## INTERLEAVED-CONTROL Scenarios (Issue 36)
+## CONTROL-INTERLEAVED-DATA Scenarios (Issue 36)
 
 These scenarios measure **control plane latency under active data plane load** by publishing control messages interleaved with regular data messages. Unlike CONTROL-OVERHEAD (control-only) and CONTROL-CHURN (batch policy churn), these scenarios simulate realistic mixed workloads where control messages (policy updates, reauthentication triggers) must be processed while ongoing data traffic continues.
 
@@ -900,7 +903,7 @@ cargo run --locked -p gen-tokens --bin mqtt-loadgen -- \
 
 ### Research Notes
 
-- **Control overhead**: Compare `control.mean_ms` between `INTERLEAVED-CONTROL-*` and `CONTROL-OVERHEAD-*` to measure the impact of concurrent data traffic
+- **Control overhead**: Compare `control.mean_ms` between `CONTROL-INTERLEAVED-DATA-*` and `CONTROL-OVERHEAD-*` to measure the impact of concurrent data traffic
 - **Data impact**: Compare `publish.mean_ms` between baseline (`TOKEN-BASELINE-JWT`, `TOKEN-BASELINE-BISCUIT`) and interleaved scenarios to quantify data plane degradation
 - **Injection efficiency**: `control_injection_delay` should remain low (<5ms); high values indicate broker contention
 
@@ -1020,4 +1023,4 @@ Packet analysis results are included in scenario output JSON under `packet_analy
 - **Retransmissions**: Under MTU stress, retransmissions indicate network congestion or packet loss
 - **Token size correlation**: Directly relates token size to network fragmentation costs
 
-This data supports ARTICLE.MD's fragmentation hypothesis (H₂/H₃ validation) by quantifying the network-level impact of token size under varying MTU constraints.
+This data supports `ARTICLE.md`'s fragmentation hypothesis (H₂/H₃ validation) by quantifying the network-level impact of token size under varying MTU constraints.

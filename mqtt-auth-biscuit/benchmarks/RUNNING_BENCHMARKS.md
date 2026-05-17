@@ -75,7 +75,8 @@ scenario run, cleanup) with:
 ./scripts/run-benchmarks
 ```
 
-To run a subset of scenarios or enable TLS, pass flags through:
+The wrapper intentionally exposes a stable subset of the scenario-runner flags.
+For example:
 
 ```bash
 ./scripts/run-benchmarks --scenarios TOKEN-BASELINE-JWT,TOKEN-BASELINE-BISCUIT
@@ -85,7 +86,14 @@ To run a subset of scenarios or enable TLS, pass flags through:
 The `scripts/run-benchmarks` launcher is a thin bash wrapper around the Rust
 crate `tools/run-benchmarks`. It keeps the repo-local command surface stable
 while the orchestration logic lives in Rust. The scenario harness it invokes
-remains `benchmarks/run_scenarios.py`.
+remains `benchmarks.run_scenarios`.
+
+Supported wrapper pass-through flags are currently `--scenarios`, `--clients`,
+`--messages`, `--qos`, `--tls`, `--tls-insecure`, `--tls-ca-file`,
+`--token-issuer-no-default-roles`, `--biscuit-base64url`, and
+`--token-refresh-codes`. Use the direct module entrypoint for lower-level
+runner options such as `--perf`, `--iperf3-*`, `--tcpdump-*`,
+`--client-topology`, or `--out`.
 
 ## Step 1: Build the Plugin
 
@@ -222,7 +230,7 @@ docker compose -f docker/docker-compose.yml up --build -d
 Use the scenario harness for reproducible latency and throughput runs:
 
 ```bash
-python3 benchmarks/run_scenarios.py --scenarios TOKEN-BASELINE-JWT,TOKEN-BASELINE-BISCUIT
+uv run --locked python -m benchmarks.run_scenarios --scenarios-arg TOKEN-BASELINE-JWT,TOKEN-BASELINE-BISCUIT
 ```
 
 `benchmarks/metrics_collector.py` remains available only for legacy/manual
@@ -404,8 +412,8 @@ strict `ACL_READ`.
 Example run:
 
 ```bash
-python3 benchmarks/run_scenarios.py \
-  --scenarios SQLITE-RBAC-DEEP-CONFLICT-JWT,SQLITE-RBAC-DEEP-CONTROL-BISCUIT
+uv run --locked python -m benchmarks.run_scenarios \
+  --scenarios-arg SQLITE-RBAC-DEEP-CONFLICT-JWT,SQLITE-RBAC-DEEP-CONTROL-BISCUIT
 ```
 
 Validation signal in scenario result JSON (`runs[].loadgen.fanout_churn`):
@@ -416,11 +424,11 @@ Validation signal in scenario result JSON (`runs[].loadgen.fanout_churn`):
 ### Anonymous Flow Scenario (DYNAMIC-SECURITY-ANONYMOUS-BASELINE)
 
 Policy rationale and security trade-offs are documented in
-`../../SCENARIO_POLICIES.md` (`## 2.8`).
+`../../SCENARIO_POLICIES.md` (`## 2.9`).
 
 **Usage:**
 ```bash
-python3 benchmarks/run_scenarios.py --scenarios DYNAMIC-SECURITY-ANONYMOUS-BASELINE
+uv run --locked python -m benchmarks.run_scenarios --scenarios-arg DYNAMIC-SECURITY-ANONYMOUS-BASELINE
 ```
 
 This run uses `docker/mosquitto_anon.conf` and `docker/dynamic-security-anon.json`.
@@ -542,7 +550,7 @@ Timing bounds and flake-control strategy:
 You can also run the full scenario battery from `ARTICLE.md` (MTU sweep, thundering herd, policy complexity, HTTP introspection latency/loss, hybrid contingency, and MQTT reauthentication):
 
 ```bash
-python3 benchmarks/run_scenarios.py
+uv run --locked python -m benchmarks.run_scenarios
 ```
 
 ### TLS-Enabled Runs
@@ -552,7 +560,7 @@ To measure TLS overhead across all network paths (MQTT, token issuer, authz HTTP
 ```bash
 bash docker/tls/generate_certs.sh
 docker compose -f docker/docker-compose.yml -f docker/docker-compose.tls.yml up --build -d
-python3 benchmarks/run_scenarios.py --tls
+uv run --locked python -m benchmarks.run_scenarios --tls
 ```
 
 Optional TLS flags:
@@ -570,7 +578,7 @@ python3 benchmarks/metrics_collector.py --tls --port 8883
 To select a different Mosquitto configuration for a run (e.g. HTTP policy or hybrid policy), set `MOSQUITTO_CONF`:
 
 ```bash
-MOSQUITTO_CONF=docker/mosquitto_http.conf python3 benchmarks/run_scenarios.py
+MOSQUITTO_CONF=docker/mosquitto_http.conf uv run --locked python -m benchmarks.run_scenarios
 ```
 
 ### HTTP Policy Backend Schema (HTTP/Hybrid Modes)
@@ -669,17 +677,17 @@ The scenario runner includes automatic network capacity measurement using `iperf
 
 Run with default iperf3 baseline (enabled by default):
 ```bash
-python3 benchmarks/run_scenarios.py --scenarios BASELINE-NO-AUTH,TOKEN-BASELINE-JWT
+uv run --locked python -m benchmarks.run_scenarios --scenarios-arg BASELINE-NO-AUTH,TOKEN-BASELINE-JWT
 ```
 
 Disable iperf3 baseline (faster startup, no network validation):
 ```bash
-python3 benchmarks/run_scenarios.py --no-iperf3
+uv run --locked python -m benchmarks.run_scenarios --no-iperf3
 ```
 
 Adjust minimum expected throughput for constrained environments:
 ```bash
-python3 benchmarks/run_scenarios.py --iperf3-min-mbps 10.0
+uv run --locked python -m benchmarks.run_scenarios --iperf3-min-mbps 10.0
 ```
 
 ### Result Structure
@@ -889,7 +897,7 @@ Example output structure:
 
 ```bash
 # Run interleaved scenario via run_scenarios.py
-python3 benchmarks/run_scenarios.py --scenarios CONTROL-INTERLEAVED-DATA-JWT
+uv run --locked python -m benchmarks.run_scenarios --scenarios-arg CONTROL-INTERLEAVED-DATA-JWT
 
 # Direct loadgen usage with interleaved control
 cargo run --locked -p gen-tokens --bin mqtt-loadgen -- \
@@ -940,22 +948,22 @@ The benchmark suite includes automated packet capture using `tcpdump` to analyze
 
 Run with default tcpdump capture (auto-enabled for MTU scenarios):
 ```bash
-python3 benchmarks/run_scenarios.py --scenarios NETWORK-MTU-200-JWT,NETWORK-MTU-500-BISCUIT-CHAIN-25
+uv run --locked python -m benchmarks.run_scenarios --scenarios-arg NETWORK-MTU-200-JWT,NETWORK-MTU-500-BISCUIT-CHAIN-25
 ```
 
 Disable packet capture entirely:
 ```bash
-python3 benchmarks/run_scenarios.py --no-tcpdump
+uv run --locked python -m benchmarks.run_scenarios --no-tcpdump
 ```
 
 Capture only, skip analysis (faster for bulk captures):
 ```bash
-python3 benchmarks/run_scenarios.py --no-tcpdump-analyze
+uv run --locked python -m benchmarks.run_scenarios --no-tcpdump-analyze
 ```
 
 Custom filter to capture all traffic:
 ```bash
-python3 benchmarks/run_scenarios.py --tcpdump-filter "tcp"
+uv run --locked python -m benchmarks.run_scenarios --tcpdump-filter "tcp"
 ```
 
 ### Metrics Captured

@@ -4089,7 +4089,9 @@ def main(
             else:
                 logger.warning("Unknown scenario '%s', skipping", scenario_id)
     else:
-        logger.info("No scenarios specified. Use --scenarios to specify which scenarios to run.")
+        logger.info(
+            "No scenarios specified. Use --scenarios-arg to specify which scenarios to run."
+        )
         logger.info("Available scenarios:")
         available_scenarios = _build_available_scenarios(
             tokens,

@@ -282,7 +282,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 #### A) Dependency Tracking
 
 - [ ] **Issue 42: Bump Mosquitto image to 2.1.3-alpine when published**
-  - Blocked as of 2026-03-04: `eclipse-mosquitto:2.1.3-alpine` is not yet on Docker Hub.
+  - Blocked as of 2026-05-17: `eclipse-mosquitto:2.1.3-alpine` is not yet on Docker Hub.
   - Reason: we need a feature from Mosquitto 2.1.3.
 
 ---
@@ -421,7 +421,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     - **Comprehensive documentation**: Added detailed rustdoc covering authorization flow and enforcement variants
     - **Benchmark scenarios**: Added 4 CONTROL scenarios (KICK-REAUTH and ACL-READ-NOTIFY variants for JWT/Biscuit)
     - **Unit tests**: Added `control_callback_defers_non_control_topics` test
-  - **Code Pointers**: @/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/lib.rs#1001-1141
+  - **Code Pointers**: `mqtt-auth-biscuit/crates/mosquitto-plugin/src/lib.rs`
 
 - [x] **Issue 20.1: Verify ACL_CHECK subtype handling across policy modes**
   - **Summary**: Added `MOSQ_ACL_CONTROL` constant (0x08) for control-plane access; fixed `control_callback` hardcoded `access: 2` → `MOSQ_ACL_CONTROL`; updated `access_to_operation()` to map 0x08 → "control"; added comprehensive unit tests for all ACL subtypes (READ/WRITE/SUBSCRIBE/CONTROL) with priority ordering (WRITE > SUBSCRIBE > CONTROL > READ), bitmask combinations, and edge cases. All 7 policy modes verified to correctly handle distinct ACL subtypes.
@@ -553,17 +553,20 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
       `benchmarks/RUNNING_BENCHMARKS.md` with Issue 31 focused invocation.
 
 - [x] **Issue 32: Verify control-triggered dynamic enforcement (ACL_READ + notify)**
-  - Summary: Implemented control scenarios where `$CONTROL/.../v1` triggers cache
-    invalidation and clients are informed via a notification topic while
-    `ACL_READ` denies fan-out.
-  - Gap: notification and deny behavior were covered, but notification
-    publication and policy transitions are currently orchestrated outside the
-    control command path.
-  - Deliverable:
-    - Notification topic publishing (e.g., `system_notification/<client_id>`)
-    - Scenario capturing denial after privilege reduction
-    - Runtime proof that notification + deny transition is caused by control
-      operation execution (not manual external policy mutation).
+  - Summary: Implemented and verified notify-oriented control enforcement
+    scenarios for Dynamic Security, including notification fan-out coverage and
+    post-change `ACL_READ` denial behavior.
+  - Completed evidence:
+    - `CONTROL-OVERHEAD-ACL-READ-NOTIFY-*` covers the notification fan-out
+      control path.
+    - `DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-REVOKE-*` publishes a Dynamic
+      Security control command during active fan-out and verifies post-control
+      read denial.
+    - `DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-DISABLE-*` verifies immediate
+      runtime enforcement for disabled subscriber identities.
+    - Broker integration coverage in `tests/integration/test_runtime_enforcement.py`
+      validates control-triggered notification/denial behavior against a real
+      Mosquitto process.
 
 - [x] **Issue 33: Enhance HTTP policy expressiveness for parity with token-based
     authorization**

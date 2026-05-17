@@ -318,7 +318,7 @@ fn build_runtime_plan(cli: &Cli, now: u64, compose_cmd: &[String]) -> RuntimePla
 
     let run_scenarios = plan_command(
         "uv",
-        ["run", "--locked", "python", "benchmarks/run_scenarios.py"]
+        ["run", "--locked", "python", "-m", "benchmarks.run_scenarios"]
             .into_iter()
             .map(str::to_owned)
             .chain(scenario_args(cli))
@@ -533,7 +533,8 @@ mod tests {
                 "run".to_owned(),
                 "--locked".to_owned(),
                 "python".to_owned(),
-                "benchmarks/run_scenarios.py".to_owned(),
+                "-m".to_owned(),
+                "benchmarks.run_scenarios".to_owned(),
                 "--scenarios-arg".to_owned(),
                 "TOKEN-BASELINE-JWT".to_owned(),
                 "--tls".to_owned()

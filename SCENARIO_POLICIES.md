@@ -26,9 +26,9 @@ JWT and Biscuit follow the same evaluation order:
 2. **Allow-next:** if an allow matches, access is accepted.
 3. **Default deny** if no match.
 
-See `authz.rs` and `biscuit_handler.rs` for the policy logic and authorizer template
-(@/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/authz.rs#212-411,
-@/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/biscuit_handler.rs#201-237).
+See `mqtt-auth-biscuit/crates/mosquitto-plugin/src/authz.rs` and
+`mqtt-auth-biscuit/crates/mosquitto-plugin/src/biscuit_handler.rs` for the
+policy logic and authorizer template.
 
 ### JWT Token-Only Claims
 
@@ -42,8 +42,9 @@ JWTs carry the following in `grants` and `denies`:
 - `read` falls back to `subscribe` when no explicit read rule exists.
 - Deny rules can be used to override a broad allow.
 
-Claims are generated in `gen-tokens` and `token-issuer` (@/home/eagle/TCC2/mqtt-auth-biscuit/crates/benchmarks/src/main.rs#66-129,
-@/home/eagle/TCC2/mqtt-auth-biscuit/crates/token-issuer/src/main.rs#213-285).
+Claims are generated in `gen-tokens` and `token-issuer`
+(`mqtt-auth-biscuit/crates/benchmarks/src/main.rs` and
+`mqtt-auth-biscuit/crates/token-issuer/src/main.rs`).
 
 ### Biscuit Token-Only Facts
 
@@ -55,8 +56,8 @@ Tokens include facts such as:
 - `expires_at(<unix>)`
 
 The authorizer collects `right/deny` facts and applies MQTT wildcard matching
-(`+`, `#`) against the request topic, with deny-over-allow semantics
-(@/home/eagle/TCC2/mqtt-auth-biscuit/crates/mosquitto-plugin/src/biscuit_handler.rs#238-264).
+(`+`, `#`) against the request topic, with deny-over-allow semantics. See
+`mqtt-auth-biscuit/crates/mosquitto-plugin/src/biscuit_handler.rs`.
 
 **Topic-matching parity note:** JWT and Biscuit both honor wildcard topic filters in token-only mode, keeping policy templates aligned for fair comparisons. This is not the same as `parity_identity_bound`: token-only scenarios remain `capability` unless the scenario is an explicit `-PARITY-` variant with strict binding enabled for both token types.
 
@@ -136,9 +137,10 @@ complexity. Scenario outputs include `complexity.axis = "chain_length"`.
 | TOKEN-COMPLEXITY-DATALOG-HIGH-BISCUIT | Biscuit | Token-only | Adds regional + device-class derivations + extra time checks | Allows |
 
 **Analysis:** these scenarios keep the same topic/operation and token size class, while
-increasing rule count and block structure to isolate Datalog evaluation cost. Scenario outputs include `complexity.axis = "datalog"`. Tokens are
-defined in `gen-tokens` (see `biscuit_complex_*` in
-@/home/eagle/TCC2/mqtt-auth-biscuit/crates/benchmarks/src/main.rs#205-365).
+increasing rule count and block structure to isolate Datalog evaluation cost.
+Scenario outputs include `complexity.axis = "datalog"`. Tokens are defined in
+`gen-tokens` (see `biscuit_complex_*` in
+`mqtt-auth-biscuit/crates/benchmarks/src/main.rs`).
 
 #### C) Authorizer Template Complexity (Constant Token Size)
 
@@ -337,7 +339,28 @@ be used in JWT-vs-Biscuit parity comparisons. Biscuit attenuation/delegation are
 intentionally not parity scenarios because the experiment is measuring a Biscuit
 capability that JWT does not provide in the same form.
 
-### 2.8 Anonymous Flow (DYNAMIC-SECURITY-ANONYMOUS-BASELINE, `capability`, JWT `off`, Biscuit `off`)
+### 2.8 Control Plane And Dynamic Security Command Scenarios
+
+Control-plane scenarios use Dynamic Security policy state and `$CONTROL/...`
+publishes to measure authorization overhead and policy-mutation cost. They are
+not identity-bound parity scenarios unless explicitly classified otherwise in
+the registry.
+
+| Scenario Family | Token | Policy Source | Policy Detail | Expected Outcome |
+| --- | --- | --- | --- | --- |
+| `CONTROL-OVERHEAD-KICK-REAUTH-*` | JWT/Biscuit admin token | Dynamic Security | Authorizes control-topic publish without modeling a data-plane fan-out workload | Control publish allowed; classified `mixed` because JWT binding is strict and Biscuit binding is off |
+| `CONTROL-OVERHEAD-ACL-READ-NOTIFY-*` | JWT/Biscuit admin token | Dynamic Security | Control-topic publish plus notification fan-out path | Control/notification path allowed under capability semantics |
+| `CONTROL-CHURN-{CREATE-ROLE,GROUP-CLIENT,ACL-MODIFY,LARGE-STATE-GROUP-CLIENT,NOOP-GROUP-CLIENT}-*` | JWT/Biscuit admin token | Dynamic Security | Publishes concrete Dynamic Security command payloads that mutate roles, groups, ACLs, large state, or idempotent membership | Command path succeeds and mutation cost is measured; classified `mixed` |
+| `CONTROL-CHURN-REPEAT-SAME-ENTITY-*` | JWT/Biscuit admin token | Dynamic Security | Repeated mutations against one shared Dynamic Security entity | Measures repeated-update control-plane cost under capability semantics |
+| `CONTROL-CHURN-REPEAT-DISTINCT-ENTITY-*` | JWT/Biscuit admin token | Dynamic Security | Repeated mutations against worker-specific Dynamic Security entities | Measures per-entity churn cost under capability semantics |
+| `CONTROL-CHURN-CONCURRENT-CONTROLLERS-*` | JWT/Biscuit admin token | Dynamic Security | Multiple controller clients publish mutation commands concurrently | Measures contention/control-plane scalability under capability semantics |
+| `CONTROL-INTERLEAVED-DATA-*` | JWT/Biscuit token | Dynamic Security | Interleaves `$CONTROL/...` publishes with normal data-plane publishes | Measures control latency while data traffic is active |
+
+Control command payloads are generated by
+`mqtt-auth-biscuit/benchmarks/dynsec_commands.py`; scenario orchestration and
+semantic classification live in `mqtt-auth-biscuit/benchmarks/run_scenarios.py`.
+
+### 2.9 Anonymous Flow (DYNAMIC-SECURITY-ANONYMOUS-BASELINE, `capability`, JWT `off`, Biscuit `off`)
 
 | Scenario | Token | Policy Source | Policy Detail | Expected Outcome |
 | --- | --- | --- | --- | --- |

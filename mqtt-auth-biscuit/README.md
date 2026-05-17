@@ -69,15 +69,23 @@ The top-level benchmark workflow entrypoint is:
 
 `../scripts/run-benchmarks`
 
-The main entrypoint is:
+The direct scenario-runner module is:
 
-`benchmarks/run_scenarios.py`
+`uv run --locked python -m benchmarks.run_scenarios`
 
 The repo-level workflow wrapper is now Rust, but scenario orchestration,
 Docker-state handling, and result aggregation still live in Python under
-`benchmarks/run_scenarios.py`. The MQTT benchmark client implementation is Rust
+`benchmarks.run_scenarios`. The MQTT benchmark client implementation is Rust
 `mqtt-loadgen`; `benchmarks/loadgen.py` is only a compatibility wrapper that
 forwards to that Rust binary.
+
+Use `../scripts/run-benchmarks --scenarios ...` for the stable wrapper
+interface. Use the direct module form when you need runner-only flags such as
+`--perf`, `--iperf3-*`, `--tcpdump-*`, `--client-topology`, or `--out`:
+
+```bash
+uv run --locked python -m benchmarks.run_scenarios --scenarios-arg ...
+```
 
 For running the benchmark scripts:
   - Install dependencies: `uv sync --locked`

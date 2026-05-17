@@ -80,7 +80,7 @@ Run commands are documented in `RUNNING_BENCHMARKS.md`; perf controls are:
 Minimal example:
 
 ```bash
-python3 benchmarks/run_scenarios.py --scenarios TOKEN-BASELINE-JWT,TOKEN-BASELINE-BISCUIT --perf
+uv run --locked python -m benchmarks.run_scenarios --scenarios-arg TOKEN-BASELINE-JWT,TOKEN-BASELINE-BISCUIT --perf
 ```
 
 ## Output Structure

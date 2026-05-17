@@ -271,17 +271,13 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 
 ---
 
-## 8) Open Issues (Next Steps, Grouped)
+## 8) Open Issues
 
 ### Priority List
 1. Issue 42: Bump Mosquitto image to 2.1.3-alpine when published
 ---
 
-#### A) Policy Source Parity
-
-#### B) Matrix Coverage (Benchmark Verification)
-
-#### C) Dependency Tracking
+#### A) Dependency Tracking
 
 - [ ] **Issue 42: Bump Mosquitto image to 2.1.3-alpine when published**
   - Blocked as of 2026-03-04: `eclipse-mosquitto:2.1.3-alpine` is not yet on Docker Hub.

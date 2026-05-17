@@ -10,6 +10,7 @@ on:
       - 'mqtt-auth-biscuit/crates/**'
       - 'mqtt-auth-biscuit/tests/**'
       - 'mqtt-auth-biscuit/pytest.ini'
+      - '.dockerignore'
       - '.github/workflows/ci-benchmarks.yml'
       - 'TODO2.md'
       - 'Cargo.toml'
@@ -29,6 +30,7 @@ on:
       - 'mqtt-auth-biscuit/crates/**'
       - 'mqtt-auth-biscuit/tests/**'
       - 'mqtt-auth-biscuit/pytest.ini'
+      - '.dockerignore'
       - '.github/workflows/ci-benchmarks.yml'
       - 'TODO2.md'
       - 'Cargo.toml'
@@ -151,6 +153,15 @@ jobs:
       - name: Mypy check
         run: uv run --locked --group dev mypy mqtt-auth-biscuit
 
+      - name: Run benchmark topology tests
+        env:
+          PYTHONPATH: mqtt-auth-biscuit
+        run: |
+          uv run --locked --group dev pytest -q \
+            mqtt-auth-biscuit/benchmarks/test_loadgen_wrapper.py \
+            mqtt-auth-biscuit/benchmarks/test_runner_startup_readiness.py \
+            mqtt-auth-biscuit/benchmarks/test_scenario_semantics.py
+
       - name: Verify Docker tooling
         run: |
           docker --version
@@ -159,6 +170,13 @@ jobs:
       - name: Validate Docker Compose configuration
         working-directory: mqtt-auth-biscuit/docker
         run: docker compose -f docker-compose.yml config
+
+      - name: Build and smoke loadgen container
+        working-directory: mqtt-auth-biscuit
+        run: |
+          docker compose -f docker/docker-compose.yml build loadgen
+          docker compose -f docker/docker-compose.yml run --rm --no-deps loadgen --help > /tmp/loadgen-help.txt
+          grep -q -- '--client-index-start' /tmp/loadgen-help.txt
 
       - name: Validate resource snapshot telemetry
         env:

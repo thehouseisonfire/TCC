@@ -274,34 +274,10 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 ## 8) Open Issues (Next Steps, Grouped)
 
 ### Priority List
-1. Issue 41: Containerized benchmark topology
+1. Issue 42: Bump Mosquitto image to 2.1.3-alpine when published
 ---
 
 #### A) Policy Source Parity
-
-- [ ] **Issue 41: Containerized benchmark topology (client-per-container +
-     service separation)**
-  - Goal: strengthen experimental isolation and fidelity by running benchmark
-    clients in containers (optionally one container per client) and ensuring
-    each major logical component is separated into the appropriate container(s)
-    for the scenario.
-  - Rationale: the current load generator runs as a host process with many
-    threads/clients, which is acceptable for many comparisons but can introduce
-    host scheduling noise and makes it harder to claim "N independent IoT nodes"
-    when discussing external validity.
-  - Deliverable:
-    - A containerized load generator image (Python orchestration + Rust rumqttc MQTT I/O) that can be
-      invoked by the scenario runner
-    - Support for two benchmark client modes:
-      - single loadgen container simulating N clients (baseline)
-      - one container per client (high-fidelity topology) with deterministic
-        naming (e.g., `client_1..client_N`)
-    - Docker resource controls for client containers (cpuset, cpu/memory limits)
-      to prevent benchmark noise from affecting Mosquitto measurements
-    - Scenario runner support to launch/teardown client containers per scenario
-      and collect client-side outputs deterministically
-    - Documentation of the measurement trade-offs between the modes and guidance
-      for which scenarios require client-per-container to improve realism
 
 #### B) Matrix Coverage (Benchmark Verification)
 
@@ -314,6 +290,20 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
 ---
 
 ## 9) Completed Issues (Backlog)
+
+- [x] **Issue 41: Containerized benchmark topology (client-per-container +
+     service separation)** — **COMPLETED 2026-05-15**
+  - **Summary**: Added a containerized Rust `mqtt-loadgen` image/service and
+    made `run_scenarios.py` default to `container-single`, with `host` retained
+    for compatibility and `container-per-client` available for high-fidelity
+    topology slices.
+  - **Coverage**: Added deterministic client container naming/identity offsets
+    (`client_1..client_N`) for standard publish/control runs, Docker resource
+    controls for loadgen containers, internal Docker service routing, and result
+    metadata documenting topology mode and resource settings.
+  - **Research Alignment**: Keeps strict JWT/Biscuit identity-bound parity
+    provisioning through the Token Issuer while improving isolation between
+    benchmark clients, broker, PDP, issuer, and observability services.
 
 - [x] **Issue 23: Proactive client reauthentication before expiry** — **COMPLETED 2026-05-13**
   - **Summary**: Added timer-driven proactive refresh to the Rust MQTT v5 load

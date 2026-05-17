@@ -80,6 +80,20 @@ services:
     networks:
       - mqtt-net
 
+  loadgen:
+    build:
+      context: ../..
+      dockerfile: mqtt-auth-biscuit/docker/Dockerfile.loadgen
+    environment:
+      - MQTT_AUTH_BISCUIT_REPO_ROOT=/workspace
+    volumes:
+      - ..:/workspace
+    cpuset: "${LOADGEN_CPUSET:-}"
+    cpus: "${LOADGEN_CPUS:-1.0}"
+    mem_limit: "${LOADGEN_MEMORY:-512m}"
+    networks:
+      - mqtt-net
+
   cadvisor:
     image: ghcr.io/google/cadvisor:0.56.2@sha256:5534ae91cbf3428998d60428d107cfdd97272d80658534ac6e54d8ce3b0c4d72
     ports:

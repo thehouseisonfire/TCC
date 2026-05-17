@@ -8,7 +8,7 @@ use gen_tokens::biscuit_attenuation::{
 };
 use gen_tokens::mqtt_helpers::{
     ClientSpec, ConnectReport, MqttHelperError, Result, connect, decode_token_arg, poll_until,
-    print_json, puback_reason_code, qos,
+    puback_reason_code, qos,
 };
 use rand::{Rng as _, RngExt as _};
 use rumqttc::mqttbytes::v5::{AuthProperties, Packet};
@@ -42,6 +42,8 @@ struct Args {
     password: String,
     #[arg(long, env = "MQTT_CLIENTS", default_value_t = 10)]
     clients: usize,
+    #[arg(long, env = "MQTT_CLIENT_INDEX_START", default_value_t = 1)]
+    client_index_start: usize,
     #[arg(long, env = "MQTT_MESSAGES", default_value_t = 50)]
     messages: usize,
     #[arg(long, env = "MQTT_TOPIC", default_value = "sensors/{client_id}/temp")]
@@ -84,6 +86,8 @@ struct Args {
     control_after_messages: usize,
     #[arg(long)]
     json: bool,
+    #[arg(long, env = "MQTT_OUTPUT_JSON_FILE")]
+    output_json_file: Option<String>,
     #[arg(long, default_value = "INFO")]
     log_level: String,
     #[arg(long, env = "TOKEN_ISSUER_URL")]
@@ -240,6 +244,7 @@ struct Output {
     received_messages: Value,
     fanout_churn: Value,
     raw_publish_ms: Vec<f64>,
+    raw_metrics: Value,
     errors: Vec<String>,
 }
 
@@ -600,6 +605,16 @@ fn strict_multi_client_startup(args: &Args) -> bool {
     binding == "strict" && args.clients > 1
 }
 
+fn explicit_startup_provisioning(args: &Args) -> bool {
+    args.password.is_empty() && args.token_issuer_url.is_some()
+}
+
+fn should_startup_provision_token(args: &Args) -> bool {
+    strict_multi_client_startup(args)
+        || args.proactive_refresh
+        || explicit_startup_provisioning(args)
+}
+
 fn resolved_token_issuer_kind(args: &Args) -> Option<String> {
     args.token_issuer_kind
         .clone()
@@ -613,6 +628,11 @@ fn apply_legacy_defaults(args: &mut Args) {
 }
 
 fn validate_startup_provisioning(args: &Args) -> Result<()> {
+    if args.client_index_start == 0 {
+        return Err(MqttHelperError::Message(
+            "client_index_start must be greater than zero".to_string(),
+        ));
+    }
     if args.proactive_refresh {
         if args.mode == "fanout" {
             return Err(MqttHelperError::Message(
@@ -661,6 +681,12 @@ fn validate_startup_provisioning(args: &Args) -> Result<()> {
                 )));
             }
         }
+    }
+    if explicit_startup_provisioning(args) && resolved_token_issuer_kind(args).is_none() {
+        return Err(MqttHelperError::Message(
+            "startup provisioning requires token_issuer_kind or username 'jwt'/'biscuit'"
+                .to_string(),
+        ));
     }
     if !strict_multi_client_startup(args) {
         return Ok(());
@@ -817,7 +843,7 @@ async fn fetch_token(args: &Args, kind: &str, client_id: &str, topic: &str) -> R
 }
 
 async fn startup_password(args: &Args, client_id: &str, topic: &str) -> Result<IssuedToken> {
-    if strict_multi_client_startup(args) || args.proactive_refresh {
+    if should_startup_provision_token(args) {
         let kind = resolved_token_issuer_kind(args).ok_or_else(|| {
             MqttHelperError::Message("startup provisioning requires token kind".to_string())
         })?;
@@ -828,6 +854,9 @@ async fn startup_password(args: &Args, client_id: &str, topic: &str) -> Result<I
 }
 
 fn repo_root() -> PathBuf {
+    if let Ok(path) = std::env::var("MQTT_AUTH_BISCUIT_REPO_ROOT") {
+        return PathBuf::from(path);
+    }
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
@@ -1033,6 +1062,10 @@ fn expand_client_template(value: &str, client_id: &str) -> String {
     value.replace(CLIENT_ID_PLACEHOLDER, client_id)
 }
 
+fn client_id_for(args: &Args, index: usize) -> String {
+    format!("client_{}", args.client_index_start + index)
+}
+
 fn expand_client_templates(values: &[String], client_id: &str) -> Vec<String> {
     values
         .iter()
@@ -1201,7 +1234,7 @@ async fn prepare_handoff(args: &Args, mode_topic: &str) -> Option<HandoffPlan> {
     let mut published_tokens = HashMap::new();
     let mut errors = Vec::new();
     for index in 0..args.clients {
-        let client_id = format!("client_{}", index + 1);
+        let client_id = client_id_for(args, index);
         let topic = if mode_topic.contains(CLIENT_ID_PLACEHOLDER) {
             expand_client_template(mode_topic, &client_id)
         } else {
@@ -2160,7 +2193,7 @@ async fn build_fanout_subscribers(
 ) -> Vec<FanoutSubscriber> {
     let mut subscribers = Vec::new();
     for index in 0..args.clients {
-        let client_id = format!("client_{}", index + 1);
+        let client_id = client_id_for(args, index);
         let Some(prepared) = prepare_fanout_client(args, client_id.clone(), runtime).await else {
             continue;
         };
@@ -2328,6 +2361,24 @@ fn fanout_metrics(
 
 fn fanout_output(args: &Args, parts: FanoutOutputParts<'_>) -> Output {
     let metrics = parts.metrics;
+    let raw_metrics = serde_json::json!({
+        "connect": metrics.connect.clone(),
+        "token_refresh": [],
+        "token_refresh_len": [],
+        "proactive_refresh": [],
+        "proactive_refresh_len": [],
+        "delegation": metrics.delegation.clone(),
+        "delegation_len": metrics.delegation_len.clone(),
+        "attenuation": metrics.attenuation.clone(),
+        "attenuation_len": metrics.attenuation_len.clone(),
+        "publish": parts.fanout_publish_ms.clone(),
+        "publish_qos_0": parts.fanout_publish_by_qos[0].clone(),
+        "publish_qos_1": parts.fanout_publish_by_qos[1].clone(),
+        "publish_qos_2": parts.fanout_publish_by_qos[2].clone(),
+        "receive": metrics.receive.clone(),
+        "control": [],
+        "control_injection_delay": [],
+    });
     Output {
         inputs: inputs_json(
             args,
@@ -2381,6 +2432,7 @@ fn fanout_output(args: &Args, parts: FanoutOutputParts<'_>) -> Output {
             metrics.received_post,
         ),
         raw_publish_ms: parts.fanout_publish_ms,
+        raw_metrics,
         errors: parts.runtime.errors,
     }
 }
@@ -2960,7 +3012,7 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
     } = job;
     let mut result = WorkerResult::default();
     let mut publish_gate_participant = PublishGateParticipant::new(publish_gate);
-    let client_id = format!("client_{}", index + 1);
+    let client_id = client_id_for(&args, index);
     let topic = expand_client_template(&args.topic, &client_id);
     result.delegation_ms = bootstrap.delegation_ms;
     result.delegation_len = bootstrap.delegation_len;
@@ -3196,6 +3248,24 @@ fn standard_output(
     handoff_nonce: Option<&str>,
     metrics: StandardMetrics,
 ) -> Output {
+    let raw_metrics = serde_json::json!({
+        "connect": metrics.connect.clone(),
+        "token_refresh": metrics.token_refresh.clone(),
+        "token_refresh_len": metrics.token_refresh_len.clone(),
+        "proactive_refresh": metrics.proactive_refresh.clone(),
+        "proactive_refresh_len": metrics.proactive_refresh_len.clone(),
+        "delegation": metrics.delegation.clone(),
+        "delegation_len": metrics.delegation_len.clone(),
+        "attenuation": metrics.attenuation.clone(),
+        "attenuation_len": metrics.attenuation_len.clone(),
+        "publish": metrics.publish.clone(),
+        "publish_qos_0": metrics.publish_qos_0.clone(),
+        "publish_qos_1": metrics.publish_qos_1.clone(),
+        "publish_qos_2": metrics.publish_qos_2.clone(),
+        "receive": metrics.receive.clone(),
+        "control": metrics.control.clone(),
+        "control_injection_delay": metrics.control_injection.clone(),
+    });
     Output {
         inputs: inputs_json(
             args,
@@ -3246,6 +3316,7 @@ fn standard_output(
         }),
         fanout_churn: fanout_churn_json(args, args.mode.as_str(), None, None, None),
         raw_publish_ms: metrics.publish,
+        raw_metrics,
         errors: metrics.errors,
     }
 }
@@ -3269,7 +3340,7 @@ async fn run_standard_mode(
     let sync_connect = args.sync_connect.then(|| Arc::new(SyncConnectGate::new()));
     let publish_gate = (!args.sync_connect).then(|| Arc::new(PublishStartGate::new(args.clients)));
     for index in 0..args.clients {
-        let client_id = format!("client_{}", index + 1);
+        let client_id = client_id_for(&args, index);
         let bootstrap = handoff_plan
             .as_ref()
             .and_then(|plan| plan.workers.get(&client_id).cloned())
@@ -3310,7 +3381,16 @@ async fn run_standard_mode(
         metrics,
     );
     validate_proactive_refresh_assertion(&args, &output)?;
-    print_json(&output)
+    emit_output(&args, &output)
+}
+
+fn emit_output(args: &Args, output: &Output) -> Result<()> {
+    let rendered = serde_json::to_string_pretty(output)?;
+    if let Some(path) = &args.output_json_file {
+        fs::write(path, rendered.as_bytes())?;
+    }
+    println!("{rendered}");
+    Ok(())
 }
 
 #[tokio::main]
@@ -3323,7 +3403,7 @@ async fn main() -> Result<()> {
     if args.mode == "fanout" {
         let output = run_fanout(args.clone()).await?;
         validate_proactive_refresh_assertion(&args, &output)?;
-        return print_json(&output);
+        return emit_output(&args, &output);
     }
     run_standard_mode(args, qos_distribution, token_refresh_codes).await
 }
@@ -3372,6 +3452,7 @@ mod tests {
             received_messages: serde_json::json!({"count": 0, "expected": 0}),
             fanout_churn: fanout_churn_json(args, mode, None, None, None),
             raw_publish_ms: Vec::new(),
+            raw_metrics: serde_json::json!({}),
             errors: Vec::new(),
         };
         let value = serde_json::to_value(output).expect("output should serialize");
@@ -3419,6 +3500,21 @@ mod tests {
             publish_throughput_mps: 0.0,
             receive_throughput_mps: 0.0,
         }
+    }
+
+    #[test]
+    fn client_index_start_offsets_generated_client_ids() {
+        let args = Args::parse_from(["mqtt-loadgen", "--client-index-start", "7"]);
+
+        assert_eq!(client_id_for(&args, 0), "client_7");
+        assert_eq!(client_id_for(&args, 2), "client_9");
+    }
+
+    #[test]
+    fn zero_client_index_start_is_rejected() {
+        let args = Args::parse_from(["mqtt-loadgen", "--client-index-start", "0"]);
+
+        assert!(validate_startup_provisioning(&args).is_err());
     }
 
     #[test]
@@ -3583,6 +3679,7 @@ mod tests {
                 "publish_qos_2",
                 "publish_throughput_mps",
                 "qos_distribution_actual",
+                "raw_metrics",
                 "raw_publish_ms",
                 "receive",
                 "receive_throughput_mps",

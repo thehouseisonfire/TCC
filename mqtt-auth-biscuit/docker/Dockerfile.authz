@@ -14,7 +14,7 @@ RUN cargo build --release -p authz-server
 
 FROM alpine:3.23.3@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
 
-RUN apk add --no-cache ca-certificates=20251003-r0
+RUN apk add --no-cache ca-certificates=20260413-r0
 
 COPY --from=builder /app/target/release/authz-server /usr/local/bin/authz-server
 

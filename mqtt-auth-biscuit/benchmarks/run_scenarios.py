@@ -49,6 +49,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 RAW_BISCUIT_MARKER = "b64:"
 IdentityBindingMode = Literal["off", "strict"]
 SemanticClass = Literal["capability", "mixed", "parity_identity_bound"]
+ClientTopology = Literal["host", "container-single", "container-per-client"]
+DEFAULT_CLIENT_TOPOLOGY: ClientTopology = "container-single"
+LOADGEN_CONTAINER_REPO_ROOT = "/workspace"
 
 
 def _resolve_rust_helper(binary: str) -> list[str]:
@@ -300,6 +303,23 @@ def _compose(
     subprocess.check_call(cmd, cwd=REPO_ROOT, env=env)
 
 
+def _compose_cmd(
+    args: list[str],
+    *,
+    compose_files: list[str] | None = None,
+    compose_project_name: str | None = None,
+) -> list[str]:
+    files = compose_files or ["docker/docker-compose.yml"]
+    file_args: list[str] = []
+    for path in files:
+        file_args.extend(["-f", path])
+    cmd = _compose_bin().split(" ") + file_args
+    if compose_project_name:
+        cmd.extend(["-p", compose_project_name])
+    cmd.extend(args)
+    return cmd
+
+
 def _compose_service_container_id(
     service: str,
     *,
@@ -373,6 +393,52 @@ def _mark_mqtt5_auth_token(token: str) -> str:
     if token.startswith("eyJ") and token.count(".") == 2:
         return token
     return f"{RAW_BISCUIT_MARKER}{token}"
+
+
+def _container_repo_path(path: str | None) -> str | None:
+    if path is None:
+        return None
+    resolved = _resolve_repo_path(path)
+    try:
+        relative = resolved.relative_to(REPO_ROOT)
+    except ValueError:
+        return path
+    return f"{LOADGEN_CONTAINER_REPO_ROOT}/{relative.as_posix()}"
+
+
+def _sanitize_container_name(value: str) -> str:
+    sanitized = "".join(ch.lower() if ch.isalnum() else "_" for ch in value)
+    return "_".join(part for part in sanitized.split("_") if part)[:120] or "loadgen"
+
+
+def _effective_compose_project_name(
+    compose_project_name: str | None,
+    compose_files: list[str] | None,
+) -> str:
+    if compose_project_name:
+        return compose_project_name
+    env_project = os.environ.get("COMPOSE_PROJECT_NAME")
+    if env_project:
+        return env_project
+    first_file = Path((compose_files or ["docker/docker-compose.yml"])[0])
+    if not first_file.is_absolute():
+        first_file = REPO_ROOT / first_file
+    return first_file.parent.name or REPO_ROOT.name
+
+
+def _loadgen_container_name(
+    *,
+    compose_project_name: str | None,
+    compose_files: list[str] | None,
+    scenario_id: str,
+    run_index: int,
+    client_index: int | None = None,
+) -> str:
+    project = _effective_compose_project_name(compose_project_name, compose_files)
+    name = f"loadgen_{project}_{scenario_id}_{run_index + 1}"
+    if client_index is not None:
+        name = f"{name}_client_{client_index + 1}"
+    return _sanitize_container_name(name)
 
 
 def _authz_config(
@@ -807,9 +873,19 @@ def _run_loadgen(
     fanout_churn_sqlite_db: str | None = None,
     fanout_churn_sqlite_topic: str | None = None,
     fanout_churn_sqlite_subscribers: int | None = None,
+    client_topology: ClientTopology = "host",
+    compose_files: list[str] | None = None,
+    compose_project_name: str | None = None,
+    loadgen_service: str = "loadgen",
+    loadgen_cpus: str = "1.0",
+    loadgen_memory: str = "512m",
+    loadgen_cpuset: str | None = None,
+    scenario_id: str = "scenario",
+    run_index: int = 0,
 ):
+    helper_cmd = _resolve_rust_helper("mqtt-loadgen")
     cmd = [
-        *_resolve_rust_helper("mqtt-loadgen"),
+        *helper_cmd,
         "--host",
         host,
         "--port",
@@ -962,12 +1038,410 @@ def _run_loadgen(
     if fanout_churn_sqlite_subscribers is not None:
         cmd.extend(["--fanout-churn-sqlite-subscribers", str(fanout_churn_sqlite_subscribers)])
 
-    out = subprocess.check_output(
+    if client_topology == "host":
+        out = subprocess.check_output(
+            cmd,
+            cwd=REPO_ROOT,
+            text=True,
+        )
+        return json.loads(out)
+
+    loadgen_args = cmd[len(helper_cmd) :]
+    env = {
+        "LOADGEN_CPUS": loadgen_cpus,
+        "LOADGEN_MEMORY": loadgen_memory,
+    }
+    if loadgen_cpuset:
+        env["LOADGEN_CPUSET"] = loadgen_cpuset
+
+    if client_topology == "container-per-client" and mode == "fanout":
+        raise RuntimeError(
+            "container-per-client topology is not supported for fanout scenarios yet; "
+            "use --client-topology container-single for ACL_READ fan-out runs"
+        )
+    if client_topology == "container-per-client" and sync_connect:
+        raise RuntimeError(
+            "container-per-client topology is not supported for sync_connect scenarios yet; "
+            "use --client-topology container-single until a cross-container start barrier exists"
+        )
+
+    if client_topology == "container-single":
+        return _run_loadgen_compose_container(
+            loadgen_args,
+            service=loadgen_service,
+            container_name=_loadgen_container_name(
+                compose_project_name=compose_project_name,
+                compose_files=compose_files,
+                scenario_id=scenario_id,
+                run_index=run_index,
+            ),
+            compose_files=compose_files,
+            compose_project_name=compose_project_name,
+            extra_env=env,
+        )
+
+    return _run_loadgen_container_per_client(
+        loadgen_args,
+        clients=clients,
+        service=loadgen_service,
+        scenario_id=scenario_id,
+        run_index=run_index,
+        compose_files=compose_files,
+        compose_project_name=compose_project_name,
+        extra_env=env,
+    )
+
+
+def _run_loadgen_compose_container(
+    loadgen_args: list[str],
+    *,
+    service: str,
+    container_name: str,
+    compose_files: list[str] | None,
+    compose_project_name: str | None,
+    extra_env: dict[str, str],
+) -> dict[str, Any]:
+    subprocess.run(
+        ["docker", "rm", "-f", container_name],
+        cwd=REPO_ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    cmd = _compose_run_loadgen_cmd(
+        loadgen_args,
+        service=service,
+        container_name=container_name,
+        compose_files=compose_files,
+        compose_project_name=compose_project_name,
+        build=True,
+    )
+    env = os.environ.copy()
+    env.update(extra_env)
+    completed = subprocess.run(
         cmd,
         cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
         text=True,
+        check=True,
     )
-    return json.loads(out)
+    return _loads_json_from_compose_stdout(completed.stdout)
+
+
+def _loads_json_from_compose_stdout(stdout: str) -> dict[str, Any]:
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(stdout):
+        if char != "{":
+            continue
+        try:
+            payload, _end = decoder.raw_decode(stdout[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    raise RuntimeError(f"loadgen container did not emit JSON payload: {stdout!r}")
+
+
+def _compose_run_loadgen_cmd(
+    loadgen_args: list[str],
+    *,
+    service: str,
+    container_name: str,
+    compose_files: list[str] | None,
+    compose_project_name: str | None,
+    build: bool,
+) -> list[str]:
+    args = ["run", "--rm", "--no-deps"]
+    if build:
+        args.append("--build")
+    args.extend(["--name", container_name, service, *loadgen_args])
+    return _compose_cmd(
+        args,
+        compose_files=compose_files,
+        compose_project_name=compose_project_name,
+    )
+
+
+def _replace_cli_option(args: list[str], option: str, value: str) -> list[str]:
+    updated = list(args)
+    try:
+        index = updated.index(option)
+    except ValueError:
+        updated.extend([option, value])
+        return updated
+    if index + 1 >= len(updated):
+        updated.append(value)
+    else:
+        updated[index + 1] = value
+    return updated
+
+
+def _summary_from_values(values: list[float]) -> dict[str, Any]:
+    if not values:
+        return {
+            "count": 0,
+            "min_ms": None,
+            "p50_ms": None,
+            "p95_ms": None,
+            "p99_ms": None,
+            "max_ms": None,
+            "mean_ms": None,
+            "median_ms": None,
+        }
+    ordered = sorted(values)
+
+    def percentile(p: float) -> float:
+        if len(ordered) == 1:
+            return float(ordered[0])
+        rank = p * (len(ordered) - 1)
+        lower = int(rank)
+        upper = min(lower + 1, len(ordered) - 1)
+        weight = rank - lower
+        return float(ordered[lower] * (1 - weight) + ordered[upper] * weight)
+
+    return {
+        "count": len(values),
+        "min_ms": float(ordered[0]),
+        "p50_ms": percentile(0.50),
+        "p95_ms": percentile(0.95),
+        "p99_ms": percentile(0.99),
+        "max_ms": float(ordered[-1]),
+        "mean_ms": float(sum(values) / len(values)),
+        "median_ms": percentile(0.50),
+    }
+
+
+def _raw_metric_values(payload: dict[str, Any], metric: str) -> list[float]:
+    raw_metrics = payload.get("raw_metrics")
+    if isinstance(raw_metrics, dict):
+        values = raw_metrics.get(metric)
+        if isinstance(values, list):
+            return [float(value) for value in values]
+    if metric == "publish":
+        values = payload.get("raw_publish_ms")
+        if isinstance(values, list):
+            return [float(value) for value in values]
+    return []
+
+
+def _merge_latency_summary(results: list[dict[str, Any]], metric: str) -> dict[str, Any]:
+    values = [value for result in results for value in _raw_metric_values(result, metric)]
+    return _summary_from_values(values)
+
+
+def _sum_numeric_field(results: list[dict[str, Any]], field: str) -> int:
+    return sum(int(result.get(field) or 0) for result in results)
+
+
+def _sum_count_object(results: list[dict[str, Any]], field: str) -> dict[str, int]:
+    totals: dict[str, int] = {}
+    for result in results:
+        payload = result.get(field)
+        if not isinstance(payload, dict):
+            continue
+        for key, value in payload.items():
+            totals[key] = totals.get(key, 0) + int(value or 0)
+    return totals
+
+
+def _merge_per_client_loadgen_results(
+    results: list[dict[str, Any]], wall_duration_s: float
+) -> dict[str, Any]:
+    if not results:
+        return {"errors": ["container_per_client_no_results"]}
+    merged = dict(results[0])
+    publish_values = [
+        value for result in results for value in _raw_metric_values(result, "publish")
+    ]
+    errors: list[str] = []
+    for result in results:
+        errors.extend(str(err) for err in result.get("errors", []))
+    for metric in (
+        "connect",
+        "token_refresh",
+        "token_refresh_len",
+        "proactive_refresh",
+        "proactive_refresh_len",
+        "delegation",
+        "delegation_len",
+        "attenuation",
+        "attenuation_len",
+        "publish_qos_0",
+        "publish_qos_1",
+        "publish_qos_2",
+        "receive",
+        "control",
+        "control_injection_delay",
+    ):
+        merged[metric] = _merge_latency_summary(results, metric)
+    merged["publish"] = _summary_from_values(publish_values)
+    merged["raw_publish_ms"] = publish_values
+    merged["raw_metrics"] = {
+        metric: [value for result in results for value in _raw_metric_values(result, metric)]
+        for metric in (
+            "connect",
+            "token_refresh",
+            "token_refresh_len",
+            "proactive_refresh",
+            "proactive_refresh_len",
+            "delegation",
+            "delegation_len",
+            "attenuation",
+            "attenuation_len",
+            "publish",
+            "publish_qos_0",
+            "publish_qos_1",
+            "publish_qos_2",
+            "receive",
+            "control",
+            "control_injection_delay",
+        )
+    }
+    merged["errors"] = errors
+    merged["qos_distribution_actual"] = _sum_count_object(results, "qos_distribution_actual")
+    merged["received_messages"] = _sum_count_object(results, "received_messages")
+    for field in (
+        "proactive_refresh_attempts",
+        "proactive_refresh_successes",
+        "proactive_refresh_failures",
+        "expiry_denial_count",
+    ):
+        merged[field] = _sum_numeric_field(results, field)
+    merged["session_continuity_ok"] = all(
+        bool(result.get("session_continuity_ok", True)) for result in results
+    )
+    inputs = merged.get("inputs")
+    if isinstance(inputs, dict):
+        merged["inputs"] = {**inputs, "clients": len(results)}
+    duration_s = max(wall_duration_s, 1e-9)
+    publish_count = int(merged["publish"].get("count") or 0)
+    receive_count = int(merged["receive"].get("count") or 0)
+    merged["publish_throughput_mps"] = float(publish_count / duration_s)
+    merged["receive_throughput_mps"] = float(receive_count / duration_s)
+    mode = inputs.get("mode") if isinstance(inputs, dict) else None
+    merged["throughput_mps"] = (
+        merged["receive_throughput_mps"] if mode == "fanout" else merged["publish_throughput_mps"]
+    )
+    merged["topology"] = {
+        "mode": "container-per-client",
+        "container_count": len(results),
+        "aggregation": "merged_from_single_client_containers",
+        "wall_duration_s": wall_duration_s,
+    }
+    return merged
+
+
+def _cleanup_per_client_loadgen_processes(
+    processes: list[tuple[str, subprocess.Popen[str]]],
+    completed: set[str],
+) -> None:
+    for container_name, process in processes:
+        if container_name in completed:
+            continue
+        if process.poll() is None:
+            process.terminate()
+    for container_name, process in processes:
+        if container_name in completed:
+            continue
+        try:
+            process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=10)
+    for container_name, _process in processes:
+        subprocess.run(
+            ["docker", "rm", "-f", container_name],
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+
+
+def _run_loadgen_container_per_client(
+    loadgen_args: list[str],
+    *,
+    clients: int,
+    service: str,
+    scenario_id: str,
+    run_index: int,
+    compose_files: list[str] | None,
+    compose_project_name: str | None,
+    extra_env: dict[str, str],
+) -> dict[str, Any]:
+    build_cmd = _compose_cmd(
+        ["build", service],
+        compose_files=compose_files,
+        compose_project_name=compose_project_name,
+    )
+    env = os.environ.copy()
+    env.update(extra_env)
+    subprocess.run(build_cmd, cwd=REPO_ROOT, env=env, check=True)
+
+    started_at = time.monotonic()
+    processes: list[tuple[str, subprocess.Popen[str]]] = []
+    for index in range(clients):
+        args = _replace_cli_option(loadgen_args, "--clients", "1")
+        args = _replace_cli_option(args, "--client-index-start", str(index + 1))
+        container_name = _loadgen_container_name(
+            compose_project_name=compose_project_name,
+            compose_files=compose_files,
+            scenario_id=scenario_id,
+            run_index=run_index,
+            client_index=index,
+        )
+        subprocess.run(
+            ["docker", "rm", "-f", container_name],
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        cmd = _compose_run_loadgen_cmd(
+            args,
+            service=service,
+            container_name=container_name,
+            compose_files=compose_files,
+            compose_project_name=compose_project_name,
+            build=False,
+        )
+        processes.append(
+            (
+                container_name,
+                subprocess.Popen(
+                    cmd,
+                    cwd=REPO_ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                ),
+            )
+        )
+
+    results: list[dict[str, Any]] = []
+    completed: set[str] = set()
+    try:
+        for container_name, process in processes:
+            stdout, stderr = process.communicate()
+            completed.add(container_name)
+            if process.returncode != 0:
+                raise RuntimeError(
+                    f"loadgen container {container_name} failed with exit code "
+                    f"{process.returncode}: {stderr}"
+                )
+            result = _loads_json_from_compose_stdout(stdout)
+            result["container_name"] = container_name
+            results.append(result)
+    except Exception:
+        _cleanup_per_client_loadgen_processes(processes, completed)
+        raise
+    wall_duration_s = time.monotonic() - started_at
+    merged = _merge_per_client_loadgen_results(results, wall_duration_s)
+    merged["topology"]["scenario_id"] = scenario_id
+    merged["topology"]["run_index"] = run_index
+    return merged
 
 
 def _apply_dynamic_security_config(source_path: str):
@@ -1771,6 +2245,46 @@ class ScenarioModel(BaseModel):
     jwt_identity_binding: IdentityBindingMode | None = None
     biscuit_identity_binding: IdentityBindingMode | None = None
     semantic_class: SemanticClass | None = None
+
+
+class ScenarioEndpointConfig(TypedDict):
+    authz_base: str
+    prom_base: str
+    token_issuer_base: str
+    loadgen_token_issuer_base: str
+    host_mqtt_host: str
+    loadgen_mqtt_host: str
+    mqtt_port: int
+    loadgen_tls_ca: str | None
+
+
+def _scenario_endpoint_config(
+    *,
+    client_topology_mode: ClientTopology,
+    scenario_tls: bool,
+    tls_ca: str | None,
+) -> ScenarioEndpointConfig:
+    token_issuer_base = "https://localhost:8444" if scenario_tls else "http://localhost:8082"
+    loadgen_token_issuer_base = token_issuer_base
+    host_mqtt_host = "localhost"
+    loadgen_mqtt_host = host_mqtt_host
+    loadgen_tls_ca = tls_ca
+    if client_topology_mode != "host":
+        loadgen_mqtt_host = "mosquitto"
+        loadgen_token_issuer_base = (
+            "https://token-issuer:8444" if scenario_tls else "http://token-issuer:8082"
+        )
+        loadgen_tls_ca = _container_repo_path(tls_ca)
+    return {
+        "authz_base": "https://localhost:8443" if scenario_tls else "http://localhost:8081",
+        "prom_base": "https://localhost:9443" if scenario_tls else "http://localhost:9090",
+        "token_issuer_base": token_issuer_base,
+        "loadgen_token_issuer_base": loadgen_token_issuer_base,
+        "host_mqtt_host": host_mqtt_host,
+        "loadgen_mqtt_host": loadgen_mqtt_host,
+        "mqtt_port": 8883 if scenario_tls else 1883,
+        "loadgen_tls_ca": loadgen_tls_ca,
+    }
 
 
 def _http_profile_authz_config(tier: Literal["simple", "med", "complex"]) -> AuthzConfig:
@@ -3476,8 +3990,32 @@ def main(
     tcpdump_duration: int = typer.Option(300, "--tcpdump-duration"),
     tcpdump_output_dir: str = typer.Option("benchmarks/results/pcap", "--tcpdump-output-dir"),
     tcpdump_analyze: bool = typer.Option(True, "--tcpdump-analyze/--no-tcpdump-analyze"),
+    client_topology: str = typer.Option(
+        DEFAULT_CLIENT_TOPOLOGY,
+        "--client-topology",
+        help="Client execution topology: host, container-single, or container-per-client.",
+    ),
+    loadgen_service: str = typer.Option("loadgen", "--client-loadgen-service"),
+    loadgen_cpus: str = typer.Option("1.0", "--client-cpus"),
+    loadgen_memory: str = typer.Option("512m", "--client-memory"),
+    loadgen_cpuset: str | None = typer.Option(None, "--client-cpuset"),
 ):
     setup_logging(log_level)
+    if not isinstance(client_topology, str):
+        client_topology = DEFAULT_CLIENT_TOPOLOGY
+    if not isinstance(loadgen_service, str):
+        loadgen_service = "loadgen"
+    if not isinstance(loadgen_cpus, str):
+        loadgen_cpus = "1.0"
+    if not isinstance(loadgen_memory, str):
+        loadgen_memory = "512m"
+    if not isinstance(loadgen_cpuset, str):
+        loadgen_cpuset = None
+    if client_topology not in {"host", "container-single", "container-per-client"}:
+        raise typer.BadParameter(
+            "client_topology must be one of: host, container-single, container-per-client"
+        )
+    client_topology_mode = cast(ClientTopology, client_topology)
 
     # Check perf installation if profiling enabled
     perf_status: dict[str, Any] = {"enabled": perf_enabled}
@@ -3589,11 +4127,19 @@ def main(
             ),
         )
         extra_env = {"MOSQUITTO_CONF": runtime_mosq_conf}
-        authz_base = "https://localhost:8443" if scenario_tls else "http://localhost:8081"
-        prom_base = "https://localhost:9443" if scenario_tls else "http://localhost:9090"
-        token_issuer_base = "https://localhost:8444" if scenario_tls else "http://localhost:8082"
-        mqtt_host = "localhost"
-        mqtt_port = 8883 if scenario_tls else 1883
+        endpoints = _scenario_endpoint_config(
+            client_topology_mode=client_topology_mode,
+            scenario_tls=scenario_tls,
+            tls_ca=tls_ca,
+        )
+        authz_base = endpoints["authz_base"]
+        prom_base = endpoints["prom_base"]
+        token_issuer_base = endpoints["token_issuer_base"]
+        loadgen_token_issuer_base = endpoints["loadgen_token_issuer_base"]
+        host_mqtt_host = endpoints["host_mqtt_host"]
+        loadgen_mqtt_host = endpoints["loadgen_mqtt_host"]
+        mqtt_port = endpoints["mqtt_port"]
+        loadgen_tls_ca = endpoints["loadgen_tls_ca"]
         compose_files = ["docker/docker-compose.yml"]
         if scenario_tls:
             compose_files.append("docker/docker-compose.tls.yml")
@@ -3857,6 +4403,19 @@ def main(
                 "fanout_churn_sqlite_db": s.get("fanout_churn_sqlite_db"),
                 "fanout_churn_sqlite_topic": s.get("fanout_churn_sqlite_topic"),
                 "fanout_churn_sqlite_subscribers": s.get("fanout_churn_sqlite_subscribers"),
+                "client_topology": {
+                    "mode": client_topology_mode,
+                    "loadgen_service": loadgen_service,
+                    "cpus": loadgen_cpus,
+                    "memory": loadgen_memory,
+                    "cpuset": loadgen_cpuset,
+                    "internal_mqtt_host": (
+                        loadgen_mqtt_host if client_topology_mode != "host" else None
+                    ),
+                    "internal_token_issuer_url": (
+                        loadgen_token_issuer_base if client_topology_mode != "host" else None
+                    ),
+                },
                 "cache_context": {
                     "acl_read_enforcement_expected": acl_read_enforcement,
                     "cache_ttl_seconds": 3600,
@@ -3943,7 +4502,7 @@ def main(
                     mqtt5_cfg = s.get("mqtt5_auth")
                     if mqtt5_cfg is not None:
                         res = _run_mqtt5_auth(
-                            mqtt_host,
+                            host_mqtt_host,
                             mqtt_port,
                             mqtt5_cfg["token1"],
                             mqtt5_cfg["token2"],
@@ -3971,7 +4530,7 @@ def main(
                         )
                         res = _run_loadgen(
                             tokens=tokens,
-                            host=mqtt_host,
+                            host=loadgen_mqtt_host,
                             port=mqtt_port,
                             username=s.get("username", ""),
                             password=s.get("password", ""),
@@ -3987,7 +4546,7 @@ def main(
                             message_size=int(s.get("message_size", 0)),
                             sync_connect=bool(s.get("sync_connect", False)),
                             token_issuer_url=(
-                                token_issuer_base
+                                loadgen_token_issuer_base
                                 if token_refresh
                                 or proactive_refresh
                                 or strict_startup_provisioning is not None
@@ -4025,7 +4584,7 @@ def main(
                                 s.get("biscuit_client_id_fact", "client_id"),
                             ),
                             tls_enabled=scenario_tls,
-                            tls_ca_file=tls_ca,
+                            tls_ca_file=loadgen_tls_ca,
                             tls_insecure=tls_insecure,
                             biscuit_attenuate=bool(s.get("biscuit_attenuate")),
                             biscuit_attenuate_denies=(
@@ -4054,8 +4613,12 @@ def main(
                                 else None
                             ),
                             biscuit_public_key_hex=s.get("biscuit_public_key_hex"),
-                            biscuit_public_key_file=s.get(
-                                "biscuit_public_key_file", "docker/biscuit_public.key"
+                            biscuit_public_key_file=(
+                                _container_repo_path(
+                                    s.get("biscuit_public_key_file", "docker/biscuit_public.key")
+                                )
+                                if client_topology_mode != "host"
+                                else s.get("biscuit_public_key_file", "docker/biscuit_public.key")
                             ),
                             biscuit_delegate=bool(s.get("biscuit_delegate")),
                             biscuit_delegate_denies=(
@@ -4086,9 +4649,18 @@ def main(
                             biscuit_delegate_public_key_hex=s.get(
                                 "biscuit_delegate_public_key_hex"
                             ),
-                            biscuit_delegate_public_key_file=s.get(
-                                "biscuit_delegate_public_key_file",
-                                "docker/biscuit_public.key",
+                            biscuit_delegate_public_key_file=(
+                                _container_repo_path(
+                                    s.get(
+                                        "biscuit_delegate_public_key_file",
+                                        "docker/biscuit_public.key",
+                                    )
+                                )
+                                if client_topology_mode != "host"
+                                else s.get(
+                                    "biscuit_delegate_public_key_file",
+                                    "docker/biscuit_public.key",
+                                )
                             ),
                             biscuit_delegate_handoff=bool(
                                 s.get("biscuit_delegate", {}).get("handoff")
@@ -4128,16 +4700,31 @@ def main(
                             ),
                             fanout_churn_max_events=s.get("fanout_churn_max_events", 1),
                             fanout_churn_settle_ms=s.get("fanout_churn_settle_ms", 0),
-                            fanout_churn_dynamic_security_source=s.get(
-                                "fanout_churn_dynamic_security_source"
+                            fanout_churn_dynamic_security_source=(
+                                _container_repo_path(s.get("fanout_churn_dynamic_security_source"))
+                                if client_topology_mode != "host"
+                                else s.get("fanout_churn_dynamic_security_source")
                             ),
                             fanout_churn_control_topic=s.get("fanout_churn_control_topic"),
                             fanout_churn_control_payload=s.get("fanout_churn_control_payload"),
-                            fanout_churn_sqlite_db=s.get("fanout_churn_sqlite_db"),
+                            fanout_churn_sqlite_db=(
+                                _container_repo_path(s.get("fanout_churn_sqlite_db"))
+                                if client_topology_mode != "host"
+                                else s.get("fanout_churn_sqlite_db")
+                            ),
                             fanout_churn_sqlite_topic=s.get("fanout_churn_sqlite_topic"),
                             fanout_churn_sqlite_subscribers=s.get(
                                 "fanout_churn_sqlite_subscribers"
                             ),
+                            client_topology=client_topology_mode,
+                            compose_files=compose_files,
+                            compose_project_name=compose_project_name,
+                            loadgen_service=loadgen_service,
+                            loadgen_cpus=loadgen_cpus,
+                            loadgen_memory=loadgen_memory,
+                            loadgen_cpuset=loadgen_cpuset,
+                            scenario_id=s["id"],
+                            run_index=idx,
                         )
                     if s.get("proactive_refresh_assert_continuity"):
                         if not res.get("session_continuity_ok"):

@@ -797,6 +797,34 @@ cargo run --locked -p gen-tokens --bin mqtt-loadgen -- \
   --password "$(cat admin_token.txt)"
 ```
 
+### Client Container Topology (Issue 41)
+
+`run_scenarios.py` runs MQTT benchmark clients in Docker by default:
+
+- `--client-topology container-single` (default): one loadgen container simulates
+  `N` MQTT clients. This preserves the established load shape while isolating
+  the generator from the host process namespace.
+- `--client-topology container-per-client`: launches deterministic one-client
+  containers named `client_1..client_N` for standard publish/control scenarios,
+  improving topology fidelity for “independent IoT node” claims.
+- `--client-topology host`: legacy compatibility mode for local debugging.
+
+Client resource controls are configured with `--client-cpus`,
+`--client-memory`, and optional `--client-cpuset`. Containerized clients use
+Docker service names (`mosquitto`, `token-issuer`) inside `mqtt-net`; host-side
+orchestration, Prometheus queries, and authz configuration still use localhost
+ports.
+
+Use `container-single` for most matrix runs where broker/plugin isolation is the
+main concern. Use `container-per-client` for thundering-herd, strict
+identity-bound, and topology-fidelity slices. Capability scenarios may still
+reuse shared tokens when declared; strict parity scenarios continue to provision
+one JWT/Biscuit per `client_id` through the Token Issuer.
+
+Current limitation: `container-per-client` is intentionally rejected for fan-out
+scenarios because those require coordinated subscriber readiness plus a separate
+publisher/controller role. Use `container-single` for ACL_READ fan-out matrices.
+
 ## INTERLEAVED-CONTROL Scenarios (Issue 36)
 
 These scenarios measure **control plane latency under active data plane load** by publishing control messages interleaved with regular data messages. Unlike CONTROL-OVERHEAD (control-only) and CONTROL-CHURN (batch policy churn), these scenarios simulate realistic mixed workloads where control messages (policy updates, reauthentication triggers) must be processed while ongoing data traffic continues.

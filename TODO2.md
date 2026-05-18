@@ -1,101 +1,124 @@
-# TODO: Support `container-per-client` for Synchronized Connect Scenarios
+# TODO: Support `container-per-client` for Biscuit Delegation Handoff
 
 ## Current Limitation
 
-`mqtt-auth-biscuit/benchmarks/run_scenarios.py` explicitly rejects:
+The benchmark suite includes `TOKEN-DELEGATION-HANDOFF-BISCUIT`, which models
+runtime Biscuit delegation by publishing delegated tokens over MQTT. However,
+the current `container-per-client` topology starts one identical one-client
+loadgen process per container. That shape does not cleanly represent the
+research-relevant handoff workflow:
 
-```text
---client-topology container-per-client
---sync-connect
-```
+- one delegator or master principal creates restricted delegated tokens
+- multiple independent delegatee clients receive those tokens
+- delegatees connect and exercise the delegated authority
 
-The Rust load generator implements `--sync-connect` with an in-process gate. In `container-per-client`, the Python runner starts one loadgen process per client and rewrites each command to `--clients 1`. That means each container creates a one-client gate and releases independently. The result is not an N-client synchronized connect burst; it is N separate one-client starts.
-
-Allowing that silently would invalidate synchronized-connect benchmark semantics.
+Without explicit delegation roles, a per-client container run risks turning a
+multi-principal delegation workflow into isolated self-contained delegation
+work. That would weaken the scenario's claim that it measures decentralized
+delegation across independent clients.
 
 ## Why This Matters
 
-A cross-container barrier is research-useful if the evaluation needs both:
+Biscuit delegation is one of the main features that differentiates Biscuit from
+JWT in this project. Supporting delegation handoff under `container-per-client`
+would connect two important evaluation claims:
 
-- per-client resource isolation from one container per MQTT client
-- a coordinated thundering-herd connect event
+- Biscuit can express and transport restricted delegated authority.
+- The benchmark topology can model independent IoT-style clients with isolated
+  load generation resources.
 
-This matters for experiments about authentication admission pressure, broker connection bursts, fairness, resource scheduling, and tail latency under simultaneous client arrival. If those claims are not part of the evaluation, `container-single` is sufficient because it already preserves synchronized starts with the existing in-process gate.
+A reasonable reviewer could ask whether the delegation result still holds when
+the delegator and delegatees are separate client processes rather than workers
+inside one process. Adding this scenario would make the delegation evidence
+stronger and more realistic without expanding the benchmark matrix
+frivolously.
 
 ## Implementation Plan
 
-1. Define the barrier contract.
-   - Every client container must signal `ready`.
-   - No client container may call MQTT connect before the coordinator releases the barrier.
-   - Release must happen once all expected clients are ready or the scenario times out.
-   - Every output should include enough timing metadata to audit barrier behavior.
+1. Define explicit delegation handoff roles.
+   - Add a loadgen role option such as
+     `--delegation-handoff-role delegator|delegatee|combined`.
+   - Keep `combined` as the default for existing host and `container-single`
+     behavior.
+   - `delegator` should create delegated tokens and publish them to the handoff
+     topic.
+   - `delegatee` should subscribe for its delegated token, then connect and run
+     the benchmark operation using that token.
 
-2. Add loadgen barrier support.
-   - Add CLI options such as:
-     - `--sync-connect-barrier-url`
-     - `--sync-connect-run-id`
-     - `--sync-connect-participant-id`
-     - `--sync-connect-participants`
-   - Keep existing in-process `--sync-connect` behavior for host and `container-single`.
-   - Use the external barrier only when the barrier URL/options are provided.
+2. Use a shared handoff run identifier.
+   - Generate a unique nonce or run ID in `run_scenarios.py`.
+   - Pass it to all delegator and delegatee containers.
+   - Require delegatees to ignore handoff messages with the wrong nonce.
+   - Include the nonce or a redacted run ID in result metadata for auditability.
 
-3. Implement a small coordinator service.
-   - Prefer a simple benchmark-local HTTP service over ad hoc sleeps or log parsing.
-   - Endpoints can be minimal:
-     - `POST /runs/{run_id}/ready/{participant_id}`
-     - `GET /runs/{run_id}/wait`
-     - `POST /runs/{run_id}/release`
-     - `GET /runs/{run_id}/status`
-   - The coordinator should enforce participant count, unique IDs, release time, and timeout.
-   - It can run as:
-     - a lightweight Python subprocess started by `run_scenarios.py`
-     - a small service in `docker-compose.yml`
-     - a mode inside the existing loadgen binary
+3. Orchestrate containers by role.
+   - Build the loadgen image once.
+   - Start delegatee containers first so they can subscribe to the handoff topic.
+   - Wait for delegatee readiness before starting the delegator.
+   - Start one delegator container to publish delegated tokens.
+   - Collect JSON output from every container.
+   - Use deterministic names such as `delegation_delegatee_1` and
+     `delegation_delegator`.
 
-4. Wire the barrier into `run_scenarios.py`.
-   - Start the coordinator before launching per-client containers.
-   - Pass the same run ID and participant count to all containers.
-   - Launch all client containers.
-   - Wait for readiness from all participants.
-   - Release the barrier.
-   - Collect all JSON outputs and merge as normal.
-   - Tear down the coordinator even when a client fails.
+4. Add delegatee readiness.
+   - Prefer a structured readiness signal over log scraping.
+   - Acceptable options:
+     - shared ready files in a run-specific directory
+     - a small readiness HTTP endpoint in loadgen
+     - MQTT readiness messages on a control topic with the run nonce
+   - Fail the scenario if all delegatees are not ready before a bounded timeout.
 
-5. Make timing explicit in result JSON.
-   - Add fields such as:
+5. Make token ownership explicit.
+   - The delegator should generate one delegated token per delegatee client ID.
+   - Delegatees should reject tokens not addressed to their own client ID.
+   - The delegated token should preserve the intended restrictions: topic,
+     operation, TTL, and any additional checks or denies.
+
+6. Merge role-specific results.
+   - Delegator output should contribute delegation latency, delegation token
+     length, handoff publish latency, and errors.
+   - Delegatee output should contribute connect latency, publish/receive
+     latency, token acceptance failures, and errors.
+   - Recompute aggregate counts from all delegatees rather than copying the
+     first delegatee payload.
+   - Preserve topology metadata, for example:
 
 ```json
 {
-  "sync_connect": {
-    "barrier": "external",
-    "participants": 10,
-    "ready_count": 10,
-    "released_at_unix_ms": 1760000000000,
-    "max_ready_skew_ms": 12.4
+  "topology": {
+    "mode": "container-per-client",
+    "delegation_handoff": {
+      "delegators": 1,
+      "delegatees": 10,
+      "topic": "delegation/handoff",
+      "qos": 1,
+      "retain": true
+    }
   }
 }
 ```
 
-   - Record client-side time spent waiting at the barrier.
-   - Preserve normal `connect` latency as MQTT connect latency, not barrier wait time.
+7. Preserve existing behavior.
+   - Host and `container-single` handoff scenarios should continue to use the
+     current combined in-process implementation.
+   - `container-per-client` should remain rejected or guarded until role-aware
+     handoff is implemented.
 
-6. Handle failure modes deliberately.
-   - If a client never reaches ready, fail the scenario with a clear timeout error.
-   - If a client exits before release, fail the run and include stderr.
-   - If the coordinator releases with fewer than expected participants, fail unless an explicit test-only override is set.
-   - Use unique run IDs to avoid stale participants from prior failed runs.
-
-7. Add tests before enabling the mode.
-   - Unit-test barrier command arguments.
-   - Unit-test coordinator ready/release behavior.
-   - Unit-test timeout and partial-readiness failures.
-   - Unit-test that per-client `sync_connect` no longer removes synchronization semantics.
-   - Add a small integration test that verifies multiple containers block before release.
+8. Add tests.
+   - Unit-test delegator and delegatee command construction.
+   - Unit-test readiness timeout behavior.
+   - Unit-test that delegatees ignore wrong-nonce and wrong-client tokens.
+   - Unit-test merge behavior for delegator-only and delegatee-only metrics.
+   - Add a small integration smoke test with one delegator and two delegatees.
 
 ## Acceptance Criteria
 
-- `container-per-client` supports `sync_connect` only through a real cross-container barrier.
-- Connect bursts remain synchronized across containers within a documented skew bound.
-- Barrier wait time is measured separately from MQTT connect latency.
-- Failed or partial barriers fail the scenario instead of producing benchmark output that looks valid.
-- Existing host and `container-single` synchronized-connect behavior remains unchanged.
+- `container-per-client` supports Biscuit delegation handoff only through
+  explicit delegator/delegatee roles.
+- Delegatees are ready before the delegator publishes handoff tokens.
+- Every delegatee receives and uses the token intended for its own client ID.
+- Missing, stale, wrong-nonce, or wrong-client handoff tokens fail the scenario.
+- Merged output reports delegation and delegatee operation metrics without
+  first-client artifacts.
+- Existing host and `container-single` delegation handoff behavior remains
+  unchanged.

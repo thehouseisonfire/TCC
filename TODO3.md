@@ -1,124 +1,115 @@
-# TODO: Support `container-per-client` for Biscuit Delegation Handoff
+# TODO: Add Multi-Client Reauthentication Storm Scenarios
 
 ## Current Limitation
 
-The benchmark suite includes `TOKEN-DELEGATION-HANDOFF-BISCUIT`, which models
-runtime Biscuit delegation by publishing delegated tokens over MQTT. However,
-the current `container-per-client` topology starts one identical one-client
-loadgen process per container. That shape does not cleanly represent the
-research-relevant handoff workflow:
+The benchmark suite includes MQTT v5 reauthentication and proactive token
+refresh coverage, but the proactive lifecycle scenarios currently focus on a
+single client. That is enough to validate correctness of the refresh path, but
+it does not measure what happens when many clients renew credentials around the
+same time.
 
-- one delegator or master principal creates restricted delegated tokens
-- multiple independent delegatee clients receive those tokens
-- delegatees connect and exercise the delegated authority
-
-Without explicit delegation roles, a per-client container run risks turning a
-multi-principal delegation workflow into isolated self-contained delegation
-work. That would weaken the scenario's claim that it measures decentralized
-delegation across independent clients.
+In realistic IoT deployments, devices are often provisioned in batches and may
+share similar token issuance or expiry windows. That can create renewal bursts
+where broker authentication, token verification, and token issuer capacity are
+exercised concurrently.
 
 ## Why This Matters
 
-Biscuit delegation is one of the main features that differentiates Biscuit from
-JWT in this project. Supporting delegation handoff under `container-per-client`
-would connect two important evaluation claims:
+A multi-client reauthentication storm would complement the existing
+thundering-herd connect scenario. The current thundering-herd scenario measures
+simultaneous initial connection pressure; a reauthentication storm would measure
+mid-session credential renewal pressure.
 
-- Biscuit can express and transport restricted delegated authority.
-- The benchmark topology can model independent IoT-style clients with isolated
-  load generation resources.
+This is worth adding if the evaluation makes claims about token lifecycle,
+operational viability, or MQTT v5 reauthentication under load. It would provide
+evidence for questions a reasonable reviewer could ask:
 
-A reasonable reviewer could ask whether the delegation result still holds when
-the delegator and delegatees are separate client processes rather than workers
-inside one process. Adding this scenario would make the delegation evidence
-stronger and more realistic without expanding the benchmark matrix
-frivolously.
+- Does proactive refresh remain stable when many clients refresh together?
+- Do JWT and Biscuit renewal paths differ under concurrent reauthentication?
+- Does broker-side authorization latency or token size affect renewal burst
+  tail latency?
+- Can sessions remain continuous during a synchronized refresh wave?
+
+This scenario should not become a broad matrix expansion. It should be a small,
+focused lifecycle stress slice.
 
 ## Implementation Plan
 
-1. Define explicit delegation handoff roles.
-   - Add a loadgen role option such as
-     `--delegation-handoff-role delegator|delegatee|combined`.
-   - Keep `combined` as the default for existing host and `container-single`
-     behavior.
-   - `delegator` should create delegated tokens and publish them to the handoff
-     topic.
-   - `delegatee` should subscribe for its delegated token, then connect and run
-     the benchmark operation using that token.
+1. Define a dedicated scenario family.
+   - Add paired JWT and Biscuit scenarios, for example:
+     - `TOKEN-LIFECYCLE-REAUTH-STORM-JWT`
+     - `TOKEN-LIFECYCLE-REAUTH-STORM-BISCUIT`
+   - Use a bounded client count that is large enough to expose concurrency but
+     still practical for CI or local research runs, such as 10 or 25 clients.
+   - Keep larger counts optional through CLI parameters rather than expanding
+     the default matrix.
 
-2. Use a shared handoff run identifier.
-   - Generate a unique nonce or run ID in `run_scenarios.py`.
-   - Pass it to all delegator and delegatee containers.
-   - Require delegatees to ignore handoff messages with the wrong nonce.
-   - Include the nonce or a redacted run ID in result metadata for auditability.
+2. Preserve session continuity semantics.
+   - Use MQTT v5 reauthentication rather than disconnect/reconnect.
+   - Keep `proactive_refresh_assert_continuity` enabled.
+   - Treat any expiry denial, dropped session, or missed refresh as a scenario
+     failure.
 
-3. Orchestrate containers by role.
-   - Build the loadgen image once.
-   - Start delegatee containers first so they can subscribe to the handoff topic.
-   - Wait for delegatee readiness before starting the delegator.
-   - Start one delegator container to publish delegated tokens.
-   - Collect JSON output from every container.
-   - Use deterministic names such as `delegation_delegatee_1` and
-     `delegation_delegator`.
+3. Add synchronized refresh timing.
+   - Reuse the existing proactive refresh machinery, but align token expiry or
+     refresh margins so clients attempt reauthentication within the same window.
+   - If exact synchronization is required, add a small in-process refresh barrier
+     for `container-single`.
+   - For `container-per-client`, only enable synchronized storm semantics after
+     the cross-container barrier from `TODO2.md` exists.
 
-4. Add delegatee readiness.
-   - Prefer a structured readiness signal over log scraping.
-   - Acceptable options:
-     - shared ready files in a run-specific directory
-     - a small readiness HTTP endpoint in loadgen
-     - MQTT readiness messages on a control topic with the run nonce
-   - Fail the scenario if all delegatees are not ready before a bounded timeout.
-
-5. Make token ownership explicit.
-   - The delegator should generate one delegated token per delegatee client ID.
-   - Delegatees should reject tokens not addressed to their own client ID.
-   - The delegated token should preserve the intended restrictions: topic,
-     operation, TTL, and any additional checks or denies.
-
-6. Merge role-specific results.
-   - Delegator output should contribute delegation latency, delegation token
-     length, handoff publish latency, and errors.
-   - Delegatee output should contribute connect latency, publish/receive
-     latency, token acceptance failures, and errors.
-   - Recompute aggregate counts from all delegatees rather than copying the
-     first delegatee payload.
-   - Preserve topology metadata, for example:
+4. Keep refresh timing separate from connect timing.
+   - Continue reporting initial `connect` latency.
+   - Report refresh latency in `proactive_refresh` and/or `token_refresh`.
+   - Add storm-specific metadata such as:
 
 ```json
 {
-  "topology": {
-    "mode": "container-per-client",
-    "delegation_handoff": {
-      "delegators": 1,
-      "delegatees": 10,
-      "topic": "delegation/handoff",
-      "qos": 1,
-      "retain": true
-    }
+  "reauth_storm": {
+    "clients": 25,
+    "attempts": 25,
+    "successes": 25,
+    "failures": 0,
+    "max_refresh_skew_ms": 18.7,
+    "session_continuity_ok": true
   }
 }
 ```
 
-7. Preserve existing behavior.
-   - Host and `container-single` handoff scenarios should continue to use the
-     current combined in-process implementation.
-   - `container-per-client` should remain rejected or guarded until role-aware
-     handoff is implemented.
+5. Add loadgen metrics if needed.
+   - Record per-client refresh attempt time and completion time.
+   - Compute refresh skew across clients.
+   - Keep reauthentication latency measured from AUTH request initiation to
+     successful AUTH completion, not from scenario start.
+
+6. Bound the scenario for reproducibility.
+   - Use deterministic token TTLs and refresh margins.
+   - Use a fixed message count and message size.
+   - Avoid combining the first version with fanout, churn, MTU, or HTTP failure
+     profiles.
+   - Add those combinations only if the thesis explicitly needs them.
+
+7. Add result validation.
+   - Fail if `proactive_refresh_attempts < client_count`.
+   - Fail if successes do not equal attempts.
+   - Fail if `session_continuity_ok` is false.
+   - Fail if expiry denials occur.
+   - Include clear errors in the scenario JSON when validation fails.
 
 8. Add tests.
-   - Unit-test delegator and delegatee command construction.
-   - Unit-test readiness timeout behavior.
-   - Unit-test that delegatees ignore wrong-nonce and wrong-client tokens.
-   - Unit-test merge behavior for delegator-only and delegatee-only metrics.
-   - Add a small integration smoke test with one delegator and two delegatees.
+   - Unit-test scenario shape for JWT and Biscuit parity.
+   - Unit-test aggregation of proactive refresh counters across clients.
+   - Unit-test storm metadata computation.
+   - Add a small smoke test with two clients and short TTLs.
 
 ## Acceptance Criteria
 
-- `container-per-client` supports Biscuit delegation handoff only through
-  explicit delegator/delegatee roles.
-- Delegatees are ready before the delegator publishes handoff tokens.
-- Every delegatee receives and uses the token intended for its own client ID.
-- Missing, stale, wrong-nonce, or wrong-client handoff tokens fail the scenario.
-- Merged output reports delegation and delegatee operation metrics without
-  first-client artifacts.
-- Existing host and `container-single` delegation handoff behavior remains
-  unchanged.
+- The benchmark suite includes focused JWT and Biscuit multi-client
+  reauthentication storm scenarios.
+- All clients perform MQTT v5 reauthentication without disconnecting.
+- The result JSON reports attempts, successes, failures, continuity status, and
+  refresh skew.
+- Scenario validation fails on missed refreshes, expiry denials, or session
+  continuity loss.
+- The scenario remains a focused lifecycle stress slice and does not multiply
+  unnecessarily across unrelated policy, network, or churn dimensions.

@@ -190,6 +190,22 @@ struct Args {
     biscuit_delegate_handoff_qos: u8,
     #[arg(long)]
     biscuit_delegate_handoff_no_retain: bool,
+    #[arg(
+        long,
+        env = "BISCUIT_DELEGATE_HANDOFF_ROLE",
+        default_value = "combined"
+    )]
+    biscuit_delegate_handoff_role: String,
+    #[arg(long, env = "BISCUIT_DELEGATE_HANDOFF_NONCE")]
+    biscuit_delegate_handoff_nonce: Option<String>,
+    #[arg(long, env = "BISCUIT_DELEGATE_HANDOFF_READY_DIR")]
+    biscuit_delegate_handoff_ready_dir: Option<String>,
+    #[arg(
+        long,
+        env = "BISCUIT_DELEGATE_HANDOFF_READY_TIMEOUT_SECONDS",
+        default_value_t = 120
+    )]
+    biscuit_delegate_handoff_ready_timeout_seconds: u64,
     #[arg(long, env = "MQTT_FANOUT_CHURN_KIND")]
     fanout_churn_kind: Option<String>,
     #[arg(long, env = "MQTT_FANOUT_CHURN_AFTER_MESSAGES", default_value_t = 0)]
@@ -248,6 +264,7 @@ struct Output {
     expiry_denial_count: usize,
     delegation: Summary,
     delegation_len: Summary,
+    delegation_handoff_publish: Summary,
     attenuation: Summary,
     attenuation_len: Summary,
     publish: Summary,
@@ -327,6 +344,7 @@ struct StandardMetrics {
     expiry_denial_count: usize,
     delegation: Vec<f64>,
     delegation_len: Vec<f64>,
+    delegation_handoff_publish: Vec<f64>,
     attenuation: Vec<f64>,
     attenuation_len: Vec<f64>,
     publish: Vec<f64>,
@@ -819,6 +837,44 @@ fn validate_startup_provisioning(args: &Args) -> Result<()> {
             "client_index_start must be greater than zero".to_string(),
         ));
     }
+    if !matches!(
+        args.biscuit_delegate_handoff_role.as_str(),
+        "combined" | "delegator" | "delegatee"
+    ) {
+        return Err(MqttHelperError::Message(format!(
+            "biscuit_delegate_handoff_role must be combined, delegator, or delegatee; got {:?}",
+            args.biscuit_delegate_handoff_role
+        )));
+    }
+    if args.biscuit_delegate_handoff_role != "combined" {
+        if !(args.biscuit_delegate && args.biscuit_delegate_handoff) {
+            return Err(MqttHelperError::Message(
+                "biscuit delegation handoff roles require --biscuit-delegate and --biscuit-delegate-handoff".to_string(),
+            ));
+        }
+        if args.mode == "fanout" {
+            return Err(MqttHelperError::Message(
+                "biscuit delegation handoff roles are only supported for standard publish/control mode".to_string(),
+            ));
+        }
+        if args.biscuit_delegate_handoff_nonce.is_none() {
+            return Err(MqttHelperError::Message(
+                "biscuit delegation handoff roles require biscuit_delegate_handoff_nonce"
+                    .to_string(),
+            ));
+        }
+        if args.biscuit_delegate_handoff_ready_dir.is_none() {
+            return Err(MqttHelperError::Message(
+                "biscuit delegation handoff roles require biscuit_delegate_handoff_ready_dir"
+                    .to_string(),
+            ));
+        }
+    }
+    if args.biscuit_delegate_handoff_role == "delegatee" && args.clients != 1 {
+        return Err(MqttHelperError::Message(
+            "biscuit_delegate_handoff_role=delegatee requires clients=1".to_string(),
+        ));
+    }
     external_sync_barrier(args)?;
     if !matches!(
         args.fanout_role.as_str(),
@@ -1111,6 +1167,110 @@ fn fill_nonce() -> String {
     let mut bytes = [0u8; 16];
     rand::rng().fill_bytes(&mut bytes);
     hex::encode(bytes)
+}
+
+fn handoff_nonce(args: &Args) -> String {
+    args.biscuit_delegate_handoff_nonce
+        .clone()
+        .unwrap_or_else(fill_nonce)
+}
+
+fn handoff_ready_dir(args: &Args) -> Result<PathBuf> {
+    args.biscuit_delegate_handoff_ready_dir
+        .as_deref()
+        .map(resolve_repo_path)
+        .ok_or_else(|| {
+            MqttHelperError::Message("biscuit_delegate_handoff_ready_dir is required".to_string())
+        })
+}
+
+fn handoff_ready_path(dir: &Path, client_id: &str) -> PathBuf {
+    dir.join(format!("{client_id}.ready"))
+}
+
+fn handoff_release_path(dir: &Path) -> PathBuf {
+    dir.join("handoff.release")
+}
+
+fn write_handoff_ready(dir: &Path, client_id: &str, nonce: &str) -> Result<()> {
+    fs::create_dir_all(dir)?;
+    let payload = serde_json::json!({
+        "client_id": client_id,
+        "nonce": nonce,
+        "ready": true,
+    });
+    fs::write(
+        handoff_ready_path(dir, client_id),
+        serde_json::to_vec(&payload)?,
+    )?;
+    Ok(())
+}
+
+fn write_handoff_release(dir: &Path, nonce: &str) -> Result<()> {
+    fs::create_dir_all(dir)?;
+    let payload = serde_json::json!({
+        "nonce": nonce,
+        "release": true,
+    });
+    fs::write(handoff_release_path(dir), serde_json::to_vec(&payload)?)?;
+    Ok(())
+}
+
+fn valid_handoff_ready_file(dir: &Path, client_id: &str, nonce: &str) -> bool {
+    let Ok(bytes) = fs::read(handoff_ready_path(dir, client_id)) else {
+        return false;
+    };
+    let Ok(payload) = serde_json::from_slice::<Value>(&bytes) else {
+        return false;
+    };
+    payload.get("ready").and_then(Value::as_bool) == Some(true)
+        && payload.get("client_id").and_then(Value::as_str) == Some(client_id)
+        && payload.get("nonce").and_then(Value::as_str) == Some(nonce)
+}
+
+fn valid_handoff_release_file(dir: &Path, nonce: &str) -> bool {
+    let Ok(bytes) = fs::read(handoff_release_path(dir)) else {
+        return false;
+    };
+    let Ok(payload) = serde_json::from_slice::<Value>(&bytes) else {
+        return false;
+    };
+    payload.get("release").and_then(Value::as_bool) == Some(true)
+        && payload.get("nonce").and_then(Value::as_str) == Some(nonce)
+}
+
+async fn wait_for_handoff_ready_files(
+    dir: &Path,
+    client_ids: &[String],
+    nonce: &str,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if client_ids
+            .iter()
+            .all(|client_id| valid_handoff_ready_file(dir, client_id, nonce))
+        {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_for_handoff_release_file(dir: &Path, nonce: &str, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if valid_handoff_release_file(dir, nonce) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 struct BiscuitTransform {
@@ -1447,7 +1607,7 @@ async fn prepare_handoff(args: &Args, mode_topic: &str) -> Option<HandoffPlan> {
     if !(args.biscuit_delegate && args.biscuit_delegate_handoff) {
         return None;
     }
-    let nonce = fill_nonce();
+    let nonce = handoff_nonce(args);
     let mut workers = HashMap::new();
     let mut published_tokens = HashMap::new();
     let mut errors = Vec::new();
@@ -1755,6 +1915,8 @@ fn inputs_json(
         "biscuit_delegate_handoff": args.biscuit_delegate_handoff,
         "biscuit_delegate_handoff_topic": handoff_topic(args),
         "biscuit_delegate_handoff_nonce": handoff_nonce,
+        "biscuit_delegate_handoff_role": args.biscuit_delegate_handoff_role,
+        "biscuit_delegate_handoff_ready_timeout_seconds": args.biscuit_delegate_handoff_ready_timeout_seconds,
         "control": {
             "topic": args.control_topic,
             "mode": args.control_mode,
@@ -2033,24 +2195,21 @@ async fn wait_for_handoff_token(
     mut receiver: HandoffReceiver,
     client_id: &str,
     nonce: &str,
+    timeout: Duration,
 ) -> Result<Vec<u8>> {
-    let password = poll_until(
-        &mut receiver.eventloop,
-        Duration::from_secs(10),
-        |event| match event {
-            Event::Incoming(Packet::Publish(publish)) => {
-                let parsed = serde_json::from_slice::<HandoffPayload>(&publish.payload).ok()?;
-                if parsed.client_id != client_id || parsed.nonce != nonce {
-                    return None;
-                }
-                let padding = "=".repeat((4 - parsed.token.len() % 4) % 4);
-                general_purpose::URL_SAFE
-                    .decode(format!("{}{padding}", parsed.token))
-                    .ok()
+    let password = poll_until(&mut receiver.eventloop, timeout, |event| match event {
+        Event::Incoming(Packet::Publish(publish)) => {
+            let parsed = serde_json::from_slice::<HandoffPayload>(&publish.payload).ok()?;
+            if parsed.client_id != client_id || parsed.nonce != nonce {
+                return None;
             }
-            _ => None,
-        },
-    )
+            let padding = "=".repeat((4 - parsed.token.len() % 4) % 4);
+            general_purpose::URL_SAFE
+                .decode(format!("{}{padding}", parsed.token))
+                .ok()
+        }
+        _ => None,
+    })
     .await
     .map_err(|err| MqttHelperError::Message(format!("delegation_handoff_timeout:{err}")))?;
     let _ = receiver.client.disconnect().await;
@@ -2059,13 +2218,19 @@ async fn wait_for_handoff_token(
 
 async fn receive_handoff_token(args: &Args, client_id: &str, nonce: &str) -> Result<Vec<u8>> {
     let receiver = subscribe_handoff_receiver(args, client_id).await?;
-    wait_for_handoff_token(receiver, client_id, nonce).await
+    wait_for_handoff_token(
+        receiver,
+        client_id,
+        nonce,
+        Duration::from_secs(args.biscuit_delegate_handoff_ready_timeout_seconds.max(1)),
+    )
+    .await
 }
 
 async fn receive_handoff_tokens(
     args: &Args,
     plan: &HandoffPlan,
-) -> (HashMap<String, Vec<u8>>, Vec<String>) {
+) -> (HashMap<String, Vec<u8>>, Vec<f64>, Vec<String>) {
     let mut tasks = Vec::new();
     let mut errors = Vec::new();
     for client_id in plan.tokens.keys() {
@@ -2073,8 +2238,11 @@ async fn receive_handoff_tokens(
             Ok(receiver) => {
                 let client_id = client_id.clone();
                 let nonce = plan.nonce.clone();
+                let timeout =
+                    Duration::from_secs(args.biscuit_delegate_handoff_ready_timeout_seconds.max(1));
                 tasks.push(tokio::spawn(async move {
-                    let result = wait_for_handoff_token(receiver, &client_id, &nonce).await;
+                    let result =
+                        wait_for_handoff_token(receiver, &client_id, &nonce, timeout).await;
                     (client_id, result)
                 }));
             }
@@ -2083,7 +2251,9 @@ async fn receive_handoff_tokens(
             )),
         }
     }
-    errors.extend(publish_handoff_tokens(args, &plan.nonce, &plan.tokens).await);
+    let (publish_ms, publish_errors) =
+        publish_handoff_tokens(args, &plan.nonce, &plan.tokens).await;
+    errors.extend(publish_errors);
     let mut passwords = HashMap::new();
     for task in tasks {
         match task.await {
@@ -2096,16 +2266,19 @@ async fn receive_handoff_tokens(
             Err(err) => errors.push(format!("delegation_handoff_join_failed:{err}")),
         }
     }
-    (passwords, errors)
+    (passwords, publish_ms, errors)
 }
 
 async fn publish_handoff_tokens(
     args: &Args,
     nonce: &str,
     tokens: &HashMap<String, String>,
-) -> Vec<String> {
+) -> (Vec<f64>, Vec<String>) {
     let Some(topic) = handoff_topic(args) else {
-        return vec!["biscuit_delegate_handoff_topic is required".to_string()];
+        return (
+            Vec::new(),
+            vec!["biscuit_delegate_handoff_topic is required".to_string()],
+        );
     };
     let password = match args
         .biscuit_delegate_handoff_token
@@ -2116,9 +2289,19 @@ async fn publish_handoff_tokens(
         Ok(Some(password)) => password,
         Ok(None) => match decode_token_arg(&args.password) {
             Ok(password) => password,
-            Err(err) => return vec![format!("delegation_master_password_failed:{err}")],
+            Err(err) => {
+                return (
+                    Vec::new(),
+                    vec![format!("delegation_master_password_failed:{err}")],
+                );
+            }
         },
-        Err(err) => return vec![format!("delegation_master_password_failed:{err}")],
+        Err(err) => {
+            return (
+                Vec::new(),
+                vec![format!("delegation_master_password_failed:{err}")],
+            );
+        }
     };
     let spec = ClientSpec {
         host: args.host.clone(),
@@ -2133,15 +2316,19 @@ async fn publish_handoff_tokens(
         auth_data: None,
     };
     let Ok((client, mut eventloop, report)) = connect(&spec).await else {
-        return vec!["delegation_master_connect_failed".to_string()];
+        return (
+            Vec::new(),
+            vec!["delegation_master_connect_failed".to_string()],
+        );
     };
+    let mut publish_ms = Vec::new();
     let mut errors = Vec::new();
     if !report.connect_ok {
         errors.push(format!(
             "delegation_master_connect_denied:{:?}",
             report.connect_reason
         ));
-        return errors;
+        return (publish_ms, errors);
     }
     for (client_id, token) in tokens {
         let payload = HandoffPayload {
@@ -2164,12 +2351,12 @@ async fn publish_handoff_tokens(
             Err(err) => Err(MqttHelperError::from(err)),
         };
         match publish_result {
-            Ok(_) => {}
+            Ok(ms) => publish_ms.push(ms),
             Err(err) => errors.push(format!("delegation_master_publish_failed:{err}")),
         }
     }
     let _ = client.disconnect().await;
-    errors
+    (publish_ms, errors)
 }
 
 struct FanoutSubscriber {
@@ -2186,6 +2373,7 @@ struct FanoutPreparedClient {
 struct FanoutRuntime {
     handoff_plan: Option<HandoffPlan>,
     handoff_passwords: HashMap<String, Vec<u8>>,
+    handoff_publish_ms: Vec<f64>,
     errors: Vec<String>,
     handoff_required: bool,
 }
@@ -2300,14 +2488,17 @@ async fn init_fanout_runtime(args: &Args) -> FanoutRuntime {
         errors.extend(plan.errors.clone());
     }
     let mut handoff_passwords = HashMap::new();
+    let mut handoff_publish_ms = Vec::new();
     if let Some(plan) = &handoff_plan {
-        let (passwords, handoff_errors) = receive_handoff_tokens(args, plan).await;
+        let (passwords, publish_ms, handoff_errors) = receive_handoff_tokens(args, plan).await;
         handoff_passwords = passwords;
+        handoff_publish_ms = publish_ms;
         errors.extend(handoff_errors);
     }
     FanoutRuntime {
         handoff_plan,
         handoff_passwords,
+        handoff_publish_ms,
         errors,
         handoff_required,
     }
@@ -2666,6 +2857,7 @@ fn fanout_output(args: &Args, parts: FanoutOutputParts<'_>) -> Output {
         "proactive_refresh_len": [],
         "delegation": metrics.delegation.clone(),
         "delegation_len": metrics.delegation_len.clone(),
+        "delegation_handoff_publish": parts.runtime.handoff_publish_ms.clone(),
         "attenuation": metrics.attenuation.clone(),
         "attenuation_len": metrics.attenuation_len.clone(),
         "publish": parts.fanout_publish_ms.clone(),
@@ -2701,6 +2893,7 @@ fn fanout_output(args: &Args, parts: FanoutOutputParts<'_>) -> Output {
         expiry_denial_count: 0,
         delegation: summarize(&metrics.delegation),
         delegation_len: summarize(&metrics.delegation_len),
+        delegation_handoff_publish: summarize(&parts.runtime.handoff_publish_ms),
         attenuation: summarize(&metrics.attenuation),
         attenuation_len: summarize(&metrics.attenuation_len),
         publish: summarize(&parts.fanout_publish_ms),
@@ -2905,6 +3098,7 @@ async fn run_fanout_publisher(args: Args) -> Result<Output> {
     let mut runtime = FanoutRuntime {
         handoff_plan: None,
         handoff_passwords: HashMap::new(),
+        handoff_publish_ms: Vec::new(),
         errors: Vec::new(),
         handoff_required: false,
     };
@@ -3652,6 +3846,7 @@ fn standard_metrics(
     results: Vec<WorkerResult>,
     duration_s: f64,
     handoff_plan: Option<&HandoffPlan>,
+    handoff_publish_ms: Vec<f64>,
     handoff_errors: Vec<String>,
 ) -> StandardMetrics {
     let connect = results.iter().filter_map(|r| r.connect_ms).collect();
@@ -3719,6 +3914,7 @@ fn standard_metrics(
         expiry_denial_count,
         delegation,
         delegation_len,
+        delegation_handoff_publish: handoff_publish_ms,
         attenuation,
         attenuation_len,
         publish,
@@ -3749,6 +3945,7 @@ fn standard_output(
         "proactive_refresh_len": metrics.proactive_refresh_len.clone(),
         "delegation": metrics.delegation.clone(),
         "delegation_len": metrics.delegation_len.clone(),
+        "delegation_handoff_publish": metrics.delegation_handoff_publish.clone(),
         "attenuation": metrics.attenuation.clone(),
         "attenuation_len": metrics.attenuation_len.clone(),
         "publish": metrics.publish.clone(),
@@ -3789,6 +3986,7 @@ fn standard_output(
         expiry_denial_count: metrics.expiry_denial_count,
         delegation: summarize(&metrics.delegation),
         delegation_len: summarize(&metrics.delegation_len),
+        delegation_handoff_publish: summarize(&metrics.delegation_handoff_publish),
         attenuation: summarize(&metrics.attenuation),
         attenuation_len: summarize(&metrics.attenuation_len),
         publish: summarize(&metrics.publish),
@@ -3832,9 +4030,11 @@ async fn run_standard_mode(
     let handoff_required = handoff_plan.is_some();
     let mut handoff_errors = Vec::new();
     let mut handoff_passwords = HashMap::new();
+    let mut handoff_publish_ms = Vec::new();
     if let Some(plan) = &handoff_plan {
-        let (passwords, errors) = receive_handoff_tokens(&args, plan).await;
+        let (passwords, publish_ms, errors) = receive_handoff_tokens(&args, plan).await;
         handoff_passwords = passwords;
+        handoff_publish_ms = publish_ms;
         handoff_errors = errors;
     }
     let mut tasks = Vec::new();
@@ -3873,7 +4073,13 @@ async fn run_standard_mode(
     };
     let results = collect_worker_results(tasks).await;
     let duration_s = start.elapsed().as_secs_f64().max(1e-9);
-    let metrics = standard_metrics(results, duration_s, handoff_plan.as_ref(), handoff_errors);
+    let metrics = standard_metrics(
+        results,
+        duration_s,
+        handoff_plan.as_ref(),
+        handoff_publish_ms,
+        handoff_errors,
+    );
     let output = standard_output(
         &args,
         qos_distribution.as_ref(),
@@ -3883,6 +4089,183 @@ async fn run_standard_mode(
     );
     validate_proactive_refresh_assertion(&args, &output)?;
     emit_output(&args, &output)
+}
+
+fn empty_standard_metrics() -> StandardMetrics {
+    StandardMetrics {
+        connect: Vec::new(),
+        token_refresh: Vec::new(),
+        token_refresh_len: Vec::new(),
+        proactive_refresh: Vec::new(),
+        proactive_refresh_len: Vec::new(),
+        proactive_refresh_attempts: 0,
+        proactive_refresh_successes: 0,
+        proactive_refresh_failures: 0,
+        expiry_denial_count: 0,
+        delegation: Vec::new(),
+        delegation_len: Vec::new(),
+        delegation_handoff_publish: Vec::new(),
+        attenuation: Vec::new(),
+        attenuation_len: Vec::new(),
+        publish: Vec::new(),
+        publish_qos_0: Vec::new(),
+        publish_qos_1: Vec::new(),
+        publish_qos_2: Vec::new(),
+        receive: Vec::new(),
+        control: Vec::new(),
+        control_injection: Vec::new(),
+        sync_barrier_wait: Vec::new(),
+        sync_barrier_released_at_unix_ms: Vec::new(),
+        errors: Vec::new(),
+        publish_throughput_mps: 0.0,
+        receive_throughput_mps: 0.0,
+    }
+}
+
+async fn run_handoff_delegator(
+    args: Args,
+    qos_distribution: Option<QosDistribution>,
+    token_refresh_codes: Vec<u16>,
+) -> Result<Output> {
+    let start = Instant::now();
+    let ready_dir = handoff_ready_dir(&args)?;
+    let plan = prepare_handoff(&args, &args.topic).await.ok_or_else(|| {
+        MqttHelperError::Message("biscuit delegation handoff plan required".to_string())
+    })?;
+    let client_ids = (0..args.clients)
+        .map(|index| client_id_for(&args, index))
+        .collect::<Vec<_>>();
+    let mut errors = plan.errors.clone();
+    let ready = wait_for_handoff_ready_files(
+        &ready_dir,
+        &client_ids,
+        &plan.nonce,
+        Duration::from_secs(args.biscuit_delegate_handoff_ready_timeout_seconds.max(1)),
+    )
+    .await;
+    let publish_ms = if ready {
+        match write_handoff_release(&ready_dir, &plan.nonce) {
+            Ok(()) => {
+                let (publish_ms, publish_errors) =
+                    publish_handoff_tokens(&args, &plan.nonce, &plan.tokens).await;
+                errors.extend(publish_errors);
+                publish_ms
+            }
+            Err(err) => {
+                errors.push(format!("delegation_handoff_release_write_failed:{err}"));
+                Vec::new()
+            }
+        }
+    } else {
+        errors.push("delegation_handoff_delegatee_ready_timeout".to_string());
+        Vec::new()
+    };
+    let duration_s = start.elapsed().as_secs_f64().max(1e-9);
+    let mut metrics = empty_standard_metrics();
+    metrics.delegation = plan
+        .workers
+        .values()
+        .filter_map(|worker| worker.delegation_ms)
+        .collect();
+    metrics.delegation_len = plan
+        .workers
+        .values()
+        .filter_map(|worker| worker.delegation_len)
+        .collect();
+    metrics.attenuation = plan
+        .workers
+        .values()
+        .filter_map(|worker| worker.attenuation_ms)
+        .collect();
+    metrics.attenuation_len = plan
+        .workers
+        .values()
+        .filter_map(|worker| worker.attenuation_len)
+        .collect();
+    metrics.delegation_handoff_publish = publish_ms;
+    metrics.publish_throughput_mps =
+        usize_as_f64(metrics.delegation_handoff_publish.len()) / duration_s;
+    metrics.errors = errors;
+    Ok(standard_output(
+        &args,
+        qos_distribution.as_ref(),
+        &token_refresh_codes,
+        Some(&plan.nonce),
+        metrics,
+    ))
+}
+
+async fn run_handoff_delegatee(
+    args: Args,
+    qos_distribution: Option<QosDistribution>,
+    token_refresh_codes: Vec<u16>,
+) -> Result<Output> {
+    let start = Instant::now();
+    let ready_dir = handoff_ready_dir(&args)?;
+    let nonce = args
+        .biscuit_delegate_handoff_nonce
+        .clone()
+        .ok_or_else(|| MqttHelperError::Message("handoff nonce required".to_string()))?;
+    let client_id = client_id_for(&args, 0);
+    let mut handoff_password = None;
+    let mut setup_errors = Vec::new();
+    match subscribe_handoff_receiver(&args, &client_id).await {
+        Ok(receiver) => {
+            if let Err(err) = write_handoff_ready(&ready_dir, &client_id, &nonce) {
+                setup_errors.push(format!("delegation_handoff_ready_write_failed:{err}"));
+            } else if !wait_for_handoff_release_file(
+                &ready_dir,
+                &nonce,
+                Duration::from_secs(args.biscuit_delegate_handoff_ready_timeout_seconds.max(1)),
+            )
+            .await
+            {
+                setup_errors.push("delegation_handoff_release_timeout".to_string());
+            } else {
+                match wait_for_handoff_token(
+                    receiver,
+                    &client_id,
+                    &nonce,
+                    Duration::from_secs(args.biscuit_delegate_handoff_ready_timeout_seconds.max(1)),
+                )
+                .await
+                {
+                    Ok(password) => handoff_password = Some(password),
+                    Err(err) => setup_errors.push(format!("delegation_handoff_failed:{err}")),
+                }
+            }
+        }
+        Err(err) => setup_errors.push(format!("delegation_handoff_subscribe_failed:{err}")),
+    }
+    let mut results = Vec::new();
+    if let Some(password) = handoff_password {
+        let result = run_worker(WorkerInvocation {
+            args: args.clone(),
+            index: 0,
+            bootstrap: WorkerBootstrap::default(),
+            handoff_nonce: None,
+            handoff_password: Some(password),
+            handoff_required: true,
+            sync_connect: None,
+            publish_gate: None,
+        })
+        .await;
+        results.push(result);
+    } else {
+        let mut result = WorkerResult::default();
+        result.errors.append(&mut setup_errors);
+        results.push(result);
+    }
+    let duration_s = start.elapsed().as_secs_f64().max(1e-9);
+    let mut metrics = standard_metrics(results, duration_s, None, Vec::new(), Vec::new());
+    metrics.errors.extend(setup_errors);
+    Ok(standard_output(
+        &args,
+        qos_distribution.as_ref(),
+        &token_refresh_codes,
+        Some(&nonce),
+        metrics,
+    ))
 }
 
 fn emit_output(args: &Args, output: &Output) -> Result<()> {
@@ -3915,6 +4298,18 @@ async fn main() -> Result<()> {
         validate_proactive_refresh_assertion(&args, &output)?;
         return emit_output(&args, &output);
     }
+    if args.biscuit_delegate_handoff_role == "delegator" {
+        let output =
+            run_handoff_delegator(args.clone(), qos_distribution, token_refresh_codes).await?;
+        validate_proactive_refresh_assertion(&args, &output)?;
+        return emit_output(&args, &output);
+    }
+    if args.biscuit_delegate_handoff_role == "delegatee" {
+        let output =
+            run_handoff_delegatee(args.clone(), qos_distribution, token_refresh_codes).await?;
+        validate_proactive_refresh_assertion(&args, &output)?;
+        return emit_output(&args, &output);
+    }
     run_standard_mode(args, qos_distribution, token_refresh_codes).await
 }
 
@@ -3942,6 +4337,7 @@ mod tests {
             expiry_denial_count: 0,
             delegation: Summary::default(),
             delegation_len: Summary::default(),
+            delegation_handoff_publish: Summary::default(),
             attenuation: Summary::default(),
             attenuation_len: Summary::default(),
             publish: Summary::default(),
@@ -3998,6 +4394,7 @@ mod tests {
             expiry_denial_count: 0,
             delegation: Vec::new(),
             delegation_len: Vec::new(),
+            delegation_handoff_publish: Vec::new(),
             attenuation: Vec::new(),
             attenuation_len: Vec::new(),
             publish: Vec::new(),
@@ -4207,6 +4604,100 @@ mod tests {
     }
 
     #[test]
+    fn split_handoff_receive_timeout_uses_configured_timeout() {
+        let args = Args::parse_from([
+            "mqtt-loadgen",
+            "--clients",
+            "1",
+            "--biscuit-delegate",
+            "--biscuit-delegate-handoff",
+            "--biscuit-delegate-handoff-role",
+            "delegatee",
+            "--biscuit-delegate-handoff-nonce",
+            "run-1",
+            "--biscuit-delegate-handoff-ready-dir",
+            "/tmp/handoff-ready",
+            "--biscuit-delegate-handoff-ready-timeout-seconds",
+            "37",
+        ]);
+
+        assert_eq!(args.biscuit_delegate_handoff_ready_timeout_seconds, 37);
+        assert!(validate_startup_provisioning(&args).is_ok());
+    }
+
+    #[tokio::test]
+    async fn handoff_readiness_requires_current_nonce_and_client_id() {
+        let mut ready_dir = std::env::temp_dir();
+        ready_dir.push(format!("mqtt-loadgen-handoff-ready-{}", fill_nonce()));
+        fs::create_dir_all(&ready_dir).expect("ready dir should be created");
+        let client_ids = vec!["client_1".to_string()];
+
+        write_handoff_ready(&ready_dir, "client_1", "old-run")
+            .expect("stale ready file should be written");
+        assert!(
+            !wait_for_handoff_ready_files(
+                &ready_dir,
+                &client_ids,
+                "new-run",
+                Duration::from_millis(1),
+            )
+            .await
+        );
+
+        fs::write(
+            handoff_ready_path(&ready_dir, "client_1"),
+            br#"{"client_id":"client_2","nonce":"new-run","ready":true}"#,
+        )
+        .expect("wrong-client ready file should be written");
+        assert!(
+            !wait_for_handoff_ready_files(
+                &ready_dir,
+                &client_ids,
+                "new-run",
+                Duration::from_millis(1),
+            )
+            .await
+        );
+
+        write_handoff_ready(&ready_dir, "client_1", "new-run")
+            .expect("current ready file should be written");
+        assert!(
+            wait_for_handoff_ready_files(
+                &ready_dir,
+                &client_ids,
+                "new-run",
+                Duration::from_millis(1),
+            )
+            .await
+        );
+
+        let _ = fs::remove_dir_all(ready_dir);
+    }
+
+    #[tokio::test]
+    async fn handoff_release_requires_current_nonce() {
+        let mut ready_dir = std::env::temp_dir();
+        ready_dir.push(format!("mqtt-loadgen-handoff-release-{}", fill_nonce()));
+        fs::create_dir_all(&ready_dir).expect("ready dir should be created");
+        fs::write(
+            handoff_release_path(&ready_dir),
+            br#"{"nonce":"old-run","release":true}"#,
+        )
+        .expect("stale release file should be written");
+        assert!(
+            !wait_for_handoff_release_file(&ready_dir, "new-run", Duration::from_millis(1)).await
+        );
+
+        write_handoff_release(&ready_dir, "new-run")
+            .expect("current release file should be written");
+        assert!(
+            wait_for_handoff_release_file(&ready_dir, "new-run", Duration::from_millis(1)).await
+        );
+
+        let _ = fs::remove_dir_all(ready_dir);
+    }
+
+    #[test]
     fn publish_output_preserves_legacy_result_shape() {
         let args = Args::parse_from(["mqtt-loadgen", "--clients", "1", "--messages", "1"]);
         let keys = output_keys_for(&args, "publish");
@@ -4219,6 +4710,7 @@ mod tests {
                 "control",
                 "control_injection_delay",
                 "delegation",
+                "delegation_handoff_publish",
                 "delegation_len",
                 "errors",
                 "expiry_denial_count",

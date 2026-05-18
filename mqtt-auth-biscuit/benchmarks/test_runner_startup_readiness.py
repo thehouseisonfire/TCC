@@ -191,6 +191,7 @@ class _RunLoadgenKwargs(TypedDict):
     biscuit_delegate_handoff_token: str | None
     biscuit_delegate_handoff_qos: int | None
     biscuit_delegate_handoff_retain: bool | None
+    biscuit_delegate_handoff_ready_timeout_seconds: int | None
 
 
 def _minimal_run_loadgen_kwargs() -> _RunLoadgenKwargs:
@@ -248,6 +249,7 @@ def _minimal_run_loadgen_kwargs() -> _RunLoadgenKwargs:
         "biscuit_delegate_handoff_token": None,
         "biscuit_delegate_handoff_qos": None,
         "biscuit_delegate_handoff_retain": None,
+        "biscuit_delegate_handoff_ready_timeout_seconds": None,
     }
 
 
@@ -671,6 +673,169 @@ def test_container_per_client_fanout_splits_subscriber_and_publisher_roles(monke
     assert publisher_calls[-1][publisher_calls[-1].index("--fanout-role") + 1] == "publisher"
     assert result["received_messages"] == {"count": 4, "expected": 4}
     assert result["topology"]["fanout_roles"] == {"publishers": 1, "subscribers": 2}
+
+
+def test_container_per_client_delegation_handoff_splits_delegatee_and_delegator_roles(
+    monkeypatch,
+) -> None:
+    observed_popen: list[list[str]] = []
+    observed_run: list[list[str]] = []
+    observed_ready_waits: list[dict[str, object]] = []
+
+    class Completed:
+        stdout = (
+            '{"inputs":{"clients":2,"biscuit_delegate_handoff_role":"delegator"},'
+            '"delegation":{"count":2},'
+            '"delegation_handoff_publish":{"count":2},'
+            '"publish":{"count":0},"receive":{"count":0},'
+            '"raw_publish_ms":[],'
+            '"raw_metrics":{"delegation":[1.0,2.0],'
+            '"delegation_handoff_publish":[3.0,4.0],"publish":[],"receive":[]},'
+            '"errors":[]}'
+        )
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, cmd, **kwargs) -> None:  # noqa: ANN001
+            self.cmd = cmd
+            observed_popen.append(cmd)
+
+        def communicate(self, timeout=None) -> tuple[str, str]:  # noqa: ANN001
+            return (
+                '{"inputs":{"clients":1,"biscuit_delegate_handoff_role":"delegatee"},'
+                '"connect":{"count":1},'
+                '"publish":{"count":1},'
+                '"receive":{"count":0},'
+                '"raw_publish_ms":[5.0],'
+                '"raw_metrics":{"connect":[1.0],"publish":[5.0],"receive":[]},'
+                '"errors":[]}',
+                "",
+            )
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = -15
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN202
+        observed_run.append(cmd)
+        return Completed()
+
+    monkeypatch.setattr(rs, "_resolve_rust_helper", lambda _binary: ["mqtt-loadgen"])
+    monkeypatch.setattr(rs.subprocess, "run", fake_run)
+    monkeypatch.setattr(rs.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(rs, "_delegation_handoff_run_id", lambda *_args: "handoff-run-1")
+
+    def fake_wait_for_ready(*args, **kwargs) -> None:  # noqa: ANN001
+        observed_ready_waits.append(kwargs)
+
+    monkeypatch.setattr(rs, "_wait_for_delegation_handoff_ready_files", fake_wait_for_ready)
+
+    kwargs = _minimal_run_loadgen_kwargs()
+    kwargs["username"] = "biscuit"
+    kwargs["biscuit_delegate"] = True
+    kwargs["biscuit_delegate_handoff"] = True
+    kwargs["biscuit_delegate_handoff_topic"] = "delegation/handoff"
+    kwargs["biscuit_delegate_handoff_qos"] = 0
+    kwargs["biscuit_delegate_handoff_retain"] = True
+    kwargs["biscuit_delegate_handoff_ready_timeout_seconds"] = 17
+    result = rs._run_loadgen(
+        **kwargs,
+        client_topology="container-per-client",
+        compose_project_name="bench",
+        scenario_id="TOKEN-DELEGATION-HANDOFF-BISCUIT",
+    )
+
+    assert len(observed_popen) == 2
+    assert {cmd[cmd.index("--biscuit-delegate-handoff-role") + 1] for cmd in observed_popen} == {
+        "delegatee"
+    }
+    assert {cmd[cmd.index("--biscuit-delegate-handoff-nonce") + 1] for cmd in observed_popen} == {
+        "handoff-run-1"
+    }
+    assert {cmd[cmd.index("--biscuit-delegate-handoff-qos") + 1] for cmd in observed_popen} == {"0"}
+    assert {
+        cmd[cmd.index("--biscuit-delegate-handoff-ready-timeout-seconds") + 1]
+        for cmd in observed_popen
+    } == {"17"}
+    delegator_calls = [cmd for cmd in observed_run if "--biscuit-delegate-handoff-role" in cmd]
+    assert delegator_calls[-1][
+        delegator_calls[-1].index("--biscuit-delegate-handoff-role") + 1
+    ] == ("delegator")
+    assert delegator_calls[-1][delegator_calls[-1].index("--biscuit-delegate-handoff-qos") + 1] == (
+        "0"
+    )
+    assert (
+        delegator_calls[-1][
+            delegator_calls[-1].index("--biscuit-delegate-handoff-ready-timeout-seconds") + 1
+        ]
+        == "17"
+    )
+    assert observed_ready_waits[-1]["timeout_seconds"] == 17
+    assert result["delegation"]["count"] == 2
+    assert result["delegation_handoff_publish"]["count"] == 2
+    assert result["publish"]["count"] == 2
+    assert result["topology"]["delegation_handoff"]["delegatees"] == 2
+    assert result["topology"]["delegation_handoff"]["qos"] == 0
+    assert result["topology"]["delegation_handoff"]["run_id"] == "handoff-run-..."
+
+
+def test_delegation_handoff_readiness_fails_fast_when_delegatee_exits(tmp_path) -> None:
+    class ExitedProcess:
+        returncode = 2
+
+        def poll(self) -> int:
+            return self.returncode
+
+    with pytest.raises(RuntimeError, match="delegatee exited before readiness"):
+        rs._wait_for_delegation_handoff_ready_files(
+            tmp_path,
+            clients=1,
+            processes=[("loadgen_delegatee_1", ExitedProcess())],  # type: ignore[list-item]
+            timeout_seconds=120,
+        )
+
+
+def test_delegation_handoff_merge_uses_benchmark_duration_for_throughput() -> None:
+    delegator = {
+        "inputs": {"clients": 2, "biscuit_delegate_handoff_role": "delegator"},
+        "publish": {"count": 0},
+        "receive": {"count": 0},
+        "raw_publish_ms": [],
+        "raw_metrics": {"publish": [], "receive": []},
+        "errors": [],
+    }
+    delegatee = {
+        "inputs": {"clients": 1, "biscuit_delegate_handoff_role": "delegatee"},
+        "publish": {"count": 1},
+        "receive": {"count": 0},
+        "raw_publish_ms": [5.0],
+        "raw_metrics": {"publish": [5.0], "receive": []},
+        "errors": [],
+    }
+
+    merged = rs._merge_delegation_handoff_loadgen_results(
+        delegator=delegator,
+        delegatees=[delegatee, delegatee],
+        wall_duration_s=100.0,
+        benchmark_duration_s=2.0,
+        scenario_id="TOKEN-DELEGATION-HANDOFF-BISCUIT",
+        run_index=0,
+        run_id="handoff-run-1",
+        handoff_topic="delegation/handoff",
+        handoff_qos=1,
+        handoff_retain=True,
+    )
+
+    assert merged["publish"]["count"] == 2
+    assert merged["publish_throughput_mps"] == pytest.approx(1.0)
+    assert merged["topology"]["wall_duration_s"] == 100.0
+    assert merged["topology"]["benchmark_duration_s"] == 2.0
 
 
 def test_container_per_client_sync_connect_uses_cross_container_barrier(

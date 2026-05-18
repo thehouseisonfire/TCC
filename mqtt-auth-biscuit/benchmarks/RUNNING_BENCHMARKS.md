@@ -188,6 +188,17 @@ Handoff-specific knobs (loadgen):
 
 - `--biscuit-delegate-handoff-qos` (default: 1)
 - `--biscuit-delegate-handoff-no-retain` (disable retained handoff messages)
+- `--biscuit-delegate-handoff-role combined|delegator|delegatee` (default:
+  `combined`)
+- `--biscuit-delegate-handoff-nonce` for role-aware cross-container handoff
+- `--biscuit-delegate-handoff-ready-dir` for structured delegatee readiness
+- `--biscuit-delegate-handoff-ready-timeout-seconds` (default: 120)
+
+With `--client-topology container-per-client`,
+`TOKEN-DELEGATION-HANDOFF-BISCUIT` runs one delegator container and one
+delegatee container per MQTT client. Delegatees subscribe first using the
+handoff token, write readiness files, then accept only handoff payloads matching
+their `client_id` and the runner-provided nonce.
 
 Default grants are added by the token issuer for `publish`/`subscribe` on
 `sensors/{subject}/temp` unless `no_default_grants` (request) or
@@ -832,9 +843,11 @@ identity-bound, and topology-fidelity slices. Capability scenarios may still
 reuse shared tokens when declared; strict parity scenarios continue to provision
 one JWT/Biscuit per `client_id` through the Token Issuer.
 
-Current limitation: `container-per-client` is intentionally rejected for fan-out
-scenarios because those require coordinated subscriber readiness plus a separate
-publisher/controller role. Use `container-single` for ACL_READ fan-out matrices.
+Fan-out and Biscuit delegation handoff scenarios use explicit split-role
+orchestration under `container-per-client`: subscribers/delegatees are started
+first, the runner waits for structured readiness, then the publisher/delegator
+role is launched. Use `container-single` for broad matrix runs and
+`container-per-client` for topology-fidelity slices.
 
 ## CONTROL-INTERLEAVED-DATA Scenarios (Issue 36)
 

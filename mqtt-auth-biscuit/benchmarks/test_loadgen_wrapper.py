@@ -141,6 +141,10 @@ def test_rust_loadgen_command_forwards_programmatic_transition_options(monkeypat
         biscuit_delegate_handoff_token=b"handoff-token",
         biscuit_delegate_handoff_qos=2,
         biscuit_delegate_handoff_no_retain=True,
+        biscuit_delegate_handoff_role="delegatee",
+        biscuit_delegate_handoff_nonce="run-1",
+        biscuit_delegate_handoff_ready_dir="/workspace/benchmarks/results/.handoff",
+        biscuit_delegate_handoff_ready_timeout_seconds=30,
         control_topic="$CONTROL/dynamic-security/v1",
         control_payload={"commands": [{"command": "noop"}]},
         control_mode=True,
@@ -212,6 +216,13 @@ def test_rust_loadgen_command_forwards_programmatic_transition_options(monkeypat
     assert _argv_value(argv, "--biscuit-delegate-handoff-token") == "b64:aGFuZG9mZi10b2tlbg"
     assert _argv_value(argv, "--biscuit-delegate-handoff-qos") == "2"
     assert "--biscuit-delegate-handoff-no-retain" in argv
+    assert _argv_value(argv, "--biscuit-delegate-handoff-role") == "delegatee"
+    assert _argv_value(argv, "--biscuit-delegate-handoff-nonce") == "run-1"
+    assert (
+        _argv_value(argv, "--biscuit-delegate-handoff-ready-dir")
+        == "/workspace/benchmarks/results/.handoff"
+    )
+    assert _argv_value(argv, "--biscuit-delegate-handoff-ready-timeout-seconds") == "30"
     assert _argv_value(argv, "--control-topic") == "$CONTROL/dynamic-security/v1"
     assert json.loads(_argv_value(argv, "--control-payload")) == {"commands": [{"command": "noop"}]}
     assert "--control-mode" in argv

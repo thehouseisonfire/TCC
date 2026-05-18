@@ -1,5 +1,9 @@
 # TODO: Support `container-per-client` for Biscuit Delegation Handoff
 
+Status: implemented. `container-per-client` now uses explicit delegator and
+delegatee loadgen roles, a shared handoff nonce, structured readiness files,
+and role-aware result merging for `TOKEN-DELEGATION-HANDOFF-BISCUIT`.
+
 ## Current Limitation
 
 The benchmark suite includes `TOKEN-DELEGATION-HANDOFF-BISCUIT`, which models

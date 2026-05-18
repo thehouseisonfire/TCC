@@ -861,6 +861,7 @@ def _run_loadgen(
     biscuit_delegate_handoff_token: str | None,
     biscuit_delegate_handoff_qos: int | None,
     biscuit_delegate_handoff_retain: bool | None,
+    biscuit_delegate_handoff_ready_timeout_seconds: int | None,
     # CONTROL message parameters
     control_topic: str | None = None,
     control_payload: dict[str, Any] | None = None,
@@ -1004,6 +1005,16 @@ def _run_loadgen(
         cmd.extend(["--biscuit-delegate-handoff-qos", str(biscuit_delegate_handoff_qos)])
     if biscuit_delegate_handoff_retain is False:
         cmd.append("--biscuit-delegate-handoff-no-retain")
+    if (
+        biscuit_delegate_handoff_ready_timeout_seconds is not None
+        and biscuit_delegate_handoff_ready_timeout_seconds != 120
+    ):
+        cmd.extend(
+            [
+                "--biscuit-delegate-handoff-ready-timeout-seconds",
+                str(biscuit_delegate_handoff_ready_timeout_seconds),
+            ]
+        )
     # CONTROL message CLI options
     if control_topic:
         cmd.extend(["--control-topic", control_topic])
@@ -1072,6 +1083,33 @@ def _run_loadgen(
             compose_files=compose_files,
             compose_project_name=compose_project_name,
             extra_env=env,
+        )
+
+    if biscuit_delegate_handoff:
+        if sync_connect:
+            raise RuntimeError(
+                "container-per-client Biscuit delegation handoff is not supported with "
+                "sync_connect; use the dedicated connection-burst scenarios for sync_connect"
+            )
+        if mode == "fanout":
+            raise RuntimeError(
+                "container-per-client Biscuit delegation handoff is not supported for "
+                "fanout split-role scenarios"
+            )
+        return _run_loadgen_container_per_client_delegation_handoff(
+            loadgen_args,
+            clients=clients,
+            service=loadgen_service,
+            scenario_id=scenario_id,
+            run_index=run_index,
+            compose_files=compose_files,
+            compose_project_name=compose_project_name,
+            extra_env=env,
+            handoff_topic=biscuit_delegate_handoff_topic or "delegation/handoff",
+            handoff_qos=(
+                biscuit_delegate_handoff_qos if biscuit_delegate_handoff_qos is not None else 1
+            ),
+            handoff_retain=biscuit_delegate_handoff_retain is not False,
         )
 
     if mode == "fanout":
@@ -1196,6 +1234,26 @@ def _append_cli_option(args: list[str], option: str, value: str) -> list[str]:
     return updated
 
 
+def _cli_option_value(args: list[str], option: str) -> str | None:
+    try:
+        index = args.index(option)
+    except ValueError:
+        return None
+    if index + 1 >= len(args):
+        return None
+    return args[index + 1]
+
+
+def _int_cli_option_value(args: list[str], option: str, default: int) -> int:
+    raw = _cli_option_value(args, option)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"invalid integer value for {option}: {raw!r}") from exc
+
+
 def _append_sync_barrier_args(
     args: list[str],
     *,
@@ -1308,6 +1366,25 @@ def _fanout_ready_host_dir(scenario_id: str, run_index: int) -> Path:
     )
 
 
+def _delegation_handoff_ready_host_dir(scenario_id: str, run_index: int) -> Path:
+    return (
+        REPO_ROOT
+        / "benchmarks"
+        / "results"
+        / ".delegation-handoff-ready"
+        / f"{_sanitize_container_name(scenario_id)}_{run_index + 1}"
+    )
+
+
+def _delegation_handoff_run_id(scenario_id: str, run_index: int) -> str:
+    scenario = _sanitize_container_name(scenario_id)
+    return f"{scenario}-{run_index + 1}-{time.time_ns()}-{uuid.uuid4().hex[:8]}"
+
+
+def _redact_run_id(run_id: str) -> str:
+    return f"{run_id[:12]}..." if len(run_id) > 12 else run_id
+
+
 def _wait_for_fanout_ready_files(
     ready_dir: Path,
     *,
@@ -1323,6 +1400,33 @@ def _wait_for_fanout_ready_files(
     missing = [path.name for path in expected if not path.exists()]
     raise RuntimeError(
         f"timed out waiting for fanout subscriber readiness in {ready_dir}: {missing}"
+    )
+
+
+def _wait_for_delegation_handoff_ready_files(
+    ready_dir: Path,
+    *,
+    clients: int,
+    processes: list[tuple[str, subprocess.Popen[str]]] | None = None,
+    timeout_seconds: float = 120.0,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    expected = [ready_dir / f"client_{index}.ready" for index in range(1, clients + 1)]
+    processes = processes or []
+    while time.monotonic() < deadline:
+        if all(path.exists() for path in expected):
+            return
+        exited = [
+            (container_name, process.returncode)
+            for container_name, process in processes
+            if process.poll() is not None
+        ]
+        if exited:
+            raise RuntimeError(f"delegation handoff delegatee exited before readiness: {exited}")
+        time.sleep(0.1)
+    missing = [path.name for path in expected if not path.exists()]
+    raise RuntimeError(
+        f"timed out waiting for delegation handoff delegatee readiness in {ready_dir}: {missing}"
     )
 
 
@@ -1414,6 +1518,7 @@ def _merge_per_client_loadgen_results(
         "proactive_refresh_len",
         "delegation",
         "delegation_len",
+        "delegation_handoff_publish",
         "attenuation",
         "attenuation_len",
         "publish_qos_0",
@@ -1437,6 +1542,7 @@ def _merge_per_client_loadgen_results(
             "proactive_refresh_len",
             "delegation",
             "delegation_len",
+            "delegation_handoff_publish",
             "attenuation",
             "attenuation_len",
             "publish",
@@ -1550,6 +1656,56 @@ def _merge_fanout_role_loadgen_results(
         "fanout_roles": {
             "publishers": 1,
             "subscribers": subscriber_count,
+        },
+    }
+    return merged
+
+
+def _merge_delegation_handoff_loadgen_results(
+    *,
+    delegator: dict[str, Any],
+    delegatees: list[dict[str, Any]],
+    wall_duration_s: float,
+    benchmark_duration_s: float,
+    scenario_id: str,
+    run_index: int,
+    run_id: str,
+    handoff_topic: str,
+    handoff_qos: int,
+    handoff_retain: bool,
+) -> dict[str, Any]:
+    merged = _merge_per_client_loadgen_results(
+        [delegator, *delegatees],
+        benchmark_duration_s,
+    )
+    delegatee_count = len(delegatees)
+    inputs = merged.get("inputs")
+    if isinstance(inputs, dict):
+        merged["inputs"] = {
+            **inputs,
+            "clients": delegatee_count,
+            "biscuit_delegate_handoff_role": "merged",
+            "biscuit_delegate_handoff_nonce": _redact_run_id(run_id),
+        }
+    duration_s = max(benchmark_duration_s, 1e-9)
+    publish_count = int(merged.get("publish", {}).get("count") or 0)
+    merged["publish_throughput_mps"] = float(publish_count / duration_s)
+    merged["throughput_mps"] = merged["publish_throughput_mps"]
+    merged["topology"] = {
+        "mode": "container-per-client",
+        "container_count": delegatee_count + 1,
+        "aggregation": "merged_from_delegation_handoff_role_containers",
+        "wall_duration_s": wall_duration_s,
+        "benchmark_duration_s": benchmark_duration_s,
+        "scenario_id": scenario_id,
+        "run_index": run_index,
+        "delegation_handoff": {
+            "delegators": 1,
+            "delegatees": delegatee_count,
+            "topic": handoff_topic,
+            "qos": handoff_qos,
+            "retain": handoff_retain,
+            "run_id": _redact_run_id(run_id),
         },
     }
     return merged
@@ -1699,6 +1855,196 @@ def _run_loadgen_container_per_client(
             "errors": [err for err in merged.get("errors", []) if str(err).startswith("sync_")],
         }
     return merged
+
+
+def _run_loadgen_container_per_client_delegation_handoff(
+    loadgen_args: list[str],
+    *,
+    clients: int,
+    service: str,
+    scenario_id: str,
+    run_index: int,
+    compose_files: list[str] | None,
+    compose_project_name: str | None,
+    extra_env: dict[str, str],
+    handoff_topic: str,
+    handoff_qos: int,
+    handoff_retain: bool,
+) -> dict[str, Any]:
+    build_cmd = _compose_cmd(
+        ["build", service],
+        compose_files=compose_files,
+        compose_project_name=compose_project_name,
+    )
+    env = os.environ.copy()
+    env.update(extra_env)
+    subprocess.run(build_cmd, cwd=REPO_ROOT, env=env, check=True)
+
+    ready_host_dir = _delegation_handoff_ready_host_dir(scenario_id, run_index)
+    if ready_host_dir.exists():
+        shutil.rmtree(ready_host_dir)
+    ready_host_dir.mkdir(parents=True)
+    ready_container_dir = _container_repo_path(str(ready_host_dir))
+    if ready_container_dir is None:
+        raise RuntimeError(
+            f"delegation handoff ready directory is not under repo root: {ready_host_dir}"
+        )
+    run_id = _delegation_handoff_run_id(scenario_id, run_index)
+    ready_timeout_seconds = _int_cli_option_value(
+        loadgen_args,
+        "--biscuit-delegate-handoff-ready-timeout-seconds",
+        120,
+    )
+
+    started_at = time.monotonic()
+    processes: list[tuple[str, subprocess.Popen[str]]] = []
+    for index in range(clients):
+        args = _replace_cli_option(loadgen_args, "--clients", "1")
+        args = _replace_cli_option(args, "--client-index-start", str(index + 1))
+        args = _replace_cli_option(args, "--biscuit-delegate-handoff-role", "delegatee")
+        args = _replace_cli_option(args, "--biscuit-delegate-handoff-nonce", run_id)
+        args = _replace_cli_option(
+            args,
+            "--biscuit-delegate-handoff-ready-dir",
+            ready_container_dir,
+        )
+        args = _replace_cli_option(
+            args,
+            "--biscuit-delegate-handoff-ready-timeout-seconds",
+            str(ready_timeout_seconds),
+        )
+        container_name = _loadgen_container_name(
+            compose_project_name=compose_project_name,
+            compose_files=compose_files,
+            scenario_id=f"{scenario_id}_delegation_delegatee",
+            run_index=run_index,
+            client_index=index,
+        )
+        subprocess.run(
+            ["docker", "rm", "-f", container_name],
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        cmd = _compose_run_loadgen_cmd(
+            args,
+            service=service,
+            container_name=container_name,
+            compose_files=compose_files,
+            compose_project_name=compose_project_name,
+            build=False,
+        )
+        processes.append(
+            (
+                container_name,
+                subprocess.Popen(
+                    cmd,
+                    cwd=REPO_ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                ),
+            )
+        )
+
+    completed: set[str] = set()
+    try:
+        _wait_for_delegation_handoff_ready_files(
+            ready_host_dir,
+            clients=clients,
+            processes=processes,
+            timeout_seconds=ready_timeout_seconds,
+        )
+        benchmark_started_at = time.monotonic()
+        delegator_args = _replace_cli_option(loadgen_args, "--clients", str(clients))
+        delegator_args = _replace_cli_option(delegator_args, "--client-index-start", "1")
+        delegator_args = _replace_cli_option(
+            delegator_args,
+            "--biscuit-delegate-handoff-role",
+            "delegator",
+        )
+        delegator_args = _replace_cli_option(
+            delegator_args,
+            "--biscuit-delegate-handoff-nonce",
+            run_id,
+        )
+        delegator_args = _replace_cli_option(
+            delegator_args,
+            "--biscuit-delegate-handoff-ready-dir",
+            ready_container_dir,
+        )
+        delegator_args = _replace_cli_option(
+            delegator_args,
+            "--biscuit-delegate-handoff-ready-timeout-seconds",
+            str(ready_timeout_seconds),
+        )
+        delegator_name = _loadgen_container_name(
+            compose_project_name=compose_project_name,
+            compose_files=compose_files,
+            scenario_id=f"{scenario_id}_delegation_delegator",
+            run_index=run_index,
+        )
+        subprocess.run(
+            ["docker", "rm", "-f", delegator_name],
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        delegator_cmd = _compose_run_loadgen_cmd(
+            delegator_args,
+            service=service,
+            container_name=delegator_name,
+            compose_files=compose_files,
+            compose_project_name=compose_project_name,
+            build=False,
+        )
+        delegator_completed = subprocess.run(
+            delegator_cmd,
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        delegator_result = _loads_json_from_compose_stdout(delegator_completed.stdout)
+        delegator_result["container_name"] = delegator_name
+        delegator_result["delegation_handoff_role"] = "delegator"
+
+        delegatee_results: list[dict[str, Any]] = []
+        for container_name, process in processes:
+            stdout, stderr = process.communicate()
+            completed.add(container_name)
+            if process.returncode != 0:
+                raise RuntimeError(
+                    f"loadgen container {container_name} failed with exit code "
+                    f"{process.returncode}: {stderr}"
+                )
+            result = _loads_json_from_compose_stdout(stdout)
+            result["container_name"] = container_name
+            result["delegation_handoff_role"] = "delegatee"
+            delegatee_results.append(result)
+    except Exception:
+        _cleanup_per_client_loadgen_processes(processes, completed)
+        raise
+
+    finished_at = time.monotonic()
+    wall_duration_s = finished_at - started_at
+    benchmark_duration_s = finished_at - benchmark_started_at
+    return _merge_delegation_handoff_loadgen_results(
+        delegator=delegator_result,
+        delegatees=delegatee_results,
+        wall_duration_s=wall_duration_s,
+        benchmark_duration_s=benchmark_duration_s,
+        scenario_id=scenario_id,
+        run_index=run_index,
+        run_id=run_id,
+        handoff_topic=handoff_topic,
+        handoff_qos=handoff_qos,
+        handoff_retain=handoff_retain,
+    )
 
 
 def _run_loadgen_container_per_client_fanout(
@@ -4404,6 +4750,11 @@ def main(
     loadgen_cpus: str = typer.Option("1.0", "--client-cpus"),
     loadgen_memory: str = typer.Option("512m", "--client-memory"),
     loadgen_cpuset: str | None = typer.Option(None, "--client-cpuset"),
+    biscuit_delegate_handoff_ready_timeout_seconds: int = typer.Option(
+        120,
+        "--biscuit-delegate-handoff-ready-timeout-seconds",
+        help="Readiness and token receive timeout for Biscuit delegation handoff roles.",
+    ),
 ):
     setup_logging(log_level)
     if not isinstance(client_topology, str):
@@ -4416,6 +4767,8 @@ def main(
         loadgen_memory = "512m"
     if not isinstance(loadgen_cpuset, str):
         loadgen_cpuset = None
+    if not isinstance(biscuit_delegate_handoff_ready_timeout_seconds, int):
+        biscuit_delegate_handoff_ready_timeout_seconds = 120
     if client_topology not in {"host", "container-single", "container-per-client"}:
         raise typer.BadParameter(
             "client_topology must be one of: host, container-single, container-per-client"
@@ -5093,6 +5446,9 @@ def main(
                                 s.get("biscuit_delegate", {}).get("handoff", {}).get("retain")
                                 if s.get("biscuit_delegate")
                                 else None
+                            ),
+                            biscuit_delegate_handoff_ready_timeout_seconds=(
+                                biscuit_delegate_handoff_ready_timeout_seconds
                             ),
                             control_topic=s.get("control_topic"),
                             control_payload=s.get("control_payload")

@@ -95,6 +95,10 @@ def _rust_loadgen_cmd(
     biscuit_delegate_handoff_token: MqttPassword | None = None,
     biscuit_delegate_handoff_qos: int | None = None,
     biscuit_delegate_handoff_no_retain: bool = False,
+    biscuit_delegate_handoff_role: str = "combined",
+    biscuit_delegate_handoff_nonce: str | None = None,
+    biscuit_delegate_handoff_ready_dir: str | None = None,
+    biscuit_delegate_handoff_ready_timeout_seconds: int = 120,
     control_topic: str | None = None,
     control_payload: dict[str, Any] | None = None,
     control_mode: bool = False,
@@ -261,6 +265,19 @@ def _rust_loadgen_cmd(
         cmd.extend(["--biscuit-delegate-handoff-qos", str(biscuit_delegate_handoff_qos)])
     if biscuit_delegate_handoff_no_retain:
         cmd.append("--biscuit-delegate-handoff-no-retain")
+    if biscuit_delegate_handoff_role != "combined":
+        cmd.extend(["--biscuit-delegate-handoff-role", biscuit_delegate_handoff_role])
+    if biscuit_delegate_handoff_nonce:
+        cmd.extend(["--biscuit-delegate-handoff-nonce", biscuit_delegate_handoff_nonce])
+    if biscuit_delegate_handoff_ready_dir:
+        cmd.extend(["--biscuit-delegate-handoff-ready-dir", biscuit_delegate_handoff_ready_dir])
+    if biscuit_delegate_handoff_ready_timeout_seconds != 120:
+        cmd.extend(
+            [
+                "--biscuit-delegate-handoff-ready-timeout-seconds",
+                str(biscuit_delegate_handoff_ready_timeout_seconds),
+            ]
+        )
     if fanout_churn_kind:
         cmd.extend(["--fanout-churn-kind", fanout_churn_kind])
     if fanout_churn_after_messages > 0:

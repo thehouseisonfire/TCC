@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
@@ -52,6 +53,10 @@ SemanticClass = Literal["capability", "mixed", "parity_identity_bound"]
 ClientTopology = Literal["host", "container-single", "container-per-client"]
 DEFAULT_CLIENT_TOPOLOGY: ClientTopology = "container-single"
 LOADGEN_CONTAINER_REPO_ROOT = "/workspace"
+SYNC_BARRIER_SERVICE = "sync-barrier"
+SYNC_BARRIER_CONTAINER_URL = "http://sync-barrier:8083"
+SYNC_BARRIER_HOST_URL = "http://localhost:8083"
+SYNC_BARRIER_TIMEOUT_SECONDS = 120
 
 
 def _resolve_rust_helper(binary: str) -> list[str]:
@@ -1054,12 +1059,6 @@ def _run_loadgen(
     if loadgen_cpuset:
         env["LOADGEN_CPUSET"] = loadgen_cpuset
 
-    if client_topology == "container-per-client" and sync_connect:
-        raise RuntimeError(
-            "container-per-client topology is not supported for sync_connect scenarios yet; "
-            "use --client-topology container-single until a cross-container start barrier exists"
-        )
-
     if client_topology == "container-single":
         return _run_loadgen_compose_container(
             loadgen_args,
@@ -1076,6 +1075,11 @@ def _run_loadgen(
         )
 
     if mode == "fanout":
+        if sync_connect:
+            raise RuntimeError(
+                "container-per-client fanout split-role topology is not supported for "
+                "sync_connect scenarios; use a standard publish/connect-burst scenario"
+            )
         return _run_loadgen_container_per_client_fanout(
             loadgen_args,
             clients=clients,
@@ -1097,6 +1101,7 @@ def _run_loadgen(
         compose_files=compose_files,
         compose_project_name=compose_project_name,
         extra_env=env,
+        sync_connect=sync_connect,
     )
 
 
@@ -1189,6 +1194,108 @@ def _append_cli_option(args: list[str], option: str, value: str) -> list[str]:
     updated = list(args)
     updated.extend([option, value])
     return updated
+
+
+def _append_sync_barrier_args(
+    args: list[str],
+    *,
+    run_id: str,
+    participant_id: str,
+    participants: int,
+) -> list[str]:
+    updated = list(args)
+    updated.extend(
+        [
+            "--sync-connect-barrier-url",
+            SYNC_BARRIER_CONTAINER_URL,
+            "--sync-connect-run-id",
+            run_id,
+            "--sync-connect-participant-id",
+            participant_id,
+            "--sync-connect-participants",
+            str(participants),
+            "--sync-connect-barrier-timeout-seconds",
+            str(SYNC_BARRIER_TIMEOUT_SECONDS),
+        ]
+    )
+    return updated
+
+
+def _sync_barrier_run_id(scenario_id: str, run_index: int) -> str:
+    scenario = _sanitize_container_name(scenario_id)
+    return f"{scenario}-{run_index + 1}-{time.time_ns()}-{uuid.uuid4().hex[:8]}"
+
+
+def _ensure_sync_barrier_service(
+    *,
+    compose_files: list[str] | None,
+    compose_project_name: str | None,
+) -> None:
+    cmd = _compose_cmd(
+        ["up", "-d", "--build", SYNC_BARRIER_SERVICE],
+        compose_files=compose_files,
+        compose_project_name=compose_project_name,
+    )
+    subprocess.run(cmd, cwd=REPO_ROOT, env=os.environ.copy(), check=True)
+    _wait_for_service_health(
+        SYNC_BARRIER_SERVICE,
+        SYNC_BARRIER_HOST_URL,
+        None,
+        False,
+        timeout_seconds=60.0,
+    )
+
+
+def _sync_barrier_status(run_id: str) -> dict[str, Any] | None:
+    try:
+        with _http_client(None, False) as client:
+            resp = client.get(f"{SYNC_BARRIER_HOST_URL}/runs/{run_id}/status")
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            return cast(dict[str, Any], resp.json())
+    except httpx.HTTPStatusError:
+        raise
+    except Exception:
+        return None
+
+
+def _wait_for_sync_barrier_ready(
+    run_id: str,
+    *,
+    participants: int,
+    processes: list[tuple[str, subprocess.Popen[str]]],
+    timeout_seconds: float = float(SYNC_BARRIER_TIMEOUT_SECONDS),
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    last_status: dict[str, Any] | None = None
+    while time.monotonic() < deadline:
+        exited = [
+            (container_name, process.returncode)
+            for container_name, process in processes
+            if process.poll() is not None
+        ]
+        if exited:
+            raise RuntimeError(f"sync barrier participant exited before release: {exited}")
+        status = _sync_barrier_status(run_id)
+        if status is not None:
+            last_status = status
+            if int(status.get("ready_count") or 0) >= participants:
+                return status
+        time.sleep(0.1)
+    raise RuntimeError(
+        f"timed out waiting for sync barrier readiness for run {run_id}: {last_status}"
+    )
+
+
+def _release_sync_barrier(run_id: str, *, participants: int) -> dict[str, Any]:
+    with _http_client(None, False) as client:
+        resp = client.post(
+            f"{SYNC_BARRIER_HOST_URL}/runs/{run_id}/release",
+            params={"participants": str(participants)},
+        )
+        resp.raise_for_status()
+        return cast(dict[str, Any], resp.json())
 
 
 def _fanout_ready_host_dir(scenario_id: str, run_index: int) -> Path:
@@ -1315,6 +1422,7 @@ def _merge_per_client_loadgen_results(
         "receive",
         "control",
         "control_injection_delay",
+        "sync_connect_barrier_wait",
     ):
         merged[metric] = _merge_latency_summary(results, metric)
     merged["publish"] = _summary_from_values(publish_values)
@@ -1338,6 +1446,7 @@ def _merge_per_client_loadgen_results(
             "receive",
             "control",
             "control_injection_delay",
+            "sync_connect_barrier_wait",
         )
     }
     merged["errors"] = errors
@@ -1483,6 +1592,7 @@ def _run_loadgen_container_per_client(
     compose_files: list[str] | None,
     compose_project_name: str | None,
     extra_env: dict[str, str],
+    sync_connect: bool,
 ) -> dict[str, Any]:
     build_cmd = _compose_cmd(
         ["build", service],
@@ -1492,12 +1602,25 @@ def _run_loadgen_container_per_client(
     env = os.environ.copy()
     env.update(extra_env)
     subprocess.run(build_cmd, cwd=REPO_ROOT, env=env, check=True)
+    barrier_run_id = _sync_barrier_run_id(scenario_id, run_index) if sync_connect else None
+    if barrier_run_id is not None:
+        _ensure_sync_barrier_service(
+            compose_files=compose_files,
+            compose_project_name=compose_project_name,
+        )
 
     started_at = time.monotonic()
     processes: list[tuple[str, subprocess.Popen[str]]] = []
     for index in range(clients):
         args = _replace_cli_option(loadgen_args, "--clients", "1")
         args = _replace_cli_option(args, "--client-index-start", str(index + 1))
+        if barrier_run_id is not None:
+            args = _append_sync_barrier_args(
+                args,
+                run_id=barrier_run_id,
+                participant_id=f"client_{index + 1}",
+                participants=clients,
+            )
         container_name = _loadgen_container_name(
             compose_project_name=compose_project_name,
             compose_files=compose_files,
@@ -1536,7 +1659,15 @@ def _run_loadgen_container_per_client(
 
     results: list[dict[str, Any]] = []
     completed: set[str] = set()
+    barrier_status: dict[str, Any] | None = None
     try:
+        if barrier_run_id is not None:
+            _wait_for_sync_barrier_ready(
+                barrier_run_id,
+                participants=clients,
+                processes=processes,
+            )
+            barrier_status = _release_sync_barrier(barrier_run_id, participants=clients)
         for container_name, process in processes:
             stdout, stderr = process.communicate()
             completed.add(container_name)
@@ -1555,6 +1686,18 @@ def _run_loadgen_container_per_client(
     merged = _merge_per_client_loadgen_results(results, wall_duration_s)
     merged["topology"]["scenario_id"] = scenario_id
     merged["topology"]["run_index"] = run_index
+    if barrier_run_id is not None:
+        merged["sync_connect"] = {
+            "enabled": True,
+            "barrier": "external",
+            "run_id": barrier_run_id,
+            "participants": clients,
+            "ready_count": int((barrier_status or {}).get("ready_count") or 0),
+            "released_at_unix_ms": (barrier_status or {}).get("released_at_unix_ms"),
+            "max_ready_skew_ms": (barrier_status or {}).get("max_ready_skew_ms"),
+            "client_wait": merged.get("sync_connect_barrier_wait", {}),
+            "errors": [err for err in merged.get("errors", []) if str(err).startswith("sync_")],
+        }
     return merged
 
 

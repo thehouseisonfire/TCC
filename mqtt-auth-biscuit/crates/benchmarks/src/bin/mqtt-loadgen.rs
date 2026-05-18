@@ -56,6 +56,20 @@ struct Args {
     message_size: usize,
     #[arg(long)]
     sync_connect: bool,
+    #[arg(long, env = "MQTT_SYNC_CONNECT_BARRIER_URL")]
+    sync_connect_barrier_url: Option<String>,
+    #[arg(long, env = "MQTT_SYNC_CONNECT_RUN_ID")]
+    sync_connect_run_id: Option<String>,
+    #[arg(long, env = "MQTT_SYNC_CONNECT_PARTICIPANT_ID")]
+    sync_connect_participant_id: Option<String>,
+    #[arg(long, env = "MQTT_SYNC_CONNECT_PARTICIPANTS")]
+    sync_connect_participants: Option<usize>,
+    #[arg(
+        long,
+        env = "MQTT_SYNC_CONNECT_BARRIER_TIMEOUT_SECONDS",
+        default_value_t = 120
+    )]
+    sync_connect_barrier_timeout_seconds: u64,
     #[arg(long, env = "MQTT_MODE", default_value = "publish")]
     mode: String,
     #[arg(long, env = "MQTT_FANOUT_TOPIC", default_value = "fanout/broadcast")]
@@ -249,6 +263,7 @@ struct Output {
     receive_throughput_mps: f64,
     received_messages: Value,
     fanout_churn: Value,
+    sync_connect: Value,
     raw_publish_ms: Vec<f64>,
     raw_metrics: Value,
     errors: Vec<String>,
@@ -276,6 +291,8 @@ struct WorkerResult {
     receive_post_churn: usize,
     control_ms: Vec<f64>,
     control_injection_ms: Vec<f64>,
+    sync_barrier_wait_ms: Option<f64>,
+    sync_barrier_released_at_unix_ms: Option<u128>,
     errors: Vec<String>,
 }
 
@@ -319,6 +336,8 @@ struct StandardMetrics {
     receive: Vec<f64>,
     control: Vec<f64>,
     control_injection: Vec<f64>,
+    sync_barrier_wait: Vec<f64>,
+    sync_barrier_released_at_unix_ms: Vec<u128>,
     errors: Vec<String>,
     publish_throughput_mps: f64,
     receive_throughput_mps: f64,
@@ -464,6 +483,167 @@ impl SyncConnectGate {
         self.released.store(true, Ordering::Release);
         self.notify.notify_waiters();
     }
+}
+
+#[derive(Debug, Clone)]
+struct ExternalSyncBarrier {
+    url: String,
+    run_id: String,
+    participant_id: String,
+    participants: usize,
+    timeout: Duration,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct SyncBarrierStatus {
+    ok: bool,
+    run_id: String,
+    participants: usize,
+    ready_count: usize,
+    released: bool,
+    released_at_unix_ms: Option<u128>,
+    max_ready_skew_ms: Option<f64>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SyncBarrierWaitReport {
+    wait_ms: f64,
+    status: SyncBarrierStatus,
+}
+
+fn external_sync_barrier(args: &Args) -> Result<Option<ExternalSyncBarrier>> {
+    let fields_set = [
+        args.sync_connect_barrier_url.is_some(),
+        args.sync_connect_run_id.is_some(),
+        args.sync_connect_participant_id.is_some(),
+        args.sync_connect_participants.is_some(),
+    ];
+    if fields_set.iter().all(|set| !set) {
+        return Ok(None);
+    }
+    if !args.sync_connect {
+        return Err(MqttHelperError::Message(
+            "sync_connect barrier options require --sync-connect".to_string(),
+        ));
+    }
+    if fields_set.iter().any(|set| !set) {
+        return Err(MqttHelperError::Message(
+            "sync_connect external barrier requires url, run_id, participant_id, and participants"
+                .to_string(),
+        ));
+    }
+    let participants = args.sync_connect_participants.unwrap_or_default();
+    if participants == 0 {
+        return Err(MqttHelperError::Message(
+            "sync_connect_participants must be greater than zero".to_string(),
+        ));
+    }
+    if args.clients != 1 {
+        return Err(MqttHelperError::Message(
+            "external sync_connect barrier requires --clients 1".to_string(),
+        ));
+    }
+    Ok(Some(ExternalSyncBarrier {
+        url: args
+            .sync_connect_barrier_url
+            .clone()
+            .unwrap_or_default()
+            .trim_end_matches('/')
+            .to_string(),
+        run_id: args.sync_connect_run_id.clone().unwrap_or_default(),
+        participant_id: args.sync_connect_participant_id.clone().unwrap_or_default(),
+        participants,
+        timeout: Duration::from_secs(args.sync_connect_barrier_timeout_seconds.max(1)),
+    }))
+}
+
+async fn wait_external_sync_barrier(
+    barrier: &ExternalSyncBarrier,
+) -> Result<SyncBarrierWaitReport> {
+    let client = reqwest::Client::builder()
+        .http2_prior_knowledge()
+        .timeout(barrier.timeout.saturating_add(Duration::from_secs(5)))
+        .build()
+        .map_err(|err| MqttHelperError::Message(format!("sync barrier client failed: {err}")))?;
+    let ready_url = format!(
+        "{}/runs/{}/ready/{}?participants={}",
+        barrier.url, barrier.run_id, barrier.participant_id, barrier.participants
+    );
+    let ready = client
+        .post(ready_url)
+        .send()
+        .await
+        .map_err(|err| MqttHelperError::Message(format!("sync barrier ready failed: {err}")))?;
+    let ready_status = ready.status();
+    if !ready_status.is_success() {
+        let body = ready.text().await.unwrap_or_default();
+        return Err(MqttHelperError::Message(format!(
+            "sync barrier ready returned {ready_status}: {body}"
+        )));
+    }
+    let started = Instant::now();
+    let wait_url = format!(
+        "{}/runs/{}/wait?timeout_ms={}",
+        barrier.url,
+        barrier.run_id,
+        barrier.timeout.as_millis()
+    );
+    let response = client
+        .get(wait_url)
+        .send()
+        .await
+        .map_err(|err| MqttHelperError::Message(format!("sync barrier wait failed: {err}")))?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(MqttHelperError::Message(format!(
+            "sync barrier wait returned {status}: {body}"
+        )));
+    }
+    let barrier_status = serde_json::from_str::<SyncBarrierStatus>(&body).map_err(|err| {
+        MqttHelperError::Message(format!("sync barrier wait response JSON failed: {err}"))
+    })?;
+    if !barrier_status.released {
+        return Err(MqttHelperError::Message(
+            "sync barrier wait returned before release".to_string(),
+        ));
+    }
+    Ok(SyncBarrierWaitReport {
+        wait_ms: started.elapsed().as_secs_f64() * 1000.0,
+        status: barrier_status,
+    })
+}
+
+fn sync_connect_json(
+    args: &Args,
+    barrier_wait: &[f64],
+    released_at: &[u128],
+    errors: &[String],
+) -> Value {
+    if !args.sync_connect {
+        return serde_json::json!({"enabled": false});
+    }
+    let barrier = if args.sync_connect_barrier_url.is_some() {
+        "external"
+    } else {
+        "in_process"
+    };
+    let first_release = released_at.iter().min().copied();
+    serde_json::json!({
+        "enabled": true,
+        "barrier": barrier,
+        "run_id": args.sync_connect_run_id,
+        "participants": args.sync_connect_participants.unwrap_or(args.clients),
+        "ready_count": if barrier == "external" { barrier_wait.len() } else { args.clients },
+        "released_at_unix_ms": first_release,
+        "client_wait": summarize(barrier_wait),
+        "errors": errors
+            .iter()
+            .filter(|err| err.starts_with("sync_barrier_"))
+            .cloned()
+            .collect::<Vec<_>>(),
+    })
 }
 
 #[derive(Debug)]
@@ -639,6 +819,7 @@ fn validate_startup_provisioning(args: &Args) -> Result<()> {
             "client_index_start must be greater than zero".to_string(),
         ));
     }
+    external_sync_barrier(args)?;
     if !matches!(
         args.fanout_role.as_str(),
         "combined" | "publisher" | "subscriber"
@@ -1532,6 +1713,12 @@ fn inputs_json(
         "qos_distribution": qos_distribution.map(QosDistribution::as_json),
         "message_size": args.message_size,
         "protocol": "mqttv5",
+        "sync_connect": args.sync_connect,
+        "sync_connect_barrier_url": args.sync_connect_barrier_url,
+        "sync_connect_run_id": args.sync_connect_run_id,
+        "sync_connect_participant_id": args.sync_connect_participant_id,
+        "sync_connect_participants": args.sync_connect_participants,
+        "sync_connect_barrier_timeout_seconds": args.sync_connect_barrier_timeout_seconds,
         "token_issuer_url": args.token_issuer_url,
         "token_issuer_kind": resolved_token_issuer_kind(args),
         "token_issuer_no_default_roles": args.token_issuer_no_default_roles,
@@ -2488,6 +2675,7 @@ fn fanout_output(args: &Args, parts: FanoutOutputParts<'_>) -> Output {
         "receive": metrics.receive.clone(),
         "control": [],
         "control_injection_delay": [],
+        "sync_connect_barrier_wait": [],
     });
     Output {
         inputs: inputs_json(
@@ -2541,6 +2729,7 @@ fn fanout_output(args: &Args, parts: FanoutOutputParts<'_>) -> Output {
             metrics.received_pre,
             metrics.received_post,
         ),
+        sync_connect: sync_connect_json(args, &[], &[], &parts.runtime.errors),
         raw_publish_ms: parts.fanout_publish_ms,
         raw_metrics,
         errors: parts.runtime.errors,
@@ -3342,8 +3531,28 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
     }
     let mut current_exp = issued_token.exp;
     let mut spec = worker_specs(&args, &client_id, password.clone());
-    if let Some(sync_connect) = sync_connect {
-        sync_connect.wait().await;
+    match external_sync_barrier(&args) {
+        Ok(Some(barrier)) => match wait_external_sync_barrier(&barrier).await {
+            Ok(report) => {
+                result.sync_barrier_wait_ms = Some(report.wait_ms);
+                result.sync_barrier_released_at_unix_ms = report.status.released_at_unix_ms;
+            }
+            Err(err) => {
+                result.errors.push(format!("sync_barrier_failed:{err}"));
+                return result;
+            }
+        },
+        Ok(None) => {
+            if let Some(sync_connect) = sync_connect {
+                sync_connect.wait().await;
+            }
+        }
+        Err(err) => {
+            result
+                .errors
+                .push(format!("sync_barrier_config_failed:{err}"));
+            return result;
+        }
     }
     let Some((client, eventloop, report, refreshed_exp)) = connect_worker(
         &args,
@@ -3483,6 +3692,14 @@ fn standard_metrics(
         .iter()
         .flat_map(|r| r.control_injection_ms.clone())
         .collect();
+    let sync_barrier_wait = results
+        .iter()
+        .filter_map(|r| r.sync_barrier_wait_ms)
+        .collect();
+    let sync_barrier_released_at_unix_ms = results
+        .iter()
+        .filter_map(|r| r.sync_barrier_released_at_unix_ms)
+        .collect();
     let mut errors: Vec<_> = results.into_iter().flat_map(|r| r.errors).collect();
     if let Some(plan) = handoff_plan {
         errors.extend(plan.errors.clone());
@@ -3511,6 +3728,8 @@ fn standard_metrics(
         receive,
         control,
         control_injection,
+        sync_barrier_wait,
+        sync_barrier_released_at_unix_ms,
         errors,
     }
 }
@@ -3539,7 +3758,14 @@ fn standard_output(
         "receive": metrics.receive.clone(),
         "control": metrics.control.clone(),
         "control_injection_delay": metrics.control_injection.clone(),
+        "sync_connect_barrier_wait": metrics.sync_barrier_wait.clone(),
     });
+    let sync_connect = sync_connect_json(
+        args,
+        &metrics.sync_barrier_wait,
+        &metrics.sync_barrier_released_at_unix_ms,
+        &metrics.errors,
+    );
     Output {
         inputs: inputs_json(
             args,
@@ -3589,6 +3815,7 @@ fn standard_output(
             "expected": if args.mode == "fanout" { args.messages * args.clients } else { 0 },
         }),
         fanout_churn: fanout_churn_json(args, args.mode.as_str(), None, None, None),
+        sync_connect,
         raw_publish_ms: metrics.publish,
         raw_metrics,
         errors: metrics.errors,
@@ -3734,6 +3961,7 @@ mod tests {
             receive_throughput_mps: 0.0,
             received_messages: serde_json::json!({"count": 0, "expected": 0}),
             fanout_churn: fanout_churn_json(args, mode, None, None, None),
+            sync_connect: serde_json::json!({"enabled": false}),
             raw_publish_ms: Vec::new(),
             raw_metrics: serde_json::json!({}),
             errors: Vec::new(),
@@ -3779,6 +4007,8 @@ mod tests {
             receive: Vec::new(),
             control: Vec::new(),
             control_injection: Vec::new(),
+            sync_barrier_wait: Vec::new(),
+            sync_barrier_released_at_unix_ms: Vec::new(),
             errors: Vec::new(),
             publish_throughput_mps: 0.0,
             receive_throughput_mps: 0.0,
@@ -3798,6 +4028,49 @@ mod tests {
         let args = Args::parse_from(["mqtt-loadgen", "--client-index-start", "0"]);
 
         assert!(validate_startup_provisioning(&args).is_err());
+    }
+
+    #[test]
+    fn external_sync_barrier_requires_single_client_and_complete_config() {
+        let incomplete = Args::parse_from([
+            "mqtt-loadgen",
+            "--sync-connect",
+            "--sync-connect-barrier-url",
+            "http://sync-barrier:8083",
+        ]);
+        assert!(external_sync_barrier(&incomplete).is_err());
+
+        let multi_client = Args::parse_from([
+            "mqtt-loadgen",
+            "--sync-connect",
+            "--clients",
+            "2",
+            "--sync-connect-barrier-url",
+            "http://sync-barrier:8083",
+            "--sync-connect-run-id",
+            "run-1",
+            "--sync-connect-participant-id",
+            "client_1",
+            "--sync-connect-participants",
+            "2",
+        ]);
+        assert!(external_sync_barrier(&multi_client).is_err());
+
+        let valid = Args::parse_from([
+            "mqtt-loadgen",
+            "--sync-connect",
+            "--clients",
+            "1",
+            "--sync-connect-barrier-url",
+            "http://sync-barrier:8083",
+            "--sync-connect-run-id",
+            "run-1",
+            "--sync-connect-participant-id",
+            "client_1",
+            "--sync-connect-participants",
+            "2",
+        ]);
+        assert!(external_sync_barrier(&valid).unwrap().is_some());
     }
 
     #[test]
@@ -3968,6 +4241,7 @@ mod tests {
                 "receive_throughput_mps",
                 "received_messages",
                 "session_continuity_ok",
+                "sync_connect",
                 "throughput_mps",
                 "token_refresh",
                 "token_refresh_len",

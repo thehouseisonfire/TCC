@@ -1,4 +1,4 @@
-# TODO: Support `container-per-client` for Synchronized Connect Scenarios
+# TODO: Support `container-per-client` for Synchronized Connect Scenarios (Implemented)
 
 ## Current Limitation
 

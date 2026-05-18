@@ -673,16 +673,67 @@ def test_container_per_client_fanout_splits_subscriber_and_publisher_roles(monke
     assert result["topology"]["fanout_roles"] == {"publishers": 1, "subscribers": 2}
 
 
-def test_container_per_client_rejects_sync_connect_until_cross_container_barrier_exists(
+def test_container_per_client_sync_connect_uses_cross_container_barrier(
     monkeypatch,
 ) -> None:
+    observed: list[list[str]] = []
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, cmd, **kwargs) -> None:  # noqa: ANN001
+            observed.append(cmd)
+
+        def communicate(self) -> tuple[str, str]:
+            return (
+                '{"inputs":{"sync_connect":true},'
+                '"connect":{"count":1,"mean_ms":1.0},'
+                '"publish":{"count":0},"raw_publish_ms":[],'
+                '"raw_metrics":{"connect":[1.0],"publish":[],"receive":[],'
+                '"sync_connect_barrier_wait":[5.0]},'
+                '"sync_connect":{"enabled":true,"barrier":"external","ready_count":1},'
+                '"errors":[],'
+                '"throughput_mps":0.0,"publish_throughput_mps":0.0,'
+                '"receive_throughput_mps":0.0}',
+                "",
+            )
+
     monkeypatch.setattr(rs, "_resolve_rust_helper", lambda _binary: ["mqtt-loadgen"])
+    monkeypatch.setattr(rs.subprocess, "run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(rs.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(rs, "_sync_barrier_run_id", lambda scenario_id, run_index: "run-1")
+    monkeypatch.setattr(rs, "_ensure_sync_barrier_service", lambda **kwargs: None)
+    monkeypatch.setattr(
+        rs,
+        "_wait_for_sync_barrier_ready",
+        lambda *args, **kwargs: {"ready_count": 2},
+    )
+    monkeypatch.setattr(
+        rs,
+        "_release_sync_barrier",
+        lambda *args, **kwargs: {
+            "ready_count": 2,
+            "released_at_unix_ms": 1760000000000,
+            "max_ready_skew_ms": 12.4,
+        },
+    )
 
     kwargs = _minimal_run_loadgen_kwargs()
     kwargs["sync_connect"] = True
-    with pytest.raises(RuntimeError, match="not supported for sync_connect"):
-        rs._run_loadgen(
-            **kwargs,
-            client_topology="container-per-client",
-            scenario_id="TOKEN-CONNECT-BURST-JWT",
-        )
+    result = rs._run_loadgen(
+        **kwargs,
+        client_topology="container-per-client",
+        compose_project_name="bench",
+        scenario_id="TOKEN-CONNECT-BURST-JWT",
+    )
+
+    assert len(observed) == 2
+    assert all("--sync-connect-barrier-url" in cmd for cmd in observed)
+    assert {cmd[cmd.index("--sync-connect-participant-id") + 1] for cmd in observed} == {
+        "client_1",
+        "client_2",
+    }
+    assert result["sync_connect"]["barrier"] == "external"
+    assert result["sync_connect"]["ready_count"] == 2
+    assert result["sync_connect"]["max_ready_skew_ms"] == pytest.approx(12.4)
+    assert result["sync_connect"]["client_wait"]["count"] == 2

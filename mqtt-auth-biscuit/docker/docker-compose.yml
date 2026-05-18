@@ -94,6 +94,19 @@ services:
     networks:
       - mqtt-net
 
+  sync-barrier:
+    build:
+      context: ../..
+      dockerfile: mqtt-auth-biscuit/docker/Dockerfile.sync-barrier
+    profiles:
+      - sync-barrier
+    environment:
+      - SYNC_BARRIER_PORT=8083
+    ports:
+      - "8083:8083"
+    networks:
+      - mqtt-net
+
   cadvisor:
     image: ghcr.io/google/cadvisor:0.56.2@sha256:5534ae91cbf3428998d60428d107cfdd97272d80658534ac6e54d8ce3b0c4d72
     ports:

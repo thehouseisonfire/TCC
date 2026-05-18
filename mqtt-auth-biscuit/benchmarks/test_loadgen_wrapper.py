@@ -158,6 +158,11 @@ def test_rust_loadgen_command_forwards_programmatic_transition_options(monkeypat
         fanout_churn_sqlite_db="policy.db",
         fanout_churn_sqlite_topic="fanout/all",
         fanout_churn_sqlite_subscribers=3,
+        sync_connect_barrier_url="http://sync-barrier:8083",
+        sync_connect_run_id="run-1",
+        sync_connect_participant_id="client_1",
+        sync_connect_participants=3,
+        sync_connect_barrier_timeout_seconds=30,
     )
 
     assert argv[0] == "mqtt-loadgen"
@@ -165,6 +170,11 @@ def test_rust_loadgen_command_forwards_programmatic_transition_options(monkeypat
     assert _argv_value(argv, "--fanout-publisher-password") == "b64:cHVibGlzaGVyLXRva2Vu"
     assert _argv_value(argv, "--qos-distribution") == "0:0.25,1:0.75"
     assert "--sync-connect" in argv
+    assert _argv_value(argv, "--sync-connect-barrier-url") == "http://sync-barrier:8083"
+    assert _argv_value(argv, "--sync-connect-run-id") == "run-1"
+    assert _argv_value(argv, "--sync-connect-participant-id") == "client_1"
+    assert _argv_value(argv, "--sync-connect-participants") == "3"
+    assert _argv_value(argv, "--sync-connect-barrier-timeout-seconds") == "30"
     assert _argv_value(argv, "--token-issuer-url") == "http://issuer"
     assert _argv_value(argv, "--token-issuer-kind") == "jwt"
     assert _argv_value(argv, "--token-issuer-ttl") == "60"

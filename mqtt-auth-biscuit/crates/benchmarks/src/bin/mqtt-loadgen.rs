@@ -64,6 +64,12 @@ struct Args {
     fanout_publisher_username: Option<String>,
     #[arg(long, env = "MQTT_FANOUT_PUBLISHER_PASSWORD")]
     fanout_publisher_password: Option<String>,
+    #[arg(long, env = "MQTT_FANOUT_ROLE", default_value = "combined")]
+    fanout_role: String,
+    #[arg(long, env = "MQTT_FANOUT_READY_DIR")]
+    fanout_ready_dir: Option<String>,
+    #[arg(long, env = "MQTT_FANOUT_READY_TIMEOUT_SECONDS", default_value_t = 120)]
+    fanout_ready_timeout_seconds: u64,
     #[arg(long)]
     tls: bool,
     #[arg(long)]
@@ -631,6 +637,37 @@ fn validate_startup_provisioning(args: &Args) -> Result<()> {
     if args.client_index_start == 0 {
         return Err(MqttHelperError::Message(
             "client_index_start must be greater than zero".to_string(),
+        ));
+    }
+    if !matches!(
+        args.fanout_role.as_str(),
+        "combined" | "publisher" | "subscriber"
+    ) {
+        return Err(MqttHelperError::Message(format!(
+            "fanout_role must be combined, publisher, or subscriber; got {:?}",
+            args.fanout_role
+        )));
+    }
+    if args.fanout_role != "combined" {
+        if args.mode != "fanout" {
+            return Err(MqttHelperError::Message(
+                "fanout_role publisher/subscriber is only valid with mode=fanout".to_string(),
+            ));
+        }
+        if args.fanout_ready_dir.is_none() {
+            return Err(MqttHelperError::Message(
+                "fanout_role publisher/subscriber requires fanout_ready_dir".to_string(),
+            ));
+        }
+        if args.biscuit_delegate_handoff {
+            return Err(MqttHelperError::Message(
+                "biscuit delegation handoff is not supported with split fanout roles".to_string(),
+            ));
+        }
+    }
+    if args.fanout_role == "subscriber" && args.clients != 1 {
+        return Err(MqttHelperError::Message(
+            "fanout_role=subscriber requires clients=1".to_string(),
         ));
     }
     if args.proactive_refresh {
@@ -1487,6 +1524,8 @@ fn inputs_json(
         "port": args.port,
         "username": args.username,
         "fanout_publisher_username": args.fanout_publisher_username,
+        "fanout_role": args.fanout_role,
+        "fanout_ready_timeout_seconds": args.fanout_ready_timeout_seconds,
         "clients": args.clients,
         "message_count": args.messages,
         "qos": args.qos,
@@ -2214,6 +2253,77 @@ fn count_ready_fanout_subscribers(subscribers: &[FanoutSubscriber]) -> usize {
         .count()
 }
 
+fn fanout_ready_dir(args: &Args) -> Result<PathBuf> {
+    args.fanout_ready_dir
+        .as_deref()
+        .map(resolve_repo_path)
+        .ok_or_else(|| MqttHelperError::Message("fanout_ready_dir is required".to_string()))
+}
+
+fn fanout_ready_path(dir: &Path, client_id: &str) -> PathBuf {
+    dir.join(format!("{client_id}.ready"))
+}
+
+fn fanout_done_path(dir: &Path) -> PathBuf {
+    dir.join("publisher.done")
+}
+
+fn write_fanout_ready(dir: &Path, client_id: &str) -> Result<()> {
+    fs::create_dir_all(dir)?;
+    let payload = serde_json::json!({
+        "client_id": client_id,
+        "ready": true,
+    });
+    fs::write(
+        fanout_ready_path(dir, client_id),
+        serde_json::to_vec(&payload)?,
+    )?;
+    Ok(())
+}
+
+fn write_fanout_done(dir: &Path, applied_events: usize, errors: &[String]) -> Result<()> {
+    fs::create_dir_all(dir)?;
+    let payload = serde_json::json!({
+        "done": true,
+        "fanout_churn_applied_events": applied_events,
+        "errors": errors,
+    });
+    fs::write(fanout_done_path(dir), serde_json::to_vec(&payload)?)?;
+    Ok(())
+}
+
+async fn wait_for_fanout_ready_files(dir: &Path, client_ids: &[String], timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if client_ids
+            .iter()
+            .all(|client_id| fanout_ready_path(dir, client_id).exists())
+        {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn watch_fanout_done_file(dir: PathBuf, timeout: Duration, done: Arc<AtomicBool>) -> bool {
+    let done_path = fanout_done_path(&dir);
+    let deadline = Instant::now() + timeout;
+    loop {
+        if done_path.exists() {
+            done.store(true, Ordering::Release);
+            return true;
+        }
+        if Instant::now() >= deadline {
+            done.store(true, Ordering::Release);
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn publish_fanout(
     args: &Args,
     start: Instant,
@@ -2494,6 +2604,170 @@ async fn run_fanout(args: Args) -> Result<Output> {
     }
     let metrics = fanout_metrics(
         &results,
+        &fanout_publish_ms,
+        duration_s,
+        args.fanout_churn_kind.is_some(),
+    );
+    Ok(fanout_output(
+        &args,
+        FanoutOutputParts {
+            qos_distribution: qos_distribution.as_ref(),
+            token_refresh_codes: &token_refresh_codes,
+            runtime,
+            fanout_publish_ms,
+            fanout_publish_by_qos: &fanout_publish_by_qos,
+            churn_state: &churn_state,
+            metrics: &metrics,
+        },
+    ))
+}
+
+async fn run_fanout_subscriber(args: Args) -> Result<Output> {
+    let start = Instant::now();
+    let ready_dir = fanout_ready_dir(&args)?;
+    let mut runtime = init_fanout_runtime(&args).await;
+    let qos_distribution = QosDistribution::parse(args.qos_distribution.as_deref())?;
+    let subscribe_qos = qos_distribution
+        .as_ref()
+        .map_or(args.qos, QosDistribution::subscribe_qos);
+    let token_refresh_codes = parse_token_refresh_codes(args.token_refresh_codes.as_deref())?;
+    let mut subscribers = build_fanout_subscribers(&args, &mut runtime, subscribe_qos).await;
+    let ready_subscribers = count_ready_fanout_subscribers(&subscribers);
+    if ready_subscribers != 1 {
+        runtime
+            .errors
+            .push("fanout_subscribe_ready_timeout".to_string());
+    } else {
+        let client_id = client_id_for(&args, 0);
+        if let Err(err) = write_fanout_ready(&ready_dir, &client_id) {
+            runtime
+                .errors
+                .push(format!("fanout_ready_write_failed:{err}"));
+        }
+    }
+
+    let publishing_done = Arc::new(AtomicBool::new(false));
+    let done_timeout = Duration::from_secs(
+        args.fanout_ready_timeout_seconds.max(1).saturating_add(
+            u64::try_from(args.messages)
+                .unwrap_or(u64::MAX)
+                .saturating_mul(5),
+        ),
+    );
+    let watcher = tokio::spawn(watch_fanout_done_file(
+        ready_dir,
+        done_timeout,
+        Arc::clone(&publishing_done),
+    ));
+    let results = if ready_subscribers == 1 {
+        if let Some(subscriber) = subscribers.pop() {
+            vec![
+                collect_fanout_subscriber(
+                    subscriber,
+                    start,
+                    args.messages,
+                    args.fanout_churn_after_messages,
+                    Arc::clone(&publishing_done),
+                )
+                .await,
+            ]
+        } else {
+            Vec::new()
+        }
+    } else {
+        subscribers.into_iter().map(|sub| sub.result).collect()
+    };
+    let done_seen = watcher.await.unwrap_or(false);
+    if !done_seen {
+        runtime.errors.push("fanout_done_timeout".to_string());
+    }
+
+    let duration_s = start.elapsed().as_secs_f64().max(1e-9);
+    let mut results = results;
+    for result in &mut results {
+        runtime.errors.append(&mut result.errors);
+    }
+    let fanout_publish_by_qos: [Vec<f64>; 3] = Default::default();
+    let fanout_publish_ms = Vec::new();
+    let churn_state = FanoutChurnState::default();
+    let metrics = fanout_metrics(
+        &results,
+        &fanout_publish_ms,
+        duration_s,
+        args.fanout_churn_kind.is_some(),
+    );
+    Ok(fanout_output(
+        &args,
+        FanoutOutputParts {
+            qos_distribution: qos_distribution.as_ref(),
+            token_refresh_codes: &token_refresh_codes,
+            runtime,
+            fanout_publish_ms,
+            fanout_publish_by_qos: &fanout_publish_by_qos,
+            churn_state: &churn_state,
+            metrics: &metrics,
+        },
+    ))
+}
+
+async fn run_fanout_publisher(args: Args) -> Result<Output> {
+    let start = Instant::now();
+    let ready_dir = fanout_ready_dir(&args)?;
+    let mut runtime = FanoutRuntime {
+        handoff_plan: None,
+        handoff_passwords: HashMap::new(),
+        errors: Vec::new(),
+        handoff_required: false,
+    };
+    let subscriber_ids = (0..args.clients)
+        .map(|index| client_id_for(&args, index))
+        .collect::<Vec<_>>();
+    let ready = wait_for_fanout_ready_files(
+        &ready_dir,
+        &subscriber_ids,
+        Duration::from_secs(args.fanout_ready_timeout_seconds.max(1)),
+    )
+    .await;
+    if !ready {
+        runtime
+            .errors
+            .push("fanout_subscribe_ready_timeout".to_string());
+        let _ = write_fanout_done(&ready_dir, 0, &runtime.errors);
+    }
+
+    let fallback_password = decode_token_arg(&args.password)?;
+    let qos_distribution = QosDistribution::parse(args.qos_distribution.as_deref())?;
+    let token_refresh_codes = parse_token_refresh_codes(args.token_refresh_codes.as_deref())?;
+    let mut fanout_publish_ms = Vec::new();
+    let mut fanout_publish_by_qos: [Vec<f64>; 3] = Default::default();
+    let mut churn_state = FanoutChurnState::default();
+    if ready {
+        let (publisher, mut publisher_eventloop) =
+            connect_fanout_publisher(&args, &fallback_password).await?;
+        let published = publish_fanout(
+            &args,
+            start,
+            &publisher,
+            &mut publisher_eventloop,
+            qos_distribution.as_ref(),
+            &mut runtime.errors,
+        )
+        .await;
+        fanout_publish_ms = published.0;
+        fanout_publish_by_qos = published.1;
+        churn_state = published.2;
+        let _ = publisher.disconnect().await;
+        if let Err(err) = write_fanout_done(&ready_dir, churn_state.applied_events, &runtime.errors)
+        {
+            runtime
+                .errors
+                .push(format!("fanout_done_write_failed:{err}"));
+        }
+    }
+
+    let duration_s = start.elapsed().as_secs_f64().max(1e-9);
+    let metrics = fanout_metrics(
+        &[],
         &fanout_publish_ms,
         duration_s,
         args.fanout_churn_kind.is_some(),
@@ -3401,7 +3675,16 @@ async fn main() -> Result<()> {
     let qos_distribution = QosDistribution::parse(args.qos_distribution.as_deref())?;
     let token_refresh_codes = parse_token_refresh_codes(args.token_refresh_codes.as_deref())?;
     if args.mode == "fanout" {
-        let output = run_fanout(args.clone()).await?;
+        let output = match args.fanout_role.as_str() {
+            "combined" => run_fanout(args.clone()).await?,
+            "subscriber" => run_fanout_subscriber(args.clone()).await?,
+            "publisher" => run_fanout_publisher(args.clone()).await?,
+            other => {
+                return Err(MqttHelperError::Message(format!(
+                    "unknown fanout_role: {other}"
+                )));
+            }
+        };
         validate_proactive_refresh_assertion(&args, &output)?;
         return emit_output(&args, &output);
     }

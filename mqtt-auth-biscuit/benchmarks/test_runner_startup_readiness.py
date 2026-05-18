@@ -492,6 +492,61 @@ def test_container_per_client_merge_aggregates_all_reported_metrics() -> None:
     assert merged["topology"]["wall_duration_s"] == 2.0
 
 
+def test_fanout_readiness_wait_times_out_for_missing_subscribers(tmp_path) -> None:
+    (tmp_path / "client_1.ready").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="client_2.ready"):
+        rs._wait_for_fanout_ready_files(tmp_path, clients=2, timeout_seconds=0)
+
+
+def test_fanout_role_merge_recomputes_receive_expectations_and_churn() -> None:
+    publisher = {
+        "inputs": {"mode": "fanout", "clients": 2, "fanout_role": "publisher"},
+        "publish": {"count": 4},
+        "receive": {"count": 0},
+        "raw_publish_ms": [1.0, 2.0, 3.0, 4.0],
+        "raw_metrics": {"publish": [1.0, 2.0, 3.0, 4.0], "receive": []},
+        "received_messages": {"count": 0, "expected": 8},
+        "fanout_churn": {
+            "enabled": True,
+            "after_messages": 2,
+            "triggered": True,
+            "applied_events": 1,
+        },
+        "errors": [],
+    }
+    subscriber = {
+        "inputs": {"mode": "fanout", "clients": 1, "fanout_role": "subscriber"},
+        "publish": {"count": 0},
+        "receive": {"count": 3},
+        "raw_publish_ms": [],
+        "raw_metrics": {"publish": [], "receive": [5.0, 6.0, 7.0]},
+        "received_messages": {"count": 3, "expected": 4},
+        "fanout_churn": {
+            "enabled": True,
+            "received_pre_churn": 2,
+            "received_post_churn": 1,
+        },
+        "errors": [],
+    }
+
+    merged = rs._merge_fanout_role_loadgen_results(
+        publisher=publisher,
+        subscribers=[subscriber, subscriber],
+        wall_duration_s=2.0,
+        scenario_id="FANOUT",
+        run_index=0,
+        messages=4,
+    )
+
+    assert merged["received_messages"] == {"count": 6, "expected": 8}
+    assert merged["fanout_churn"]["expected_pre_churn"] == 4
+    assert merged["fanout_churn"]["expected_post_churn"] == 4
+    assert merged["fanout_churn"]["received_pre_churn"] == 4
+    assert merged["fanout_churn"]["received_post_churn"] == 2
+    assert merged["topology"]["fanout_roles"] == {"publishers": 1, "subscribers": 2}
+
+
 def test_container_per_client_cleans_up_siblings_on_failure(monkeypatch) -> None:
     instances: list[FakeProcess] = []
     docker_rm: list[str] = []
@@ -545,17 +600,77 @@ def test_container_per_client_cleans_up_siblings_on_failure(monkeypatch) -> None
     assert docker_rm.count("loadgen_bench_token_baseline_jwt_1_client_2") >= 1
 
 
-def test_container_per_client_rejects_fanout_until_split_roles_exist(monkeypatch) -> None:
+def test_container_per_client_fanout_splits_subscriber_and_publisher_roles(monkeypatch) -> None:
+    observed_popen: list[list[str]] = []
+    observed_run: list[list[str]] = []
+
+    class Completed:
+        stdout = (
+            '{"inputs":{"mode":"fanout","clients":2},'
+            '"publish":{"count":2},"receive":{"count":0},'
+            '"raw_publish_ms":[1.0,2.0],'
+            '"raw_metrics":{"publish":[1.0,2.0],"receive":[]},'
+            '"received_messages":{"count":0,"expected":4},'
+            '"fanout_churn":{"enabled":false},'
+            '"errors":[]}'
+        )
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, cmd, **kwargs) -> None:  # noqa: ANN001
+            self.cmd = cmd
+            observed_popen.append(cmd)
+
+        def communicate(self, timeout=None) -> tuple[str, str]:  # noqa: ANN001
+            return (
+                '{"inputs":{"mode":"fanout","clients":1},'
+                '"publish":{"count":0},"receive":{"count":2},'
+                '"raw_publish_ms":[],'
+                '"raw_metrics":{"publish":[],"receive":[5.0,7.0]},'
+                '"received_messages":{"count":2,"expected":2},'
+                '"fanout_churn":{"enabled":false},'
+                '"errors":[]}',
+                "",
+            )
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = -15
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN202
+        observed_run.append(cmd)
+        return Completed()
+
     monkeypatch.setattr(rs, "_resolve_rust_helper", lambda _binary: ["mqtt-loadgen"])
+    monkeypatch.setattr(rs.subprocess, "run", fake_run)
+    monkeypatch.setattr(rs.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(rs, "_wait_for_fanout_ready_files", lambda *args, **kwargs: None)
 
     kwargs = _minimal_run_loadgen_kwargs()
     kwargs["mode"] = "fanout"
-    with pytest.raises(RuntimeError, match="not supported for fanout"):
-        rs._run_loadgen(
-            **kwargs,
-            client_topology="container-per-client",
-            scenario_id="TOKEN-ACL-READ-FANOUT-STRICT-ALLOW-JWT-10",
-        )
+    kwargs["messages"] = 2
+    result = rs._run_loadgen(
+        **kwargs,
+        client_topology="container-per-client",
+        compose_project_name="bench",
+        scenario_id="TOKEN-ACL-READ-FANOUT-STRICT-ALLOW-JWT-10",
+    )
+
+    assert len(observed_popen) == 2
+    assert all("--fanout-role" in cmd for cmd in observed_popen)
+    assert all(cmd.count("--fanout-role") == 1 for cmd in observed_popen)
+    assert {cmd[cmd.index("--fanout-role") + 1] for cmd in observed_popen} == {"subscriber"}
+    publisher_calls = [cmd for cmd in observed_run if "--fanout-role" in cmd]
+    assert publisher_calls[-1].count("--fanout-role") == 1
+    assert publisher_calls[-1][publisher_calls[-1].index("--fanout-role") + 1] == "publisher"
+    assert result["received_messages"] == {"count": 4, "expected": 4}
+    assert result["topology"]["fanout_roles"] == {"publishers": 1, "subscribers": 2}
 
 
 def test_container_per_client_rejects_sync_connect_until_cross_container_barrier_exists(

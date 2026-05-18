@@ -71,6 +71,9 @@ def _rust_loadgen_cmd(
     biscuit_client_id_fact: str,
     mode: str,
     fanout_topic: str | None,
+    fanout_role: str = "combined",
+    fanout_ready_dir: str | None = None,
+    fanout_ready_timeout_seconds: int = 120,
     biscuit_attenuate: bool = False,
     biscuit_attenuate_denies: list[str] | None = None,
     biscuit_attenuate_checks: list[str] | None = None,
@@ -134,6 +137,8 @@ def _rust_loadgen_cmd(
         mode,
         "--fanout-topic",
         fanout_topic or "fanout/broadcast",
+        "--fanout-role",
+        fanout_role,
         "--token-refresh-codes",
         ",".join(str(code) for code in sorted(token_refresh_codes)),
         "--jwt-identity-binding",
@@ -153,6 +158,10 @@ def _rust_loadgen_cmd(
         cmd.extend(["--fanout-publisher-username", fanout_publisher_username])
     if fanout_publisher_password is not None:
         cmd.extend(["--fanout-publisher-password", _password_cli_arg(fanout_publisher_password)])
+    if fanout_ready_dir:
+        cmd.extend(["--fanout-ready-dir", fanout_ready_dir])
+    if fanout_ready_timeout_seconds != 120:
+        cmd.extend(["--fanout-ready-timeout-seconds", str(fanout_ready_timeout_seconds)])
     if tls_enabled:
         cmd.append("--tls")
     if tls_ca_file:

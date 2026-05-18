@@ -318,11 +318,17 @@ fn build_runtime_plan(cli: &Cli, now: u64, compose_cmd: &[String]) -> RuntimePla
 
     let run_scenarios = plan_command(
         "uv",
-        ["run", "--locked", "python", "-m", "benchmarks.run_scenarios"]
-            .into_iter()
-            .map(str::to_owned)
-            .chain(scenario_args(cli))
-            .collect::<Vec<_>>(),
+        [
+            "run",
+            "--locked",
+            "python",
+            "-m",
+            "benchmarks.run_scenarios",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(scenario_args(cli))
+        .collect::<Vec<_>>(),
         &workdir,
         run_scenarios_env(compose_cmd),
     );

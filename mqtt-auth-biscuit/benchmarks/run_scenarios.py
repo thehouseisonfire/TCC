@@ -1054,11 +1054,6 @@ def _run_loadgen(
     if loadgen_cpuset:
         env["LOADGEN_CPUSET"] = loadgen_cpuset
 
-    if client_topology == "container-per-client" and mode == "fanout":
-        raise RuntimeError(
-            "container-per-client topology is not supported for fanout scenarios yet; "
-            "use --client-topology container-single for ACL_READ fan-out runs"
-        )
     if client_topology == "container-per-client" and sync_connect:
         raise RuntimeError(
             "container-per-client topology is not supported for sync_connect scenarios yet; "
@@ -1075,6 +1070,19 @@ def _run_loadgen(
                 scenario_id=scenario_id,
                 run_index=run_index,
             ),
+            compose_files=compose_files,
+            compose_project_name=compose_project_name,
+            extra_env=env,
+        )
+
+    if mode == "fanout":
+        return _run_loadgen_container_per_client_fanout(
+            loadgen_args,
+            clients=clients,
+            messages=messages,
+            service=loadgen_service,
+            scenario_id=scenario_id,
+            run_index=run_index,
             compose_files=compose_files,
             compose_project_name=compose_project_name,
             extra_env=env,
@@ -1175,6 +1183,40 @@ def _replace_cli_option(args: list[str], option: str, value: str) -> list[str]:
     else:
         updated[index + 1] = value
     return updated
+
+
+def _append_cli_option(args: list[str], option: str, value: str) -> list[str]:
+    updated = list(args)
+    updated.extend([option, value])
+    return updated
+
+
+def _fanout_ready_host_dir(scenario_id: str, run_index: int) -> Path:
+    return (
+        REPO_ROOT
+        / "benchmarks"
+        / "results"
+        / ".fanout-ready"
+        / f"{_sanitize_container_name(scenario_id)}_{run_index + 1}"
+    )
+
+
+def _wait_for_fanout_ready_files(
+    ready_dir: Path,
+    *,
+    clients: int,
+    timeout_seconds: float = 120.0,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    expected = [ready_dir / f"client_{index}.ready" for index in range(1, clients + 1)]
+    while time.monotonic() < deadline:
+        if all(path.exists() for path in expected):
+            return
+        time.sleep(0.1)
+    missing = [path.name for path in expected if not path.exists()]
+    raise RuntimeError(
+        f"timed out waiting for fanout subscriber readiness in {ready_dir}: {missing}"
+    )
 
 
 def _summary_from_values(values: list[float]) -> dict[str, Any]:
@@ -1332,6 +1374,78 @@ def _merge_per_client_loadgen_results(
     return merged
 
 
+def _merge_fanout_role_loadgen_results(
+    *,
+    publisher: dict[str, Any],
+    subscribers: list[dict[str, Any]],
+    wall_duration_s: float,
+    scenario_id: str,
+    run_index: int,
+    messages: int,
+) -> dict[str, Any]:
+    merged = _merge_per_client_loadgen_results([publisher, *subscribers], wall_duration_s)
+    subscriber_count = len(subscribers)
+    received_count = int(merged.get("receive", {}).get("count") or 0)
+    expected = messages * subscriber_count
+    merged["received_messages"] = {"count": received_count, "expected": expected}
+    duration_s = max(wall_duration_s, 1e-9)
+    publish_count = int(merged.get("publish", {}).get("count") or 0)
+    merged["publish_throughput_mps"] = float(publish_count / duration_s)
+    merged["receive_throughput_mps"] = float(received_count / duration_s)
+    merged["throughput_mps"] = merged["receive_throughput_mps"]
+
+    publisher_churn = publisher.get("fanout_churn")
+    if isinstance(publisher_churn, dict):
+        churn = dict(publisher_churn)
+        enabled = bool(churn.get("enabled"))
+        if enabled:
+            after = int(churn.get("after_messages") or 0)
+            expected_pre = min(messages, after) * subscriber_count
+            expected_post = max(messages - after, 0) * subscriber_count
+            received_pre = sum(
+                int(result.get("fanout_churn", {}).get("received_pre_churn") or 0)
+                for result in subscribers
+                if isinstance(result.get("fanout_churn"), dict)
+            )
+            received_post = sum(
+                int(result.get("fanout_churn", {}).get("received_post_churn") or 0)
+                for result in subscribers
+                if isinstance(result.get("fanout_churn"), dict)
+            )
+            churn["received_pre_churn"] = received_pre
+            churn["received_post_churn"] = received_post
+            churn["expected_pre_churn"] = expected_pre
+            churn["expected_post_churn"] = expected_post
+            churn["post_churn_delivery_ratio"] = (
+                float(received_post / expected_post) if expected_post > 0 else None
+            )
+            churn["cache_validity_signal"] = bool(churn.get("triggered")) and (
+                received_post < expected_post
+            )
+        merged["fanout_churn"] = churn
+
+    inputs = merged.get("inputs")
+    if isinstance(inputs, dict):
+        merged["inputs"] = {
+            **inputs,
+            "clients": subscriber_count,
+            "fanout_role": "merged",
+        }
+    merged["topology"] = {
+        "mode": "container-per-client",
+        "container_count": subscriber_count + 1,
+        "aggregation": "merged_from_fanout_role_containers",
+        "wall_duration_s": wall_duration_s,
+        "scenario_id": scenario_id,
+        "run_index": run_index,
+        "fanout_roles": {
+            "publishers": 1,
+            "subscribers": subscriber_count,
+        },
+    }
+    return merged
+
+
 def _cleanup_per_client_loadgen_processes(
     processes: list[tuple[str, subprocess.Popen[str]]],
     completed: set[str],
@@ -1442,6 +1556,154 @@ def _run_loadgen_container_per_client(
     merged["topology"]["scenario_id"] = scenario_id
     merged["topology"]["run_index"] = run_index
     return merged
+
+
+def _run_loadgen_container_per_client_fanout(
+    loadgen_args: list[str],
+    *,
+    clients: int,
+    messages: int,
+    service: str,
+    scenario_id: str,
+    run_index: int,
+    compose_files: list[str] | None,
+    compose_project_name: str | None,
+    extra_env: dict[str, str],
+) -> dict[str, Any]:
+    build_cmd = _compose_cmd(
+        ["build", service],
+        compose_files=compose_files,
+        compose_project_name=compose_project_name,
+    )
+    env = os.environ.copy()
+    env.update(extra_env)
+    subprocess.run(build_cmd, cwd=REPO_ROOT, env=env, check=True)
+
+    ready_host_dir = _fanout_ready_host_dir(scenario_id, run_index)
+    if ready_host_dir.exists():
+        shutil.rmtree(ready_host_dir)
+    ready_host_dir.mkdir(parents=True)
+    ready_container_dir = _container_repo_path(str(ready_host_dir))
+    if ready_container_dir is None:
+        raise RuntimeError(f"fanout ready directory is not under repo root: {ready_host_dir}")
+
+    started_at = time.monotonic()
+    processes: list[tuple[str, subprocess.Popen[str]]] = []
+    for index in range(clients):
+        args = _replace_cli_option(loadgen_args, "--clients", "1")
+        args = _replace_cli_option(args, "--client-index-start", str(index + 1))
+        args = _replace_cli_option(args, "--fanout-role", "subscriber")
+        args = _append_cli_option(args, "--fanout-ready-dir", ready_container_dir)
+        container_name = _loadgen_container_name(
+            compose_project_name=compose_project_name,
+            compose_files=compose_files,
+            scenario_id=f"{scenario_id}_fanout_subscriber",
+            run_index=run_index,
+            client_index=index,
+        )
+        subprocess.run(
+            ["docker", "rm", "-f", container_name],
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        cmd = _compose_run_loadgen_cmd(
+            args,
+            service=service,
+            container_name=container_name,
+            compose_files=compose_files,
+            compose_project_name=compose_project_name,
+            build=False,
+        )
+        processes.append(
+            (
+                container_name,
+                subprocess.Popen(
+                    cmd,
+                    cwd=REPO_ROOT,
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                ),
+            )
+        )
+
+    completed: set[str] = set()
+    try:
+        _wait_for_fanout_ready_files(ready_host_dir, clients=clients)
+        publisher_args = _replace_cli_option(loadgen_args, "--clients", str(clients))
+        publisher_args = _replace_cli_option(publisher_args, "--client-index-start", "1")
+        publisher_args = _replace_cli_option(publisher_args, "--fanout-role", "publisher")
+        publisher_args = _append_cli_option(
+            publisher_args,
+            "--fanout-ready-dir",
+            ready_container_dir,
+        )
+        publisher_name = _loadgen_container_name(
+            compose_project_name=compose_project_name,
+            compose_files=compose_files,
+            scenario_id=f"{scenario_id}_fanout_publisher",
+            run_index=run_index,
+        )
+        subprocess.run(
+            ["docker", "rm", "-f", publisher_name],
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        publisher_cmd = _compose_run_loadgen_cmd(
+            publisher_args,
+            service=service,
+            container_name=publisher_name,
+            compose_files=compose_files,
+            compose_project_name=compose_project_name,
+            build=False,
+        )
+        publisher_completed = subprocess.run(
+            publisher_cmd,
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        publisher_result = _loads_json_from_compose_stdout(publisher_completed.stdout)
+        publisher_result["container_name"] = publisher_name
+        publisher_result["fanout_role"] = "publisher"
+
+        subscriber_results: list[dict[str, Any]] = []
+        for container_name, process in processes:
+            stdout, stderr = process.communicate()
+            completed.add(container_name)
+            if process.returncode != 0:
+                raise RuntimeError(
+                    f"loadgen container {container_name} failed with exit code "
+                    f"{process.returncode}: {stderr}"
+                )
+            result = _loads_json_from_compose_stdout(stdout)
+            result["container_name"] = container_name
+            result["fanout_role"] = "subscriber"
+            subscriber_results.append(result)
+    except Exception:
+        (ready_host_dir / "publisher.done").write_text(
+            json.dumps({"done": True, "forced_by_runner": True}),
+            encoding="utf-8",
+        )
+        _cleanup_per_client_loadgen_processes(processes, completed)
+        raise
+
+    wall_duration_s = time.monotonic() - started_at
+    return _merge_fanout_role_loadgen_results(
+        publisher=publisher_result,
+        subscribers=subscriber_results,
+        wall_duration_s=wall_duration_s,
+        scenario_id=scenario_id,
+        run_index=run_index,
+        messages=messages,
+    )
 
 
 def _apply_dynamic_security_config(source_path: str):

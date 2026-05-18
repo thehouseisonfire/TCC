@@ -1,4 +1,4 @@
-# TODO: Support `container-per-client` for Fanout Scenarios
+# TODO: Support `container-per-client` for Fanout Scenarios (Implemented)
 
 ## Current Limitation
 

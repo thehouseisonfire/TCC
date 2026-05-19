@@ -18,7 +18,7 @@ fn read_to_string(path: &Path) -> Result<String> {
 
 fn parse_toml(path: &Path) -> Result<TomlValue> {
     let text = read_to_string(path)?;
-    text.parse::<TomlValue>()
+    toml::from_str(&text)
         .with_context(|| format!("failed to parse TOML from {}", path.display()))
 }
 
@@ -412,7 +412,7 @@ mod tests {
         let benchmark_toolchain =
             read_yaml("infra/ansible/group_vars/all/benchmark_toolchain.yml")?;
         let rust_toolchain: TomlValue =
-            read_to_string(&repo_root().join("rust-toolchain.toml"))?.parse()?;
+            toml::from_str(&read_to_string(&repo_root().join("rust-toolchain.toml"))?)?;
         let python_version = read_to_string(&repo_root().join(".python-version"))?
             .trim()
             .to_owned();

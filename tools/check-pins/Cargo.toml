@@ -8,7 +8,7 @@ publish = false
 anyhow = "1"
 regex = "1"
 serde_yaml = "0.9"
-toml = "0.8"
+toml = "1.1"
 
 [[bin]]
 name = "check-pins"

@@ -10,7 +10,8 @@ The current stage-1 split is:
 - apt snapshots for reproducible host package resolution
 - Packer deferred until repeated image rebuilds justify the extra maintenance
 
-For the full rationale and the staged roadmap, see [`../TODO2.md`](../TODO2.md).
+The staged roadmap is now reflected in the current boundary below and the
+project status tracker at [`../PROGRESS.md`](../PROGRESS.md).
 
 ## Layout
 

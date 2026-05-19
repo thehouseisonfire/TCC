@@ -849,6 +849,30 @@ first, the runner waits for structured readiness, then the publisher/delegator
 role is launched. Use `container-single` for broad matrix runs and
 `container-per-client` for topology-fidelity slices.
 
+### Synchronized Connect Bursts
+
+`TOKEN-THUNDERING-HERD-BISCUIT` enables `sync_connect` so clients wait until the
+runner releases a shared start gate before connecting to Mosquitto.
+
+Topology behavior:
+
+- `container-single`: Rust `mqtt-loadgen` uses an in-process synchronization
+  gate across its worker tasks.
+- `container-per-client`: `run_scenarios.py` starts one loadgen container per
+  MQTT client, ensures the `sync-barrier` Compose service is running, waits
+  until all participants are ready, and then releases the external barrier.
+- `host`: uses the same in-process gate as direct local loadgen execution.
+
+The external barrier is intentionally a runner-managed implementation detail.
+Operators normally select it only by choosing `--client-topology
+container-per-client`; direct loadgen barrier flags are reserved for diagnostics.
+
+Result JSON includes a `sync_connect` section with barrier mode, participant
+count, ready count, release timestamp, maximum ready skew, client wait summary,
+and any `sync_*` errors. Fan-out split-role runs, Biscuit delegation handoff, and
+reauth-storm runs have dedicated coordination paths and intentionally reject
+incompatible `sync_connect` combinations.
+
 ## CONTROL-INTERLEAVED-DATA Scenarios (Issue 36)
 
 These scenarios measure **control plane latency under active data plane load** by publishing control messages interleaved with regular data messages. Unlike CONTROL-OVERHEAD (control-only) and CONTROL-CHURN (batch policy churn), these scenarios simulate realistic mixed workloads where control messages (policy updates, reauthentication triggers) must be processed while ongoing data traffic continues.

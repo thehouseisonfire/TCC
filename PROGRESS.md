@@ -132,15 +132,20 @@ There are two benchmark entrypoints now:
 
 Load generation is driven by:
 
-- `benchmarks/loadgen.py`
-  - Multi-client MQTT publisher with latency stats and throughput
-  - Supports a `sync_connect` option for thundering-herd style connection spikes
+- Rust `mqtt-loadgen` (`crates/benchmarks/src/bin/mqtt-loadgen.rs`)
+  - Multi-client MQTT publisher with latency stats, throughput, fan-out,
+    control-plane, lifecycle, and delegation modes
+  - `benchmarks/loadgen.py` is a compatibility wrapper that forwards to the
+    Rust binary
+  - Supports `sync_connect` for thundering-herd style connection spikes; under
+    `container-per-client`, the runner coordinates one-client containers
+    through the external `sync-barrier` service
 
 MQTT v5 reauthentication microbenchmark:
 
 - `benchmarks/mqtt_auth_client.py`
-  - Raw-socket MQTT5 client that measures CONNECT and subsequent `AUTH` latency
-    (reauth)
+  - Compatibility wrapper for the Rust `mqtt-auth-client` binary
+  - Measures CONNECT and subsequent MQTT v5 `AUTH` latency (reauth)
 
 ### 3.4 Docker Orchestration & Observability
 
@@ -148,6 +153,11 @@ MQTT v5 reauthentication microbenchmark:
 - Prometheus + cAdvisor for container resource telemetry
 - HTTP authz service (`authz`) used for introspection/latency/failure scenarios
 - `netem` helper container joined to Mosquitto network namespace for tc/MTU
+- Token Issuer service (`token-issuer`) for online JWT/Biscuit issuance and
+  refresh/provisioning scenarios
+- Load generator service (`loadgen`) for containerized benchmark clients
+- Optional `sync-barrier` service for externally coordinated synchronized
+  connect bursts in `container-per-client` topology
 
 ### 3.5 HTTP Authz Benchmark Baseline
 
@@ -297,7 +307,8 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
     topology slices.
   - **Coverage**: Added deterministic client container naming/identity offsets
     (`client_1..client_N`) for standard publish/control runs, Docker resource
-    controls for loadgen containers, internal Docker service routing, and result
+    controls for loadgen containers, internal Docker service routing, external
+    `sync-barrier` coordination for synchronized connect bursts, and result
     metadata documenting topology mode and resource settings.
   - **Research Alignment**: Keeps strict JWT/Biscuit identity-bound parity
     provisioning through the Token Issuer while improving isolation between
@@ -396,7 +407,7 @@ Cross-link: `SCENARIO_POLICIES.md#3-fairness-and-alignment-tracking`.
   - **Research Alignment**: Enables H₂/H₃ validation by quantifying computational costs of JWT vs Biscuit verification at instruction level, complementing container-level metrics with PMU hardware counters.
 
 - [x] **Issue 17: Implement comprehensive QoS configuration and mixing features**
-  - **Summary**: Added full QoS 0/1/2 support with per-QoS latency tracking. Implemented QoS distribution parsing (`0:0.6,1:0.3,2:0.1` format) in `loadgen.py` with `--qos-distribution` CLI option. `WorkerResult` now tracks `publish_ms_by_qos` per level; `aggregate_results.py` reports per-QoS statistics in JSON and CSV. Added scenarios: `QOS0-BASELINE-NO-AUTH`, `TOKEN-QOS2-JWT`, `TOKEN-QOS2-BISCUIT`, `TOKEN-QOS-MIXED-JWT`, `TOKEN-QOS-MIXED-BISCUIT`. Enables H₂/H₃ validation of latency differences across QoS levels.
+  - **Summary**: Added full QoS 0/1/2 support with per-QoS latency tracking. Implemented QoS distribution parsing (`0:0.6,1:0.3,2:0.1` format) in the benchmark load generator with `--qos-distribution` CLI option. `WorkerResult` tracks `publish_ms_by_qos` per level; `aggregate_results.py` reports per-QoS statistics in JSON and CSV. Added scenarios: `BASELINE-NO-AUTH-QOS0`, `TOKEN-QOS2-JWT`, `TOKEN-QOS2-BISCUIT`, `TOKEN-QOS-MIXED-JWT`, `TOKEN-QOS-MIXED-BISCUIT`. Enables H₂/H₃ validation of latency differences across QoS levels.
 
 - [x] **Issue 18: Avoid Base64URL encoding for Biscuit tokens where possible (use native Protobuf format)** — **COMPLETED 2026-02-06**
   - **Summary**: Native Protobuf transport for Biscuit tokens is now used across MQTT transport. Initial authentication uses raw Biscuit bytes in `CONNECT.password` (via Mosquitto's password-length fix), and MQTT v5 reauthentication uses raw Authentication Data.

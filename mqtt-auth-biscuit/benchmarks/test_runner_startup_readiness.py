@@ -164,6 +164,7 @@ class _RunLoadgenKwargs(TypedDict):
     proactive_refresh_margin_seconds: int | None
     proactive_refresh_timeout_seconds: int | None
     proactive_refresh_assert_continuity: bool
+    reauth_storm: bool
     jwt_identity_binding: rs.IdentityBindingMode
     biscuit_identity_binding: rs.IdentityBindingMode
     biscuit_client_id_fact: str
@@ -222,6 +223,7 @@ def _minimal_run_loadgen_kwargs() -> _RunLoadgenKwargs:
         "proactive_refresh_margin_seconds": None,
         "proactive_refresh_timeout_seconds": None,
         "proactive_refresh_assert_continuity": False,
+        "reauth_storm": False,
         "jwt_identity_binding": "off",
         "biscuit_identity_binding": "off",
         "biscuit_client_id_fact": "client_id",
@@ -492,6 +494,78 @@ def test_container_per_client_merge_aggregates_all_reported_metrics() -> None:
     assert merged["publish_throughput_mps"] == 1.0
     assert merged["receive_throughput_mps"] == 2.5
     assert merged["topology"]["wall_duration_s"] == 2.0
+
+
+def test_reauth_storm_validation_accepts_complete_success() -> None:
+    rs._validate_reauth_storm_result(
+        "TOKEN-LIFECYCLE-REAUTH-STORM-JWT",
+        {
+            "reauth_storm": {
+                "enabled": True,
+                "attempts": 2,
+                "successes": 2,
+                "failures": 0,
+                "session_continuity_ok": True,
+            },
+            "expiry_denial_count": 0,
+            "session_continuity_ok": True,
+        },
+        client_count=2,
+    )
+
+
+@pytest.mark.parametrize(
+    ("payload", "match"),
+    (
+        (
+            {"reauth_storm": {"enabled": True, "attempts": 1, "successes": 1, "failures": 0}},
+            "missed",
+        ),
+        (
+            {"reauth_storm": {"enabled": True, "attempts": 2, "successes": 1, "failures": 0}},
+            "successes",
+        ),
+        (
+            {"reauth_storm": {"enabled": True, "attempts": 2, "successes": 2, "failures": 1}},
+            "failures",
+        ),
+        (
+            {
+                "reauth_storm": {
+                    "enabled": True,
+                    "attempts": 2,
+                    "successes": 2,
+                    "failures": 0,
+                },
+                "expiry_denial_count": 1,
+            },
+            "expiry denials",
+        ),
+        (
+            {
+                "reauth_storm": {
+                    "enabled": True,
+                    "attempts": 2,
+                    "successes": 2,
+                    "failures": 0,
+                    "session_continuity_ok": False,
+                },
+                "session_continuity_ok": True,
+            },
+            "continuity",
+        ),
+    ),
+)
+def test_reauth_storm_validation_rejects_incomplete_or_failed_runs(
+    payload: dict[str, object],
+    match: str,
+) -> None:
+    with pytest.raises(RuntimeError, match=match):
+        rs._validate_reauth_storm_result(
+            "TOKEN-LIFECYCLE-REAUTH-STORM-JWT",
+            payload,
+            client_count=2,
+        )
 
 
 def test_fanout_readiness_wait_times_out_for_missing_subscribers(tmp_path) -> None:

@@ -139,6 +139,31 @@ def test_proactive_reauth_lifecycle_scenarios_are_timer_driven(scenario_id: str,
 
 
 @pytest.mark.parametrize(
+    ("scenario_id", "kind"),
+    (
+        ("TOKEN-LIFECYCLE-REAUTH-STORM-JWT", "jwt"),
+        ("TOKEN-LIFECYCLE-REAUTH-STORM-BISCUIT", "biscuit"),
+    ),
+)
+def test_reauth_storm_lifecycle_scenarios_are_focused_multi_client_slice(
+    scenario_id: str,
+    kind: str,
+) -> None:
+    scenarios = _scenario_registry()
+    scenario = scenarios[scenario_id]
+
+    assert scenario["reauth_storm"] is True
+    assert scenario["proactive_refresh"] is True
+    assert scenario["proactive_refresh_margin_seconds"] == 60
+    assert scenario["proactive_refresh_assert_continuity"] is True
+    assert scenario["token_refresh"] == {"kind": kind, "ttl_seconds": 75}
+    assert scenario["client_count"] == 25
+    assert scenario["message_count"] == 1
+    assert scenario.get("traffic_pattern") is None
+    assert scenario.get("authz_config") is None
+
+
+@pytest.mark.parametrize(
     ("scenario_id", "username"),
     (
         ("TEST-STRICT-MULTI-CLIENT-JWT", "jwt"),

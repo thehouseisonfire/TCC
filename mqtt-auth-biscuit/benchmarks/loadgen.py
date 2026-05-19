@@ -63,6 +63,7 @@ def _rust_loadgen_cmd(
     proactive_refresh_margin_seconds: int | None,
     proactive_refresh_timeout_seconds: int | None,
     proactive_refresh_assert_continuity: bool,
+    reauth_storm: bool,
     tls_enabled: bool,
     tls_ca_file: str | None,
     tls_insecure: bool,
@@ -222,6 +223,8 @@ def _rust_loadgen_cmd(
         cmd.extend(["--proactive-refresh-timeout-seconds", str(proactive_refresh_timeout_seconds)])
     if proactive_refresh_assert_continuity:
         cmd.append("--proactive-refresh-assert-continuity")
+    if reauth_storm:
+        cmd.append("--reauth-storm")
     if biscuit_attenuate:
         cmd.append("--biscuit-attenuate")
     for deny in biscuit_attenuate_denies or []:

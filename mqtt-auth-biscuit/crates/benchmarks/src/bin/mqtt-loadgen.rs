@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -138,6 +138,8 @@ struct Args {
     proactive_refresh_timeout_seconds: u64,
     #[arg(long, env = "MQTT_PROACTIVE_REFRESH_ASSERT_CONTINUITY")]
     proactive_refresh_assert_continuity: bool,
+    #[arg(long, env = "MQTT_REAUTH_STORM")]
+    reauth_storm: bool,
     #[arg(long, env = "JWT_IDENTITY_BINDING", default_value = "off")]
     jwt_identity_binding: String,
     #[arg(long, env = "BISCUIT_IDENTITY_BINDING", default_value = "off")]
@@ -281,6 +283,7 @@ struct Output {
     received_messages: Value,
     fanout_churn: Value,
     sync_connect: Value,
+    reauth_storm: Value,
     raw_publish_ms: Vec<f64>,
     raw_metrics: Value,
     errors: Vec<String>,
@@ -296,6 +299,7 @@ struct WorkerResult {
     proactive_refresh_attempts: usize,
     proactive_refresh_successes: usize,
     proactive_refresh_failures: usize,
+    proactive_refresh_attempt_unix_ms: Vec<u128>,
     expiry_denial_count: usize,
     delegation_ms: Option<f64>,
     delegation_len: Option<f64>,
@@ -330,6 +334,7 @@ struct WorkerInvocation {
     handoff_required: bool,
     sync_connect: Option<Arc<SyncConnectGate>>,
     publish_gate: Option<Arc<PublishStartGate>>,
+    reauth_storm: Option<Arc<ReauthStormGate>>,
 }
 
 struct StandardMetrics {
@@ -341,6 +346,7 @@ struct StandardMetrics {
     proactive_refresh_attempts: usize,
     proactive_refresh_successes: usize,
     proactive_refresh_failures: usize,
+    proactive_refresh_attempt_unix_ms: Vec<u128>,
     expiry_denial_count: usize,
     delegation: Vec<f64>,
     delegation_len: Vec<f64>,
@@ -500,6 +506,48 @@ impl SyncConnectGate {
     fn release(&self) {
         self.released.store(true, Ordering::Release);
         self.notify.notify_waiters();
+    }
+}
+
+#[derive(Debug)]
+struct ReauthStormGate {
+    expected: usize,
+    ready: AtomicUsize,
+    released: AtomicBool,
+    notify: Notify,
+    ready_unix_ms: Mutex<Vec<u128>>,
+}
+
+impl ReauthStormGate {
+    fn new(expected: usize) -> Self {
+        Self {
+            expected,
+            ready: AtomicUsize::new(0),
+            released: AtomicBool::new(false),
+            notify: Notify::new(),
+            ready_unix_ms: Mutex::new(Vec::with_capacity(expected)),
+        }
+    }
+
+    async fn wait(&self, timeout: Duration) -> bool {
+        if let Ok(mut ready) = self.ready_unix_ms.lock() {
+            ready.push(unix_ms_now());
+        }
+        if self.ready.fetch_add(1, Ordering::AcqRel) + 1 >= self.expected {
+            self.released.store(true, Ordering::Release);
+            self.notify.notify_waiters();
+            return true;
+        }
+        let wait = async {
+            loop {
+                let notified = self.notify.notified();
+                if self.released.load(Ordering::Acquire) {
+                    break;
+                }
+                notified.await;
+            }
+        };
+        tokio::time::timeout(timeout, wait).await.is_ok()
     }
 }
 
@@ -956,6 +1004,23 @@ fn validate_startup_provisioning(args: &Args) -> Result<()> {
             }
         }
     }
+    if args.reauth_storm {
+        if !args.proactive_refresh {
+            return Err(MqttHelperError::Message(
+                "reauth storm requires --proactive-refresh".to_string(),
+            ));
+        }
+        if args.clients <= 1 {
+            return Err(MqttHelperError::Message(
+                "reauth storm requires more than one client".to_string(),
+            ));
+        }
+        if args.sync_connect_barrier_url.is_some() {
+            return Err(MqttHelperError::Message(
+                "reauth storm uses an in-process refresh barrier and is not supported with external sync_connect barriers".to_string(),
+            ));
+        }
+    }
     if explicit_startup_provisioning(args) && resolved_token_issuer_kind(args).is_none() {
         return Err(MqttHelperError::Message(
             "startup provisioning requires token_issuer_kind or username 'jwt'/'biscuit'"
@@ -1304,6 +1369,13 @@ fn unix_timestamp_now() -> Result<i64> {
         .map_err(|err| MqttHelperError::Message(format!("system clock before epoch: {err}")))?;
     i64::try_from(duration.as_secs())
         .map_err(|_| MqttHelperError::Message("system timestamp exceeds i64 range".to_string()))
+}
+
+fn unix_ms_now() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }
 
 fn should_proactively_refresh(exp: Option<i64>, margin_seconds: u64, now: i64) -> bool {
@@ -1888,6 +1960,7 @@ fn inputs_json(
         "proactive_refresh_margin_seconds": args.proactive_refresh_margin_seconds,
         "proactive_refresh_timeout_seconds": args.proactive_refresh_timeout_seconds,
         "proactive_refresh_assert_continuity": args.proactive_refresh_assert_continuity,
+        "reauth_storm": args.reauth_storm,
         "jwt_identity_binding": args.jwt_identity_binding,
         "biscuit_identity_binding": args.biscuit_identity_binding,
         "biscuit_client_id_fact": args.biscuit_client_id_fact,
@@ -2855,6 +2928,7 @@ fn fanout_output(args: &Args, parts: FanoutOutputParts<'_>) -> Output {
         "token_refresh_len": [],
         "proactive_refresh": [],
         "proactive_refresh_len": [],
+        "proactive_refresh_attempt_unix_ms": [],
         "delegation": metrics.delegation.clone(),
         "delegation_len": metrics.delegation_len.clone(),
         "delegation_handoff_publish": parts.runtime.handoff_publish_ms.clone(),
@@ -2923,6 +2997,7 @@ fn fanout_output(args: &Args, parts: FanoutOutputParts<'_>) -> Output {
             metrics.received_post,
         ),
         sync_connect: sync_connect_json(args, &[], &[], &parts.runtime.errors),
+        reauth_storm: serde_json::json!({"enabled": false}),
         raw_publish_ms: parts.fanout_publish_ms,
         raw_metrics,
         errors: parts.runtime.errors,
@@ -3331,6 +3406,7 @@ async fn perform_proactive_reauth(
     result: &mut WorkerResult,
     shutdown: Option<&Notify>,
     apply_refresh_transforms: bool,
+    reauth_storm: Option<&ReauthStormGate>,
 ) -> bool {
     if !args.proactive_refresh {
         return true;
@@ -3349,7 +3425,18 @@ async fn perform_proactive_reauth(
         result.proactive_refresh_failures += 1;
         return false;
     };
+    if let Some(gate) = reauth_storm {
+        let timeout = Duration::from_secs(args.proactive_refresh_timeout_seconds.max(1));
+        if !gate.wait(timeout).await {
+            result.proactive_refresh_failures += 1;
+            result
+                .errors
+                .push("proactive_refresh_failed:reauth_storm_barrier_timeout".to_string());
+            return false;
+        }
+    }
     result.proactive_refresh_attempts += 1;
+    result.proactive_refresh_attempt_unix_ms.push(unix_ms_now());
     let started = Instant::now();
     let refreshed = if apply_refresh_transforms {
         fetch_worker_token(args, &kind, client_id, topic, result).await
@@ -3457,6 +3544,7 @@ async fn run_proactive_refresh_timer(
     first_attempt_notify: Arc<Notify>,
     first_attempt_observed: Arc<AtomicBool>,
     apply_refresh_transforms: bool,
+    reauth_storm: Option<Arc<ReauthStormGate>>,
 ) -> WorkerResult {
     let mut result = WorkerResult::default();
     if !args.proactive_refresh {
@@ -3497,6 +3585,7 @@ async fn run_proactive_refresh_timer(
             &mut result,
             Some(&shutdown),
             apply_refresh_transforms,
+            reauth_storm.as_deref(),
         )
         .await;
         first_attempt_observed.store(true, Ordering::Release);
@@ -3517,6 +3606,9 @@ fn merge_proactive_result(result: &mut WorkerResult, proactive: &mut WorkerResul
     result.proactive_refresh_attempts += proactive.proactive_refresh_attempts;
     result.proactive_refresh_successes += proactive.proactive_refresh_successes;
     result.proactive_refresh_failures += proactive.proactive_refresh_failures;
+    result
+        .proactive_refresh_attempt_unix_ms
+        .append(&mut proactive.proactive_refresh_attempt_unix_ms);
     result.expiry_denial_count += proactive.expiry_denial_count;
     result.errors.append(&mut proactive.errors);
 }
@@ -3666,6 +3758,7 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
         handoff_required,
         sync_connect,
         publish_gate,
+        reauth_storm,
     } = job;
     let mut result = WorkerResult::default();
     let mut publish_gate_participant = PublishGateParticipant::new(publish_gate);
@@ -3790,6 +3883,7 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
         Arc::clone(&first_attempt_notify),
         Arc::clone(&first_attempt_observed),
         apply_refresh_transforms,
+        reauth_storm.clone(),
     ));
 
     run_worker_session(
@@ -3863,6 +3957,10 @@ fn standard_metrics(
     let proactive_refresh_attempts = results.iter().map(|r| r.proactive_refresh_attempts).sum();
     let proactive_refresh_successes = results.iter().map(|r| r.proactive_refresh_successes).sum();
     let proactive_refresh_failures = results.iter().map(|r| r.proactive_refresh_failures).sum();
+    let proactive_refresh_attempt_unix_ms = results
+        .iter()
+        .flat_map(|r| r.proactive_refresh_attempt_unix_ms.clone())
+        .collect();
     let expiry_denial_count = results.iter().map(|r| r.expiry_denial_count).sum();
     let delegation = results.iter().filter_map(|r| r.delegation_ms).collect();
     let delegation_len = results.iter().filter_map(|r| r.delegation_len).collect();
@@ -3911,6 +4009,7 @@ fn standard_metrics(
         proactive_refresh_attempts,
         proactive_refresh_successes,
         proactive_refresh_failures,
+        proactive_refresh_attempt_unix_ms,
         expiry_denial_count,
         delegation,
         delegation_len,
@@ -3930,6 +4029,30 @@ fn standard_metrics(
     }
 }
 
+fn max_timestamp_skew_ms(values: &[u128]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let min = values.iter().min().copied().unwrap_or_default();
+    let max = values.iter().max().copied().unwrap_or_default();
+    Some(max.saturating_sub(min) as f64)
+}
+
+fn reauth_storm_json(args: &Args, metrics: &StandardMetrics, session_continuity_ok: bool) -> Value {
+    if !args.reauth_storm {
+        return serde_json::json!({"enabled": false});
+    }
+    serde_json::json!({
+        "enabled": true,
+        "clients": args.clients,
+        "attempts": metrics.proactive_refresh_attempts,
+        "successes": metrics.proactive_refresh_successes,
+        "failures": metrics.proactive_refresh_failures,
+        "max_refresh_skew_ms": max_timestamp_skew_ms(&metrics.proactive_refresh_attempt_unix_ms),
+        "session_continuity_ok": session_continuity_ok,
+    })
+}
+
 fn standard_output(
     args: &Args,
     qos_distribution: Option<&QosDistribution>,
@@ -3937,12 +4060,17 @@ fn standard_output(
     handoff_nonce: Option<&str>,
     metrics: StandardMetrics,
 ) -> Output {
+    let session_continuity_ok = !args.proactive_refresh
+        || (metrics.proactive_refresh_attempts > 0
+            && metrics.proactive_refresh_failures == 0
+            && metrics.expiry_denial_count == 0);
     let raw_metrics = serde_json::json!({
         "connect": metrics.connect.clone(),
         "token_refresh": metrics.token_refresh.clone(),
         "token_refresh_len": metrics.token_refresh_len.clone(),
         "proactive_refresh": metrics.proactive_refresh.clone(),
         "proactive_refresh_len": metrics.proactive_refresh_len.clone(),
+        "proactive_refresh_attempt_unix_ms": metrics.proactive_refresh_attempt_unix_ms.clone(),
         "delegation": metrics.delegation.clone(),
         "delegation_len": metrics.delegation_len.clone(),
         "delegation_handoff_publish": metrics.delegation_handoff_publish.clone(),
@@ -3979,10 +4107,7 @@ fn standard_output(
         proactive_refresh_attempts: metrics.proactive_refresh_attempts,
         proactive_refresh_successes: metrics.proactive_refresh_successes,
         proactive_refresh_failures: metrics.proactive_refresh_failures,
-        session_continuity_ok: !args.proactive_refresh
-            || (metrics.proactive_refresh_attempts > 0
-                && metrics.proactive_refresh_failures == 0
-                && metrics.expiry_denial_count == 0),
+        session_continuity_ok,
         expiry_denial_count: metrics.expiry_denial_count,
         delegation: summarize(&metrics.delegation),
         delegation_len: summarize(&metrics.delegation_len),
@@ -4014,6 +4139,7 @@ fn standard_output(
         }),
         fanout_churn: fanout_churn_json(args, args.mode.as_str(), None, None, None),
         sync_connect,
+        reauth_storm: reauth_storm_json(args, &metrics, session_continuity_ok),
         raw_publish_ms: metrics.publish,
         raw_metrics,
         errors: metrics.errors,
@@ -4040,6 +4166,9 @@ async fn run_standard_mode(
     let mut tasks = Vec::new();
     let sync_connect = args.sync_connect.then(|| Arc::new(SyncConnectGate::new()));
     let publish_gate = (!args.sync_connect).then(|| Arc::new(PublishStartGate::new(args.clients)));
+    let reauth_storm = args
+        .reauth_storm
+        .then(|| Arc::new(ReauthStormGate::new(args.clients)));
     for index in 0..args.clients {
         let client_id = client_id_for(&args, index);
         let bootstrap = handoff_plan
@@ -4055,6 +4184,7 @@ async fn run_standard_mode(
             handoff_required,
             sync_connect: sync_connect.clone(),
             publish_gate: publish_gate.clone(),
+            reauth_storm: reauth_storm.clone(),
         })));
     }
 
@@ -4101,6 +4231,7 @@ fn empty_standard_metrics() -> StandardMetrics {
         proactive_refresh_attempts: 0,
         proactive_refresh_successes: 0,
         proactive_refresh_failures: 0,
+        proactive_refresh_attempt_unix_ms: Vec::new(),
         expiry_denial_count: 0,
         delegation: Vec::new(),
         delegation_len: Vec::new(),
@@ -4248,6 +4379,7 @@ async fn run_handoff_delegatee(
             handoff_required: true,
             sync_connect: None,
             publish_gate: None,
+            reauth_storm: None,
         })
         .await;
         results.push(result);
@@ -4358,6 +4490,7 @@ mod tests {
             received_messages: serde_json::json!({"count": 0, "expected": 0}),
             fanout_churn: fanout_churn_json(args, mode, None, None, None),
             sync_connect: serde_json::json!({"enabled": false}),
+            reauth_storm: serde_json::json!({"enabled": false}),
             raw_publish_ms: Vec::new(),
             raw_metrics: serde_json::json!({}),
             errors: Vec::new(),
@@ -4391,6 +4524,7 @@ mod tests {
             proactive_refresh_attempts: 0,
             proactive_refresh_successes: 0,
             proactive_refresh_failures: 0,
+            proactive_refresh_attempt_unix_ms: Vec::new(),
             expiry_denial_count: 0,
             delegation: Vec::new(),
             delegation_len: Vec::new(),
@@ -4729,6 +4863,7 @@ mod tests {
                 "qos_distribution_actual",
                 "raw_metrics",
                 "raw_publish_ms",
+                "reauth_storm",
                 "receive",
                 "receive_throughput_mps",
                 "received_messages",
@@ -4871,6 +5006,58 @@ mod tests {
         let successful = standard_output(&args, None, &[], None, successful_metrics);
         validate_proactive_refresh_assertion(&args, &successful)
             .expect("successful proactive refresh should satisfy continuity assertion");
+    }
+
+    #[test]
+    fn reauth_storm_output_reports_attempt_skew_and_counts() {
+        let args = Args::parse_from([
+            "mqtt-loadgen",
+            "--clients",
+            "2",
+            "--proactive-refresh",
+            "--reauth-storm",
+        ]);
+        let mut metrics = empty_standard_metrics();
+        metrics.proactive_refresh_attempts = 2;
+        metrics.proactive_refresh_successes = 2;
+        metrics.proactive_refresh_attempt_unix_ms = vec![1_000, 1_018];
+
+        let output = standard_output(&args, None, &[], None, metrics);
+
+        assert_eq!(output.reauth_storm["enabled"], true);
+        assert_eq!(output.reauth_storm["clients"], 2);
+        assert_eq!(output.reauth_storm["attempts"], 2);
+        assert_eq!(output.reauth_storm["successes"], 2);
+        assert_eq!(output.reauth_storm["failures"], 0);
+        assert_eq!(output.reauth_storm["max_refresh_skew_ms"], 18.0);
+        assert_eq!(output.reauth_storm["session_continuity_ok"], true);
+    }
+
+    #[test]
+    fn reauth_storm_requires_multi_client_proactive_refresh() {
+        let no_refresh = Args::parse_from(["mqtt-loadgen", "--clients", "2", "--reauth-storm"]);
+        assert!(
+            validate_startup_provisioning(&no_refresh)
+                .unwrap_err()
+                .to_string()
+                .contains("requires --proactive-refresh")
+        );
+
+        let single_client = Args::parse_from([
+            "mqtt-loadgen",
+            "--clients",
+            "1",
+            "--proactive-refresh",
+            "--token-issuer-url",
+            "http://issuer",
+            "--reauth-storm",
+        ]);
+        assert!(
+            validate_startup_provisioning(&single_client)
+                .unwrap_err()
+                .to_string()
+                .contains("more than one client")
+        );
     }
 
     #[test]

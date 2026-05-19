@@ -39,6 +39,7 @@ class _RustLoadgenKwargs(TypedDict):
     proactive_refresh_margin_seconds: int | None
     proactive_refresh_timeout_seconds: int | None
     proactive_refresh_assert_continuity: bool
+    reauth_storm: bool
     tls_enabled: bool
     tls_ca_file: str | None
     tls_insecure: bool
@@ -74,6 +75,7 @@ def _base_kwargs() -> _RustLoadgenKwargs:
         "proactive_refresh_margin_seconds": None,
         "proactive_refresh_timeout_seconds": None,
         "proactive_refresh_assert_continuity": False,
+        "reauth_storm": False,
         "jwt_identity_binding": "off",
         "biscuit_identity_binding": "off",
         "biscuit_client_id_fact": "client_id",
@@ -107,6 +109,7 @@ def test_rust_loadgen_command_forwards_programmatic_transition_options(monkeypat
             "proactive_refresh_margin_seconds": 60,
             "proactive_refresh_timeout_seconds": 10,
             "proactive_refresh_assert_continuity": True,
+            "reauth_storm": True,
             "tls_enabled": True,
             "tls_ca_file": "ca.pem",
             "tls_insecure": True,
@@ -189,6 +192,7 @@ def test_rust_loadgen_command_forwards_programmatic_transition_options(monkeypat
     assert _argv_value(argv, "--proactive-refresh-margin-seconds") == "60"
     assert _argv_value(argv, "--proactive-refresh-timeout-seconds") == "10"
     assert "--proactive-refresh-assert-continuity" in argv
+    assert "--reauth-storm" in argv
     assert _argv_value(argv, "--jwt-identity-binding") == "strict"
     assert _argv_value(argv, "--biscuit-identity-binding") == "strict"
     assert _argv_value(argv, "--biscuit-client-id-fact") == "cid"

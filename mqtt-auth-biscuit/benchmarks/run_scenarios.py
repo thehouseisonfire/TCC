@@ -245,6 +245,8 @@ class ScenarioConfig(TypedDict, total=False):
     proactive_refresh_margin_seconds: int
     proactive_refresh_timeout_seconds: int
     proactive_refresh_assert_continuity: bool
+    reauth_storm: bool
+    message_count: int
     dynamic_security_config: str
     dynamic_security_generated_profile: str
     dynamic_security_churn: list[str]
@@ -834,6 +836,7 @@ def _run_loadgen(
     proactive_refresh_margin_seconds: int | None,
     proactive_refresh_timeout_seconds: int | None,
     proactive_refresh_assert_continuity: bool,
+    reauth_storm: bool,
     jwt_identity_binding: IdentityBindingMode,
     biscuit_identity_binding: IdentityBindingMode,
     biscuit_client_id_fact: str,
@@ -949,6 +952,8 @@ def _run_loadgen(
         cmd.extend(["--proactive-refresh-timeout-seconds", str(proactive_refresh_timeout_seconds)])
     if proactive_refresh_assert_continuity:
         cmd.append("--proactive-refresh-assert-continuity")
+    if reauth_storm:
+        cmd.append("--reauth-storm")
     cmd.extend(["--jwt-identity-binding", jwt_identity_binding])
     cmd.extend(["--biscuit-identity-binding", biscuit_identity_binding])
     cmd.extend(["--biscuit-client-id-fact", biscuit_client_id_fact])
@@ -1061,6 +1066,8 @@ def _run_loadgen(
             text=True,
         )
         return json.loads(out)
+    if reauth_storm and client_topology == "container-per-client":
+        raise RuntimeError("reauth storm is only supported with host or container-single topology")
 
     loadgen_args = cmd[len(helper_cmd) :]
     env = {
@@ -1587,6 +1594,35 @@ def _merge_per_client_loadgen_results(
         "wall_duration_s": wall_duration_s,
     }
     return merged
+
+
+def _validate_reauth_storm_result(
+    scenario_id: str,
+    result: dict[str, Any],
+    *,
+    client_count: int,
+) -> None:
+    storm = result.get("reauth_storm")
+    if not isinstance(storm, dict) or storm.get("enabled") is not True:
+        raise RuntimeError(f"{scenario_id}: reauth storm metadata missing")
+    attempts = int(storm.get("attempts") or result.get("proactive_refresh_attempts") or 0)
+    successes = int(storm.get("successes") or result.get("proactive_refresh_successes") or 0)
+    failures = int(storm.get("failures") or result.get("proactive_refresh_failures") or 0)
+    if attempts < client_count:
+        raise RuntimeError(
+            f"{scenario_id}: reauth storm missed refresh attempts " f"({attempts}/{client_count})"
+        )
+    if successes != attempts:
+        raise RuntimeError(
+            f"{scenario_id}: reauth storm successes ({successes}) "
+            f"did not match attempts ({attempts})"
+        )
+    if failures != 0:
+        raise RuntimeError(f"{scenario_id}: reauth storm saw {failures} refresh failures")
+    if result.get("expiry_denial_count", 0) != 0:
+        raise RuntimeError(f"{scenario_id}: reauth storm saw expiry denials")
+    if not result.get("session_continuity_ok") or storm.get("session_continuity_ok") is False:
+        raise RuntimeError(f"{scenario_id}: reauth storm did not preserve session continuity")
 
 
 def _merge_fanout_role_loadgen_results(
@@ -4280,6 +4316,40 @@ def _build_available_scenarios(
             "proactive_refresh_timeout_seconds": 10,
             "proactive_refresh_assert_continuity": True,
         },
+        "TOKEN-LIFECYCLE-REAUTH-STORM-JWT": {
+            "mosquitto_conf": "./mosquitto_shortcache.conf",
+            "username": "jwt",
+            "password": tokens["jwt_short"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "message_count": 1,
+            "client_count": 25,
+            "token_refresh": {"kind": "jwt", "ttl_seconds": 75},
+            "proactive_refresh": True,
+            "proactive_refresh_margin_seconds": 60,
+            "proactive_refresh_timeout_seconds": 10,
+            "proactive_refresh_assert_continuity": True,
+            "reauth_storm": True,
+        },
+        "TOKEN-LIFECYCLE-REAUTH-STORM-BISCUIT": {
+            "mosquitto_conf": "./mosquitto_shortcache.conf",
+            "username": "biscuit",
+            "password": tokens["biscuit_short"],
+            "topic": "sensors/{client_id}/temp",
+            "authz_config": None,
+            "netem": {"clear": True},
+            "message_size": 0,
+            "message_count": 1,
+            "client_count": 25,
+            "token_refresh": {"kind": "biscuit", "ttl_seconds": 75},
+            "proactive_refresh": True,
+            "proactive_refresh_margin_seconds": 60,
+            "proactive_refresh_timeout_seconds": 10,
+            "proactive_refresh_assert_continuity": True,
+            "reauth_storm": True,
+        },
         "DYNAMIC-SECURITY-BASELINE": {
             "mosquitto_conf": "./mosquitto_dynsec.conf",
             "username": "dynsec_client_1",
@@ -4750,6 +4820,11 @@ def main(
     loadgen_cpus: str = typer.Option("1.0", "--client-cpus"),
     loadgen_memory: str = typer.Option("512m", "--client-memory"),
     loadgen_cpuset: str | None = typer.Option(None, "--client-cpuset"),
+    reauth_storm_clients: int | None = typer.Option(
+        None,
+        "--reauth-storm-clients",
+        help="Override client count for TOKEN-LIFECYCLE-REAUTH-STORM scenarios.",
+    ),
     biscuit_delegate_handoff_ready_timeout_seconds: int = typer.Option(
         120,
         "--biscuit-delegate-handoff-ready-timeout-seconds",
@@ -4767,6 +4842,10 @@ def main(
         loadgen_memory = "512m"
     if not isinstance(loadgen_cpuset, str):
         loadgen_cpuset = None
+    if not isinstance(reauth_storm_clients, int):
+        reauth_storm_clients = None
+    if reauth_storm_clients is not None and reauth_storm_clients <= 1:
+        raise typer.BadParameter("reauth_storm_clients must be greater than one")
     if not isinstance(biscuit_delegate_handoff_ready_timeout_seconds, int):
         biscuit_delegate_handoff_ready_timeout_seconds = 120
     if client_topology not in {"host", "container-single", "container-per-client"}:
@@ -5097,7 +5176,16 @@ def main(
             authz_profile = cast(dict[str, Any], s["authz_config"]).get("authz_profile")
         authorizer_profile = s.get("authorizer_profile")
         acl_read_enforcement = _infer_acl_read_enforcement(s)
-        effective_client_count = _effective_scenario_client_count(s, clients)
+        if s.get("reauth_storm") and client_topology_mode == "container-per-client":
+            raise RuntimeError(
+                f"{s['id']}: reauth storm is only supported with host or container-single topology"
+            )
+        effective_client_count = (
+            int(reauth_storm_clients)
+            if s.get("reauth_storm") and reauth_storm_clients is not None
+            else _effective_scenario_client_count(s, clients)
+        )
+        scenario_messages = int(s.get("message_count", messages))
         out_payload: dict[str, Any] = {
             "scenario": s["id"],
             "token_len": token_len,
@@ -5130,7 +5218,7 @@ def main(
                 **scenario_semantics,
                 "clients": effective_client_count,
                 "client_count": s.get("client_count"),
-                "messages": messages,
+                "messages": scenario_messages,
                 "qos": qos,
                 "qos_distribution": qos_distribution,
                 "token_issuer_no_default_roles": token_issuer_no_default_roles,
@@ -5141,6 +5229,7 @@ def main(
                 "proactive_refresh_assert_continuity": s.get(
                     "proactive_refresh_assert_continuity", False
                 ),
+                "reauth_storm": s.get("reauth_storm", False),
                 "traffic_pattern": s.get("traffic_pattern"),
                 "fanout_topic": s.get("fanout_topic"),
                 "subscriber_count": s.get("subscriber_count"),
@@ -5189,7 +5278,9 @@ def main(
                 "subscriber_count": (
                     effective_client_count if s.get("traffic_pattern") == "fanout" else None
                 ),
-                "message_count": messages if s.get("traffic_pattern") == "fanout" else None,
+                "message_count": (
+                    scenario_messages if s.get("traffic_pattern") == "fanout" else None
+                ),
                 "acl_read_cost_per_subscriber_ms": None,  # Calculated from receive latencies
             },
             "network_baseline": {
@@ -5275,7 +5366,7 @@ def main(
                         proactive_refresh = bool(s.get("proactive_refresh", False))
                         scenario_qos = int(s.get("qos", qos))
                         scenario_qos_distribution = s.get("qos_distribution", qos_distribution)
-                        scenario_clients = _effective_scenario_client_count(s, clients)
+                        scenario_clients = effective_client_count
                         strict_startup_provisioning = (
                             _scenario_requires_per_client_strict_provisioning(
                                 s["id"],
@@ -5297,7 +5388,7 @@ def main(
                             fanout_publisher_username=s.get("fanout_publisher_username"),
                             fanout_publisher_password=s.get("fanout_publisher_password"),
                             clients=scenario_clients,
-                            messages=messages,
+                            messages=scenario_messages,
                             topic=s.get("topic", "sensors/{client_id}/temp"),
                             mode=s.get("traffic_pattern"),
                             fanout_topic=s.get("fanout_topic"),
@@ -5331,6 +5422,7 @@ def main(
                             proactive_refresh_assert_continuity=bool(
                                 s.get("proactive_refresh_assert_continuity", False)
                             ),
+                            reauth_storm=bool(s.get("reauth_storm", False)),
                             jwt_identity_binding=cast(
                                 IdentityBindingMode,
                                 scenario_semantics["jwt_identity_binding"],
@@ -5498,6 +5590,12 @@ def main(
                             raise RuntimeError(f"{s['id']}: proactive refresh saw expiry denials")
                         if res.get("proactive_refresh_attempts", 0) <= 0:
                             raise RuntimeError(f"{s['id']}: proactive refresh did not execute")
+                    if s.get("reauth_storm"):
+                        _validate_reauth_storm_result(
+                            s["id"],
+                            res,
+                            client_count=scenario_clients,
+                        )
                 finally:
                     policy_churn.cleanup_dynsec_snapshot(generated_dynsec_path)
                 # Small delay to ensure container metrics are available after loadgen

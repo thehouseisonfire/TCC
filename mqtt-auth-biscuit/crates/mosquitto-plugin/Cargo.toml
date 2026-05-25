@@ -18,7 +18,7 @@ serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
 rand = "=0.10.1"
 rusqlite = { version = "=0.39.0", features = ["bundled"] }
-log = "=0.4.29"
+log = "=0.4.30"
 env_logger = "=0.11.10"
 libc = "=0.2.186"                   # C FFI types
 base64 = "=0.22.1"

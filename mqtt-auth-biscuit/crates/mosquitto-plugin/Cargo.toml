@@ -15,7 +15,7 @@ expiry_stats = []
 biscuit-auth = "=6.0.0"              # Biscuit v3 support (v6 API)
 jsonwebtoken = { version = "=10.4.0", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 serde = { version = "=1.0.228", features = ["derive"] }
-serde_json = "=1.0.149"
+serde_json = "=1.0.150"
 rand = "=0.10.1"
 rusqlite = { version = "=0.39.0", features = ["bundled"] }
 log = "=0.4.29"
@@ -24,7 +24,7 @@ libc = "=0.2.186"                   # C FFI types
 base64 = "=0.22.1"
 chrono = "=0.4.44"
 lru = "=0.18.0"
-dashmap = "=6.1.0"
+dashmap = "=6.2.1"
 hex = "=0.4.3"
 thiserror = "=2.0.18"
 rustls = "=0.23.40"

@@ -243,8 +243,7 @@ jobs:
           PYTHONPATH: mqtt-auth-biscuit
         run: |
           uv run --locked --group dev pytest \
-            mqtt-auth-biscuit/benchmarks/test_loadgen_worker_suback.py \
-            mqtt-auth-biscuit/benchmarks/test_loadgen_fanout_sync.py \
+            mqtt-auth-biscuit/benchmarks/test_loadgen_wrapper.py \
             mqtt-auth-biscuit/benchmarks/test_acl_read_fanout_churn_coverage.py \
             mqtt-auth-biscuit/benchmarks/test_acl_read_profile_matrix_coverage.py \
             mqtt-auth-biscuit/benchmarks/test_static_acl_coverage.py \

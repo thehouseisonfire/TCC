@@ -13,8 +13,8 @@ from benchmarks import policy_churn
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TLS_CA_FILE = Path(__file__).resolve().parents[2] / "docker" / "tls" / "ca.pem"
-EXPIRED_TOKEN_TTL_S = 3
-EXPIRY_TRIGGER_DELAY_S = 4.2
+SHORT_LIVED_TOKEN_TTL_S = 12
+EXPIRY_TRIGGER_DELAY_S = 18
 RAW_BISCUIT_MARKER = "b64:"
 
 
@@ -269,6 +269,8 @@ def test_runtime_acl_read_expiry_disconnect_and_reconnect(
     )
     compose_harness.up(mosquitto_conf=base_conf, tls=False)
     issuer = compose_harness.token_issuer(tls=False)
+    # Ensure the Rust helper binary is compiled before issuing short-lived tokens.
+    mqtt_client_factory._helper_path()
 
     topic = (
         f"fanout/runtime-enforcement/expiry/runtime-semantics/{token_kind}/"
@@ -280,14 +282,7 @@ def test_runtime_acl_read_expiry_disconnect_and_reconnect(
     subscribe_grants = [{"op": "subscribe", "res": topic}]
     publish_grants = [{"op": "publish", "res": topic}]
 
-    expired_sub_token = _issue_token(
-        issuer,
-        token_kind=token_kind,
-        client_id=sub_client_id,
-        topic=topic,
-        ttl_seconds=EXPIRED_TOKEN_TTL_S,
-        grants=subscribe_grants,
-    )
+    # Long-lived tokens (no time pressure).
     fresh_sub_token = _issue_token(
         issuer,
         token_kind=token_kind,
@@ -305,12 +300,22 @@ def test_runtime_acl_read_expiry_disconnect_and_reconnect(
         grants=publish_grants,
     )
 
+    # Issue the short-lived subscriber token immediately before connect
+    # so it is valid for the initial CONNECT / SUBSCRIBE and expires later.
+    short_lived_sub_token = _issue_token(
+        issuer,
+        token_kind=token_kind,
+        client_id=sub_client_id,
+        topic=topic,
+        ttl_seconds=SHORT_LIVED_TOKEN_TTL_S,
+        grants=subscribe_grants,
+    )
     sub = mqtt_client_factory(
         host="localhost",
         port=1883,
         client_id=sub_client_id,
         username=token_kind,
-        password=expired_sub_token,
+        password=short_lived_sub_token,
     )
     pub = mqtt_client_factory(
         host="localhost",
@@ -384,6 +389,8 @@ def test_runtime_expiry_disconnect_does_not_emit_lwt(
 ) -> None:
     compose_harness.up(mosquitto_conf="./mosquitto_integration_acl_read_full.conf", tls=False)
     issuer = compose_harness.token_issuer(tls=False)
+    # Ensure the Rust helper binary is compiled before issuing short-lived tokens.
+    mqtt_client_factory._helper_path()
 
     data_topic = f"fanout/runtime-enforcement/lwt/data/runtime-semantics/{unique_suffix}"
     will_topic = f"fanout/runtime-enforcement/lwt/will/runtime-semantics/{unique_suffix}"
@@ -392,14 +399,7 @@ def test_runtime_expiry_disconnect_does_not_emit_lwt(
     observer_client_id = f"runtime-enforcement-lwt-observer-runtime-semantics-{unique_suffix}"
     will_payload = f"unexpected-will-{unique_suffix}"
 
-    expired_sub_token = _issue_token(
-        issuer,
-        token_kind=token_kind,
-        client_id=sub_client_id,
-        topic=data_topic,
-        ttl_seconds=EXPIRED_TOKEN_TTL_S,
-        grants=[{"op": "subscribe", "res": data_topic}],
-    )
+    # Long-lived tokens (no time pressure).
     pub_token = _issue_token(
         issuer,
         token_kind=token_kind,
@@ -429,7 +429,7 @@ def test_runtime_expiry_disconnect_does_not_emit_lwt(
         port=1883,
         client_id=sub_client_id,
         username=token_kind,
-        password=expired_sub_token,
+        password="PLACEHOLDER",  # replaced below with short-lived token
         will_topic=will_topic,
         will_payload=will_payload,
         will_qos=1,
@@ -445,8 +445,21 @@ def test_runtime_expiry_disconnect_does_not_emit_lwt(
     try:
         observer.connect()
         assert _is_granted(observer.subscribe(will_topic, qos=1))
+
+        # Issue short-lived token immediately before sub connect
+        # so it is valid for the initial CONNECT / SUBSCRIBE and expires later.
+        short_lived_sub_token = _issue_token(
+            issuer,
+            token_kind=token_kind,
+            client_id=sub_client_id,
+            topic=data_topic,
+            ttl_seconds=SHORT_LIVED_TOKEN_TTL_S,
+            grants=[{"op": "subscribe", "res": data_topic}],
+        )
+        sub.password = short_lived_sub_token
         sub.connect()
         assert _is_granted(sub.subscribe(data_topic, qos=1))
+
         pub.connect()
 
         time.sleep(EXPIRY_TRIGGER_DELAY_S)

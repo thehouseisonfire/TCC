@@ -1,0 +1,36 @@
+name: Sanitizers
+
+on:
+  push:
+    paths:
+      - "mqtt-auth-biscuit/**"
+      - ".github/workflows/sanitizers.yml"
+      - "rust-toolchain.toml"
+  pull_request:
+    paths:
+      - "mqtt-auth-biscuit/**"
+      - ".github/workflows/sanitizers.yml"
+      - "rust-toolchain.toml"
+
+jobs:
+  sanitizers:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Install nightly Rust with sanitizer runtime
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: nightly-2026-03-20
+
+      - name: Generate test tokens
+        working-directory: mqtt-auth-biscuit
+        run: cargo +nightly-2026-03-20 run --locked --bin gen-tokens
+
+      - name: Test with AddressSanitizer
+        working-directory: mqtt-auth-biscuit
+        run: cargo +nightly-2026-03-20 --config 'build.rustflags=[]' test --target x86_64-unknown-linux-gnu -p mosquitto-auth-biscuit
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          ASAN_OPTIONS: detect_leaks=1

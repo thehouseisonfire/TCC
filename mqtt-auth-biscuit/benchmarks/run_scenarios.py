@@ -525,8 +525,8 @@ def _validated_authz_state_baseline(
 
 def _expected_authz_state(
     cfg: AuthzConfig | None,
-    baseline_state: dict[str, object],
-) -> dict[str, object]:
+    baseline_state: dict[str, Any],
+) -> dict[str, Any]:
     expected = dict(baseline_state)
     expected["fail_rate"] = _coerce_fail_rate(
         expected.get("fail_rate"),
@@ -3478,11 +3478,11 @@ def _acl_read_profile_matrix_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
     base_topic = "fanout/broadcast"
 
     for token_label, token_key in (("JWT", "jwt"), ("BISCUIT", "biscuit")):
-        allow_token = tokens.get(f"{token_key}_fanout_allow", tokens[token_key])
+        allow_token = tokens.get(f"{token_key}_fanout_allow", tokens[token_key]) or ""
         deny_token = tokens.get(
             f"{token_key}_fanout_read_deny",
             tokens.get(f"{token_key}_deny", allow_token),
-        )
+        ) or allow_token
         username = "jwt" if token_key == "jwt" else "biscuit"
 
         for subscribers in subscriber_slices:
@@ -3529,11 +3529,11 @@ def _acl_read_profile_matrix_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
         for tier in ("simple", "med", "complex"):
             for token_label, token_key in (("JWT", "jwt"), ("BISCUIT", "biscuit")):
                 username = "jwt" if token_key == "jwt" else "biscuit"
-                allow_token = tokens.get(f"{token_key}_fanout_allow", tokens[token_key])
+                allow_token = tokens.get(f"{token_key}_fanout_allow", tokens[token_key]) or ""
                 deny_token = tokens.get(
                     f"{token_key}_fanout_read_deny",
                     tokens.get(f"{token_key}_deny", allow_token),
-                )
+                ) or allow_token
 
                 scenarios[
                     f"{source_label}-ACL-READ-FANOUT-STRICT-{tier.upper()}-ALLOW-{token_label}-10"
@@ -5351,6 +5351,7 @@ def main(
                             profile=str(s.get("sqlite_seed_profile", "fanout_basic")),
                         )
                     mqtt5_cfg = s.get("mqtt5_auth")
+                    scenario_clients = effective_client_count
                     if mqtt5_cfg is not None:
                         res = _run_mqtt5_auth(
                             host_mqtt_host,
@@ -5366,7 +5367,6 @@ def main(
                         proactive_refresh = bool(s.get("proactive_refresh", False))
                         scenario_qos = int(s.get("qos", qos))
                         scenario_qos_distribution = s.get("qos_distribution", qos_distribution)
-                        scenario_clients = effective_client_count
                         strict_startup_provisioning = (
                             _scenario_requires_per_client_strict_provisioning(
                                 s["id"],

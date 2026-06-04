@@ -52,6 +52,12 @@ repos:
         language: system
         pass_filenames: false
         stages: [commit, push]
+      - id: pyrefly
+        name: pyrefly
+        entry: uv run --locked --group dev pyrefly check mqtt-auth-biscuit
+        language: system
+        pass_filenames: false
+        stages: [commit, push]
       - id: pin-audit
         name: reproducibility audit
         entry: ./scripts/check-pins

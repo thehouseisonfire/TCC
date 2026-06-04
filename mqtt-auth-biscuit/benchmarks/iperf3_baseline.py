@@ -67,6 +67,7 @@ def run_iperf3_baseline(
         reverse_mode,
     )
 
+    result = None
     try:
         result = subprocess.run(
             cmd,
@@ -101,7 +102,7 @@ def run_iperf3_baseline(
         logger.error("Failed to parse iperf3 JSON output: %s", e)
         return {
             "error": f"JSON parse error: {e}",
-            "raw_output": result.stdout if "result" in dir() else None,
+            "raw_output": result.stdout if result is not None else None,
             "host": host,
             "port": port,
         }

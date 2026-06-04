@@ -64,7 +64,7 @@ def _aggregate_latency_values(values):
     }
 
 
-def _aggregate_metric(runs, metric_name):
+def _aggregate_metric(runs, metric_name) -> dict[str, Any]:
     values_by_field: dict[str, list[float | None]] = {field: [] for field in METRIC_FIELDS}
     counts = []
     for run in runs:
@@ -77,7 +77,7 @@ def _aggregate_metric(runs, metric_name):
         for field in METRIC_FIELDS:
             values_by_field[field].append(_safe_float(metric.get(field)))
 
-    out = {
+    out: dict[str, Any] = {
         "count_total": int(sum(counts)) if counts else 0,
     }
     for field, values in values_by_field.items():

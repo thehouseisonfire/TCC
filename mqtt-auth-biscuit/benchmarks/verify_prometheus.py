@@ -6,6 +6,8 @@ data for the mosquitto container.
 Usage: python3 verify_prometheus.py
 """
 
+from typing import Any
+
 import subprocess
 import sys
 import urllib.parse
@@ -31,7 +33,7 @@ except ImportError:
     )
 
 
-def query_prometheus(query):
+def query_prometheus(query) -> dict[str, Any]:
     """Query Prometheus and return the result."""
     try:
         url = f"http://localhost:9090/api/v1/query?query={urllib.parse.quote(query, safe='')}"

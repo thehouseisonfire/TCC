@@ -5,21 +5,22 @@ requires-python = "==3.14.2"
 dependencies = [
   "dpkt==1.9.8",
   "httpx[http2]==0.28.1",
-  "numpy==2.4.2",
-  "pandas==3.0.1",
-  "pydantic==2.12.5",
-  "rich==14.3.3",
-  "typer==0.24.1",
+  "numpy==2.4.6",
+  "pandas==3.0.3",
+  "pydantic==2.13.4",
+  "rich==15.0.0",
+  "typer==0.26.5",
 ]
 
 [dependency-groups]
 dev = [
-  "ansible-core==2.19.3",
-  "black==26.1.0",
-  "mypy==1.19.1",
-  "pandas-stubs==3.0.0.260204",
-  "pytest==9.0.2",
-  "ruff==0.15.4",
+  "ansible-core==2.21.0",
+  "black==26.5.1",
+  "mypy==2.1.0",
+  "pandas-stubs==3.0.3.260530",
+  "pyrefly==1.0.0",
+  "pytest==9.0.3",
+  "ruff==0.15.15",
 ]
 
 [tool.uv]
@@ -58,3 +59,12 @@ check_untyped_defs = true
 no_implicit_optional = true
 exclude = '(\.venv)/'
 ignore_missing_imports = true
+num_workers = 4
+
+[tool.pyrefly]
+python-version = "3.14"
+python-platform = "linux"
+project-includes = ["mqtt-auth-biscuit"]
+project-excludes = ["**/node_modules", "**/__pycache__", "**/*venv/**", "**/.[!/.]*/**"]
+search-path = ["mqtt-auth-biscuit"]
+use-ignore-files = true

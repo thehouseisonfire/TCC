@@ -3479,10 +3479,13 @@ def _acl_read_profile_matrix_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
 
     for token_label, token_key in (("JWT", "jwt"), ("BISCUIT", "biscuit")):
         allow_token = tokens.get(f"{token_key}_fanout_allow", tokens[token_key]) or ""
-        deny_token = tokens.get(
-            f"{token_key}_fanout_read_deny",
-            tokens.get(f"{token_key}_deny", allow_token),
-        ) or allow_token
+        deny_token = (
+            tokens.get(
+                f"{token_key}_fanout_read_deny",
+                tokens.get(f"{token_key}_deny", allow_token),
+            )
+            or allow_token
+        )
         username = "jwt" if token_key == "jwt" else "biscuit"
 
         for subscribers in subscriber_slices:
@@ -3530,10 +3533,13 @@ def _acl_read_profile_matrix_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
             for token_label, token_key in (("JWT", "jwt"), ("BISCUIT", "biscuit")):
                 username = "jwt" if token_key == "jwt" else "biscuit"
                 allow_token = tokens.get(f"{token_key}_fanout_allow", tokens[token_key]) or ""
-                deny_token = tokens.get(
-                    f"{token_key}_fanout_read_deny",
-                    tokens.get(f"{token_key}_deny", allow_token),
-                ) or allow_token
+                deny_token = (
+                    tokens.get(
+                        f"{token_key}_fanout_read_deny",
+                        tokens.get(f"{token_key}_deny", allow_token),
+                    )
+                    or allow_token
+                )
 
                 scenarios[
                     f"{source_label}-ACL-READ-FANOUT-STRICT-{tier.upper()}-ALLOW-{token_label}-10"

@@ -6,11 +6,10 @@ data for the mosquitto container.
 Usage: python3 verify_prometheus.py
 """
 
-from typing import Any
-
 import subprocess
 import sys
 import urllib.parse
+from typing import Any
 
 import httpx
 

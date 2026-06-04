@@ -43,7 +43,7 @@ def _normalize_reason_code(reason_code: Any) -> int | None:
         return None
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 

@@ -18,8 +18,7 @@ fn read_to_string(path: &Path) -> Result<String> {
 
 fn parse_toml(path: &Path) -> Result<TomlValue> {
     let text = read_to_string(path)?;
-    toml::from_str(&text)
-        .with_context(|| format!("failed to parse TOML from {}", path.display()))
+    toml::from_str(&text).with_context(|| format!("failed to parse TOML from {}", path.display()))
 }
 
 fn table<'a>(value: &'a TomlValue, key: &str) -> Result<&'a toml::map::Map<String, TomlValue>> {

@@ -36,12 +36,14 @@ if str(REPO_ROOT) not in sys.path:
 def _normalize_reason_code(reason_code: Any) -> int | None:
     if reason_code is None:
         return None
-    value = getattr(reason_code, "value", reason_code)
+    value: Any = getattr(reason_code, "value", reason_code)
     if callable(value):
         value = value()
+    if value is None:
+        return None
     try:
         return int(value)
-    except TypeError, ValueError:
+    except (TypeError, ValueError):
         return None
 
 

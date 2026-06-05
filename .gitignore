@@ -19,6 +19,9 @@ __pycache__/
 # Generated benchmark-host inventory
 /infra/ansible/inventory.yml
 
+# Artifacts
+mqtt-auth-biscuit/benchmarks/**.json
+
 # Generated TLS assets (see docker/tls/generate_certs.sh)
 /mqtt-auth-biscuit/docker/tls/*.pem
 /mqtt-auth-biscuit/docker/tls/*.key

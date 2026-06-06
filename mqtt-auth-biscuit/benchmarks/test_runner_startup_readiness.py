@@ -293,6 +293,36 @@ def test_container_single_runs_loadgen_through_compose(monkeypatch) -> None:
     assert compose_call[compose_call.index("--host") + 1] == "mosquitto"
 
 
+def test_container_single_passes_explicit_password_map_profiles(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    class Completed:
+        stdout = '{"errors":[],"raw_publish_ms":[]}'
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN202
+        calls.append(cmd)
+        return Completed()
+
+    monkeypatch.setattr(rs, "_resolve_rust_helper", lambda _binary: ["mqtt-loadgen"])
+    monkeypatch.setattr(rs.subprocess, "run", fake_run)
+
+    rs._run_loadgen(
+        **_minimal_run_loadgen_kwargs(),
+        password_map_path="benchmarks/password-map.json",
+        password_map_profile="jwt_fanout_allow",
+        fanout_publisher_password_map_profile="jwt_static_writer",
+        client_topology="container-single",
+        compose_files=["docker/docker-compose.yml"],
+    )
+
+    command = calls[-1]
+    assert command[command.index("--password-map") + 1] == "benchmarks/password-map.json"
+    assert command[command.index("--password-map-profile") + 1] == "jwt_fanout_allow"
+    assert (
+        command[command.index("--fanout-publisher-password-map-profile") + 1] == "jwt_static_writer"
+    )
+
+
 def test_loadgen_container_names_follow_compose_project_precedence(monkeypatch) -> None:
     monkeypatch.delenv("COMPOSE_PROJECT_NAME", raising=False)
 

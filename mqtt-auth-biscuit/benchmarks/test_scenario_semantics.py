@@ -239,6 +239,33 @@ def test_multi_client_capability_scenarios_may_reuse_shared_tokens_when_declared
     }
 
 
+def test_every_scenario_declares_and_validates_credential_mode() -> None:
+    scenarios = _scenario_registry()
+
+    for scenario_id, scenario in scenarios.items():
+        rs._validate_scenario_credentials(scenario_id, scenario)
+
+    assert scenarios["TOKEN-BASELINE-JWT"]["password_map_profile"] == "jwt"
+    assert scenarios["TOKEN-DENY-READ-JWT"]["password_map_profile"] == "jwt_deny"
+    assert scenarios["TOKEN-COMPLEXITY-CHAIN-25-BISCUIT"]["password_map_profile"] == "biscuit_25"
+    assert scenarios["STATIC-ACL-FANOUT-JWT"]["password_map_profile"] == "jwt_static_reader"
+    assert (
+        scenarios["STATIC-ACL-FANOUT-JWT"]["fanout_publisher_password_map_profile"]
+        == "jwt_static_writer"
+    )
+    assert scenarios["TOKEN-LIFECYCLE-REAUTH-STORM-BISCUIT"]["credential_mode"] == "issuer"
+    assert scenarios["TOKEN-AUTHORIZER-PROFILE-SIMPLE-BISCUIT"]["credential_mode"] == "shared"
+    assert scenarios["TOKEN-ACL-READ-FANOUT-STRICT-ALLOW-JWT-50"]["credential_mode"] == "shared"
+    assert (
+        scenarios["HTTP-ACL-READ-FANOUT-STRICT-MED-ALLOW-PARITY-JWT-50"]["password_map_profile"]
+        == "jwt_fanout_strict"
+    )
+    assert (
+        scenarios["HTTP-LATENCY-200MS-PARITY-BISCUIT"]["password_map_profile"]
+        == "biscuit_strict_client_id"
+    )
+
+
 @pytest.mark.parametrize("scenario_id", MULTI_CLIENT_FANOUT_PARITY_SCENARIOS)
 def test_multi_client_fanout_parity_variants_are_runnable_and_strict(
     scenario_id: str,

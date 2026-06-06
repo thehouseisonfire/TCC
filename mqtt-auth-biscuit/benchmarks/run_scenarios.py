@@ -50,6 +50,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 RAW_BISCUIT_MARKER = "b64:"
 IdentityBindingMode = Literal["off", "strict"]
 SemanticClass = Literal["capability", "mixed", "parity_identity_bound"]
+CredentialMode = Literal["none", "shared", "per_client", "issuer"]
 ClientTopology = Literal["host", "container-single", "container-per-client"]
 DEFAULT_CLIENT_TOPOLOGY: ClientTopology = "container-single"
 LOADGEN_CONTAINER_REPO_ROOT = "/workspace"
@@ -270,7 +271,9 @@ class ScenarioConfig(TypedDict, total=False):
     token_issuer_no_default_grants: bool
     biscuit_client_id_fact: str
     tls: bool
-    per_client_password: bool
+    credential_mode: CredentialMode
+    password_map_profile: str
+    fanout_publisher_password_map_profile: str
     # CONTROL scenario support
     control_topic: str
     control_payload: dict[str, Any]
@@ -867,6 +870,8 @@ def _run_loadgen(
     biscuit_delegate_handoff_retain: bool | None,
     biscuit_delegate_handoff_ready_timeout_seconds: int | None,
     password_map_path: str | None = None,
+    password_map_profile: str | None = None,
+    fanout_publisher_password_map_profile: str | None = None,
     # CONTROL message parameters
     control_topic: str | None = None,
     control_payload: dict[str, Any] | None = None,
@@ -946,6 +951,15 @@ def _run_loadgen(
         cmd.append("--token-issuer-no-default-grants")
     if password_map_path:
         cmd.extend(["--password-map", password_map_path])
+    if password_map_profile:
+        cmd.extend(["--password-map-profile", password_map_profile])
+    if fanout_publisher_password_map_profile:
+        cmd.extend(
+            [
+                "--fanout-publisher-password-map-profile",
+                fanout_publisher_password_map_profile,
+            ]
+        )
     if token_refresh_codes:
         cmd.extend(["--token-refresh-codes", token_refresh_codes])
     if proactive_refresh:
@@ -2441,7 +2455,98 @@ def _apply_scenario_classification(
 
     scenarios.update(_make_http_parity_variants(scenarios, tokens))
     scenarios.update(_make_multi_client_fanout_parity_variants(scenarios))
+    _apply_credential_profiles(scenarios, tokens)
     return scenarios
+
+
+PROFILE_TOKEN_KEYS = (
+    "jwt_deny",
+    "jwt_fanout_read_deny",
+    "jwt_fanout_allow",
+    "jwt_static_admin",
+    "jwt_static_writer",
+    "jwt_static_reader",
+    "jwt_strict_sub_client_id",
+    "jwt",
+    "biscuit_deny",
+    "biscuit_fanout_read_deny",
+    "biscuit_fanout_allow",
+    "biscuit_static_admin",
+    "biscuit_static_writer",
+    "biscuit_static_reader",
+    "biscuit_strict_client_id",
+    "biscuit_delegated",
+    "biscuit_complex_low",
+    "biscuit_complex_med",
+    "biscuit_complex_high",
+    "biscuit_25",
+    "biscuit_5",
+    "biscuit",
+)
+
+SHARED_CREDENTIAL_SCENARIOS = frozenset(
+    {
+        "TOKEN-AUTHORIZER-PROFILE-SIMPLE-BISCUIT",
+        "TOKEN-AUTHORIZER-PROFILE-RBAC-BISCUIT",
+        "TOKEN-AUTHORIZER-PROFILE-CONTEXTUAL-BISCUIT",
+    }
+)
+
+
+def _profile_for_password(
+    scenario_id: str,
+    password: str | None,
+    tokens: dict[str, Any],
+) -> str:
+    if "-PARITY-" in scenario_id and "FANOUT" in scenario_id:
+        return "jwt_fanout_strict" if "-JWT-" in scenario_id else "biscuit_fanout_strict"
+    if scenario_id.endswith("-PARITY-BISCUIT"):
+        return "biscuit_strict_client_id"
+    if scenario_id.endswith("-PARITY-JWT"):
+        return "jwt_strict_sub_client_id"
+    for key in PROFILE_TOKEN_KEYS:
+        if password == tokens.get(key):
+            return key
+    if "-JWT" in scenario_id:
+        return "jwt"
+    if "-BISCUIT" in scenario_id:
+        return "biscuit"
+    raise ValueError(f"{scenario_id}: cannot map password fixture to a credential profile")
+
+
+def _apply_credential_profiles(
+    scenarios: dict[str, ScenarioConfig],
+    tokens: dict[str, Any],
+) -> None:
+    for scenario_id, scenario in scenarios.items():
+        if not scenario.get("username") and not scenario.get("mqtt5_auth"):
+            scenario["credential_mode"] = "none"
+            continue
+        if scenario.get("mqtt5_auth") or scenario_id in SHARED_CREDENTIAL_SCENARIOS:
+            scenario["credential_mode"] = "shared"
+            continue
+        if scenario.get("token_refresh"):
+            scenario["credential_mode"] = "issuer"
+            continue
+        if (
+            scenario.get("traffic_pattern") == "fanout"
+            and scenario.get("acl_read_enforcement") == "strict"
+            and scenario.get("semantic_class") == "capability"
+        ):
+            scenario["credential_mode"] = "shared"
+            continue
+        scenario["credential_mode"] = "per_client"
+        scenario["password_map_profile"] = _profile_for_password(
+            scenario_id,
+            scenario.get("password"),
+            tokens,
+        )
+        if scenario.get("traffic_pattern") == "fanout":
+            scenario["fanout_publisher_password_map_profile"] = _profile_for_password(
+                scenario_id,
+                scenario.get("fanout_publisher_password") or scenario.get("password"),
+                tokens,
+            )
 
 
 def _scenario_token_kind(
@@ -2596,6 +2701,36 @@ def _scenario_semantics_metadata(
             scenario.get("semantic_class", SCENARIO_SEMANTIC_DEFAULTS[2]),
         ),
     }
+
+
+def _validate_scenario_credentials(scenario_id: str, scenario: ScenarioConfig) -> None:
+    mode = scenario.get("credential_mode")
+    if mode not in {"none", "shared", "per_client", "issuer"}:
+        raise ValueError(f"{scenario_id}: missing or invalid credential_mode")
+    if mode == "per_client":
+        profile = scenario.get("password_map_profile")
+        if not profile:
+            raise ValueError(f"{scenario_id}: per_client mode requires password_map_profile")
+        if scenario.get("traffic_pattern") == "fanout" and not scenario.get(
+            "fanout_publisher_password_map_profile"
+        ):
+            raise ValueError(
+                f"{scenario_id}: per_client fanout requires fanout_publisher_password_map_profile"
+            )
+    if mode == "issuer" and not scenario.get("token_refresh"):
+        raise ValueError(f"{scenario_id}: issuer mode requires token_refresh configuration")
+    if mode == "shared":
+        allowed = (
+            scenario.get("mqtt5_auth") is not None
+            or scenario_id in SHARED_CREDENTIAL_SCENARIOS
+            or (
+                scenario.get("traffic_pattern") == "fanout"
+                and scenario.get("acl_read_enforcement") == "strict"
+                and scenario.get("semantic_class") == "capability"
+            )
+        )
+        if not allowed:
+            raise ValueError(f"{scenario_id}: shared credential mode is not allowlisted")
 
 
 def _render_mosquitto_runtime_conf(
@@ -3858,7 +3993,6 @@ def _build_available_scenarios(
             "mosquitto_conf": "./mosquitto.conf",
             "username": "jwt",
             "password": tokens["jwt"],
-            "per_client_password": True,
             "topic": "sensors/{client_id}/temp",
             "authz_config": None,
             "netem": {"clear": True},
@@ -3868,7 +4002,6 @@ def _build_available_scenarios(
             "mosquitto_conf": "./mosquitto.conf",
             "username": "jwt",
             "password": tokens["jwt"],
-            "per_client_password": True,
             "topic": "sensors/{client_id}/temp",
             "authz_config": None,
             "netem": {"clear": True},
@@ -3888,7 +4021,6 @@ def _build_available_scenarios(
             "mosquitto_conf": "./mosquitto.conf",
             "username": "biscuit",
             "password": tokens["biscuit"],
-            "per_client_password": True,
             "topic": "sensors/{client_id}/temp",
             "authz_config": None,
             "netem": {"clear": True},
@@ -3898,7 +4030,6 @@ def _build_available_scenarios(
             "mosquitto_conf": "./mosquitto.conf",
             "username": "biscuit",
             "password": tokens["biscuit"],
-            "per_client_password": True,
             "topic": "sensors/{client_id}/temp",
             "authz_config": None,
             "netem": {"clear": True},
@@ -3909,7 +4040,6 @@ def _build_available_scenarios(
             "mosquitto_conf": "./mosquitto.conf",
             "username": "jwt",
             "password": tokens["jwt"],
-            "per_client_password": True,
             "topic": "sensors/{client_id}/temp",
             "authz_config": None,
             "netem": {"clear": True},
@@ -3921,7 +4051,6 @@ def _build_available_scenarios(
             "mosquitto_conf": "./mosquitto.conf",
             "username": "biscuit",
             "password": tokens["biscuit"],
-            "per_client_password": True,
             "topic": "sensors/{client_id}/temp",
             "authz_config": None,
             "netem": {"clear": True},
@@ -4957,6 +5086,7 @@ def main(
         return
 
     for s in scenarios:
+        _validate_scenario_credentials(s["id"], s)
         scenario_semantics = _scenario_semantics_metadata(
             s["id"],
             s,
@@ -5246,6 +5376,11 @@ def main(
                     "proactive_refresh_assert_continuity", False
                 ),
                 "reauth_storm": s.get("reauth_storm", False),
+                "credential_mode": s.get("credential_mode"),
+                "password_map_profile": s.get("password_map_profile"),
+                "fanout_publisher_password_map_profile": s.get(
+                    "fanout_publisher_password_map_profile"
+                ),
                 "traffic_pattern": s.get("traffic_pattern"),
                 "fanout_topic": s.get("fanout_topic"),
                 "subscriber_count": s.get("subscriber_count"),
@@ -5383,8 +5518,14 @@ def main(
                         proactive_refresh = bool(s.get("proactive_refresh", False))
                         scenario_qos = int(s.get("qos", qos))
                         scenario_qos_distribution = s.get("qos_distribution", qos_distribution)
+                        credential_mode = cast(
+                            CredentialMode,
+                            s.get("credential_mode", "shared"),
+                        )
                         strict_startup_provisioning = (
-                            _scenario_requires_per_client_strict_provisioning(
+                            None
+                            if credential_mode == "per_client"
+                            else _scenario_requires_per_client_strict_provisioning(
                                 s["id"],
                                 s,
                                 default_clients=clients,
@@ -5400,7 +5541,7 @@ def main(
                             host=loadgen_mqtt_host,
                             port=mqtt_port,
                             username=s.get("username", ""),
-                            password=s.get("password", ""),
+                            password=("" if credential_mode == "issuer" else s.get("password", "")),
                             fanout_publisher_username=s.get("fanout_publisher_username"),
                             fanout_publisher_password=s.get("fanout_publisher_password"),
                             clients=scenario_clients,
@@ -5414,7 +5555,8 @@ def main(
                             sync_connect=bool(s.get("sync_connect", False)),
                             token_issuer_url=(
                                 loadgen_token_issuer_base
-                                if token_refresh
+                                if credential_mode == "issuer"
+                                or token_refresh
                                 or proactive_refresh
                                 or strict_startup_provisioning is not None
                                 else None
@@ -5598,8 +5740,12 @@ def main(
                             run_index=idx,
                             password_map_path=(
                                 "benchmarks/password-map.json"
-                                if s.get("per_client_password")
+                                if credential_mode == "per_client"
                                 else None
+                            ),
+                            password_map_profile=s.get("password_map_profile"),
+                            fanout_publisher_password_map_profile=s.get(
+                                "fanout_publisher_password_map_profile"
                             ),
                         )
                     if s.get("proactive_refresh_assert_continuity"):

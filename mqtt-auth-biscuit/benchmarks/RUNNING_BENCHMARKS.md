@@ -53,8 +53,32 @@ Current inventory rules:
 - Biscuit attenuation/delegation scenarios are intentionally `capability`, not
   parity.
 - Runnable multi-client parity now depends on per-client strict provisioning at
-  startup. The harness fetches one strict-bound token per MQTT client identity
-  instead of reusing a shared token.
+  startup. Static scenarios select a strict credential profile; lifecycle
+  scenarios obtain one token per MQTT client identity from the Token Issuer.
+
+## Credential Profiles
+
+`gen-tokens` writes a versioned `benchmarks/password-map.json` containing
+per-client equivalents of the reusable JWT and Biscuit fixtures. Profile names
+match fixture semantics, including deny, fan-out, static-role, delegation,
+complexity, and strict identity-bound variants. Fan-out scenarios select
+subscriber and publisher profiles independently.
+
+Every scenario declares one credential mode:
+
+- `per_client`: resolve `client_N` and `fanout_publisher` from explicit profiles.
+- `issuer`: obtain initial and refreshed per-client credentials from Token Issuer.
+- `shared`: retain identical bytes because sharing is part of the benchmark.
+- `none`: unauthenticated scenarios.
+
+Shared mode is restricted to MQTT5 two-token sequences, the authorizer-template
+matrix that intentionally holds token bytes constant, and documented non-parity
+strict fan-out bearer tests. Other authenticated scenarios use per-client
+credentials.
+
+The full bundle is generated up to `GEN_TOKENS_MAX_CLIENTS` (default `10000`).
+Lower this value for local development when the complete 10,000-client fixture
+set is unnecessary.
 
 The full family-to-class mapping is the source-of-truth table in
 `../../SCENARIO_POLICIES.md`.
@@ -122,7 +146,9 @@ The benchmarking suite uses predefined tokens. Generate them with:
 cargo run -p gen-tokens
 ```
 
-This will create/update `benchmarks/tokens.json` and write `docker/biscuit_public.key` for the Mosquitto plugin.
+This creates/updates `benchmarks/tokens.json`, the full
+`benchmarks/password-map.json` credential-profile bundle, and
+`docker/biscuit_public.key` for the Mosquitto plugin.
 
 The Docker Mosquitto configuration is pre-wired to the deterministic keys used
 by `gen-tokens` (see `docker/mosquitto.conf`).

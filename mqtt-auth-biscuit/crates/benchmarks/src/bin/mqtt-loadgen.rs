@@ -29,28 +29,72 @@ const SYNC_CONNECT_RELEASE_DELAY: Duration = Duration::from_millis(200);
 const DEFAULT_CONTROL_TOPIC: &str = "$CONTROL/dynamic-security/v1";
 const CLIENT_ID_PLACEHOLDER: &str = "{client_id}";
 
-type PasswordMap = HashMap<String, HashMap<String, Vec<u8>>>;
+#[derive(Debug, Deserialize)]
+struct PasswordMapFile {
+    version: u64,
+    max_clients: usize,
+    profiles: HashMap<String, PasswordMapProfile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PasswordMapProfile {
+    kind: String,
+    entries: HashMap<String, PasswordMapEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PasswordMapEntry {
+    token: String,
+    exp: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedPassword {
+    bytes: Vec<u8>,
+    exp: Option<i64>,
+}
+
+#[derive(Debug)]
+struct PasswordMap {
+    max_clients: usize,
+    profiles: HashMap<String, HashMap<String, ResolvedPassword>>,
+}
 
 fn load_password_map(path: &Path) -> Result<PasswordMap> {
     let data = fs::read_to_string(path)
         .map_err(|e| MqttHelperError::Message(format!("failed to read password-map: {e}")))?;
-    let raw: Value = serde_json::from_str(&data)
+    let raw: PasswordMapFile = serde_json::from_str(&data)
         .map_err(|e| MqttHelperError::Message(format!("failed to parse password-map: {e}")))?;
-    let mut map = PasswordMap::new();
-    if let Some(obj) = raw.as_object() {
-        for (kind, clients) in obj {
-            if let Some(clients_obj) = clients.as_object() {
-                let mut client_map = HashMap::new();
-                for (client_id, token_val) in clients_obj {
-                    if let Some(token_str) = token_val.as_str() {
-                        client_map.insert(client_id.clone(), decode_token_arg(token_str)?);
-                    }
-                }
-                map.insert(kind.clone(), client_map);
-            }
-        }
+    if raw.version != 1 {
+        return Err(MqttHelperError::Message(format!(
+            "unsupported password-map version {}; expected 1",
+            raw.version
+        )));
     }
-    Ok(map)
+    let mut profiles = HashMap::new();
+    for (name, profile) in raw.profiles {
+        if profile.kind != "jwt" && profile.kind != "biscuit" {
+            return Err(MqttHelperError::Message(format!(
+                "password-map profile {name:?} has unsupported kind {:?}",
+                profile.kind
+            )));
+        }
+        let mut entries = HashMap::new();
+        for (client_id, entry) in profile.entries {
+            entries.insert(
+                client_id,
+                ResolvedPassword {
+                    bytes: decode_token_arg(&entry.token)?,
+                    exp: entry.exp,
+                },
+            );
+        }
+        profiles.insert(name, entries);
+    }
+    Ok(PasswordMap {
+        max_clients: raw.max_clients,
+        profiles,
+    })
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -256,6 +300,10 @@ struct Args {
     fanout_churn_sqlite_subscribers: Option<usize>,
     #[arg(long, env = "MQTT_PASSWORD_MAP")]
     password_map: Option<PathBuf>,
+    #[arg(long, env = "MQTT_PASSWORD_MAP_PROFILE")]
+    password_map_profile: Option<String>,
+    #[arg(long, env = "MQTT_FANOUT_PUBLISHER_PASSWORD_MAP_PROFILE")]
+    fanout_publisher_password_map_profile: Option<String>,
     #[arg(skip)]
     password_map_data: Option<Arc<PasswordMap>>,
 }
@@ -1058,6 +1106,9 @@ fn validate_startup_provisioning(args: &Args) -> Result<()> {
     if !strict_multi_client_startup(args) {
         return Ok(());
     }
+    if args.password_map_profile.is_some() {
+        return Ok(());
+    }
     let active_kind = active_token_kind(&args.username).ok_or_else(|| {
         MqttHelperError::Message(
             "strict multi-client startup provisioning requires username 'jwt' or 'biscuit'"
@@ -1079,6 +1130,9 @@ fn validate_startup_provisioning(args: &Args) -> Result<()> {
 }
 
 fn should_provision_fanout_publisher(args: &Args, publisher_username: &str) -> Result<bool> {
+    if args.fanout_publisher_password_map_profile.is_some() {
+        return Ok(false);
+    }
     if !strict_multi_client_startup(args) {
         return Ok(false);
     }
@@ -1210,17 +1264,8 @@ async fn fetch_token(args: &Args, kind: &str, client_id: &str, topic: &str) -> R
 }
 
 async fn startup_password(args: &Args, client_id: &str, topic: &str) -> Result<IssuedToken> {
-    if let Some(map) = &args.password_map_data {
-        let kind = if args.username == "biscuit" {
-            "biscuit"
-        } else {
-            "jwt"
-        };
-        if let Some(clients) = map.get(kind)
-            && let Some(token_bytes) = clients.get(client_id)
-        {
-            return Ok(IssuedToken::static_token(token_bytes.clone()));
-        }
+    if let Some(profile) = args.password_map_profile.as_deref() {
+        return password_map_token(args, profile, client_id);
     }
     if should_startup_provision_token(args) {
         let kind = resolved_token_issuer_kind(args).ok_or_else(|| {
@@ -1230,6 +1275,28 @@ async fn startup_password(args: &Args, client_id: &str, topic: &str) -> Result<I
     } else {
         decode_token_arg(&args.password).map(IssuedToken::static_token)
     }
+}
+
+fn password_map_token(args: &Args, profile: &str, client_id: &str) -> Result<IssuedToken> {
+    let map = args.password_map_data.as_ref().ok_or_else(|| {
+        MqttHelperError::Message(format!(
+            "password-map profile {profile:?} requested without --password-map"
+        ))
+    })?;
+    let entries = map.profiles.get(profile).ok_or_else(|| {
+        MqttHelperError::Message(format!("password-map profile {profile:?} not found"))
+    })?;
+    let entry = entries.get(client_id).ok_or_else(|| {
+        MqttHelperError::Message(format!(
+            "password-map profile {profile:?} has no entry for {client_id:?} \
+             (max_clients={})",
+            map.max_clients
+        ))
+    })?;
+    Ok(IssuedToken {
+        bytes: entry.bytes.clone(),
+        exp: entry.exp,
+    })
 }
 
 fn repo_root() -> PathBuf {
@@ -2899,20 +2966,23 @@ async fn connect_fanout_publisher(
         .fanout_publisher_username
         .clone()
         .unwrap_or_else(|| args.username.clone());
-    let publisher_password = if let Some(password) = args.fanout_publisher_password.as_deref() {
-        decode_token_arg(password)?
-    } else if should_provision_fanout_publisher(args, &publisher_username)? {
-        let kind = resolved_token_issuer_kind(args).ok_or_else(|| {
-            MqttHelperError::Message(
-                "strict multi-client startup provisioning requires token kind".to_string(),
-            )
-        })?;
-        fetch_token(args, &kind, "fanout_publisher", &args.fanout_topic)
-            .await?
-            .bytes
-    } else {
-        fallback_password.to_vec()
-    };
+    let publisher_password =
+        if let Some(profile) = args.fanout_publisher_password_map_profile.as_deref() {
+            password_map_token(args, profile, "fanout_publisher")?.bytes
+        } else if let Some(password) = args.fanout_publisher_password.as_deref() {
+            decode_token_arg(password)?
+        } else if should_provision_fanout_publisher(args, &publisher_username)? {
+            let kind = resolved_token_issuer_kind(args).ok_or_else(|| {
+                MqttHelperError::Message(
+                    "strict multi-client startup provisioning requires token kind".to_string(),
+                )
+            })?;
+            fetch_token(args, &kind, "fanout_publisher", &args.fanout_topic)
+                .await?
+                .bytes
+        } else {
+            fallback_password.to_vec()
+        };
     let publisher_spec = ClientSpec {
         host: args.host.clone(),
         port: args.port,
@@ -4444,10 +4514,21 @@ fn emit_output(args: &Args, output: &Output) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = Args::parse();
-    if let Some(path) = &args.password_map
-        && path.exists()
-    {
+    if let Some(path) = &args.password_map {
+        if !path.exists() {
+            return Err(MqttHelperError::Message(format!(
+                "password-map file does not exist: {}",
+                path.display()
+            )));
+        }
         args.password_map_data = Some(Arc::new(load_password_map(path)?));
+    }
+    if (args.password_map_profile.is_some() || args.fanout_publisher_password_map_profile.is_some())
+        && args.password_map_data.is_none()
+    {
+        return Err(MqttHelperError::Message(
+            "password-map profiles require --password-map".to_string(),
+        ));
     }
     apply_legacy_defaults(&mut args);
     validate_startup_provisioning(&args)?;
@@ -5312,5 +5393,26 @@ mod tests {
             "off",
         ]);
         assert!(!should_provision_fanout_publisher(&non_strict, "jwt").unwrap());
+    }
+
+    #[test]
+    fn password_map_profiles_preserve_token_and_expiry() {
+        let path = std::env::temp_dir().join(format!(
+            "mqtt-password-map-{}-{}.json",
+            std::process::id(),
+            unix_ms_now()
+        ));
+        fs::write(
+            &path,
+            r#"{"version":1,"max_clients":2,"profiles":{"jwt":{"kind":"jwt","entries":{"client_1":{"token":"token-1","exp":2000000000},"fanout_publisher":{"token":"publisher","exp":2000000000}}}}}"#,
+        )
+        .unwrap();
+
+        let map = load_password_map(&path).unwrap();
+        fs::remove_file(path).unwrap();
+        let client = &map.profiles["jwt"]["client_1"];
+        assert_eq!(client.bytes, b"token-1");
+        assert_eq!(client.exp, Some(2_000_000_000));
+        assert_eq!(map.profiles["jwt"]["fanout_publisher"].bytes, b"publisher");
     }
 }

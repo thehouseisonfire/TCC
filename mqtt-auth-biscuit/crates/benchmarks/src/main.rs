@@ -5,6 +5,7 @@ use p256::SecretKey;
 use p256::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::env;
 use std::fs::File;
 use std::io::Write;
@@ -73,6 +74,196 @@ fn build_biscuit_with_identity(
             .unwrap();
     }
     builder.build(root_keypair).unwrap()
+}
+
+#[derive(Debug, Serialize)]
+struct CredentialEntry {
+    token: String,
+    exp: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct CredentialProfile {
+    kind: &'static str,
+    entries: BTreeMap<String, CredentialEntry>,
+}
+
+fn encoded_biscuit(token: &Biscuit) -> String {
+    format!(
+        "b64:{}",
+        general_purpose::URL_SAFE_NO_PAD.encode(token.to_vec().unwrap())
+    )
+}
+
+fn sensor_biscuit(root_keypair: &KeyPair, client_id: &str) -> Biscuit {
+    build_biscuit_with_identity(
+        root_keypair,
+        &[
+            &format!(r#"right("publish", "sensors/{client_id}/temp")"#),
+            &format!(r#"right("subscribe", "sensors/{client_id}/temp")"#),
+            "expires_at(2000000000)",
+        ],
+        None,
+    )
+}
+
+fn biscuit_with_empty_blocks(token: &Biscuit, blocks: usize) -> Biscuit {
+    let mut result = token.clone();
+    for _ in 1..blocks {
+        result = result.append(BlockBuilder::new()).unwrap();
+    }
+    result
+}
+
+fn delegated_biscuit(root_keypair: &KeyPair, client_id: &str) -> Biscuit {
+    let master = Biscuit::builder()
+        .fact(format!(r#"right("publish", "sensors/{client_id}/temp")"#).as_str())
+        .unwrap()
+        .fact(format!(r#"right("publish", "sensors/{client_id}/humidity")"#).as_str())
+        .unwrap()
+        .fact("expires_at(2000000000)")
+        .unwrap()
+        .build(root_keypair)
+        .unwrap();
+    master
+        .append(
+            BlockBuilder::new()
+                .check(format!(r#"check if resource("sensors/{client_id}/temp")"#).as_str())
+                .unwrap()
+                .fact("expires_at(2000000000)")
+                .unwrap(),
+        )
+        .unwrap()
+}
+
+fn complex_biscuit(root_keypair: &KeyPair, client_id: &str, level: &str) -> Biscuit {
+    let topic = format!("sensors/{client_id}/temp");
+    let base = Biscuit::builder()
+        .fact(r#"role("sensor")"#)
+        .unwrap()
+        .fact(r#"role("writer")"#)
+        .unwrap()
+        .fact(r#"group("telemetry")"#)
+        .unwrap()
+        .fact(r#"op_role("sensor", "publish")"#)
+        .unwrap()
+        .fact(r#"op_role("sensor", "subscribe")"#)
+        .unwrap()
+        .fact(format!(r#"resource_group("{topic}", "telemetry")"#).as_str())
+        .unwrap()
+        .fact(r#"allow_group("telemetry")"#)
+        .unwrap()
+        .fact("expires_at(2000000000)")
+        .unwrap()
+        .rule(r#"allow_op($op) <- role("sensor"), op_role("sensor", $op)"#)
+        .unwrap()
+        .rule(r#"allow_res($res) <- resource_group($res, "telemetry"), allow_group("telemetry")"#)
+        .unwrap()
+        .rule(r"right($op, $res) <- allow_op($op), allow_res($res), operation($op), resource($res)")
+        .unwrap()
+        .build(root_keypair)
+        .unwrap();
+    if level == "low" {
+        return base;
+    }
+    let medium = base
+        .append(
+            BlockBuilder::new()
+                .fact(format!(r#"scope("{client_id}")"#).as_str())
+                .unwrap()
+                .fact(format!(r#"owner("{topic}", "{client_id}")"#).as_str())
+                .unwrap()
+                .fact(format!(r#"allow_scope("{client_id}")"#).as_str())
+                .unwrap()
+                .rule(r"scoped_res($res) <- owner($res, $c), allow_scope($c)")
+                .unwrap()
+                .rule(r#"allow_res($res) <- scoped_res($res), resource_group($res, "telemetry")"#)
+                .unwrap(),
+        )
+        .unwrap()
+        .append(
+            BlockBuilder::new()
+                .fact(r#"capability("sensor", "pubsub")"#)
+                .unwrap()
+                .fact(r#"capability_op("pubsub", "publish")"#)
+                .unwrap()
+                .fact(r#"capability_op("pubsub", "subscribe")"#)
+                .unwrap()
+                .rule(
+                    r#"allow_op($op) <- role("sensor"), capability("sensor", $cap), capability_op($cap, $op)"#,
+                )
+                .unwrap()
+                .check("check if time($t), $t < 2000000000")
+                .unwrap(),
+        )
+        .unwrap();
+    if level == "med" {
+        return medium;
+    }
+    medium
+        .append(
+            BlockBuilder::new()
+                .fact(format!(r#"region("{client_id}", "lab")"#).as_str())
+                .unwrap()
+                .fact(r#"region_allow("lab")"#)
+                .unwrap()
+                .fact(format!(r#"topic_region("{topic}", "lab")"#).as_str())
+                .unwrap()
+                .rule(r"regional_res($res) <- topic_region($res, $r), region_allow($r)")
+                .unwrap()
+                .rule(r"allow_res($res) <- scoped_res($res), regional_res($res)")
+                .unwrap(),
+        )
+        .unwrap()
+        .append(
+            BlockBuilder::new()
+                .fact(format!(r#"device("{client_id}", "sensor")"#).as_str())
+                .unwrap()
+                .fact(r#"device_class("sensor", "telemetry")"#)
+                .unwrap()
+                .fact(r#"class_op("telemetry", "publish")"#)
+                .unwrap()
+                .fact(r#"class_op("telemetry", "subscribe")"#)
+                .unwrap()
+                .rule(
+                    r"device_op($op) <- device($c, $class), device_class($class, $group), class_op($group, $op)",
+                )
+                .unwrap()
+                .rule(r#"allow_op($op) <- device_op($op), role("sensor")"#)
+                .unwrap()
+                .check("check if time($t), $t < 2000000000")
+                .unwrap(),
+        )
+        .unwrap()
+}
+
+fn add_credential(
+    profiles: &mut BTreeMap<String, CredentialProfile>,
+    profile: &'static str,
+    kind: &'static str,
+    client_id: &str,
+    token: String,
+) {
+    let target = profiles
+        .entry(profile.to_string())
+        .or_insert_with(|| CredentialProfile {
+            kind,
+            entries: BTreeMap::new(),
+        });
+    assert_eq!(target.kind, kind, "credential profile kind changed");
+    assert!(
+        target
+            .entries
+            .insert(
+                client_id.to_string(),
+                CredentialEntry {
+                    token,
+                    exp: LONG_EXP,
+                },
+            )
+            .is_none(),
+        "duplicate credential entry {profile}/{client_id}"
+    );
 }
 
 #[allow(clippy::too_many_lines)]
@@ -617,69 +808,304 @@ fn main() {
         .unwrap();
     println!("Wrote benchmarks/tokens.json");
 
-    // Per-client static tokens: one JWT and one Biscuit per client index,
-    // each scoped to that client's own topic. Written to password-map.json
-    // so the loadgen can distribute them without a runtime token issuer.
+    // Materialize all reusable credential profiles. Scenarios select the
+    // profile matching their original shared fixture.
     let max_clients: usize = env::var("GEN_TOKENS_MAX_CLIENTS").map_or(10_000, |v| {
         v.parse().expect("GEN_TOKENS_MAX_CLIENTS must be usize")
     });
+    assert!(
+        max_clients > 0,
+        "GEN_TOKENS_MAX_CLIENTS must be greater than zero"
+    );
+    let mut profiles = BTreeMap::new();
+    let client_ids = (1..=max_clients)
+        .map(|i| format!("client_{i}"))
+        .chain(std::iter::once("fanout_publisher".to_string()));
 
-    let mut jwt_clients = serde_json::Map::new();
-    let mut biscuit_clients = serde_json::Map::new();
-    for i in 1..=max_clients {
-        let client_id = format!("client_{i}");
+    for client_id in client_ids {
         let topic = format!("sensors/{client_id}/temp");
-
-        let claims = make_claims(
-            &client_id,
-            LONG_EXP,
-            None,
-            Some(vec!["admin".to_string()]),
-            Some(vec![
+        let sensor_grants = || {
+            vec![
                 JwtGrant {
                     op: "publish".to_string(),
                     res: topic.clone(),
                 },
                 JwtGrant {
                     op: "subscribe".to_string(),
-                    res: topic,
+                    res: topic.clone(),
                 },
-            ]),
-            None,
+            ]
+        };
+        let encode_claims = |claims: &Claims| {
+            encode(&Header::new(Algorithm::ES256), claims, &jwt_encoding_key).unwrap()
+        };
+        add_credential(
+            &mut profiles,
+            "jwt",
+            "jwt",
+            &client_id,
+            encode_claims(&make_claims(
+                &client_id,
+                LONG_EXP,
+                None,
+                Some(vec!["admin".to_string()]),
+                Some(sensor_grants()),
+                None,
+            )),
         );
-        let jwt = encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap();
-        jwt_clients.insert(client_id.clone(), serde_json::Value::String(jwt));
+        add_credential(
+            &mut profiles,
+            "jwt_deny",
+            "jwt",
+            &client_id,
+            encode_claims(&make_claims(
+                &client_id,
+                LONG_EXP,
+                None,
+                Some(vec!["admin".to_string()]),
+                Some(sensor_grants()),
+                Some(vec![JwtGrant {
+                    op: "read".to_string(),
+                    res: topic.clone(),
+                }]),
+            )),
+        );
+        for (profile, role) in [
+            ("jwt_static_admin", "admin"),
+            ("jwt_static_writer", "writer"),
+            ("jwt_static_reader", "reader"),
+        ] {
+            add_credential(
+                &mut profiles,
+                profile,
+                "jwt",
+                &client_id,
+                encode_claims(&make_claims(
+                    &client_id,
+                    LONG_EXP,
+                    None,
+                    Some(vec![role.to_string()]),
+                    None,
+                    None,
+                )),
+            );
+        }
+        add_credential(
+            &mut profiles,
+            "jwt_strict_sub_client_id",
+            "jwt",
+            &client_id,
+            encode_claims(&make_claims(
+                &client_id,
+                LONG_EXP,
+                Some(&client_id),
+                Some(vec!["reader".to_string()]),
+                None,
+                None,
+            )),
+        );
+        let fanout_grants = || {
+            vec![
+                JwtGrant {
+                    op: "publish".to_string(),
+                    res: FANOUT_TOPIC.to_string(),
+                },
+                JwtGrant {
+                    op: "subscribe".to_string(),
+                    res: FANOUT_TOPIC.to_string(),
+                },
+            ]
+        };
+        add_credential(
+            &mut profiles,
+            "jwt_fanout_allow",
+            "jwt",
+            &client_id,
+            encode_claims(&make_claims(
+                &client_id,
+                LONG_EXP,
+                None,
+                Some(vec!["reader".to_string(), "writer".to_string()]),
+                Some(fanout_grants()),
+                None,
+            )),
+        );
+        add_credential(
+            &mut profiles,
+            "jwt_fanout_strict",
+            "jwt",
+            &client_id,
+            encode_claims(&make_claims(
+                &client_id,
+                LONG_EXP,
+                Some(&client_id),
+                Some(vec!["reader".to_string(), "writer".to_string()]),
+                Some(fanout_grants()),
+                None,
+            )),
+        );
+        add_credential(
+            &mut profiles,
+            "jwt_fanout_read_deny",
+            "jwt",
+            &client_id,
+            encode_claims(&make_claims(
+                &client_id,
+                LONG_EXP,
+                None,
+                Some(vec!["reader".to_string()]),
+                Some(fanout_grants()),
+                Some(vec![JwtGrant {
+                    op: "read".to_string(),
+                    res: FANOUT_TOPIC.to_string(),
+                }]),
+            )),
+        );
 
-        let biscuit = build_biscuit_with_identity(
+        let sensor = sensor_biscuit(&root_keypair, &client_id);
+        add_credential(
+            &mut profiles,
+            "biscuit",
+            "biscuit",
+            &client_id,
+            encoded_biscuit(&sensor),
+        );
+        add_credential(
+            &mut profiles,
+            "biscuit_5",
+            "biscuit",
+            &client_id,
+            encoded_biscuit(&biscuit_with_empty_blocks(&sensor, BISCUIT_BLOCKS_MEDIUM)),
+        );
+        add_credential(
+            &mut profiles,
+            "biscuit_25",
+            "biscuit",
+            &client_id,
+            encoded_biscuit(&biscuit_with_empty_blocks(&sensor, BISCUIT_BLOCKS_LARGE)),
+        );
+        let denied = sensor
+            .append(
+                BlockBuilder::new()
+                    .fact(format!(r#"deny("read", "{topic}")"#).as_str())
+                    .unwrap(),
+            )
+            .unwrap();
+        add_credential(
+            &mut profiles,
+            "biscuit_deny",
+            "biscuit",
+            &client_id,
+            encoded_biscuit(&denied),
+        );
+        add_credential(
+            &mut profiles,
+            "biscuit_delegated",
+            "biscuit",
+            &client_id,
+            encoded_biscuit(&delegated_biscuit(&root_keypair, &client_id)),
+        );
+        for (profile, role) in [
+            ("biscuit_static_admin", "admin"),
+            ("biscuit_static_writer", "writer"),
+            ("biscuit_static_reader", "reader"),
+        ] {
+            let role_token = build_biscuit_with_identity(
+                &root_keypair,
+                &[&format!(r#"role("{role}")"#), "expires_at(2000000000)"],
+                None,
+            );
+            add_credential(
+                &mut profiles,
+                profile,
+                "biscuit",
+                &client_id,
+                encoded_biscuit(&role_token),
+            );
+        }
+        let strict = build_biscuit_with_identity(
+            &root_keypair,
+            &[r#"role("reader")"#, "expires_at(2000000000)"],
+            Some(("client_id", &client_id)),
+        );
+        add_credential(
+            &mut profiles,
+            "biscuit_strict_client_id",
+            "biscuit",
+            &client_id,
+            encoded_biscuit(&strict),
+        );
+        let fanout = build_biscuit_with_identity(
             &root_keypair,
             &[
-                &format!(r#"right("publish", "sensors/{client_id}/temp")"#),
-                &format!(r#"right("subscribe", "sensors/{client_id}/temp")"#),
+                r#"right("publish", "fanout/broadcast")"#,
+                r#"right("subscribe", "fanout/broadcast")"#,
                 "expires_at(2000000000)",
             ],
             None,
         );
-        biscuit_clients.insert(
-            client_id,
-            serde_json::Value::String(format!(
-                "b64:{}",
-                general_purpose::URL_SAFE_NO_PAD.encode(biscuit.to_vec().unwrap())
-            )),
+        add_credential(
+            &mut profiles,
+            "biscuit_fanout_allow",
+            "biscuit",
+            &client_id,
+            encoded_biscuit(&fanout),
         );
+        let fanout_strict = build_biscuit_with_identity(
+            &root_keypair,
+            &[
+                r#"right("publish", "fanout/broadcast")"#,
+                r#"right("subscribe", "fanout/broadcast")"#,
+                "expires_at(2000000000)",
+            ],
+            Some(("client_id", &client_id)),
+        );
+        add_credential(
+            &mut profiles,
+            "biscuit_fanout_strict",
+            "biscuit",
+            &client_id,
+            encoded_biscuit(&fanout_strict),
+        );
+        let fanout_deny = fanout
+            .append(
+                BlockBuilder::new()
+                    .fact(r#"deny("read", "fanout/broadcast")"#)
+                    .unwrap(),
+            )
+            .unwrap();
+        add_credential(
+            &mut profiles,
+            "biscuit_fanout_read_deny",
+            "biscuit",
+            &client_id,
+            encoded_biscuit(&fanout_deny),
+        );
+        for level in ["low", "med", "high"] {
+            let profile = match level {
+                "low" => "biscuit_complex_low",
+                "med" => "biscuit_complex_med",
+                _ => "biscuit_complex_high",
+            };
+            add_credential(
+                &mut profiles,
+                profile,
+                "biscuit",
+                &client_id,
+                encoded_biscuit(&complex_biscuit(&root_keypair, &client_id, level)),
+            );
+        }
     }
 
     let password_map = json!({
-        "jwt": jwt_clients,
-        "biscuit": biscuit_clients,
+        "version": 1,
+        "max_clients": max_clients,
+        "profiles": profiles,
     });
     let mut f = File::create("benchmarks/password-map.json").unwrap();
-    f.write_all(
-        serde_json::to_string_pretty(&password_map)
-            .unwrap()
-            .as_bytes(),
-    )
-    .unwrap();
-    println!("Wrote benchmarks/password-map.json ({max_clients} clients per kind)");
+    f.write_all(serde_json::to_string(&password_map).unwrap().as_bytes())
+        .unwrap();
+    println!("Wrote benchmarks/password-map.json ({max_clients} clients per profile)");
 }
 
 #[cfg(test)]

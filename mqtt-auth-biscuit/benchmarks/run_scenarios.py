@@ -270,6 +270,7 @@ class ScenarioConfig(TypedDict, total=False):
     token_issuer_no_default_grants: bool
     biscuit_client_id_fact: str
     tls: bool
+    per_client_password: bool
     # CONTROL scenario support
     control_topic: str
     control_payload: dict[str, Any]
@@ -539,7 +540,7 @@ def _expected_authz_state(
     if "fail_mode" in cfg:
         expected["fail_mode"] = cfg["fail_mode"]
     if "fail_rate" in cfg:
-        expected["fail_rate"] = float(cfg["fail_rate"])
+        expected["fail_rate"] = cfg["fail_rate"]
     if "authz_profile" in cfg:
         expected["authz_profile"] = cfg["authz_profile"]
     if "jwt_identity_binding" in cfg:
@@ -805,7 +806,7 @@ def _wait_for_non_empty_resource_snapshot(
             last_error = exc
             time.sleep(2.0)
     raise RuntimeError(
-        "timed out waiting for non-empty Prometheus vectors for mosquitto: " f"{last_error!r}"
+        f"timed out waiting for non-empty Prometheus vectors for mosquitto: {last_error!r}"
     )
 
 
@@ -865,6 +866,7 @@ def _run_loadgen(
     biscuit_delegate_handoff_qos: int | None,
     biscuit_delegate_handoff_retain: bool | None,
     biscuit_delegate_handoff_ready_timeout_seconds: int | None,
+    password_map_path: str | None = None,
     # CONTROL message parameters
     control_topic: str | None = None,
     control_payload: dict[str, Any] | None = None,
@@ -942,6 +944,8 @@ def _run_loadgen(
         cmd.append("--token-issuer-no-default-roles")
     if token_issuer_no_default_grants:
         cmd.append("--token-issuer-no-default-grants")
+    if password_map_path:
+        cmd.extend(["--password-map", password_map_path])
     if token_refresh_codes:
         cmd.extend(["--token-refresh-codes", token_refresh_codes])
     if proactive_refresh:
@@ -1610,7 +1614,7 @@ def _validate_reauth_storm_result(
     failures = int(storm.get("failures") or result.get("proactive_refresh_failures") or 0)
     if attempts < client_count:
         raise RuntimeError(
-            f"{scenario_id}: reauth storm missed refresh attempts " f"({attempts}/{client_count})"
+            f"{scenario_id}: reauth storm missed refresh attempts ({attempts}/{client_count})"
         )
     if successes != attempts:
         raise RuntimeError(
@@ -3854,6 +3858,7 @@ def _build_available_scenarios(
             "mosquitto_conf": "./mosquitto.conf",
             "username": "jwt",
             "password": tokens["jwt"],
+            "per_client_password": True,
             "topic": "sensors/{client_id}/temp",
             "authz_config": None,
             "netem": {"clear": True},
@@ -3863,6 +3868,7 @@ def _build_available_scenarios(
             "mosquitto_conf": "./mosquitto.conf",
             "username": "jwt",
             "password": tokens["jwt"],
+            "per_client_password": True,
             "topic": "sensors/{client_id}/temp",
             "authz_config": None,
             "netem": {"clear": True},
@@ -3882,6 +3888,7 @@ def _build_available_scenarios(
             "mosquitto_conf": "./mosquitto.conf",
             "username": "biscuit",
             "password": tokens["biscuit"],
+            "per_client_password": True,
             "topic": "sensors/{client_id}/temp",
             "authz_config": None,
             "netem": {"clear": True},
@@ -3891,6 +3898,7 @@ def _build_available_scenarios(
             "mosquitto_conf": "./mosquitto.conf",
             "username": "biscuit",
             "password": tokens["biscuit"],
+            "per_client_password": True,
             "topic": "sensors/{client_id}/temp",
             "authz_config": None,
             "netem": {"clear": True},
@@ -3901,6 +3909,7 @@ def _build_available_scenarios(
             "mosquitto_conf": "./mosquitto.conf",
             "username": "jwt",
             "password": tokens["jwt"],
+            "per_client_password": True,
             "topic": "sensors/{client_id}/temp",
             "authz_config": None,
             "netem": {"clear": True},
@@ -3912,6 +3921,7 @@ def _build_available_scenarios(
             "mosquitto_conf": "./mosquitto.conf",
             "username": "biscuit",
             "password": tokens["biscuit"],
+            "per_client_password": True,
             "topic": "sensors/{client_id}/temp",
             "authz_config": None,
             "netem": {"clear": True},
@@ -5586,6 +5596,11 @@ def main(
                             loadgen_cpuset=loadgen_cpuset,
                             scenario_id=s["id"],
                             run_index=idx,
+                            password_map_path=(
+                                "benchmarks/password-map.json"
+                                if s.get("per_client_password")
+                                else None
+                            ),
                         )
                     if s.get("proactive_refresh_assert_continuity"):
                         if not res.get("session_continuity_ok"):

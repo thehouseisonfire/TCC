@@ -29,6 +29,30 @@ const SYNC_CONNECT_RELEASE_DELAY: Duration = Duration::from_millis(200);
 const DEFAULT_CONTROL_TOPIC: &str = "$CONTROL/dynamic-security/v1";
 const CLIENT_ID_PLACEHOLDER: &str = "{client_id}";
 
+type PasswordMap = HashMap<String, HashMap<String, Vec<u8>>>;
+
+fn load_password_map(path: &Path) -> Result<PasswordMap> {
+    let data = fs::read_to_string(path)
+        .map_err(|e| MqttHelperError::Message(format!("failed to read password-map: {e}")))?;
+    let raw: Value = serde_json::from_str(&data)
+        .map_err(|e| MqttHelperError::Message(format!("failed to parse password-map: {e}")))?;
+    let mut map = PasswordMap::new();
+    if let Some(obj) = raw.as_object() {
+        for (kind, clients) in obj {
+            if let Some(clients_obj) = clients.as_object() {
+                let mut client_map = HashMap::new();
+                for (client_id, token_val) in clients_obj {
+                    if let Some(token_str) = token_val.as_str() {
+                        client_map.insert(client_id.clone(), decode_token_arg(token_str)?);
+                    }
+                }
+                map.insert(kind.clone(), client_map);
+            }
+        }
+    }
+    Ok(map)
+}
+
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Parser, Clone)]
 struct Args {
@@ -230,6 +254,10 @@ struct Args {
     fanout_churn_sqlite_topic: Option<String>,
     #[arg(long, env = "MQTT_FANOUT_CHURN_SQLITE_SUBSCRIBERS")]
     fanout_churn_sqlite_subscribers: Option<usize>,
+    #[arg(long, env = "MQTT_PASSWORD_MAP")]
+    password_map: Option<PathBuf>,
+    #[arg(skip)]
+    password_map_data: Option<Arc<PasswordMap>>,
 }
 
 #[derive(Debug, Default, Serialize, Clone)]
@@ -1182,6 +1210,18 @@ async fn fetch_token(args: &Args, kind: &str, client_id: &str, topic: &str) -> R
 }
 
 async fn startup_password(args: &Args, client_id: &str, topic: &str) -> Result<IssuedToken> {
+    if let Some(map) = &args.password_map_data {
+        let kind = if args.username == "biscuit" {
+            "biscuit"
+        } else {
+            "jwt"
+        };
+        if let Some(clients) = map.get(kind)
+            && let Some(token_bytes) = clients.get(client_id)
+        {
+            return Ok(IssuedToken::static_token(token_bytes.clone()));
+        }
+    }
     if should_startup_provision_token(args) {
         let kind = resolved_token_issuer_kind(args).ok_or_else(|| {
             MqttHelperError::Message("startup provisioning requires token kind".to_string())
@@ -4412,6 +4452,11 @@ fn emit_output(args: &Args, output: &Output) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = Args::parse();
+    if let Some(path) = &args.password_map {
+        if path.exists() {
+            args.password_map_data = Some(Arc::new(load_password_map(path)?));
+        }
+    }
     apply_legacy_defaults(&mut args);
     validate_startup_provisioning(&args)?;
     let qos_distribution = QosDistribution::parse(args.qos_distribution.as_deref())?;

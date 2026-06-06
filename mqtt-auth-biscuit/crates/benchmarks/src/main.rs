@@ -616,6 +616,70 @@ fn main() {
     f.write_all(serde_json::to_string_pretty(&tokens).unwrap().as_bytes())
         .unwrap();
     println!("Wrote benchmarks/tokens.json");
+
+    // Per-client static tokens: one JWT and one Biscuit per client index,
+    // each scoped to that client's own topic. Written to password-map.json
+    // so the loadgen can distribute them without a runtime token issuer.
+    let max_clients: usize = env::var("GEN_TOKENS_MAX_CLIENTS").map_or(10_000, |v| {
+        v.parse().expect("GEN_TOKENS_MAX_CLIENTS must be usize")
+    });
+
+    let mut jwt_clients = serde_json::Map::new();
+    let mut biscuit_clients = serde_json::Map::new();
+    for i in 1..=max_clients {
+        let client_id = format!("client_{i}");
+        let topic = format!("sensors/{client_id}/temp");
+
+        let claims = make_claims(
+            &client_id,
+            LONG_EXP,
+            None,
+            Some(vec!["admin".to_string()]),
+            Some(vec![
+                JwtGrant {
+                    op: "publish".to_string(),
+                    res: topic.clone(),
+                },
+                JwtGrant {
+                    op: "subscribe".to_string(),
+                    res: topic,
+                },
+            ]),
+            None,
+        );
+        let jwt = encode(&Header::new(Algorithm::ES256), &claims, &jwt_encoding_key).unwrap();
+        jwt_clients.insert(client_id.clone(), serde_json::Value::String(jwt));
+
+        let biscuit = build_biscuit_with_identity(
+            &root_keypair,
+            &[
+                &format!(r#"right("publish", "sensors/{client_id}/temp")"#),
+                &format!(r#"right("subscribe", "sensors/{client_id}/temp")"#),
+                "expires_at(2000000000)",
+            ],
+            None,
+        );
+        biscuit_clients.insert(
+            client_id,
+            serde_json::Value::String(format!(
+                "b64:{}",
+                general_purpose::URL_SAFE_NO_PAD.encode(biscuit.to_vec().unwrap())
+            )),
+        );
+    }
+
+    let password_map = json!({
+        "jwt": jwt_clients,
+        "biscuit": biscuit_clients,
+    });
+    let mut f = File::create("benchmarks/password-map.json").unwrap();
+    f.write_all(
+        serde_json::to_string_pretty(&password_map)
+            .unwrap()
+            .as_bytes(),
+    )
+    .unwrap();
+    println!("Wrote benchmarks/password-map.json ({max_clients} clients per kind)");
 }
 
 #[cfg(test)]

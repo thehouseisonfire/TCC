@@ -1418,16 +1418,6 @@ fn unix_ms_now() -> u128 {
         .as_millis()
 }
 
-fn should_proactively_refresh(exp: Option<i64>, margin_seconds: u64, now: i64) -> bool {
-    let Some(exp) = exp else {
-        return false;
-    };
-    let Ok(margin) = i64::try_from(margin_seconds) else {
-        return true;
-    };
-    now >= exp.saturating_sub(margin)
-}
-
 fn proactive_refresh_delay(exp: Option<i64>, margin_seconds: u64, now: i64) -> Option<Duration> {
     let exp = exp?;
     if exp <= now {
@@ -3437,6 +3427,7 @@ async fn connect_worker(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn perform_proactive_reauth(
     args: &Args,
     client_id: &str,
@@ -3573,6 +3564,7 @@ async fn drive_worker_eventloop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_proactive_refresh_timer(
     args: Args,
     client_id: String,
@@ -4452,10 +4444,10 @@ fn emit_output(args: &Args, output: &Output) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = Args::parse();
-    if let Some(path) = &args.password_map {
-        if path.exists() {
-            args.password_map_data = Some(Arc::new(load_password_map(path)?));
-        }
+    if let Some(path) = &args.password_map
+        && path.exists()
+    {
+        args.password_map_data = Some(Arc::new(load_password_map(path)?));
     }
     apply_legacy_defaults(&mut args);
     validate_startup_provisioning(&args)?;
@@ -4996,9 +4988,6 @@ mod tests {
 
     #[test]
     fn proactive_refresh_deadline_uses_exp_minus_margin() {
-        assert!(!should_proactively_refresh(Some(1_000), 60, 939));
-        assert!(should_proactively_refresh(Some(1_000), 60, 940));
-        assert!(!should_proactively_refresh(None, 60, 940));
         assert_eq!(
             proactive_refresh_delay(Some(1_000), 60, 939),
             Some(Duration::from_secs(1))

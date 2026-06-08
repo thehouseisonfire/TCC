@@ -27,3 +27,6 @@ mqtt-auth-biscuit/benchmarks/**.json
 /mqtt-auth-biscuit/docker/tls/*.key
 /mqtt-auth-biscuit/docker/tls/*.srl
 /mqtt-auth-biscuit/docker/tls/dynamic-security.json
+
+# Generated Mosquitto configs (benchmark matrix variants)
+/mqtt-auth-biscuit/docker/.generated/

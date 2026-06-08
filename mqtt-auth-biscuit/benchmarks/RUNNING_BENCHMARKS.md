@@ -193,6 +193,44 @@ Scenario IDs and parity classification for attenuation/delegation and
 policy-complexity runs are documented in `../../SCENARIO_POLICIES.md` (`## 2.2`
 and `## 2.7`).
 
+### Explicit Publish-Path Authorization Stress
+
+Dedicated high-volume publish-path stress scenarios:
+
+- `TOKEN-PUBLISH-STRESS-JWT`
+- `TOKEN-PUBLISH-STRESS-BISCUIT`
+
+These scenarios pin the workload at 25 clients and 1000 messages per client on
+the standard token-only publish path. They exist to make steady-state
+per-publish authorization cost explicit instead of depending on caller-supplied
+`--messages`. They also pin `client_count`, so benchmark matrix runs that vary
+`--clients` / `--messages` should not include them.
+
+Reconnect variants:
+
+- `TOKEN-PUBLISH-STRESS-RECONNECT-JWT`
+- `TOKEN-PUBLISH-STRESS-RECONNECT-BISCUIT`
+
+These use the same 25x1000 publish workload, but run 6 repeated
+connect/publish/disconnect cycles with a 1-second pause between runs and fresh
+issuer-backed credentials from `mosquitto_shortcache.conf`. They measure the
+combination of full reconnect authentication overhead and sustained publish-path
+authorization cost. They use full reconnects, not MQTT v5 in-session reauth.
+
+### HTTP Authorization Complexity Stress
+
+Dedicated high-volume HTTP policy-evaluation stress scenarios:
+
+- `HTTP-AUTHZ-COMPLEXITY-SIMPLE-{JWT|BISCUIT}`
+- `HTTP-AUTHZ-COMPLEXITY-MED-{JWT|BISCUIT}`
+- `HTTP-AUTHZ-COMPLEXITY-COMPLEX-{JWT|BISCUIT}`
+
+These also pin the workload at 25 clients and 1000 messages per client. They
+reuse the existing HTTP `simple` / `med` / `complex` authz profiles so the
+complexity axis is PDP rule evaluation rather than token structure. Like the
+token publish-stress family, they should be run as targeted slices instead of
+being mixed into client/message matrix sweeps.
+
 ### Client-to-Client Delegation
 
 The delegation benchmark now exercises **real client-side delegation** instead

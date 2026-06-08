@@ -168,6 +168,91 @@ def test_reconnect_publish_lifecycle_scenarios_are_multi_client_auth_heavy_repea
 @pytest.mark.parametrize(
     ("scenario_id", "kind"),
     (
+        ("TOKEN-PUBLISH-STRESS-JWT", "jwt"),
+        ("TOKEN-PUBLISH-STRESS-BISCUIT", "biscuit"),
+    ),
+)
+def test_publish_stress_scenarios_are_fixed_high_volume_publish_slices(
+    scenario_id: str,
+    kind: str,
+) -> None:
+    scenarios = _scenario_registry()
+    scenario = scenarios[scenario_id]
+
+    assert scenario["username"] == kind
+    assert scenario["topic"] == "sensors/{client_id}/temp"
+    assert scenario["client_count"] == 25
+    assert scenario["message_count"] == 1000
+    assert scenario["complexity_axis"] == "publish_authz"
+    assert scenario["complexity_level"] == "baseline"
+    assert scenario.get("token_refresh") is None
+    assert scenario.get("traffic_pattern") is None
+    assert scenario.get("authz_config") is None
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "kind"),
+    (
+        ("TOKEN-PUBLISH-STRESS-RECONNECT-JWT", "jwt"),
+        ("TOKEN-PUBLISH-STRESS-RECONNECT-BISCUIT", "biscuit"),
+    ),
+)
+def test_publish_stress_reconnect_scenarios_are_high_volume_repeated_full_reconnects(
+    scenario_id: str,
+    kind: str,
+) -> None:
+    scenarios = _scenario_registry()
+    scenario = scenarios[scenario_id]
+
+    assert scenario["username"] == kind
+    assert scenario["topic"] == "sensors/{client_id}/temp"
+    assert scenario["client_count"] == 25
+    assert scenario["message_count"] == 1000
+    assert scenario["repeat"] == 6
+    assert scenario["sleep_between"] == 1
+    assert scenario["token_refresh"] == {"kind": kind, "ttl_seconds": 30}
+    assert scenario["complexity_axis"] == "publish_authz_reconnect"
+    assert scenario["complexity_level"] == "baseline"
+    assert scenario.get("traffic_pattern") is None
+    assert scenario.get("authz_config") is None
+    assert scenario.get("proactive_refresh") is None
+    assert scenario.get("reauth_storm") is None
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "kind", "level"),
+    (
+        ("HTTP-AUTHZ-COMPLEXITY-SIMPLE-JWT", "jwt", "simple"),
+        ("HTTP-AUTHZ-COMPLEXITY-MED-JWT", "jwt", "med"),
+        ("HTTP-AUTHZ-COMPLEXITY-COMPLEX-JWT", "jwt", "complex"),
+        ("HTTP-AUTHZ-COMPLEXITY-SIMPLE-BISCUIT", "biscuit", "simple"),
+        ("HTTP-AUTHZ-COMPLEXITY-MED-BISCUIT", "biscuit", "med"),
+        ("HTTP-AUTHZ-COMPLEXITY-COMPLEX-BISCUIT", "biscuit", "complex"),
+    ),
+)
+def test_http_authz_complexity_scenarios_are_fixed_high_volume_profile_runs(
+    scenario_id: str,
+    kind: str,
+    level: str,
+) -> None:
+    scenarios = _scenario_registry()
+    scenario = scenarios[scenario_id]
+
+    assert scenario["mosquitto_conf"] == "./mosquitto_http.conf"
+    assert scenario["username"] == kind
+    assert scenario["topic"] == "sensors/{client_id}/temp"
+    assert scenario["client_count"] == 25
+    assert scenario["message_count"] == 1000
+    assert scenario["complexity_axis"] == "http_profile"
+    assert scenario["complexity_level"] == level
+    assert scenario["authz_config"]["authz_profile"] == level
+    assert scenario.get("token_refresh") is None
+    assert scenario.get("traffic_pattern") is None
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "kind"),
+    (
         ("TOKEN-LIFECYCLE-PROACTIVE-REAUTH-JWT", "jwt"),
         ("TOKEN-LIFECYCLE-PROACTIVE-REAUTH-BISCUIT", "biscuit"),
     ),
@@ -302,6 +387,12 @@ def test_every_scenario_declares_and_validates_credential_mode() -> None:
     assert scenarios["TOKEN-LIFECYCLE-REAUTH-STORM-BISCUIT"]["credential_mode"] == "issuer"
     assert scenarios["TOKEN-LIFECYCLE-RECONNECT-PUBLISH-JWT"]["credential_mode"] == "issuer"
     assert scenarios["TOKEN-LIFECYCLE-RECONNECT-PUBLISH-BISCUIT"]["credential_mode"] == "issuer"
+    assert scenarios["TOKEN-PUBLISH-STRESS-JWT"]["credential_mode"] == "per_client"
+    assert scenarios["TOKEN-PUBLISH-STRESS-BISCUIT"]["credential_mode"] == "per_client"
+    assert scenarios["TOKEN-PUBLISH-STRESS-RECONNECT-JWT"]["credential_mode"] == "issuer"
+    assert scenarios["TOKEN-PUBLISH-STRESS-RECONNECT-BISCUIT"]["credential_mode"] == "issuer"
+    assert scenarios["HTTP-AUTHZ-COMPLEXITY-SIMPLE-JWT"]["credential_mode"] == "per_client"
+    assert scenarios["HTTP-AUTHZ-COMPLEXITY-COMPLEX-BISCUIT"]["credential_mode"] == "per_client"
     assert scenarios["TOKEN-AUTHORIZER-PROFILE-SIMPLE-BISCUIT"]["credential_mode"] == "shared"
     assert scenarios["TOKEN-ACL-READ-FANOUT-STRICT-ALLOW-JWT-50"]["credential_mode"] == "shared"
     assert (

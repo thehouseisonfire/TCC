@@ -155,7 +155,22 @@ Scenario outputs include `complexity.axis = "datalog"`. Tokens are defined in
 `gen-tokens` (see `biscuit_complex_*` in
 `mqtt-auth-biscuit/crates/benchmarks/src/main.rs`).
 
-#### C) Authorizer Template Complexity (Constant Token Size)
+#### C) Explicit Publish-Path Stress
+
+| Scenario | Token | Policy Source | Policy Detail | Expected Outcome |
+| --- | --- | --- | --- | --- |
+| TOKEN-PUBLISH-STRESS-JWT | JWT | Token-only | Baseline JWT grants on `sensors/{client_id}/temp`, fixed at 25 clients x 1000 publishes/client | Allows |
+| TOKEN-PUBLISH-STRESS-BISCUIT | Biscuit | Token-only | Baseline Biscuit rights on `sensors/{client_id}/temp`, fixed at 25 clients x 1000 publishes/client | Allows |
+| TOKEN-PUBLISH-STRESS-RECONNECT-JWT | JWT | Token-only | Same publish workload, repeated across 6 full reconnect cycles with issuer-backed refresh | Allows |
+| TOKEN-PUBLISH-STRESS-RECONNECT-BISCUIT | Biscuit | Token-only | Same publish workload, repeated across 6 full reconnect cycles with issuer-backed refresh | Allows |
+
+**Analysis:** these scenarios make publish-path authorization stress explicit
+instead of relying on caller-supplied `--messages`. The reconnect variants stay
+on the standard full CONNECT / publish / disconnect path rather than MQTT v5
+in-session reauth, so they combine authentication churn and steady-state
+publish-path ACL evaluation in one workload.
+
+#### D) Authorizer Template Complexity (Constant Token Size)
 
 | Scenario | Token | Policy Source | Policy Detail | Expected Outcome |
 | --- | --- | --- | --- | --- |
@@ -180,6 +195,9 @@ plugin-side authorizer template/rule complexity changes. Scenario outputs includ
 | HTTP-PROFILE-SIMPLE-JWT/BIS | JWT/Biscuit | HTTP | Profile `simple`: operation-aware + wildcard allow/deny baseline | Allows |
 | HTTP-PROFILE-MED-JWT/BIS | JWT/Biscuit | HTTP | Profile `med`: adds deny rules and role-aware rules | Allows |
 | HTTP-PROFILE-COMPLEX-JWT/BIS | JWT/Biscuit | HTTP | Profile `complex`: deny-first with client/role/topic constraints | Allows |
+| HTTP-AUTHZ-COMPLEXITY-SIMPLE-JWT/BIS | JWT/Biscuit | HTTP | Profile `simple`, fixed at 25 clients x 1000 publishes/client | Allows |
+| HTTP-AUTHZ-COMPLEXITY-MED-JWT/BIS | JWT/Biscuit | HTTP | Profile `med`, fixed at 25 clients x 1000 publishes/client | Allows |
+| HTTP-AUTHZ-COMPLEXITY-COMPLEX-JWT/BIS | JWT/Biscuit | HTTP | Profile `complex`, fixed at 25 clients x 1000 publishes/client | Allows |
 
 HTTP server behavior is defined in `crates/authz-server/src/main.rs`.
 It now evaluates rules in this order: `deny` first, then `allow`, then default deny.
@@ -189,6 +207,11 @@ The authz server reset baseline is intentionally neutral: `authz_profile=custom`
 with empty rules, which denies by default until the scenario applies an
 explicit profile or `custom` rule set. Benchmark scenarios must not rely on
 startup/reset state to silently provide allow semantics.
+
+The `HTTP-AUTHZ-COMPLEXITY-*` family exists to provide a cross-token
+authorization-complexity comparison that does not depend on Biscuit-specific
+token structure. Complexity here is PDP rule evaluation cost, not token
+evaluation depth.
 
 The scenarios in this table are still `capability`, not `parity_identity_bound`.
 They may compare policy behavior under HTTP/hybrid authorization, but they do

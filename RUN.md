@@ -6,14 +6,14 @@ lever, and produces a reproducible dataset for analysis.
 
 ## Overview
 
-The benchmark suite has **402 scenarios** (201 base + 201 TLS variants) across
-20 functional categories. The run plan has two parts:
+The benchmark suite has **428 scenarios** (214 base + 214 TLS variants) across
+multiple functional categories. The run plan has two parts:
 
 | Part | What | Runs | Est. time |
 |------|------|------|-----------|
-| 1 | All 402 scenarios × 2 clients × 2 messages × 3 runs | 4,824 | ~4–7 days |
-| 2 | 40 scenarios × 3 clients × 2 messages × 3 QoS × 2 token issuer × 3 runs | 4,320 | ~5–8 days |
-| **Total** | | **9,144** | **~10–15 days** |
+| 1 | All 428 scenarios × 2 clients × 2 messages × 3 runs | 5,136 | ~4–7 days |
+| 2 | 32 scenarios × 3 clients × 2 messages × 3 QoS × 2 token issuer × 3 runs | 3,456 | ~4–7 days |
+| **Total** | | **8,592** | **~9–14 days** |
 
 ## Research Dimensions
 
@@ -31,13 +31,14 @@ Every lever below is pulled at least twice across the full plan.
 | Token issuer | Default | Default, Stripped | `--token-issuer-no-default-roles` |
 
 Part 1 runs every scenario across a 2×2 matrix of client counts and message
-densities (3 runs each). Part 2 deepens the sweep on 40 representative
+densities (3 runs each). Part 2 deepens the sweep on 32 representative
 scenarios by adding a third client level, all three QoS levels, and token
-issuer configuration.
+issuer configuration, while excluding scenarios whose workload shape is already
+defined by the scenario itself.
 
 ## Sweep Scenarios (Part 2)
 
-40 scenarios, 2 per category:
+32 scenarios, 2 per category where applicable:
 
 | # | Category | Scenario 1 | Scenario 2 |
 |---|----------|------------|------------|
@@ -48,20 +49,56 @@ issuer configuration.
 | 5 | HTTP profile simple | `HTTP-PROFILE-SIMPLE-JWT` | `HTTP-PROFILE-SIMPLE-BISCUIT` |
 | 6 | HTTP profile complex | `HTTP-PROFILE-COMPLEX-JWT` | `HTTP-PROFILE-COMPLEX-BISCUIT` |
 | 7 | HTTP latency | `HTTP-LATENCY-200MS-JWT` | `HTTP-LATENCY-1000MS-JWT` |
-| 8 | SQLite RBAC | `SQLITE-RBAC-CHURN-JWT` | `SQLITE-RBAC-CHURN-BISCUIT` |
-| 9 | Hybrid fallback | `HYBRID-FALLBACK-AUTHZ-DOWN-JWT` | — |
-| 10 | Token complexity chain | `TOKEN-COMPLEXITY-CHAIN-5-BISCUIT` | `TOKEN-COMPLEXITY-CHAIN-25-BISCUIT` |
-| 11 | Token complexity datalog | `TOKEN-COMPLEXITY-DATALOG-MED-BISCUIT` | `TOKEN-COMPLEXITY-DATALOG-HIGH-BISCUIT` |
-| 12 | Token attenuation | `TOKEN-ATTENUATION-CLIENT-BISCUIT` | `TOKEN-ATTENUATION-DENY-BISCUIT` |
-| 13 | Network MTU | `NETWORK-MTU-200-JWT` | `NETWORK-MTU-1500-JWT` |
-| 14 | Lifecycle reauth | `TOKEN-LIFECYCLE-REAUTH-STORM-JWT` | `TOKEN-LIFECYCLE-REAUTH-STORM-BISCUIT` |
-| 15 | MQTT5 reauth | `TOKEN-MQTT5-REAUTH-JWT` | `TOKEN-MQTT5-REAUTH-BISCUIT` |
-| 16 | Control overhead | `CONTROL-OVERHEAD-KICK-REAUTH-JWT` | `CONTROL-OVERHEAD-ACL-READ-NOTIFY-JWT` |
-| 17 | Control churn | `CONTROL-CHURN-ACL-MODIFY-JWT` | `CONTROL-CHURN-GROUP-CLIENT-JWT` |
-| 18 | Token deny | `TOKEN-DENY-READ-JWT` | `TOKEN-ATTENUATED-DENY-BISCUIT` |
-| 19 | QoS | `TOKEN-QOS2-JWT` | `TOKEN-QOS2-BISCUIT` |
-| 20 | Thundering herd | `TOKEN-THUNDERING-HERD-JWT` | `TOKEN-THUNDERING-HERD-BISCUIT` |
-| 21 | Reconnect publish | `TOKEN-LIFECYCLE-RECONNECT-PUBLISH-JWT` | `TOKEN-LIFECYCLE-RECONNECT-PUBLISH-BISCUIT` |
+| 8 | Hybrid fallback | `HYBRID-FALLBACK-AUTHZ-DOWN-JWT` | — |
+| 9 | Token complexity chain | `TOKEN-COMPLEXITY-CHAIN-5-BISCUIT` | `TOKEN-COMPLEXITY-CHAIN-25-BISCUIT` |
+| 10 | Token complexity datalog | `TOKEN-COMPLEXITY-DATALOG-MED-BISCUIT` | `TOKEN-COMPLEXITY-DATALOG-HIGH-BISCUIT` |
+| 11 | Token attenuation | `TOKEN-ATTENUATION-CLIENT-BISCUIT` | `TOKEN-ATTENUATION-DENY-BISCUIT` |
+| 12 | Network MTU | `NETWORK-MTU-200-JWT` | `NETWORK-MTU-1500-JWT` |
+| 13 | MQTT5 reauth | `TOKEN-MQTT5-REAUTH-JWT` | `TOKEN-MQTT5-REAUTH-BISCUIT` |
+| 14 | Token deny | `TOKEN-DENY-READ-JWT` | `TOKEN-ATTENUATED-DENY-BISCUIT` |
+| 15 | QoS | `TOKEN-QOS2-JWT` | `TOKEN-QOS2-BISCUIT` |
+| 16 | Thundering herd | `TOKEN-THUNDERING-HERD-JWT` | `TOKEN-THUNDERING-HERD-BISCUIT` |
+
+The following fixed-workload scenarios are intentionally excluded from Part 2
+because they hard-code their own client/message counts and would not participate
+meaningfully in the `--clients` / `--messages` matrix:
+
+- `TOKEN-PUBLISH-STRESS-JWT`
+- `TOKEN-PUBLISH-STRESS-BISCUIT`
+- `TOKEN-PUBLISH-STRESS-RECONNECT-JWT`
+- `TOKEN-PUBLISH-STRESS-RECONNECT-BISCUIT`
+- `HTTP-AUTHZ-COMPLEXITY-SIMPLE-JWT`
+- `HTTP-AUTHZ-COMPLEXITY-SIMPLE-BISCUIT`
+- `HTTP-AUTHZ-COMPLEXITY-MED-JWT`
+- `HTTP-AUTHZ-COMPLEXITY-MED-BISCUIT`
+- `HTTP-AUTHZ-COMPLEXITY-COMPLEX-JWT`
+- `HTTP-AUTHZ-COMPLEXITY-COMPLEX-BISCUIT`
+
+Run those as targeted scenarios instead of mixing them into the parameter
+sweep.
+
+The following scenario families are also excluded from Part 2 because their
+primary workload axis is already scenario-defined, so the generic matrix would
+blur the point of the experiment:
+
+- `TOKEN-LIFECYCLE-REAUTH-STORM-{JWT,BISCUIT}`
+- `TOKEN-LIFECYCLE-PROACTIVE-REAUTH-{JWT,BISCUIT}`
+- `TOKEN-LIFECYCLE-RECONNECT-PUBLISH-{JWT,BISCUIT}`
+- `CONTROL-OVERHEAD-KICK-REAUTH-JWT`
+- `CONTROL-OVERHEAD-ACL-READ-NOTIFY-JWT`
+- `CONTROL-CHURN-ACL-MODIFY-JWT`
+- `CONTROL-CHURN-GROUP-CLIENT-JWT`
+- `SQLITE-RBAC-CHURN-{JWT,BISCUIT}`
+
+Run those as targeted slices with their scenario-defined workload shape.
+
+Two Part 2 scenarios remain in the sweep but do not vary on the QoS axis:
+
+- `BASELINE-NO-AUTH` pins `qos=0`
+- `TOKEN-QOS2-{JWT,BISCUIT}` pin `qos=2`
+
+Include them in Part 2 for client/message and token-issuer coverage, but do not
+interpret their results as a QoS sweep.
 
 ## Prerequisites
 
@@ -93,7 +130,7 @@ cargo run --locked -p gen-tokens --bin gen-tokens
 cd ../..
 ```
 
-### Step 2: Part 1 — Full baseline (all 402 × 2 clients × 2 messages × 3 runs)
+### Step 2: Part 1 — Full baseline (all 428 × 2 clients × 2 messages × 3 runs)
 
 Generate the full scenario list:
 
@@ -111,7 +148,7 @@ Run the 2×2 matrix (clients × messages) with 3 repetitions:
 
 ```bash
 for clients in 10 500; do
-  for messages in 10 500; do
+  for messages in 10 100; do
     for run in 1 2 3; do
       echo "=== Part 1: clients=$clients messages=$messages run=$run ==="
       ./scripts/run-benchmarks \
@@ -128,9 +165,9 @@ for clients in 10 500; do
 done
 ```
 
-This produces 4,824 scenario runs across 12 invocations of `run-benchmarks`.
+This produces 5,136 scenario runs across 12 invocations of `run-benchmarks`.
 
-### Step 3: Part 2 — Parameter sweep (40 scenarios × 36 combos × 3 runs)
+### Step 3: Part 2 — Parameter sweep (32 scenarios × 36 combos × 3 runs)
 
 Define the sweep scenarios:
 
@@ -142,29 +179,55 @@ DYNAMIC-SECURITY-BASELINE,DYNAMIC-SECURITY-CHURN,\
 HTTP-PROFILE-SIMPLE-JWT,HTTP-PROFILE-SIMPLE-BISCUIT,\
 HTTP-PROFILE-COMPLEX-JWT,HTTP-PROFILE-COMPLEX-BISCUIT,\
 HTTP-LATENCY-200MS-JWT,HTTP-LATENCY-1000MS-JWT,\
-SQLITE-RBAC-CHURN-JWT,SQLITE-RBAC-CHURN-BISCUIT,\
 HYBRID-FALLBACK-AUTHZ-DOWN-JWT,\
 TOKEN-COMPLEXITY-CHAIN-5-BISCUIT,TOKEN-COMPLEXITY-CHAIN-25-BISCUIT,\
 TOKEN-COMPLEXITY-DATALOG-MED-BISCUIT,TOKEN-COMPLEXITY-DATALOG-HIGH-BISCUIT,\
 TOKEN-ATTENUATION-CLIENT-BISCUIT,TOKEN-ATTENUATION-DENY-BISCUIT,\
 NETWORK-MTU-200-JWT,NETWORK-MTU-1500-JWT,\
-TOKEN-LIFECYCLE-REAUTH-STORM-JWT,TOKEN-LIFECYCLE-REAUTH-STORM-BISCUIT,\
-TOKEN-LIFECYCLE-PROACTIVE-REAUTH-JWT,TOKEN-LIFECYCLE-PROACTIVE-REAUTH-BISCUIT,\
-TOKEN-LIFECYCLE-RECONNECT-PUBLISH-JWT,TOKEN-LIFECYCLE-RECONNECT-PUBLISH-BISCUIT,\
 TOKEN-MQTT5-REAUTH-JWT,TOKEN-MQTT5-REAUTH-BISCUIT,\
-CONTROL-OVERHEAD-KICK-REAUTH-JWT,CONTROL-OVERHEAD-ACL-READ-NOTIFY-JWT,\
-CONTROL-CHURN-ACL-MODIFY-JWT,CONTROL-CHURN-GROUP-CLIENT-JWT,\
 TOKEN-DENY-READ-JWT,TOKEN-ATTENUATED-DENY-BISCUIT,\
 TOKEN-QOS2-JWT,TOKEN-QOS2-BISCUIT,\
 TOKEN-THUNDERING-HERD-JWT,TOKEN-THUNDERING-HERD-BISCUIT"
 ```
 
+Run the fixed-workload stress scenarios separately with explicit targeted
+invocations:
+
+```bash
+./scripts/run-benchmarks \
+  --scenarios TOKEN-PUBLISH-STRESS-JWT,TOKEN-PUBLISH-STRESS-BISCUIT,\
+HTTP-AUTHZ-COMPLEXITY-SIMPLE-JWT,HTTP-AUTHZ-COMPLEXITY-SIMPLE-BISCUIT,\
+HTTP-AUTHZ-COMPLEXITY-MED-JWT,HTTP-AUTHZ-COMPLEXITY-MED-BISCUIT,\
+HTTP-AUTHZ-COMPLEXITY-COMPLEX-JWT,HTTP-AUTHZ-COMPLEXITY-COMPLEX-BISCUIT \
+  --skip-build \
+  --skip-tokens
+
+./scripts/run-benchmarks \
+  --scenarios TOKEN-PUBLISH-STRESS-RECONNECT-JWT,TOKEN-PUBLISH-STRESS-RECONNECT-BISCUIT \
+  --skip-build \
+  --skip-tokens
+```
+
+Run the excluded lifecycle/control/fan-out targeted scenarios separately:
+
+```bash
+./scripts/run-benchmarks \
+  --scenarios TOKEN-LIFECYCLE-REAUTH-STORM-JWT,TOKEN-LIFECYCLE-REAUTH-STORM-BISCUIT,\
+TOKEN-LIFECYCLE-PROACTIVE-REAUTH-JWT,TOKEN-LIFECYCLE-PROACTIVE-REAUTH-BISCUIT,\
+TOKEN-LIFECYCLE-RECONNECT-PUBLISH-JWT,TOKEN-LIFECYCLE-RECONNECT-PUBLISH-BISCUIT,\
+CONTROL-OVERHEAD-KICK-REAUTH-JWT,CONTROL-OVERHEAD-ACL-READ-NOTIFY-JWT,\
+CONTROL-CHURN-ACL-MODIFY-JWT,CONTROL-CHURN-GROUP-CLIENT-JWT,\
+SQLITE-RBAC-CHURN-JWT,SQLITE-RBAC-CHURN-BISCUIT \
+  --skip-build \
+  --skip-tokens
+```
+
 Run the full sweep (3 clients × 2 messages × 3 QoS × 2 token issuer × 3 runs
-= 108 iterations):
+= 108 iterations, 3,456 scenario runs total):
 
 ```bash
 for clients in 10 50 500; do
-  for messages in 10 50 500; do
+  for messages in 10 100; do
     for qos in 0 1 2; do
       for stripped in 0 1; do
         for run in 1 2 3; do
@@ -229,13 +292,13 @@ Each directory contains:
 
 | Component | Per-invocation time | Invocations | Subtotal |
 |-----------|-------------------|-------------|----------|
-| Part 1 (402 scenarios, 10 clients, 10 msgs) | ~4–8 h | 3 | ~12–24 h |
-| Part 1 (402 scenarios, 500 clients, 10 msgs) | ~8–16 h | 3 | ~24–48 h |
-| Part 1 (402 scenarios, 10 clients, 100 msgs) | ~6–12 h | 3 | ~18–36 h |
-| Part 1 (402 scenarios, 500 clients, 100 msgs) | ~12–24 h | 3 | ~36–72 h |
-| Part 2 (40 scenarios per invocation) | ~1–3 h | 108 | ~108–324 h |
+| Part 1 (428 scenarios, 10 clients, 10 msgs) | ~4–8 h | 3 | ~12–24 h |
+| Part 1 (428 scenarios, 500 clients, 10 msgs) | ~8–16 h | 3 | ~24–48 h |
+| Part 1 (428 scenarios, 10 clients, 100 msgs) | ~6–12 h | 3 | ~18–36 h |
+| Part 1 (428 scenarios, 500 clients, 100 msgs) | ~12–24 h | 3 | ~36–72 h |
+| Part 2 (32 scenarios per invocation) | ~1–3 h | 108 | ~108–324 h |
 
-**Conservative total: 10–15 days continuous execution.** Plan for overnight and
+**Conservative total: 9–14 days continuous execution.** Plan for overnight and
 weekend runs. Consider splitting across multiple machines if available.
 
 ## Verifying Completeness
@@ -243,13 +306,13 @@ weekend runs. Consider splitting across multiple machines if available.
 After all runs, count result files:
 
 ```bash
-# Part 1: expect 402 JSON files per run
+# Part 1: expect 428 JSON files per run
 for d in mqtt-auth-biscuit/benchmarks/results-p1-*/; do
   count=$(ls "$d"/*.json 2>/dev/null | grep -v summary | wc -l)
   echo "$d: $count scenarios"
 done
 
-# Part 2: expect 40 JSON files per sweep run
+# Part 2: expect 32 JSON files per sweep run
 for d in mqtt-auth-biscuit/benchmarks/results-p2-*/; do
   count=$(ls "$d"/*.json 2>/dev/null | grep -v summary | wc -l)
   echo "$d: $count scenarios"

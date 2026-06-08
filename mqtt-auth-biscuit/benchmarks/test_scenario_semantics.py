@@ -123,6 +123,51 @@ def test_capability_scenarios_keep_identity_binding_disabled(scenario_id: str) -
 @pytest.mark.parametrize(
     ("scenario_id", "kind"),
     (
+        ("TOKEN-THUNDERING-HERD-JWT", "jwt"),
+        ("TOKEN-THUNDERING-HERD-BISCUIT", "biscuit"),
+    ),
+)
+def test_thundering_herd_scenarios_are_synchronized_connect_bursts(
+    scenario_id: str,
+    kind: str,
+) -> None:
+    scenarios = _scenario_registry()
+    scenario = scenarios[scenario_id]
+
+    assert scenario["sync_connect"] is True
+    assert scenario["restart_mosquitto"] is True
+    assert scenario["username"] == kind
+    assert scenario["topic"] == "sensors/{client_id}/temp"
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "kind"),
+    (
+        ("TOKEN-LIFECYCLE-RECONNECT-PUBLISH-JWT", "jwt"),
+        ("TOKEN-LIFECYCLE-RECONNECT-PUBLISH-BISCUIT", "biscuit"),
+    ),
+)
+def test_reconnect_publish_lifecycle_scenarios_are_multi_client_auth_heavy_repeats(
+    scenario_id: str,
+    kind: str,
+) -> None:
+    scenarios = _scenario_registry()
+    scenario = scenarios[scenario_id]
+
+    assert scenario["repeat"] == 6
+    assert scenario["sleep_between"] == 1
+    assert scenario["client_count"] == 25
+    assert scenario["message_count"] == 25
+    assert scenario["token_refresh"] == {"kind": kind, "ttl_seconds": 30}
+    assert scenario.get("traffic_pattern") is None
+    assert scenario.get("authz_config") is None
+    assert scenario.get("proactive_refresh") is None
+    assert scenario.get("reauth_storm") is None
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "kind"),
+    (
         ("TOKEN-LIFECYCLE-PROACTIVE-REAUTH-JWT", "jwt"),
         ("TOKEN-LIFECYCLE-PROACTIVE-REAUTH-BISCUIT", "biscuit"),
     ),
@@ -253,7 +298,10 @@ def test_every_scenario_declares_and_validates_credential_mode() -> None:
         scenarios["STATIC-ACL-FANOUT-JWT"]["fanout_publisher_password_map_profile"]
         == "jwt_static_writer"
     )
+    assert scenarios["TOKEN-THUNDERING-HERD-JWT"]["credential_mode"] == "per_client"
     assert scenarios["TOKEN-LIFECYCLE-REAUTH-STORM-BISCUIT"]["credential_mode"] == "issuer"
+    assert scenarios["TOKEN-LIFECYCLE-RECONNECT-PUBLISH-JWT"]["credential_mode"] == "issuer"
+    assert scenarios["TOKEN-LIFECYCLE-RECONNECT-PUBLISH-BISCUIT"]["credential_mode"] == "issuer"
     assert scenarios["TOKEN-AUTHORIZER-PROFILE-SIMPLE-BISCUIT"]["credential_mode"] == "shared"
     assert scenarios["TOKEN-ACL-READ-FANOUT-STRICT-ALLOW-JWT-50"]["credential_mode"] == "shared"
     assert (

@@ -877,8 +877,9 @@ role is launched. Use `container-single` for broad matrix runs and
 
 ### Synchronized Connect Bursts
 
-`TOKEN-THUNDERING-HERD-BISCUIT` enables `sync_connect` so clients wait until the
-runner releases a shared start gate before connecting to Mosquitto.
+`TOKEN-THUNDERING-HERD-JWT` and `TOKEN-THUNDERING-HERD-BISCUIT` enable
+`sync_connect` so clients wait until the runner releases a shared start gate
+before connecting to Mosquitto.
 
 Topology behavior:
 
@@ -898,6 +899,20 @@ count, ready count, release timestamp, maximum ready skew, client wait summary,
 and any `sync_*` errors. Fan-out split-role runs, Biscuit delegation handoff, and
 reauth-storm runs have dedicated coordination paths and intentionally reject
 incompatible `sync_connect` combinations.
+
+### Reconnect-and-Publish Lifecycle Bursts
+
+`TOKEN-LIFECYCLE-RECONNECT-PUBLISH-JWT` and
+`TOKEN-LIFECYCLE-RECONNECT-PUBLISH-BISCUIT` model auth-heavy full reconnect
+workloads by running 25 clients through 6 repeated connect/publish/disconnect
+cycles, with 25 messages per client per cycle and fresh issuer-backed
+credentials on each run.
+
+These scenarios use the standard loadgen session path rather than MQTT v5
+reauth. Each repeat performs a full CONNECT handshake, publishes the configured
+workload, disconnects, sleeps briefly, and then starts the next run. This keeps
+the measurement focused on reconnect authentication cost under sustained publish
+activity.
 
 ## CONTROL-INTERLEAVED-DATA Scenarios (Issue 36)
 

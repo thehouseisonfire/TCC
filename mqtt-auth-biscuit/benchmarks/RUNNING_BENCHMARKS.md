@@ -206,6 +206,32 @@ per-publish authorization cost explicit instead of depending on caller-supplied
 `--messages`. They also pin `client_count`, so benchmark matrix runs that vary
 `--clients` / `--messages` should not include them.
 
+### Biscuit Local-Datalog Stress
+
+Dedicated fixed-workload local-Datalog stress scenarios:
+
+- `TOKEN-DATALOG-STRESS-LOW-BISCUIT`
+- `TOKEN-DATALOG-STRESS-MED-BISCUIT`
+- `TOKEN-DATALOG-STRESS-HIGH-BISCUIT`
+
+These reuse the existing low/med/high complex Biscuit fixtures but pin the
+workload at 25 clients and 1000 messages per client. They exist to make the
+local token-evaluation cost of richer Biscuit rules explicit under heavy
+publish traffic.
+
+### Biscuit Composability Stress
+
+Dedicated fixed-workload composability scenarios:
+
+- `TOKEN-COMPOSABILITY-ATTENUATED-DATALOG-{MED,HIGH}-BISCUIT`
+- `TOKEN-COMPOSABILITY-DELEGATED-DATALOG-{MED,HIGH}-BISCUIT`
+
+These also pin the workload at 25 clients and 1000 messages per client. They
+reuse the medium/high complex Biscuit tokens and then apply runtime attenuation
+or runtime delegation on top, so the benchmark measures whether richer local
+rules remain practical when Biscuit-only transformations are also performed in
+the client path.
+
 Reconnect variants:
 
 - `TOKEN-PUBLISH-STRESS-RECONNECT-JWT`
@@ -247,6 +273,10 @@ of pre-generated delegated tokens.
   messages.
 - `TOKEN-DELEGATION-SIMULATED-BISCUIT` keeps the previous pre-generated delegated token to
   compare runtime delegation against the simulated baseline.
+
+The `TOKEN-COMPOSABILITY-DELEGATED-DATALOG-*` scenarios use the same runtime
+delegation path as `TOKEN-DELEGATION-TEMP-ONLY-BISCUIT`, but start from the
+existing medium/high complex Datalog fixtures instead of the baseline token.
 
 Handoff-specific knobs (loadgen):
 

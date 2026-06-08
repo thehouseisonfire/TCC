@@ -104,6 +104,8 @@ def test_http_parity_variants_enable_strict_identity_binding_for_both_token_type
     (
         "TOKEN-DELEGATION-TEMP-ONLY-BISCUIT",
         "TOKEN-ATTENUATION-CLIENT-BISCUIT",
+        "TOKEN-COMPOSABILITY-ATTENUATED-DATALOG-MED-BISCUIT",
+        "TOKEN-COMPOSABILITY-DELEGATED-DATALOG-HIGH-BISCUIT",
         "TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-BISCUIT-100",
     ),
 )
@@ -217,6 +219,113 @@ def test_publish_stress_reconnect_scenarios_are_high_volume_repeated_full_reconn
     assert scenario.get("authz_config") is None
     assert scenario.get("proactive_refresh") is None
     assert scenario.get("reauth_storm") is None
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "level", "profile"),
+    (
+        ("TOKEN-DATALOG-STRESS-LOW-BISCUIT", "low", "biscuit_complex_low"),
+        ("TOKEN-DATALOG-STRESS-MED-BISCUIT", "med", "biscuit_complex_med"),
+        ("TOKEN-DATALOG-STRESS-HIGH-BISCUIT", "high", "biscuit_complex_high"),
+    ),
+)
+def test_datalog_stress_scenarios_are_fixed_high_volume_local_policy_slices(
+    scenario_id: str,
+    level: str,
+    profile: str,
+) -> None:
+    scenarios = _scenario_registry()
+    scenario = scenarios[scenario_id]
+
+    assert scenario["username"] == "biscuit"
+    assert scenario["topic"] == "sensors/{client_id}/temp"
+    assert scenario["client_count"] == 25
+    assert scenario["message_count"] == 1000
+    assert scenario["complexity_axis"] == "datalog"
+    assert scenario["complexity_level"] == level
+    assert scenario["password_map_profile"] == profile
+    assert scenario.get("biscuit_attenuate") is None
+    assert scenario.get("biscuit_delegate") is None
+    assert scenario.get("token_refresh") is None
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "level", "profile"),
+    (
+        (
+            "TOKEN-COMPOSABILITY-ATTENUATED-DATALOG-MED-BISCUIT",
+            "med",
+            "biscuit_complex_med",
+        ),
+        (
+            "TOKEN-COMPOSABILITY-ATTENUATED-DATALOG-HIGH-BISCUIT",
+            "high",
+            "biscuit_complex_high",
+        ),
+    ),
+)
+def test_composability_attenuated_datalog_scenarios_layer_runtime_restrictions(
+    scenario_id: str,
+    level: str,
+    profile: str,
+) -> None:
+    scenarios = _scenario_registry()
+    scenario = scenarios[scenario_id]
+
+    assert scenario["username"] == "biscuit"
+    assert scenario["topic"] == "sensors/{client_id}/temp"
+    assert scenario["client_count"] == 25
+    assert scenario["message_count"] == 1000
+    assert scenario["complexity_axis"] == "datalog"
+    assert scenario["complexity_level"] == level
+    assert scenario["password_map_profile"] == profile
+    assert scenario["biscuit_attenuate"] == {
+        "ttl_seconds": 300,
+        "topic": "sensors/{client_id}/temp",
+        "op": "publish",
+    }
+    assert scenario.get("biscuit_delegate") is None
+    assert scenario.get("token_refresh") is None
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "level", "profile"),
+    (
+        (
+            "TOKEN-COMPOSABILITY-DELEGATED-DATALOG-MED-BISCUIT",
+            "med",
+            "biscuit_complex_med",
+        ),
+        (
+            "TOKEN-COMPOSABILITY-DELEGATED-DATALOG-HIGH-BISCUIT",
+            "high",
+            "biscuit_complex_high",
+        ),
+    ),
+)
+def test_composability_delegated_datalog_scenarios_layer_runtime_delegation(
+    scenario_id: str,
+    level: str,
+    profile: str,
+) -> None:
+    scenarios = _scenario_registry()
+    scenario = scenarios[scenario_id]
+
+    assert scenario["username"] == "biscuit"
+    assert scenario["topic"] == "sensors/{client_id}/temp"
+    assert scenario["client_count"] == 25
+    assert scenario["message_count"] == 1000
+    assert scenario["complexity_axis"] == "datalog"
+    assert scenario["complexity_level"] == level
+    assert scenario["password_map_profile"] == profile
+    assert scenario["biscuit_delegate"] == {
+        "ttl_seconds": 300,
+        "topic": "sensors/{client_id}/temp",
+        "op": "publish",
+    }
+    assert scenario.get("biscuit_delegate", {}).get("handoff") is None
+    assert scenario.get("biscuit_attenuate") is None
+    assert scenario.get("token_refresh") is None
 
 
 @pytest.mark.parametrize(
@@ -391,6 +500,15 @@ def test_every_scenario_declares_and_validates_credential_mode() -> None:
     assert scenarios["TOKEN-PUBLISH-STRESS-BISCUIT"]["credential_mode"] == "per_client"
     assert scenarios["TOKEN-PUBLISH-STRESS-RECONNECT-JWT"]["credential_mode"] == "issuer"
     assert scenarios["TOKEN-PUBLISH-STRESS-RECONNECT-BISCUIT"]["credential_mode"] == "issuer"
+    assert scenarios["TOKEN-DATALOG-STRESS-LOW-BISCUIT"]["credential_mode"] == "per_client"
+    assert (
+        scenarios["TOKEN-COMPOSABILITY-ATTENUATED-DATALOG-MED-BISCUIT"]["credential_mode"]
+        == "per_client"
+    )
+    assert (
+        scenarios["TOKEN-COMPOSABILITY-DELEGATED-DATALOG-HIGH-BISCUIT"]["credential_mode"]
+        == "per_client"
+    )
     assert scenarios["HTTP-AUTHZ-COMPLEXITY-SIMPLE-JWT"]["credential_mode"] == "per_client"
     assert scenarios["HTTP-AUTHZ-COMPLEXITY-COMPLEX-BISCUIT"]["credential_mode"] == "per_client"
     assert scenarios["TOKEN-AUTHORIZER-PROFILE-SIMPLE-BISCUIT"]["credential_mode"] == "shared"

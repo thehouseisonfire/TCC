@@ -170,7 +170,20 @@ on the standard full CONNECT / publish / disconnect path rather than MQTT v5
 in-session reauth, so they combine authentication churn and steady-state
 publish-path ACL evaluation in one workload.
 
-#### D) Authorizer Template Complexity (Constant Token Size)
+#### D) Fixed-Workload Datalog Stress
+
+| Scenario | Token | Policy Source | Policy Detail | Expected Outcome |
+| --- | --- | --- | --- | --- |
+| TOKEN-DATALOG-STRESS-LOW-BISCUIT | Biscuit | Token-only | Low-complexity Datalog token on `sensors/{client_id}/temp`, fixed at 25 clients x 1000 publishes/client | Allows |
+| TOKEN-DATALOG-STRESS-MED-BISCUIT | Biscuit | Token-only | Medium-complexity Datalog token on `sensors/{client_id}/temp`, fixed at 25 clients x 1000 publishes/client | Allows |
+| TOKEN-DATALOG-STRESS-HIGH-BISCUIT | Biscuit | Token-only | High-complexity Datalog token on `sensors/{client_id}/temp`, fixed at 25 clients x 1000 publishes/client | Allows |
+
+**Analysis:** these scenarios reuse the existing low/med/high complex Biscuit
+fixtures but pin the publish workload so local Datalog evaluation cost can be
+measured under an explicit high-volume slice rather than caller-supplied
+message counts.
+
+#### E) Authorizer Template Complexity (Constant Token Size)
 
 | Scenario | Token | Policy Source | Policy Detail | Expected Outcome |
 | --- | --- | --- | --- | --- |
@@ -369,11 +382,20 @@ Tokens are issued with the same default grants/rights in token-only mode.
 | TOKEN-DELEGATION-TEMP-ONLY-BISCUIT | Token-only | Client delegates limited token | Measures delegation cost |
 | TOKEN-DELEGATION-HANDOFF-BISCUIT | Token-only | Delegated token passed over MQTT | Handoff overhead |
 | TOKEN-DELEGATION-SIMULATED-BISCUIT | Token-only | Pre-generated delegated token | Baseline for delegation |
+| TOKEN-COMPOSABILITY-ATTENUATED-DATALOG-MED-BISCUIT | Token-only | Complex medium Datalog token with runtime attenuation (publish/topic/TTL restriction) | Measures composability of local rules + attenuation |
+| TOKEN-COMPOSABILITY-ATTENUATED-DATALOG-HIGH-BISCUIT | Token-only | Complex high Datalog token with runtime attenuation (publish/topic/TTL restriction) | Measures composability of local rules + attenuation |
+| TOKEN-COMPOSABILITY-DELEGATED-DATALOG-MED-BISCUIT | Token-only | Complex medium Datalog token with runtime delegation (publish/topic/TTL restriction) | Measures composability of local rules + delegation |
+| TOKEN-COMPOSABILITY-DELEGATED-DATALOG-HIGH-BISCUIT | Token-only | Complex high Datalog token with runtime delegation (publish/topic/TTL restriction) | Measures composability of local rules + delegation |
 
 These are marked `capability_flags.biscuit_only=true` in scenario output and **must not**
 be used in JWT-vs-Biscuit parity comparisons. Biscuit attenuation/delegation are
 intentionally not parity scenarios because the experiment is measuring a Biscuit
 capability that JWT does not provide in the same form.
+
+The `TOKEN-COMPOSABILITY-*` family combines existing Biscuit-only features
+rather than introducing a new parity claim. It exists to measure whether richer
+local Datalog policies remain practical when attenuation or delegation is also
+performed at runtime.
 
 ### 2.8 Control Plane And Dynamic Security Command Scenarios
 

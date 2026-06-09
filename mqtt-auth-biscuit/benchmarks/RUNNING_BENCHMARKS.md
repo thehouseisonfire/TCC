@@ -89,6 +89,7 @@ The full family-to-class mapping is the source-of-truth table in
 - **Docker & Docker Compose**: For running the test environment.
 - **Python 3.14.2 + uv 0.9.17**: For running the benchmark scripts.
   - Install dependencies: `uv sync --locked`
+- **iperf3**: For network baseline measurement (client-side). The server runs in Docker; the `iperf3` binary must be installed on the host. Install with `sudo apt-get install iperf3`.
 
 ## One-Command Run (Recommended)
 

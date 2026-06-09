@@ -6,5 +6,6 @@ benchmark_host_rust_components:
   - rustfmt
 
 benchmark_host_benchmark_package_versions:
+  iperf3: "3.17.1+git20231114-2"
   linux-tools-common: "6.8.0-31.31"
   linux-tools-generic: "6.8.0-31.31"

@@ -19,6 +19,7 @@ both JWT and Biscuit tokens, intended as a reproducible research prototype.
 - Rust 1.93.1
 - Docker and Docker Compose
 - Python 3.14.2 + `uv 0.9.17`
+- `iperf3` (client binary; server runs in Docker). Install with `sudo apt-get install iperf3`.
 
 ### Building
 

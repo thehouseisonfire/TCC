@@ -107,7 +107,7 @@ def run_iperf3_baseline(
             "port": port,
         }
     except FileNotFoundError:
-        logger.error("iperf3 not found in PATH")
+        logger.error("iperf3 not found in PATH — install with: sudo apt-get install iperf3")
         return {
             "error": "iperf3 not installed",
             "host": host,

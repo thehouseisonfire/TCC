@@ -120,6 +120,9 @@ python --version  # 3.14.2
 # Docker
 docker --version
 docker compose version
+
+# iperf3 (client binary, server runs in Docker)
+iperf3 --version  # sudo apt-get install iperf3
 ```
 
 ## Step-by-Step Execution

@@ -207,8 +207,11 @@ class TokenRefreshConfig(TypedDict):
 
 
 class Mqtt5AuthConfig(TypedDict, total=False):
+    kind: Literal["jwt", "biscuit"]
     token1: str
     token2: str
+    token1_ttl_seconds: int
+    token2_ttl_seconds: int
 
 
 class ScenarioConfig(TypedDict, total=False):
@@ -404,6 +407,130 @@ def _mark_mqtt5_auth_token(token: str) -> str:
     if token.startswith("eyJ") and token.count(".") == 2:
         return token
     return f"{RAW_BISCUIT_MARKER}{token}"
+
+
+def _normalize_tcpdump_output_dir(path: str) -> str:
+    return str(_resolve_repo_path(path).resolve())
+
+
+def _issue_token(
+    token_issuer_base: str,
+    endpoint: str,
+    payload: dict[str, Any],
+    *,
+    ca_file: str | None,
+    insecure: bool,
+) -> str:
+    with _http_client(ca_file, insecure) as client:
+        response = client.post(f"{token_issuer_base}{endpoint}", json=payload)
+        response.raise_for_status()
+    token = response.json().get("token")
+    if not isinstance(token, str) or not token:
+        raise RuntimeError(f"token issuer returned invalid token payload for {endpoint}")
+    return token
+
+
+def _issue_mqtt5_auth_tokens(
+    scenario_id: str,
+    token_kind: ScenarioTokenKind,
+    token_issuer_base: str,
+    *,
+    token1_ttl_seconds: int,
+    token2_ttl_seconds: int,
+    ca_file: str | None,
+    insecure: bool,
+) -> tuple[str, str]:
+    client_id = f"mqtt5-auth-{scenario_id.lower()}-{uuid.uuid4().hex[:12]}"
+    topic = f"sensors/{client_id}/temp"
+
+    if token_kind == "jwt":
+
+        def jwt_payload(ttl_seconds: int) -> dict[str, Any]:
+            return {
+                "client_id": client_id,
+                "ttl_seconds": ttl_seconds,
+                "grants": [
+                    {"op": "publish", "res": topic},
+                    {"op": "subscribe", "res": topic},
+                ],
+                "no_default_roles": True,
+                "no_default_grants": True,
+            }
+
+        return (
+            _issue_token(
+                token_issuer_base,
+                "/jwt",
+                jwt_payload(token1_ttl_seconds),
+                ca_file=ca_file,
+                insecure=insecure,
+            ),
+            _issue_token(
+                token_issuer_base,
+                "/jwt",
+                jwt_payload(token2_ttl_seconds),
+                ca_file=ca_file,
+                insecure=insecure,
+            ),
+        )
+
+    def biscuit_payload(ttl_seconds: int) -> dict[str, Any]:
+        return {
+            "client_id": client_id,
+            "topic": topic,
+            "ttl_seconds": ttl_seconds,
+        }
+
+    return (
+        _issue_token(
+            token_issuer_base,
+            "/biscuit",
+            biscuit_payload(token1_ttl_seconds),
+            ca_file=ca_file,
+            insecure=insecure,
+        ),
+        _issue_token(
+            token_issuer_base,
+            "/biscuit",
+            biscuit_payload(token2_ttl_seconds),
+            ca_file=ca_file,
+            insecure=insecure,
+        ),
+    )
+
+
+def _resolve_mqtt5_auth_tokens(
+    scenario_id: str,
+    scenario: ScenarioConfig,
+    token_issuer_base: str,
+    *,
+    ca_file: str | None,
+    insecure: bool,
+) -> tuple[str, str]:
+    mqtt5_cfg = scenario.get("mqtt5_auth")
+    if mqtt5_cfg is None:
+        raise RuntimeError(f"{scenario_id}: mqtt5 auth configuration missing")
+
+    token1 = mqtt5_cfg.get("token1")
+    token2 = mqtt5_cfg.get("token2")
+    if token1 and token2:
+        return token1, token2
+
+    token_kind = cast(ScenarioTokenKind | None, mqtt5_cfg.get("kind")) or _scenario_token_kind(
+        scenario_id, scenario
+    )
+    if token_kind is None:
+        raise RuntimeError(f"{scenario_id}: mqtt5 auth token kind is not configured")
+
+    return _issue_mqtt5_auth_tokens(
+        scenario_id,
+        token_kind,
+        token_issuer_base,
+        token1_ttl_seconds=int(mqtt5_cfg.get("token1_ttl_seconds", 180)),
+        token2_ttl_seconds=int(mqtt5_cfg.get("token2_ttl_seconds", 300)),
+        ca_file=ca_file,
+        insecure=insecure,
+    )
 
 
 def _container_repo_path(path: str | None) -> str | None:
@@ -4555,15 +4682,20 @@ def _build_available_scenarios(
             "mosquitto_conf": "./mosquitto.conf",
             "authz_config": None,
             "netem": {"clear": True},
-            "mqtt5_auth": {"token1": tokens["jwt_short"], "token2": tokens["jwt"]},
+            "mqtt5_auth": {
+                "kind": "jwt",
+                "token1_ttl_seconds": 180,
+                "token2_ttl_seconds": 300,
+            },
         },
         "TOKEN-MQTT5-REAUTH-BISCUIT": {
             "mosquitto_conf": "./mosquitto.conf",
             "authz_config": None,
             "netem": {"clear": True},
             "mqtt5_auth": {
-                "token1": tokens["biscuit_short"],
-                "token2": tokens["biscuit"],
+                "kind": "biscuit",
+                "token1_ttl_seconds": 180,
+                "token2_ttl_seconds": 300,
             },
         },
         "TOKEN-THUNDERING-HERD-JWT": {
@@ -5329,6 +5461,7 @@ def main(
     scenarios: list[ScenarioConfig] = []
     tls_enabled = tls
     tls_ca = tls_ca_file or ("docker/tls/ca.pem" if tls_enabled else None)
+    normalized_tcpdump_output_dir = _normalize_tcpdump_output_dir(tcpdump_output_dir)
     if tls_enabled and tls_ca and not _resolve_repo_path(tls_ca).exists():
         raise SystemExit(
             f"TLS enabled but CA file not found at {tls_ca}. Run docker/tls/generate_certs.sh"
@@ -5481,11 +5614,11 @@ def main(
                     "TCPDUMP_FILTER": tcpdump_filter,
                     "TCPDUMP_DURATION": str(tcpdump_duration),
                     "TCPDUMP_OUTPUT": f"/pcap/{pcap_filename}",
-                    "TCPDUMP_OUTPUT_DIR": tcpdump_output_dir,
+                    "TCPDUMP_OUTPUT_DIR": normalized_tcpdump_output_dir,
                     "TCPDUMP_KEEP_ALIVE": "0",
                 }
             )
-            Path(tcpdump_output_dir).mkdir(parents=True, exist_ok=True)
+            Path(normalized_tcpdump_output_dir).mkdir(parents=True, exist_ok=True)
 
         compose_project_name = extra_env.get("COMPOSE_PROJECT_NAME") or os.environ.get(
             "COMPOSE_PROJECT_NAME"
@@ -5790,11 +5923,18 @@ def main(
                     mqtt5_cfg = s.get("mqtt5_auth")
                     scenario_clients = effective_client_count
                     if mqtt5_cfg is not None:
+                        token1, token2 = _resolve_mqtt5_auth_tokens(
+                            s["id"],
+                            s,
+                            token_issuer_base,
+                            ca_file=tls_ca,
+                            insecure=tls_insecure,
+                        )
                         res = _run_mqtt5_auth(
                             host_mqtt_host,
                             mqtt_port,
-                            mqtt5_cfg["token1"],
-                            mqtt5_cfg["token2"],
+                            token1,
+                            token2,
                             scenario_tls,
                             tls_ca,
                             tls_insecure,

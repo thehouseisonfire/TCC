@@ -230,6 +230,16 @@ def test_build_dynsec_snapshot_control_admin_base_contains_admin_control_identit
     } in acls
 
 
+def test_apply_dynsec_snapshot_same_source_and_dest_is_a_noop(tmp_path) -> None:
+    snapshot = tmp_path / "dynamic-security.json"
+    snapshot.write_text('{"clients":[]}\n', encoding="utf-8")
+
+    result = policy_churn.apply_dynsec_snapshot(str(snapshot), str(snapshot))
+
+    assert result == {"source": str(snapshot), "dest": str(snapshot)}
+    assert snapshot.read_text(encoding="utf-8") == '{"clients":[]}\n'
+
+
 def test_build_dynsec_snapshot_control_interleaved_base_contains_jwt_and_biscuit_publishers() -> (
     None
 ):

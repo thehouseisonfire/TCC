@@ -137,6 +137,86 @@ def test_host_endpoint_config_uses_localhost_for_loadgen_and_mqtt5_auth() -> Non
     assert endpoints["loadgen_tls_ca"] == "docker/tls/ca.pem"
 
 
+def test_normalize_tcpdump_output_dir_returns_absolute_repo_path() -> None:
+    path = rs._normalize_tcpdump_output_dir("benchmarks/results/pcap")
+
+    assert path == str((Path(rs.REPO_ROOT) / "benchmarks/results/pcap").resolve())
+
+
+def test_resolve_mqtt5_auth_tokens_uses_static_tokens_when_present() -> None:
+    scenario: rs.ScenarioConfig = {
+        "id": "TOKEN-MQTT5-REAUTH-JWT",
+        "mqtt5_auth": {"token1": "token-one", "token2": "token-two"},
+    }
+
+    token1, token2 = rs._resolve_mqtt5_auth_tokens(
+        "TOKEN-MQTT5-REAUTH-JWT",
+        scenario,
+        "http://issuer",
+        ca_file=None,
+        insecure=False,
+    )
+
+    assert token1 == "token-one"
+    assert token2 == "token-two"
+
+
+def test_resolve_mqtt5_auth_tokens_mints_fresh_runtime_tokens(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_issue(
+        scenario_id: str,
+        token_kind: rs.ScenarioTokenKind,
+        token_issuer_base: str,
+        *,
+        token1_ttl_seconds: int,
+        token2_ttl_seconds: int,
+        ca_file: str | None,
+        insecure: bool,
+    ) -> tuple[str, str]:
+        captured.update(
+            {
+                "scenario_id": scenario_id,
+                "token_kind": token_kind,
+                "token_issuer_base": token_issuer_base,
+                "token1_ttl_seconds": token1_ttl_seconds,
+                "token2_ttl_seconds": token2_ttl_seconds,
+                "ca_file": ca_file,
+                "insecure": insecure,
+            }
+        )
+        return ("fresh-token-1", "fresh-token-2")
+
+    monkeypatch.setattr(rs, "_issue_mqtt5_auth_tokens", fake_issue)
+    scenario: rs.ScenarioConfig = {
+        "id": "TOKEN-MQTT5-REAUTH-BISCUIT",
+        "mqtt5_auth": {
+            "kind": "biscuit",
+            "token1_ttl_seconds": 90,
+            "token2_ttl_seconds": 240,
+        },
+    }
+
+    token1, token2 = rs._resolve_mqtt5_auth_tokens(
+        "TOKEN-MQTT5-REAUTH-BISCUIT",
+        scenario,
+        "https://issuer",
+        ca_file="docker/tls/ca.pem",
+        insecure=True,
+    )
+
+    assert (token1, token2) == ("fresh-token-1", "fresh-token-2")
+    assert captured == {
+        "scenario_id": "TOKEN-MQTT5-REAUTH-BISCUIT",
+        "token_kind": "biscuit",
+        "token_issuer_base": "https://issuer",
+        "token1_ttl_seconds": 90,
+        "token2_ttl_seconds": 240,
+        "ca_file": "docker/tls/ca.pem",
+        "insecure": True,
+    }
+
+
 class _RunLoadgenKwargs(TypedDict):
     tokens: dict[str, Any]
     host: str

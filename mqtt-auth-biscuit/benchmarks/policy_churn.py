@@ -63,13 +63,15 @@ def apply_dynsec_snapshot(
     dest = _resolve_repo_path(dest_path)
     dest.parent.mkdir(parents=True, exist_ok=True)
     # Keep inode stable for bind-mounted single-file volumes used by Docker.
-    shutil.copyfile(src, dest)
+    if src.resolve() != dest.resolve():
+        shutil.copyfile(src, dest)
 
     out = {"source": str(src), "dest": str(dest)}
     if copy_tls:
         tls_dest = _resolve_repo_path("docker/tls/dynamic-security.json")
         tls_dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, tls_dest)
+        if src.resolve() != tls_dest.resolve():
+            shutil.copyfile(src, tls_dest)
         out["tls_dest"] = str(tls_dest)
     return out
 

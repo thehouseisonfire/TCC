@@ -354,7 +354,9 @@ def test_http_authz_complexity_scenarios_are_fixed_high_volume_profile_runs(
     assert scenario["message_count"] == 1000
     assert scenario["complexity_axis"] == "http_profile"
     assert scenario["complexity_level"] == level
-    assert scenario["authz_config"]["authz_profile"] == level
+    authz_config = scenario["authz_config"]
+    assert authz_config is not None
+    assert authz_config["authz_profile"] == level
     assert scenario.get("token_refresh") is None
     assert scenario.get("traffic_pattern") is None
 

@@ -236,9 +236,17 @@ class ScenarioConfig(TypedDict, total=False):
     biscuit_delegate_public_key_hex: str | None
     biscuit_delegate_public_key_file: str | None
     complexity_axis: (
-        Literal["chain_length", "datalog", "http_profile", "authorizer_template"] | None
+        Literal[
+            "chain_length",
+            "datalog",
+            "http_profile",
+            "authorizer_template",
+            "publish_authz",
+            "publish_authz_reconnect",
+        ]
+        | None
     )
-    complexity_level: Literal["simple", "med", "complex"] | None
+    complexity_level: Literal["simple", "med", "complex", "baseline", "low", "high"] | None
     mqtt5_auth: Mqtt5AuthConfig | None
     restart_mosquitto: bool
     sync_connect: bool

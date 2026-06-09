@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, TypedDict
 
 import pytest
 
 from benchmarks import run_scenarios as rs
+from benchmarks.perf_profiler import PerfConfig
 
 
 def test_python_subprocess_env_prepends_repo_root(monkeypatch) -> None:
@@ -141,6 +143,140 @@ def test_normalize_tcpdump_output_dir_returns_absolute_repo_path() -> None:
     path = rs._normalize_tcpdump_output_dir("benchmarks/results/pcap")
 
     assert path == str((Path(rs.REPO_ROOT) / "benchmarks/results/pcap").resolve())
+
+
+def test_main_normalizes_output_directory_strings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    scenario_id = "TEST-SCENARIO"
+    tcpdump_output_dir = tmp_path / "pcap"
+    perf_output_dir = tmp_path / "perf"
+
+    class _ValidatedScenario:
+        def __init__(self, payload: rs.ScenarioConfig) -> None:
+            self._payload = payload
+
+        def model_dump(self) -> rs.ScenarioConfig:
+            return self._payload
+
+    class _FakeScenarioModel:
+        @staticmethod
+        def model_validate(payload: rs.ScenarioConfig) -> _ValidatedScenario:
+            return _ValidatedScenario(payload)
+
+    scenario: rs.ScenarioConfig = {
+        "id": scenario_id,
+        "mosquitto_conf": "./mosquitto.conf",
+        "netem": {"mtu": 1200},
+    }
+
+    monkeypatch.setattr(rs, "setup_logging", lambda _log_level: None)
+    monkeypatch.setattr(
+        rs,
+        "check_perf_installation",
+        lambda: {"installed": True, "version": "1"},
+    )
+    monkeypatch.setattr(
+        rs,
+        "check_pcap_parser_available",
+        lambda: {"installed": True, "parser": "dpkt", "version": "1"},
+    )
+    monkeypatch.setattr(rs, "_read_tokens", lambda _path: {})
+    monkeypatch.setattr(
+        rs,
+        "_build_available_scenarios",
+        lambda *args, **kwargs: {scenario_id: scenario},
+    )
+    monkeypatch.setattr(rs, "_expand_tls_matrix", lambda available: available)
+    monkeypatch.setattr(rs, "ScenarioModel", _FakeScenarioModel)
+    monkeypatch.setattr(rs, "_require_requested_scenario_fixtures", lambda *_args: None)
+    monkeypatch.setattr(rs, "_validate_scenario_credentials", lambda *_args: None)
+    monkeypatch.setattr(
+        rs,
+        "_scenario_semantics_metadata",
+        lambda *_args, **_kwargs: {
+            "jwt_identity_binding": "off",
+            "biscuit_identity_binding": "off",
+        },
+    )
+    monkeypatch.setattr(
+        rs,
+        "_effective_mosquitto_runtime_conf",
+        lambda mosq_conf, **_kwargs: mosq_conf,
+    )
+    monkeypatch.setattr(
+        rs,
+        "_scenario_endpoint_config",
+        lambda **_kwargs: {
+            "authz_base": "http://localhost:5000",
+            "prom_base": "http://localhost:9090",
+            "token_issuer_base": "http://localhost:8082",
+            "loadgen_token_issuer_base": "http://localhost:8082",
+            "host_mqtt_host": "localhost",
+            "loadgen_mqtt_host": "localhost",
+            "mqtt_port": 1883,
+            "loadgen_tls_ca": None,
+        },
+    )
+
+    def fake_compose(
+        _args: list[str],
+        *,
+        extra_env: dict[str, str] | None = None,
+        compose_files: list[str] | None = None,
+    ) -> None:
+        captured["compose_extra_env"] = extra_env
+        captured["compose_files"] = compose_files
+
+    monkeypatch.setattr(rs, "_compose", fake_compose)
+    monkeypatch.setattr(rs.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(rs, "_wait_for_service_health", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(rs, "_wait_for_prometheus_api", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(rs, "_wait_for_non_empty_resource_snapshot", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(rs, "run_baseline_with_retry", lambda **_kwargs: {})
+    monkeypatch.setattr(rs, "check_network_validity", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(rs, "_capture_dynamic_security_baseline", lambda: {})
+    monkeypatch.setattr(rs, "_restore_dynamic_security_baseline", lambda _baseline: None)
+    monkeypatch.setattr(rs, "_validate_dynamic_security_alignment", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(rs, "_resource_snapshot", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(rs, "_validate_resource_snapshot", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(rs, "_run_loadgen", lambda **_kwargs: {"errors": [], "receive": {}})
+
+    def fake_profile(
+        *,
+        container_name: str,
+        config: PerfConfig,
+    ) -> dict[str, object]:
+        captured["perf_container_name"] = container_name
+        captured["perf_output_dir"] = config.output_dir
+        return {"success": True}
+
+    monkeypatch.setattr(rs, "profile_mosquitto_container", fake_profile)
+    monkeypatch.setattr(rs, "format_perf_summary", lambda _result: "ok")
+    monkeypatch.setattr(rs.subprocess, "check_call", lambda *args, **kwargs: None)
+
+    rs.main(
+        tokens_path="ignored.json",
+        out=str(tmp_path / "results"),
+        scenarios_arg=scenario_id,
+        iperf3_enabled=False,
+        perf_enabled=True,
+        perf_scenarios=scenario_id,
+        perf_output_dir=str(perf_output_dir),
+        tcpdump_enabled=True,
+        tcpdump_analyze=False,
+        tcpdump_output_dir=str(tcpdump_output_dir),
+    )
+
+    compose_extra_env = captured["compose_extra_env"]
+    assert isinstance(compose_extra_env, dict)
+    assert compose_extra_env["TCPDUMP_OUTPUT_DIR"] == str(tcpdump_output_dir.resolve())
+    assert captured["perf_output_dir"] == str(perf_output_dir)
+    result = json.loads((tmp_path / "results" / f"{scenario_id}.json").read_text())
+    assert result["perf_profiling"]["config"]["callgraph"] is True
+    assert result["packet_analysis"]["config"]["analyze"] is False
 
 
 def test_resolve_mqtt5_auth_tokens_uses_static_tokens_when_present() -> None:

@@ -417,8 +417,18 @@ def _mark_mqtt5_auth_token(token: str) -> str:
     return f"{RAW_BISCUIT_MARKER}{token}"
 
 
-def _normalize_tcpdump_output_dir(path: str) -> str:
-    return str(_resolve_repo_path(path).resolve())
+def _coerce_output_dir_arg(path: object, default: str) -> str:
+    if isinstance(path, (str, os.PathLike)):
+        return os.fspath(path)
+    return default
+
+
+def _coerce_bool_arg(value: object, default: bool) -> bool:
+    return value if isinstance(value, bool) else default
+
+
+def _normalize_tcpdump_output_dir(path: str | os.PathLike[str]) -> str:
+    return str(_resolve_repo_path(os.fspath(path)).resolve())
 
 
 def _issue_token(
@@ -5402,7 +5412,14 @@ def main(
         help="Readiness and token receive timeout for Biscuit delegation handoff roles.",
     ),
 ):
+    if not isinstance(log_level, str):
+        log_level = "INFO"
     setup_logging(log_level)
+    iperf3_enabled = _coerce_bool_arg(iperf3_enabled, True)
+    perf_enabled = _coerce_bool_arg(perf_enabled, False)
+    perf_callgraph = _coerce_bool_arg(perf_callgraph, True)
+    tcpdump_enabled = _coerce_bool_arg(tcpdump_enabled, True)
+    tcpdump_analyze = _coerce_bool_arg(tcpdump_analyze, True)
     if not isinstance(client_topology, str):
         client_topology = DEFAULT_CLIENT_TOPOLOGY
     if not isinstance(loadgen_service, str):
@@ -5419,6 +5436,40 @@ def main(
         raise typer.BadParameter("reauth_storm_clients must be greater than one")
     if not isinstance(biscuit_delegate_handoff_ready_timeout_seconds, int):
         biscuit_delegate_handoff_ready_timeout_seconds = 120
+    tcpdump_output_dir = _coerce_output_dir_arg(
+        tcpdump_output_dir,
+        "benchmarks/results/pcap",
+    )
+    if not isinstance(token_refresh_codes, str):
+        token_refresh_codes = None
+    if not isinstance(iperf3_host, str):
+        iperf3_host = "localhost"
+    if not isinstance(iperf3_port, int):
+        iperf3_port = 5201
+    if not isinstance(iperf3_duration, int):
+        iperf3_duration = 5
+    if not isinstance(iperf3_streams, int):
+        iperf3_streams = 4
+    if isinstance(iperf3_min_mbps, bool) or not isinstance(iperf3_min_mbps, int | float):
+        iperf3_min_mbps = 100.0
+    else:
+        iperf3_min_mbps = float(iperf3_min_mbps)
+    if not isinstance(perf_duration, int):
+        perf_duration = 10
+    if not isinstance(perf_sample_rate, int):
+        perf_sample_rate = 1000
+    if not isinstance(perf_events, str):
+        perf_events = "cycles,instructions,cache-misses"
+    perf_output_dir = _coerce_output_dir_arg(
+        perf_output_dir,
+        "benchmarks/results/perf",
+    )
+    if not isinstance(perf_scenarios, str):
+        perf_scenarios = None
+    if not isinstance(tcpdump_filter, str):
+        tcpdump_filter = "port 1883 or port 8883"
+    if not isinstance(tcpdump_duration, int):
+        tcpdump_duration = 300
     if client_topology not in {"host", "container-single", "container-per-client"}:
         raise typer.BadParameter(
             "client_topology must be one of: host, container-single, container-per-client"

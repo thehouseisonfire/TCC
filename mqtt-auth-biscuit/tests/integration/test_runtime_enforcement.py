@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Protocol
@@ -1142,7 +1143,7 @@ def test_runtime_enhanced_auth_entrypoint_over_tcp_and_tls(
     )
 
     cmd = [
-        "python3",
+        sys.executable,
         "benchmarks/mqtt_auth_client.py",
         "--host",
         "localhost",

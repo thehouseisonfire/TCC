@@ -553,14 +553,14 @@ policy during ACL checks.
 Run a lightweight health check + single publish for JWT and Biscuit:
 
 ```bash
-python3 benchmarks/smoke_test.py
+uv run --locked python benchmarks/smoke_test.py
 ```
 
 TLS smoke test:
 
 ```bash
 bash docker/tls/generate_certs.sh
-python3 benchmarks/smoke_test.py --tls
+uv run --locked python benchmarks/smoke_test.py --tls
 ```
 
 ### Issue 39 Broker Integration Assertions
@@ -678,8 +678,8 @@ Optional TLS flags:
 For the microbenchmark or single-run metrics collector over TLS:
 
 ```bash
-python3 benchmarks/mqtt_auth_client.py --token1 "<token>" --token2 "<token>" --tls
-python3 benchmarks/metrics_collector.py --tls --port 8883
+uv run --locked python benchmarks/mqtt_auth_client.py --token1 "<token>" --token2 "<token>" --tls
+uv run --locked python benchmarks/metrics_collector.py --tls --port 8883
 ```
 
 To select a different Mosquitto configuration for a run (e.g. HTTP policy or hybrid policy), set `MOSQUITTO_CONF`:
@@ -743,7 +743,7 @@ Defaults:
 For the MQTT `AUTH` reauthentication microbenchmark only:
 
 ```bash
-python3 benchmarks/mqtt_auth_client.py --token1 "<token>" --token2 "<token>"
+uv run --locked python benchmarks/mqtt_auth_client.py --token1 "<token>" --token2 "<token>"
 ```
 
 You can also monitor resource usage via:
@@ -755,7 +755,7 @@ If resource snapshots fail because vectors are empty, validate telemetry wiring
 with:
 
 ```bash
-python3 benchmarks/verify_prometheus.py
+uv run --locked python benchmarks/verify_prometheus.py
 ```
 
 ## Network Baseline Measurement (iperf3)

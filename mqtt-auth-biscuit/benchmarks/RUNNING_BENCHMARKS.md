@@ -90,6 +90,7 @@ The full family-to-class mapping is the source-of-truth table in
 - **Python 3.14.2 + uv 0.9.17**: For running the benchmark scripts.
   - Install dependencies: `uv sync --locked`
 - **iperf3**: For network baseline measurement (client-side). The server runs in Docker; the `iperf3` binary must be installed on the host. Install with `sudo apt-get install iperf3`.
+- **openssl**: Required for TLS certificate generation (needed when running TLS-enabled scenarios). Install with `sudo apt-get install openssl`.
 
 ## One-Command Run (Recommended)
 

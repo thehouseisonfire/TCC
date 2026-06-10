@@ -106,6 +106,10 @@ def _rust_loadgen_cmd(
     control_repeat: int = 1,
     control_qos: int = 1,
     control_after_messages: int = 0,
+    runtime_control_username: str | None = None,
+    runtime_control_password: MqttPassword | None = None,
+    runtime_control_after_messages: int = 0,
+    runtime_control_expect_denial: bool = False,
     fanout_churn_kind: str | None = None,
     fanout_churn_after_messages: int = 0,
     fanout_churn_interval_messages: int = 0,
@@ -205,6 +209,14 @@ def _rust_loadgen_cmd(
         cmd.extend(["--control-qos", str(control_qos)])
     if control_after_messages > 0:
         cmd.extend(["--control-after-messages", str(control_after_messages)])
+    if runtime_control_username:
+        cmd.extend(["--runtime-control-username", runtime_control_username])
+    if runtime_control_password is not None:
+        cmd.extend(["--runtime-control-password", _password_cli_arg(runtime_control_password)])
+    if runtime_control_after_messages > 0:
+        cmd.extend(["--runtime-control-after-messages", str(runtime_control_after_messages)])
+    if runtime_control_expect_denial:
+        cmd.append("--runtime-control-expect-denial")
     if token_issuer_url:
         cmd.extend(["--token-issuer-url", token_issuer_url])
     if token_issuer_kind:

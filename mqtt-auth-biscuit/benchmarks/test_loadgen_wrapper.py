@@ -154,6 +154,10 @@ def test_rust_loadgen_command_forwards_programmatic_transition_options(monkeypat
         control_repeat=3,
         control_qos=2,
         control_after_messages=4,
+        runtime_control_username="admin",
+        runtime_control_password=b"admin-token",
+        runtime_control_after_messages=10,
+        runtime_control_expect_denial=True,
         fanout_churn_kind="dynamic_security_control",
         fanout_churn_after_messages=2,
         fanout_churn_interval_messages=3,
@@ -233,6 +237,10 @@ def test_rust_loadgen_command_forwards_programmatic_transition_options(monkeypat
     assert _argv_value(argv, "--control-repeat") == "3"
     assert _argv_value(argv, "--control-qos") == "2"
     assert _argv_value(argv, "--control-after-messages") == "4"
+    assert _argv_value(argv, "--runtime-control-username") == "admin"
+    assert _argv_value(argv, "--runtime-control-password") == "b64:YWRtaW4tdG9rZW4"
+    assert _argv_value(argv, "--runtime-control-after-messages") == "10"
+    assert "--runtime-control-expect-denial" in argv
     assert _argv_value(argv, "--fanout-churn-kind") == "dynamic_security_control"
     assert _argv_value(argv, "--fanout-churn-after-messages") == "2"
     assert _argv_value(argv, "--fanout-churn-interval-messages") == "3"

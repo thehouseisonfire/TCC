@@ -176,6 +176,11 @@ def _upsert_client(
     return client_entry
 
 
+def _clear_client_id_pin(payload: dict[str, Any], *, username: str) -> None:
+    client = _upsert_client(payload, username=username)
+    client.pop("clientid", None)
+
+
 def _upsert_client_role(
     payload: dict[str, Any],
     *,
@@ -246,9 +251,9 @@ def _add_control_data_identity(payload: dict[str, Any], username: str) -> None:
 
 
 def build_dynsec_snapshot(profile: str) -> dict[str, Any]:
-    if profile == "fanout_control_allow":
+    if profile in {"fanout_control_allow"}:
         payload = read_dynsec_snapshot("docker/dynamic-security-fanout-read-allow-unpinned.json")
-    elif profile in {
+    elif profile == "publish_multi_client_base" or profile in {
         "control_admin_base",
         "control_interleaved_base",
         "fanout_control_noop_group",
@@ -268,6 +273,9 @@ def build_dynsec_snapshot(profile: str) -> dict[str, Any]:
         )
     else:
         _add_control_admin_identity(payload)
+
+    if profile == "publish_multi_client_base":
+        _clear_client_id_pin(payload, username="dynsec_client_1")
 
     if profile == "control_interleaved_base":
         _add_control_data_identity(payload, "jwt")

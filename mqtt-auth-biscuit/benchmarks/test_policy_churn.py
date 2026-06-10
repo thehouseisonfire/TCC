@@ -285,6 +285,32 @@ def test_build_dynsec_snapshot_noop_group_seeds_existing_reader_membership() -> 
     assert admin_client["roles"] == [{"rolename": policy_churn.CONTROL_ADMIN_ROLE, "priority": 0}]
 
 
+def test_build_dynsec_snapshot_publish_multi_client_profiles_remove_client_pin() -> None:
+    payload = policy_churn.build_dynsec_snapshot("publish_multi_client_base")
+    clients = payload["clients"]
+    roles = payload["roles"]
+    assert isinstance(clients, list)
+    assert isinstance(roles, list)
+
+    dynsec_client = next(
+        client for client in clients if client.get("username") == "dynsec_client_1"
+    )
+    assert "clientid" not in dynsec_client
+    assert dynsec_client["roles"] == [{"rolename": "sensor_writer", "priority": 0}]
+
+    admin_client = next(client for client in clients if client.get("username") == "admin")
+    assert admin_client["roles"] == [{"rolename": policy_churn.CONTROL_ADMIN_ROLE, "priority": 0}]
+    admin_role = next(
+        role for role in roles if role.get("rolename") == policy_churn.CONTROL_ADMIN_ROLE
+    )
+    assert {
+        "acltype": "publishClientSend",
+        "topic": "$CONTROL/dynamic-security/v1",
+        "priority": 0,
+        "allow": True,
+    } in admin_role["acls"]
+
+
 def test_build_dynsec_snapshot_large_state_adds_deterministic_bulk_entities() -> None:
     payload = policy_churn.build_dynsec_snapshot("large_state_control")
 

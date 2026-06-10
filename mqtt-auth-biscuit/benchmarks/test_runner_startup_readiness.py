@@ -10,6 +10,160 @@ from benchmarks import run_scenarios as rs
 from benchmarks.perf_profiler import PerfConfig
 
 
+def test_restore_dynamic_security_baseline_removes_file_when_baseline_was_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    dynamic_security_path = tmp_path / "dynamic-security.json"
+    dynamic_security_path.write_text('{"clients":[]}', encoding="utf-8")
+    monkeypatch.setattr(rs, "_resolve_repo_path", lambda _path: dynamic_security_path)
+
+    rs._restore_dynamic_security_baseline(None)
+
+    assert not dynamic_security_path.exists()
+
+
+def test_dynamic_security_scenario_config_cleans_up_after_startup_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+    scenario: rs.ScenarioConfig = {
+        "id": "DYNSEC-STARTUP-FAILURE",
+        "mosquitto_conf": "./mosquitto.conf",
+        "dynamic_security_generated_profile": "test-profile",
+    }
+
+    def generate(profile: str) -> str:
+        calls.append(("generate", profile))
+        return "/tmp/generated-dynsec.json"
+
+    monkeypatch.setattr(rs, "_capture_dynamic_security_baseline", lambda: b"baseline")
+    monkeypatch.setattr(rs, "_generate_dynamic_security_config", generate)
+    monkeypatch.setattr(
+        rs,
+        "_apply_dynamic_security_config",
+        lambda path: calls.append(("apply", path)),
+    )
+    monkeypatch.setattr(
+        rs.policy_churn,
+        "cleanup_dynsec_snapshot",
+        lambda path: calls.append(("cleanup", path)),
+    )
+    monkeypatch.setattr(
+        rs,
+        "_restore_dynamic_security_baseline",
+        lambda baseline: calls.append(("restore", baseline)),
+    )
+
+    with (
+        pytest.raises(RuntimeError, match="compose startup failed"),
+        rs._dynamic_security_scenario_config(scenario),
+    ):
+        raise RuntimeError("compose startup failed")
+
+    assert calls == [
+        ("generate", "test-profile"),
+        ("apply", "/tmp/generated-dynsec.json"),
+        ("cleanup", "/tmp/generated-dynsec.json"),
+        ("restore", b"baseline"),
+    ]
+
+
+def test_dynamic_security_scenario_config_restarts_after_restoring_live_broker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    scenario: rs.ScenarioConfig = {
+        "id": "DYNAMIC-SECURITY-CHURN",
+        "mosquitto_conf": "./mosquitto_dynsec.conf",
+        "dynamic_security_generated_profile": "dynsec_multi_client",
+        "runtime_control_username": "admin",
+    }
+    monkeypatch.setattr(rs, "_capture_dynamic_security_baseline", lambda: b"baseline")
+    monkeypatch.setattr(
+        rs,
+        "_generate_dynamic_security_config",
+        lambda _profile: "/tmp/generated.json",
+    )
+    monkeypatch.setattr(rs, "_apply_dynamic_security_config", lambda _path: None)
+    monkeypatch.setattr(rs.policy_churn, "cleanup_dynsec_snapshot", lambda _path: None)
+    monkeypatch.setattr(
+        rs,
+        "_restore_dynamic_security_baseline",
+        lambda _baseline: calls.append("restore"),
+    )
+    monkeypatch.setattr(
+        rs,
+        "_restart_mosquitto",
+        lambda **_kwargs: calls.append("restart"),
+    )
+
+    with rs._dynamic_security_scenario_config(
+        scenario,
+        extra_env={"MOSQUITTO_CONF": "./mosquitto_dynsec.conf"},
+        compose_files=["docker/docker-compose.yml"],
+    ) as state:
+        state.broker_started = True
+
+    assert calls == ["restore", "restart"]
+
+
+def test_generated_dynamic_security_is_reset_only_between_repeats(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        rs,
+        "_apply_dynamic_security_config",
+        lambda path: calls.append(("apply", path)),
+    )
+    monkeypatch.setattr(
+        rs,
+        "_restart_mosquitto",
+        lambda **kwargs: calls.append(("restart", kwargs)),
+    )
+    extra_env: dict[str, str] = {"MOSQUITTO_CONF": "./mosquitto_dynsec.conf"}
+    compose_files: list[str] = ["docker/docker-compose.yml"]
+    host = "localhost"
+    port = 1883
+
+    rs._reset_generated_dynamic_security_between_repeats(
+        0,
+        "/tmp/seed.json",
+        extra_env=extra_env,
+        compose_files=compose_files,
+        host=host,
+        port=port,
+    )
+    rs._reset_generated_dynamic_security_between_repeats(
+        1,
+        "/tmp/seed.json",
+        extra_env=extra_env,
+        compose_files=compose_files,
+        host=host,
+        port=port,
+    )
+    rs._reset_generated_dynamic_security_between_repeats(
+        2,
+        None,
+        extra_env=extra_env,
+        compose_files=compose_files,
+        host=host,
+        port=port,
+    )
+
+    expected_kwargs = {
+        "extra_env": extra_env,
+        "compose_files": compose_files,
+        "host": host,
+        "port": port,
+    }
+    assert calls == [
+        ("apply", "/tmp/seed.json"),
+        ("restart", expected_kwargs),
+    ]
+
+
 def test_python_subprocess_env_prepends_repo_root(monkeypatch) -> None:
     monkeypatch.setenv("PYTHONPATH", "/tmp/existing")
 
@@ -1222,3 +1376,137 @@ def test_container_per_client_sync_connect_uses_cross_container_barrier(
     assert result["sync_connect"]["ready_count"] == 2
     assert result["sync_connect"]["max_ready_skew_ms"] == pytest.approx(12.4)
     assert result["sync_connect"]["client_wait"]["count"] == 2
+
+
+def test_container_per_client_runtime_control_uses_one_coordinated_controller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    publisher_commands: list[list[str]] = []
+    run_commands: list[list[str]] = []
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, cmd, **kwargs) -> None:  # noqa: ANN001
+            publisher_commands.append(cmd)
+
+        def poll(self) -> None:
+            return None
+
+        def communicate(self) -> tuple[str, str]:
+            return (
+                '{"inputs":{"clients":1},"connect":{"count":1},'
+                '"publish":{"count":2},"raw_publish_ms":[1.0,2.0],'
+                '"raw_metrics":{"connect":[3.0],"publish":[1.0,2.0],'
+                '"receive":[],"control":[],"policy_denial_count":1},'
+                '"errors":[],"throughput_mps":1.0,'
+                '"publish_throughput_mps":1.0,"receive_throughput_mps":0.0}',
+                "",
+            )
+
+    class Completed:
+        returncode = 0
+        stdout = (
+            '{"connect":{"count":1},"control":{"count":1},'
+            '"raw_metrics":{"connect":[99.0],"control":[4.0]},'
+            '"errors":[]}'
+        )
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001
+        run_commands.append(cmd)
+        return Completed()
+
+    monkeypatch.setattr(rs.subprocess, "run", fake_run)
+    monkeypatch.setattr(rs.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(rs, "_sync_barrier_run_id", lambda *_args: "runtime-run")
+    monkeypatch.setattr(rs, "_ensure_sync_barrier_service", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        rs,
+        "_wait_for_sync_barrier_ready",
+        lambda *_args, **_kwargs: {"ready_count": 2},
+    )
+    monkeypatch.setattr(
+        rs,
+        "_release_sync_barrier",
+        lambda *_args, **_kwargs: {
+            "ready_count": 2,
+            "released_at_unix_ms": 1760000000000,
+        },
+    )
+
+    args = [
+        "--host",
+        "mosquitto",
+        "--port",
+        "1883",
+        "--username",
+        "dynsec_client_1",
+        "--password",
+        "publisher-password",
+        "--password-map-profile",
+        "jwt",
+        "--clients",
+        "2",
+        "--messages",
+        "5",
+        "--topic",
+        "sensors/{client_id}/temp",
+        "--qos",
+        "1",
+        "--message-size",
+        "0",
+        "--json",
+        "--control-topic",
+        "$CONTROL/dynamic-security/v1",
+        "--control-payload",
+        "{}",
+        "--runtime-control-username",
+        "admin",
+        "--runtime-control-password",
+        "admin-password",
+        "--runtime-control-after-messages",
+        "4",
+        "--runtime-control-expect-denial",
+    ]
+    result = rs._run_loadgen_container_per_client(
+        args,
+        clients=2,
+        service="loadgen",
+        scenario_id="DYNAMIC-SECURITY-CHURN",
+        run_index=0,
+        compose_files=["docker/docker-compose.yml"],
+        compose_project_name="bench",
+        extra_env={},
+        sync_connect=False,
+        runtime_control=rs.PerClientRuntimeControl(
+            username="admin",
+            password="admin-password",
+            after_messages=4,
+            expect_denial=True,
+        ),
+    )
+
+    assert len(publisher_commands) == 2
+    assert all("--runtime-control-username" not in cmd for cmd in publisher_commands)
+    assert all("--runtime-control-barrier-url" in cmd for cmd in publisher_commands)
+    assert {
+        cmd[cmd.index("--runtime-control-local-after-messages") + 1] for cmd in publisher_commands
+    } == {"2"}
+    controller_commands = [cmd for cmd in run_commands if "--control-mode" in cmd]
+    assert len(controller_commands) == 1
+    assert (
+        controller_commands[0][controller_commands[0].index("--client-id") + 1]
+        == "runtime-dynsec-controller"
+    )
+    assert "--password-map-profile" not in controller_commands[0]
+    assert result["connect"]["count"] == 2
+    assert result["raw_metrics"]["runtime_control_connect_ms"] == pytest.approx(99.0)
+    assert result["control"]["count"] == 1
+    assert result["policy_denial_count"] == 2
+    assert result["runtime_control"]["local_quotas"] == [2, 2]
+
+
+def test_runtime_control_quotas_preserve_exact_aggregate_threshold() -> None:
+    assert rs._runtime_control_quotas(clients=3, after_messages=2) == [1, 1, 0]
+    assert sum(rs._runtime_control_quotas(clients=4, after_messages=11)) == 11

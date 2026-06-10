@@ -112,6 +112,8 @@ struct Args {
     clients: usize,
     #[arg(long, env = "MQTT_CLIENT_INDEX_START", default_value_t = 1)]
     client_index_start: usize,
+    #[arg(long, env = "MQTT_CLIENT_ID")]
+    client_id: Option<String>,
     #[arg(long, env = "MQTT_MESSAGES", default_value_t = 50)]
     messages: usize,
     #[arg(long, env = "MQTT_TOPIC", default_value = "sensors/{client_id}/temp")]
@@ -172,6 +174,30 @@ struct Args {
     control_qos: u8,
     #[arg(long, env = "MQTT_CONTROL_AFTER_MESSAGES", default_value_t = 0)]
     control_after_messages: usize,
+    #[arg(long, env = "MQTT_RUNTIME_CONTROL_USERNAME")]
+    runtime_control_username: Option<String>,
+    #[arg(long, env = "MQTT_RUNTIME_CONTROL_PASSWORD")]
+    runtime_control_password: Option<String>,
+    #[arg(long, env = "MQTT_RUNTIME_CONTROL_AFTER_MESSAGES", default_value_t = 0)]
+    runtime_control_after_messages: usize,
+    #[arg(long, env = "MQTT_RUNTIME_CONTROL_EXPECT_DENIAL")]
+    runtime_control_expect_denial: bool,
+    #[arg(long, env = "MQTT_RUNTIME_CONTROL_BARRIER_URL")]
+    runtime_control_barrier_url: Option<String>,
+    #[arg(long, env = "MQTT_RUNTIME_CONTROL_RUN_ID")]
+    runtime_control_run_id: Option<String>,
+    #[arg(long, env = "MQTT_RUNTIME_CONTROL_PARTICIPANT_ID")]
+    runtime_control_participant_id: Option<String>,
+    #[arg(long, env = "MQTT_RUNTIME_CONTROL_PARTICIPANTS")]
+    runtime_control_participants: Option<usize>,
+    #[arg(long, env = "MQTT_RUNTIME_CONTROL_LOCAL_AFTER_MESSAGES")]
+    runtime_control_local_after_messages: Option<usize>,
+    #[arg(
+        long,
+        env = "MQTT_RUNTIME_CONTROL_BARRIER_TIMEOUT_SECONDS",
+        default_value_t = 120
+    )]
+    runtime_control_barrier_timeout_seconds: u64,
     #[arg(long)]
     json: bool,
     #[arg(long, env = "MQTT_OUTPUT_JSON_FILE")]
@@ -377,6 +403,7 @@ struct WorkerResult {
     proactive_refresh_failures: usize,
     proactive_refresh_attempt_unix_ms: Vec<u128>,
     expiry_denial_count: usize,
+    policy_denial_count: usize,
     delegation_ms: Option<f64>,
     delegation_len: Option<f64>,
     attenuation_ms: Option<f64>,
@@ -411,6 +438,7 @@ struct WorkerInvocation {
     sync_connect: Option<Arc<SyncConnectGate>>,
     publish_gate: Option<Arc<PublishStartGate>>,
     reauth_storm: Option<Arc<ReauthStormGate>>,
+    runtime_control: Option<Arc<RuntimeControlState>>,
 }
 
 struct StandardMetrics {
@@ -424,6 +452,8 @@ struct StandardMetrics {
     proactive_refresh_failures: usize,
     proactive_refresh_attempt_unix_ms: Vec<u128>,
     expiry_denial_count: usize,
+    policy_denial_count: usize,
+    runtime_control_connect_ms: Option<f64>,
     delegation: Vec<f64>,
     delegation_len: Vec<f64>,
     delegation_handoff_publish: Vec<f64>,
@@ -441,6 +471,14 @@ struct StandardMetrics {
     errors: Vec<String>,
     publish_throughput_mps: f64,
     receive_throughput_mps: f64,
+}
+
+#[derive(Debug, Default)]
+struct RuntimeControlState {
+    successful_publishes: AtomicUsize,
+    publishers_finished: AtomicBool,
+    applied: AtomicBool,
+    progress: Notify,
 }
 
 #[derive(Debug, Clone)]
@@ -698,6 +736,69 @@ fn external_sync_barrier(args: &Args) -> Result<Option<ExternalSyncBarrier>> {
         participants,
         timeout: Duration::from_secs(args.sync_connect_barrier_timeout_seconds.max(1)),
     }))
+}
+
+fn external_runtime_control_barrier(args: &Args) -> Result<Option<(ExternalSyncBarrier, usize)>> {
+    let fields_set = [
+        args.runtime_control_barrier_url.is_some(),
+        args.runtime_control_run_id.is_some(),
+        args.runtime_control_participant_id.is_some(),
+        args.runtime_control_participants.is_some(),
+        args.runtime_control_local_after_messages.is_some(),
+    ];
+    if fields_set.iter().all(|set| !set) {
+        return Ok(None);
+    }
+    if fields_set.iter().any(|set| !set) {
+        return Err(MqttHelperError::Message(
+            "external runtime control requires barrier_url, run_id, participant_id, participants, and local_after_messages"
+                .to_string(),
+        ));
+    }
+    if args.runtime_control_username.is_some() {
+        return Err(MqttHelperError::Message(
+            "external runtime control cannot be combined with an in-process runtime controller"
+                .to_string(),
+        ));
+    }
+    if args.clients != 1 {
+        return Err(MqttHelperError::Message(
+            "external runtime control requires --clients 1".to_string(),
+        ));
+    }
+    let participants = args.runtime_control_participants.unwrap_or_default();
+    if participants == 0 {
+        return Err(MqttHelperError::Message(
+            "runtime_control_participants must be greater than zero".to_string(),
+        ));
+    }
+    let local_after_messages = args
+        .runtime_control_local_after_messages
+        .unwrap_or_default();
+    if local_after_messages > args.messages {
+        return Err(MqttHelperError::Message(format!(
+            "runtime control local after-messages ({local_after_messages}) exceeds configured messages ({})",
+            args.messages
+        )));
+    }
+    Ok(Some((
+        ExternalSyncBarrier {
+            url: args
+                .runtime_control_barrier_url
+                .clone()
+                .unwrap_or_default()
+                .trim_end_matches('/')
+                .to_string(),
+            run_id: args.runtime_control_run_id.clone().unwrap_or_default(),
+            participant_id: args
+                .runtime_control_participant_id
+                .clone()
+                .unwrap_or_default(),
+            participants,
+            timeout: Duration::from_secs(args.runtime_control_barrier_timeout_seconds.max(1)),
+        },
+        local_after_messages,
+    )))
 }
 
 async fn wait_external_sync_barrier(
@@ -961,6 +1062,37 @@ fn validate_startup_provisioning(args: &Args) -> Result<()> {
             "client_index_start must be greater than zero".to_string(),
         ));
     }
+    if args.client_id.is_some() && args.clients != 1 {
+        return Err(MqttHelperError::Message(
+            "client_id override requires --clients 1".to_string(),
+        ));
+    }
+    if args.runtime_control_username.is_some() {
+        if args.runtime_control_after_messages == 0 {
+            return Err(MqttHelperError::Message(
+                "runtime control after-messages must be greater than zero".to_string(),
+            ));
+        }
+        let publish_capacity = args.clients.checked_mul(args.messages).ok_or_else(|| {
+            MqttHelperError::Message(
+                "runtime control publish capacity overflowed clients * messages".to_string(),
+            )
+        })?;
+        if args.runtime_control_after_messages > publish_capacity {
+            return Err(MqttHelperError::Message(format!(
+                "runtime control after-messages ({}) exceeds configured publish capacity ({publish_capacity})",
+                args.runtime_control_after_messages
+            )));
+        }
+        if args.runtime_control_expect_denial
+            && args.runtime_control_after_messages >= publish_capacity
+        {
+            return Err(MqttHelperError::Message(format!(
+                "runtime control expected-denial mode requires after-messages ({}) to be below configured publish capacity ({publish_capacity})",
+                args.runtime_control_after_messages
+            )));
+        }
+    }
     if !matches!(
         args.biscuit_delegate_handoff_role.as_str(),
         "combined" | "delegator" | "delegatee"
@@ -1000,6 +1132,7 @@ fn validate_startup_provisioning(args: &Args) -> Result<()> {
         ));
     }
     external_sync_barrier(args)?;
+    external_runtime_control_barrier(args)?;
     if !matches!(
         args.fanout_role.as_str(),
         "combined" | "publisher" | "subscriber"
@@ -1610,6 +1743,9 @@ fn expand_client_template(value: &str, client_id: &str) -> String {
 }
 
 fn client_id_for(args: &Args, index: usize) -> String {
+    if let Some(client_id) = &args.client_id {
+        return client_id.clone();
+    }
     format!("client_{}", args.client_index_start + index)
 }
 
@@ -2094,6 +2230,9 @@ fn inputs_json(
             "repeat": args.control_repeat,
             "qos": args.control_qos,
             "after_messages": args.control_after_messages,
+            "runtime_username": args.runtime_control_username,
+            "runtime_after_messages": args.runtime_control_after_messages,
+            "runtime_expect_denial": args.runtime_control_expect_denial,
         },
         "fanout_churn": {
             "kind": args.fanout_churn_kind,
@@ -3743,9 +3882,32 @@ async fn run_publish_mode(
     args: &Args,
     client: &AsyncClient,
     plan: WorkerPublishPlan<'_>,
+    runtime_control: Option<&RuntimeControlState>,
     result: &mut WorkerResult,
 ) {
     let mut since_control = 0usize;
+    let external_runtime_control = match external_runtime_control_barrier(args) {
+        Ok(barrier) => barrier,
+        Err(err) => {
+            result
+                .errors
+                .push(format!("runtime_control_barrier_config_failed:{err}"));
+            return;
+        }
+    };
+    let mut local_successful_publishes = 0usize;
+    let mut external_policy_applied = false;
+    if let Some((barrier, 0)) = external_runtime_control.as_ref() {
+        match wait_external_sync_barrier(barrier).await {
+            Ok(_) => external_policy_applied = true,
+            Err(err) => {
+                result
+                    .errors
+                    .push(format!("runtime_control_barrier_failed:{err}"));
+                return;
+            }
+        }
+    }
     for _ in 0..args.messages {
         if args.control_after_messages > 0 && since_control >= args.control_after_messages {
             if let Some(topic) = plan.control_topic {
@@ -3778,9 +3940,48 @@ async fn run_publish_mode(
                 if let Some(bucket) = result.publish_by_qos.get_mut(usize::from(publish_qos)) {
                     bucket.push(ms);
                 }
+                if let Some(runtime_control) = runtime_control {
+                    let total = runtime_control
+                        .successful_publishes
+                        .fetch_add(1, Ordering::AcqRel)
+                        + 1;
+                    runtime_control.progress.notify_waiters();
+                    if total >= args.runtime_control_after_messages {
+                        while !runtime_control.applied.load(Ordering::Acquire) {
+                            let notified = runtime_control.progress.notified();
+                            if runtime_control.applied.load(Ordering::Acquire) {
+                                break;
+                            }
+                            notified.await;
+                        }
+                    }
+                }
+                local_successful_publishes += 1;
+                if let Some((barrier, local_after_messages)) = external_runtime_control.as_ref()
+                    && !external_policy_applied
+                    && local_successful_publishes >= *local_after_messages
+                {
+                    match wait_external_sync_barrier(barrier).await {
+                        Ok(_) => external_policy_applied = true,
+                        Err(err) => {
+                            result
+                                .errors
+                                .push(format!("runtime_control_barrier_failed:{err}"));
+                            return;
+                        }
+                    }
+                }
             }
             Err(err) => {
-                result.errors.push(format!("publish_failed:{err}"));
+                if args.runtime_control_expect_denial
+                    && (runtime_control.is_some_and(|state| state.applied.load(Ordering::Acquire))
+                        || external_policy_applied)
+                    && expiry_denial_error(&err.to_string())
+                {
+                    result.policy_denial_count += 1;
+                } else {
+                    result.errors.push(format!("publish_failed:{err}"));
+                }
                 break;
             }
         }
@@ -3794,12 +3995,18 @@ async fn run_worker_session(
     topic: &str,
     qos_distribution: Option<&QosDistribution>,
     client: &AsyncClient,
+    runtime_control: Option<&RuntimeControlState>,
     result: &mut WorkerResult,
 ) {
     let control_topic = args
-        .control_topic
-        .as_deref()
-        .map(|topic| expand_client_template(topic, client_id));
+        .runtime_control_username
+        .is_none()
+        .then(|| {
+            args.control_topic
+                .as_deref()
+                .map(|topic| expand_client_template(topic, client_id))
+        })
+        .flatten();
     let control_payload = expand_control_payload(&load_control_payload(args, result), client_id);
     let data_payload = vec![b'A'; args.message_size];
     if args.control_mode {
@@ -3822,6 +4029,7 @@ async fn run_worker_session(
                 data_payload: &data_payload,
                 qos_distribution,
             },
+            runtime_control,
             result,
         )
         .await;
@@ -3861,6 +4069,7 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
         sync_connect,
         publish_gate,
         reauth_storm,
+        runtime_control,
     } = job;
     let mut result = WorkerResult::default();
     let mut publish_gate_participant = PublishGateParticipant::new(publish_gate);
@@ -3994,6 +4203,7 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
         &topic,
         qos_distribution.as_ref(),
         &client,
+        runtime_control.as_deref(),
         &mut result,
     )
     .await;
@@ -4064,6 +4274,7 @@ fn standard_metrics(
         .flat_map(|r| r.proactive_refresh_attempt_unix_ms.clone())
         .collect();
     let expiry_denial_count = results.iter().map(|r| r.expiry_denial_count).sum();
+    let policy_denial_count = results.iter().map(|r| r.policy_denial_count).sum();
     let delegation = results.iter().filter_map(|r| r.delegation_ms).collect();
     let delegation_len = results.iter().filter_map(|r| r.delegation_len).collect();
     let attenuation = results.iter().filter_map(|r| r.attenuation_ms).collect();
@@ -4113,6 +4324,8 @@ fn standard_metrics(
         proactive_refresh_failures,
         proactive_refresh_attempt_unix_ms,
         expiry_denial_count,
+        policy_denial_count,
+        runtime_control_connect_ms: None,
         delegation,
         delegation_len,
         delegation_handoff_publish: handoff_publish_ms,
@@ -4129,6 +4342,12 @@ fn standard_metrics(
         sync_barrier_released_at_unix_ms,
         errors,
     }
+}
+
+fn merge_runtime_control_result(metrics: &mut StandardMetrics, result: WorkerResult) {
+    metrics.runtime_control_connect_ms = result.connect_ms;
+    metrics.control.extend(result.control_ms);
+    metrics.errors.extend(result.errors);
 }
 
 fn max_timestamp_skew_ms(values: &[u128]) -> Option<f64> {
@@ -4173,6 +4392,8 @@ fn standard_output(
         "proactive_refresh": metrics.proactive_refresh.clone(),
         "proactive_refresh_len": metrics.proactive_refresh_len.clone(),
         "proactive_refresh_attempt_unix_ms": metrics.proactive_refresh_attempt_unix_ms.clone(),
+        "policy_denial_count": metrics.policy_denial_count,
+        "runtime_control_connect_ms": metrics.runtime_control_connect_ms,
         "delegation": metrics.delegation.clone(),
         "delegation_len": metrics.delegation_len.clone(),
         "delegation_handoff_publish": metrics.delegation_handoff_publish.clone(),
@@ -4248,6 +4469,112 @@ fn standard_output(
     }
 }
 
+async fn wait_for_runtime_control_threshold(state: &RuntimeControlState, threshold: usize) -> bool {
+    while state.successful_publishes.load(Ordering::Acquire) < threshold
+        && !state.publishers_finished.load(Ordering::Acquire)
+    {
+        let notified = state.progress.notified();
+        if state.successful_publishes.load(Ordering::Acquire) >= threshold
+            || state.publishers_finished.load(Ordering::Acquire)
+        {
+            break;
+        }
+        notified.await;
+    }
+    state.successful_publishes.load(Ordering::Acquire) >= threshold
+}
+
+async fn spawn_runtime_control(
+    args: &Args,
+    state: Arc<RuntimeControlState>,
+) -> Result<tokio::task::JoinHandle<WorkerResult>> {
+    let username = args.runtime_control_username.as_deref().ok_or_else(|| {
+        MqttHelperError::Message("runtime control username is required".to_string())
+    })?;
+    let password = args.runtime_control_password.as_deref().ok_or_else(|| {
+        MqttHelperError::Message("runtime control password is required".to_string())
+    })?;
+    let topic = args
+        .control_topic
+        .as_deref()
+        .ok_or_else(|| MqttHelperError::Message("runtime control topic is required".to_string()))?;
+    if args.runtime_control_after_messages == 0 {
+        return Err(MqttHelperError::Message(
+            "runtime control after-messages must be greater than zero".to_string(),
+        ));
+    }
+
+    let mut payload_result = WorkerResult::default();
+    let payload = load_control_payload(args, &mut payload_result);
+    if !payload_result.errors.is_empty() {
+        return Err(MqttHelperError::Message(payload_result.errors.join(",")));
+    }
+    let spec = ClientSpec {
+        host: args.host.clone(),
+        port: args.port,
+        client_id: "runtime-dynsec-controller".to_string(),
+        username: username.to_string(),
+        password: decode_token_arg(password)?,
+        tls: args.tls,
+        tls_ca_file: args.tls_ca_file.clone(),
+        tls_insecure: args.tls_insecure,
+        auth_method: None,
+        auth_data: None,
+    };
+    let (client, eventloop, report) = connect(&spec).await?;
+    if !report.connect_ok {
+        return Err(MqttHelperError::Message(format!(
+            "runtime control connect rejected with reason {:?}",
+            report.connect_reason
+        )));
+    }
+
+    let topic = topic.to_string();
+    let control_qos = args.control_qos;
+    let threshold = args.runtime_control_after_messages;
+    Ok(tokio::spawn(async move {
+        let mut result = WorkerResult {
+            connect_ms: Some(report.connect_ms),
+            ..WorkerResult::default()
+        };
+        let shutdown = Arc::new(Notify::new());
+        let shutdown_requested = Arc::new(AtomicBool::new(false));
+        let eventloop_task = tokio::spawn(drive_worker_eventloop(
+            eventloop,
+            Arc::clone(&shutdown),
+            Arc::clone(&shutdown_requested),
+        ));
+
+        if wait_for_runtime_control_threshold(&state, threshold).await {
+            match publish_tracked_and_wait(&client, &topic, payload, control_qos).await {
+                Ok(ms) => result.control_ms.push(ms),
+                Err(err) => result
+                    .errors
+                    .push(format!("runtime_control_publish_failed:{err}")),
+            }
+        } else {
+            let successful_publishes = state.successful_publishes.load(Ordering::Acquire);
+            result.errors.push(format!(
+                "runtime_control_threshold_unreachable:required={threshold},successful={successful_publishes}"
+            ));
+        }
+        state.applied.store(true, Ordering::Release);
+        state.progress.notify_waiters();
+
+        let _ = client.disconnect().await;
+        shutdown_requested.store(true, Ordering::Release);
+        shutdown.notify_waiters();
+        match eventloop_task.await {
+            Ok(Some(err)) => result.errors.push(err),
+            Ok(None) => {}
+            Err(err) => result
+                .errors
+                .push(format!("runtime_control_eventloop_join_failed:{err}")),
+        }
+        result
+    }))
+}
+
 async fn run_standard_mode(
     args: Args,
     qos_distribution: Option<QosDistribution>,
@@ -4271,6 +4598,15 @@ async fn run_standard_mode(
     let reauth_storm = args
         .reauth_storm
         .then(|| Arc::new(ReauthStormGate::new(args.clients)));
+    let runtime_control = args
+        .runtime_control_username
+        .as_ref()
+        .map(|_| Arc::new(RuntimeControlState::default()));
+    let runtime_control_task = if let Some(state) = &runtime_control {
+        Some(spawn_runtime_control(&args, Arc::clone(state)).await?)
+    } else {
+        None
+    };
     for index in 0..args.clients {
         let client_id = client_id_for(&args, index);
         let bootstrap = handoff_plan
@@ -4287,6 +4623,7 @@ async fn run_standard_mode(
             sync_connect: sync_connect.clone(),
             publish_gate: publish_gate.clone(),
             reauth_storm: reauth_storm.clone(),
+            runtime_control: runtime_control.clone(),
         })));
     }
 
@@ -4304,14 +4641,31 @@ async fn run_standard_mode(
         start
     };
     let results = collect_worker_results(tasks).await;
+    if let Some(state) = &runtime_control {
+        state.publishers_finished.store(true, Ordering::Release);
+        state.progress.notify_waiters();
+    }
     let duration_s = start.elapsed().as_secs_f64().max(1e-9);
-    let metrics = standard_metrics(
+    let mut metrics = standard_metrics(
         results,
         duration_s,
         handoff_plan.as_ref(),
         handoff_publish_ms,
         handoff_errors,
     );
+    if let Some(task) = runtime_control_task {
+        match task.await {
+            Ok(result) => merge_runtime_control_result(&mut metrics, result),
+            Err(err) => metrics
+                .errors
+                .push(format!("runtime_control_join_failed:{err}")),
+        }
+    }
+    if args.runtime_control_expect_denial && metrics.policy_denial_count == 0 {
+        metrics
+            .errors
+            .push("runtime_control_expected_policy_denial_not_observed".to_string());
+    }
     let output = standard_output(
         &args,
         qos_distribution.as_ref(),
@@ -4335,6 +4689,8 @@ fn empty_standard_metrics() -> StandardMetrics {
         proactive_refresh_failures: 0,
         proactive_refresh_attempt_unix_ms: Vec::new(),
         expiry_denial_count: 0,
+        policy_denial_count: 0,
+        runtime_control_connect_ms: None,
         delegation: Vec::new(),
         delegation_len: Vec::new(),
         delegation_handoff_publish: Vec::new(),
@@ -4482,6 +4838,7 @@ async fn run_handoff_delegatee(
             sync_connect: None,
             publish_gate: None,
             reauth_storm: None,
+            runtime_control: None,
         })
         .await;
         results.push(result);
@@ -4644,6 +5001,8 @@ mod tests {
             proactive_refresh_failures: 0,
             proactive_refresh_attempt_unix_ms: Vec::new(),
             expiry_denial_count: 0,
+            policy_denial_count: 0,
+            runtime_control_connect_ms: None,
             delegation: Vec::new(),
             delegation_len: Vec::new(),
             delegation_handoff_publish: Vec::new(),
@@ -4677,6 +5036,179 @@ mod tests {
         let args = Args::parse_from(["mqtt-loadgen", "--client-index-start", "0"]);
 
         assert!(validate_startup_provisioning(&args).is_err());
+    }
+
+    #[test]
+    fn explicit_client_id_requires_single_client() {
+        let valid = Args::parse_from([
+            "mqtt-loadgen",
+            "--clients",
+            "1",
+            "--client-id",
+            "runtime-dynsec-controller",
+        ]);
+        let invalid = Args::parse_from([
+            "mqtt-loadgen",
+            "--clients",
+            "2",
+            "--client-id",
+            "runtime-dynsec-controller",
+        ]);
+
+        assert_eq!(client_id_for(&valid, 0), "runtime-dynsec-controller");
+        assert!(validate_startup_provisioning(&valid).is_ok());
+        assert!(validate_startup_provisioning(&invalid).is_err());
+    }
+
+    #[test]
+    fn runtime_control_threshold_cannot_exceed_publish_capacity() {
+        let args = Args::parse_from([
+            "mqtt-loadgen",
+            "--clients",
+            "2",
+            "--messages",
+            "3",
+            "--runtime-control-username",
+            "admin",
+            "--runtime-control-after-messages",
+            "7",
+        ]);
+
+        let err = validate_startup_provisioning(&args)
+            .expect_err("threshold above publish capacity should be rejected");
+        assert!(
+            err.to_string()
+                .contains("exceeds configured publish capacity")
+        );
+    }
+
+    #[test]
+    fn runtime_control_expected_denial_requires_post_control_publish_capacity() {
+        let denied = Args::parse_from([
+            "mqtt-loadgen",
+            "--clients",
+            "2",
+            "--messages",
+            "3",
+            "--runtime-control-username",
+            "admin",
+            "--runtime-control-after-messages",
+            "6",
+            "--runtime-control-expect-denial",
+        ]);
+        let allowed = Args::parse_from([
+            "mqtt-loadgen",
+            "--clients",
+            "2",
+            "--messages",
+            "3",
+            "--runtime-control-username",
+            "admin",
+            "--runtime-control-after-messages",
+            "6",
+        ]);
+
+        let err = validate_startup_provisioning(&denied)
+            .expect_err("expected-denial mode must reserve a post-control publish");
+        assert!(err.to_string().contains("requires after-messages"));
+        assert!(validate_startup_provisioning(&allowed).is_ok());
+    }
+
+    #[test]
+    fn external_runtime_control_requires_complete_single_client_configuration() {
+        let incomplete = Args::parse_from([
+            "mqtt-loadgen",
+            "--runtime-control-barrier-url",
+            "http://sync-barrier:8083",
+        ]);
+        assert!(external_runtime_control_barrier(&incomplete).is_err());
+
+        let valid = Args::parse_from([
+            "mqtt-loadgen",
+            "--clients",
+            "1",
+            "--messages",
+            "3",
+            "--runtime-control-barrier-url",
+            "http://sync-barrier:8083",
+            "--runtime-control-run-id",
+            "run-1",
+            "--runtime-control-participant-id",
+            "client_1",
+            "--runtime-control-participants",
+            "2",
+            "--runtime-control-local-after-messages",
+            "1",
+        ]);
+        assert!(external_runtime_control_barrier(&valid).unwrap().is_some());
+
+        let invalid_quota = Args::parse_from([
+            "mqtt-loadgen",
+            "--clients",
+            "1",
+            "--messages",
+            "3",
+            "--runtime-control-barrier-url",
+            "http://sync-barrier:8083",
+            "--runtime-control-run-id",
+            "run-1",
+            "--runtime-control-participant-id",
+            "client_1",
+            "--runtime-control-participants",
+            "2",
+            "--runtime-control-local-after-messages",
+            "4",
+        ]);
+        assert!(external_runtime_control_barrier(&invalid_quota).is_err());
+    }
+
+    #[test]
+    fn runtime_controller_is_excluded_from_worker_connection_metrics() {
+        let workers = vec![
+            WorkerResult {
+                connect_ms: Some(1.0),
+                ..WorkerResult::default()
+            },
+            WorkerResult {
+                connect_ms: Some(2.0),
+                ..WorkerResult::default()
+            },
+        ];
+        let mut metrics = standard_metrics(workers, 1.0, None, Vec::new(), Vec::new());
+        merge_runtime_control_result(
+            &mut metrics,
+            WorkerResult {
+                connect_ms: Some(99.0),
+                control_ms: vec![3.0],
+                errors: vec!["controller-warning".to_string()],
+                ..WorkerResult::default()
+            },
+        );
+
+        assert_eq!(metrics.connect, vec![1.0, 2.0]);
+        assert_eq!(metrics.runtime_control_connect_ms, Some(99.0));
+        assert_eq!(metrics.control, vec![3.0]);
+        assert_eq!(metrics.errors, vec!["controller-warning"]);
+    }
+
+    #[tokio::test]
+    async fn runtime_control_wait_can_be_released_when_publishers_finish_early() {
+        let state = Arc::new(RuntimeControlState::default());
+        let waiting_state = Arc::clone(&state);
+        let waiter =
+            tokio::spawn(
+                async move { wait_for_runtime_control_threshold(&waiting_state, 2).await },
+            );
+
+        state.successful_publishes.store(1, Ordering::Release);
+        state.publishers_finished.store(true, Ordering::Release);
+        state.progress.notify_waiters();
+
+        let reached = tokio::time::timeout(Duration::from_millis(100), waiter)
+            .await
+            .expect("runtime control waiter should stop")
+            .expect("runtime control waiter should not panic");
+        assert!(!reached);
     }
 
     #[test]

@@ -1,10 +1,14 @@
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast
 
@@ -58,6 +62,20 @@ SYNC_BARRIER_SERVICE = "sync-barrier"
 SYNC_BARRIER_CONTAINER_URL = "http://sync-barrier:8083"
 SYNC_BARRIER_HOST_URL = "http://localhost:8083"
 SYNC_BARRIER_TIMEOUT_SECONDS = 120
+
+
+@dataclass(frozen=True)
+class PerClientRuntimeControl:
+    username: str
+    password: str
+    after_messages: int
+    expect_denial: bool
+
+
+@dataclass
+class DynamicSecurityScenarioState:
+    generated_path: str | None
+    broker_started: bool = False
 
 
 def _resolve_rust_helper(binary: str) -> list[str]:
@@ -292,6 +310,10 @@ class ScenarioConfig(TypedDict, total=False):
     control_repeat: int
     # Issue 36: Interleaved control message support
     control_after_messages: int
+    runtime_control_username: str
+    runtime_control_password: str
+    runtime_control_after_messages: int
+    runtime_control_expect_denial: bool
     # Issue 19: ACL_READ fan-out subscriber count
     subscriber_count: int
     client_count: int
@@ -1023,6 +1045,10 @@ def _run_loadgen(
     control_mode: bool = False,
     control_after_messages: int = 0,
     control_repeat: int = 1,
+    runtime_control_username: str | None = None,
+    runtime_control_password: str | None = None,
+    runtime_control_after_messages: int = 0,
+    runtime_control_expect_denial: bool = False,
     fanout_churn_kind: str | None = None,
     fanout_churn_after_messages: int = 0,
     fanout_churn_interval_messages: int = 0,
@@ -1192,6 +1218,19 @@ def _run_loadgen(
         cmd.append("--control-mode")
     if control_after_messages > 0:
         cmd.extend(["--control-after-messages", str(control_after_messages)])
+    if runtime_control_username:
+        cmd.extend(["--runtime-control-username", runtime_control_username])
+    if runtime_control_password:
+        cmd.extend(
+            [
+                "--runtime-control-password",
+                _mark_biscuit_cli_token(tokens, runtime_control_password) or "",
+            ]
+        )
+    if runtime_control_after_messages > 0:
+        cmd.extend(["--runtime-control-after-messages", str(runtime_control_after_messages)])
+    if runtime_control_expect_denial:
+        cmd.append("--runtime-control-expect-denial")
     if control_repeat != 1:
         cmd.extend(["--control-repeat", str(control_repeat)])
     if fanout_churn_kind:
@@ -1310,6 +1349,16 @@ def _run_loadgen(
         compose_project_name=compose_project_name,
         extra_env=env,
         sync_connect=sync_connect,
+        runtime_control=(
+            PerClientRuntimeControl(
+                username=runtime_control_username,
+                password=_cli_option_value(loadgen_args, "--runtime-control-password") or "",
+                after_messages=runtime_control_after_messages,
+                expect_denial=runtime_control_expect_denial,
+            )
+            if runtime_control_username
+            else None
+        ),
     )
 
 
@@ -1398,6 +1447,20 @@ def _replace_cli_option(args: list[str], option: str, value: str) -> list[str]:
     return updated
 
 
+def _remove_cli_option(args: list[str], option: str) -> list[str]:
+    updated = list(args)
+    while option in updated:
+        index = updated.index(option)
+        del updated[index]
+        if index < len(updated):
+            del updated[index]
+    return updated
+
+
+def _remove_cli_flag(args: list[str], option: str) -> list[str]:
+    return [arg for arg in args if arg != option]
+
+
 def _append_cli_option(args: list[str], option: str, value: str) -> list[str]:
     updated = list(args)
     updated.extend([option, value])
@@ -1447,6 +1510,43 @@ def _append_sync_barrier_args(
         ]
     )
     return updated
+
+
+def _append_runtime_control_barrier_args(
+    args: list[str],
+    *,
+    run_id: str,
+    participant_id: str,
+    participants: int,
+    local_after_messages: int,
+) -> list[str]:
+    updated = list(args)
+    updated.extend(
+        [
+            "--runtime-control-barrier-url",
+            SYNC_BARRIER_CONTAINER_URL,
+            "--runtime-control-run-id",
+            run_id,
+            "--runtime-control-participant-id",
+            participant_id,
+            "--runtime-control-participants",
+            str(participants),
+            "--runtime-control-local-after-messages",
+            str(local_after_messages),
+            "--runtime-control-barrier-timeout-seconds",
+            str(SYNC_BARRIER_TIMEOUT_SECONDS),
+        ]
+    )
+    return updated
+
+
+def _runtime_control_quotas(*, clients: int, after_messages: int) -> list[int]:
+    if clients <= 0:
+        raise RuntimeError("runtime control requires at least one publisher")
+    if after_messages <= 0:
+        raise RuntimeError("runtime control after-messages must be greater than zero")
+    base, remainder = divmod(after_messages, clients)
+    return [base + (1 if index < remainder else 0) for index in range(clients)]
 
 
 def _sync_barrier_run_id(scenario_id: str, run_index: int) -> str:
@@ -1657,6 +1757,13 @@ def _sum_numeric_field(results: list[dict[str, Any]], field: str) -> int:
     return sum(int(result.get(field) or 0) for result in results)
 
 
+def _policy_denial_count(result: dict[str, Any]) -> int:
+    raw_metrics = result.get("raw_metrics")
+    if isinstance(raw_metrics, dict) and "policy_denial_count" in raw_metrics:
+        return int(raw_metrics.get("policy_denial_count") or 0)
+    return int(result.get("policy_denial_count") or 0)
+
+
 def _sum_count_object(results: list[dict[str, Any]], field: str) -> dict[str, int]:
     totals: dict[str, int] = {}
     for result in results:
@@ -1735,6 +1842,7 @@ def _merge_per_client_loadgen_results(
         "expiry_denial_count",
     ):
         merged[field] = _sum_numeric_field(results, field)
+    merged["policy_denial_count"] = sum(_policy_denial_count(result) for result in results)
     merged["session_continuity_ok"] = all(
         bool(result.get("session_continuity_ok", True)) for result in results
     )
@@ -1948,6 +2056,7 @@ def _run_loadgen_container_per_client(
     compose_project_name: str | None,
     extra_env: dict[str, str],
     sync_connect: bool,
+    runtime_control: PerClientRuntimeControl | None = None,
 ) -> dict[str, Any]:
     build_cmd = _compose_cmd(
         ["build", service],
@@ -1958,16 +2067,61 @@ def _run_loadgen_container_per_client(
     env.update(extra_env)
     subprocess.run(build_cmd, cwd=REPO_ROOT, env=env, check=True)
     barrier_run_id = _sync_barrier_run_id(scenario_id, run_index) if sync_connect else None
-    if barrier_run_id is not None:
+    runtime_control_run_id = (
+        _sync_barrier_run_id(f"{scenario_id}-runtime-control", run_index)
+        if runtime_control is not None
+        else None
+    )
+    if barrier_run_id is not None or runtime_control_run_id is not None:
         _ensure_sync_barrier_service(
             compose_files=compose_files,
             compose_project_name=compose_project_name,
         )
+    publisher_args = list(loadgen_args)
+    if runtime_control is not None:
+        for option in (
+            "--runtime-control-username",
+            "--runtime-control-password",
+            "--runtime-control-after-messages",
+            "--control-topic",
+            "--control-payload",
+            "--control-payload-file",
+        ):
+            publisher_args = _remove_cli_option(publisher_args, option)
+        publisher_args = _remove_cli_flag(
+            publisher_args,
+            "--runtime-control-expect-denial",
+        )
+    messages = _int_cli_option_value(loadgen_args, "--messages", 0)
+    if runtime_control is not None:
+        publish_capacity = clients * messages
+        if runtime_control.after_messages > publish_capacity:
+            raise RuntimeError(
+                "runtime control after-messages "
+                f"({runtime_control.after_messages}) exceeds configured publish capacity "
+                f"({publish_capacity})"
+            )
+        if runtime_control.expect_denial and runtime_control.after_messages >= publish_capacity:
+            raise RuntimeError(
+                "runtime control expected-denial mode requires after-messages "
+                f"({runtime_control.after_messages}) to be below configured publish capacity "
+                f"({publish_capacity})"
+            )
+        if not _cli_option_value(loadgen_args, "--control-topic"):
+            raise RuntimeError("runtime control requires --control-topic")
+    quotas = (
+        _runtime_control_quotas(
+            clients=clients,
+            after_messages=runtime_control.after_messages,
+        )
+        if runtime_control is not None
+        else []
+    )
 
     started_at = time.monotonic()
     processes: list[tuple[str, subprocess.Popen[str]]] = []
     for index in range(clients):
-        args = _replace_cli_option(loadgen_args, "--clients", "1")
+        args = _replace_cli_option(publisher_args, "--clients", "1")
         args = _replace_cli_option(args, "--client-index-start", str(index + 1))
         if barrier_run_id is not None:
             args = _append_sync_barrier_args(
@@ -1976,6 +2130,20 @@ def _run_loadgen_container_per_client(
                 participant_id=f"client_{index + 1}",
                 participants=clients,
             )
+        if runtime_control_run_id is not None:
+            args = _append_runtime_control_barrier_args(
+                args,
+                run_id=runtime_control_run_id,
+                participant_id=f"client_{index + 1}",
+                participants=clients,
+                local_after_messages=quotas[index],
+            )
+            if (
+                runtime_control is not None
+                and runtime_control.expect_denial
+                and quotas[index] < messages
+            ):
+                args.append("--runtime-control-expect-denial")
         container_name = _loadgen_container_name(
             compose_project_name=compose_project_name,
             compose_files=compose_files,
@@ -2015,6 +2183,8 @@ def _run_loadgen_container_per_client(
     results: list[dict[str, Any]] = []
     completed: set[str] = set()
     barrier_status: dict[str, Any] | None = None
+    runtime_control_status: dict[str, Any] | None = None
+    controller_result: dict[str, Any] | None = None
     try:
         if barrier_run_id is not None:
             _wait_for_sync_barrier_ready(
@@ -2023,6 +2193,98 @@ def _run_loadgen_container_per_client(
                 processes=processes,
             )
             barrier_status = _release_sync_barrier(barrier_run_id, participants=clients)
+        if runtime_control_run_id is not None and runtime_control is not None:
+            _wait_for_sync_barrier_ready(
+                runtime_control_run_id,
+                participants=clients,
+                processes=processes,
+            )
+            controller_args = list(loadgen_args)
+            for option in (
+                "--runtime-control-username",
+                "--runtime-control-password",
+                "--runtime-control-after-messages",
+                "--password-map",
+                "--password-map-profile",
+                "--fanout-publisher-password-map-profile",
+            ):
+                controller_args = _remove_cli_option(controller_args, option)
+            controller_args = _remove_cli_flag(
+                controller_args,
+                "--runtime-control-expect-denial",
+            )
+            controller_args = _remove_cli_flag(controller_args, "--sync-connect")
+            controller_args = _replace_cli_option(controller_args, "--clients", "1")
+            controller_args = _replace_cli_option(
+                controller_args,
+                "--client-index-start",
+                str(clients + 1),
+            )
+            controller_args = _replace_cli_option(
+                controller_args,
+                "--client-id",
+                "runtime-dynsec-controller",
+            )
+            controller_args = _replace_cli_option(
+                controller_args,
+                "--username",
+                runtime_control.username,
+            )
+            controller_args = _replace_cli_option(
+                controller_args,
+                "--password",
+                runtime_control.password,
+            )
+            if "--control-mode" not in controller_args:
+                controller_args.append("--control-mode")
+            controller_name = _loadgen_container_name(
+                compose_project_name=compose_project_name,
+                compose_files=compose_files,
+                scenario_id=f"{scenario_id}-runtime-controller",
+                run_index=run_index,
+            )
+            subprocess.run(
+                ["docker", "rm", "-f", controller_name],
+                cwd=REPO_ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            controller_cmd = _compose_run_loadgen_cmd(
+                controller_args,
+                service=service,
+                container_name=controller_name,
+                compose_files=compose_files,
+                compose_project_name=compose_project_name,
+                build=False,
+            )
+            controller_completed = subprocess.run(
+                controller_cmd,
+                cwd=REPO_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if controller_completed.returncode != 0:
+                raise RuntimeError(
+                    f"runtime control container {controller_name} failed with exit code "
+                    f"{controller_completed.returncode}: {controller_completed.stderr}"
+                )
+            controller_result = _loads_json_from_compose_stdout(controller_completed.stdout)
+            if controller_result.get("errors"):
+                raise RuntimeError(
+                    f"runtime control container {controller_name} reported errors: "
+                    f"{controller_result['errors']}"
+                )
+            if not _raw_metric_values(controller_result, "control"):
+                raise RuntimeError(
+                    f"runtime control container {controller_name} did not publish a control command"
+                )
+            runtime_control_status = _release_sync_barrier(
+                runtime_control_run_id,
+                participants=clients,
+            )
         for container_name, process in processes:
             stdout, stderr = process.communicate()
             completed.add(container_name)
@@ -2041,6 +2303,31 @@ def _run_loadgen_container_per_client(
     merged = _merge_per_client_loadgen_results(results, wall_duration_s)
     merged["topology"]["scenario_id"] = scenario_id
     merged["topology"]["run_index"] = run_index
+    if controller_result is not None and runtime_control is not None:
+        controller_connect = _raw_metric_values(controller_result, "connect")
+        controller_control = _raw_metric_values(controller_result, "control")
+        raw_metrics = cast(dict[str, Any], merged["raw_metrics"])
+        raw_metrics["runtime_control_connect_ms"] = (
+            controller_connect[0] if controller_connect else None
+        )
+        raw_metrics["control"] = [
+            *cast(list[float], raw_metrics.get("control", [])),
+            *controller_control,
+        ]
+        merged["control"] = _summary_from_values(cast(list[float], raw_metrics["control"]))
+        merged["runtime_control"] = {
+            "enabled": True,
+            "barrier": "external",
+            "run_id": runtime_control_run_id,
+            "participants": clients,
+            "ready_count": int((runtime_control_status or {}).get("ready_count") or 0),
+            "released_at_unix_ms": (runtime_control_status or {}).get("released_at_unix_ms"),
+            "after_messages": runtime_control.after_messages,
+            "local_quotas": quotas,
+            "controller_connect_ms": raw_metrics["runtime_control_connect_ms"],
+        }
+        if runtime_control.expect_denial and int(merged.get("policy_denial_count") or 0) == 0:
+            merged["errors"].append("runtime_control_expected_policy_denial_not_observed")
     if barrier_run_id is not None:
         merged["sync_connect"] = {
             "enabled": True,
@@ -2412,11 +2699,108 @@ def _capture_dynamic_security_baseline() -> bytes | None:
 
 
 def _restore_dynamic_security_baseline(snapshot: bytes | None) -> None:
-    if snapshot is None:
-        return
     path = _resolve_repo_path("docker/dynamic-security.json")
+    if snapshot is None:
+        path.unlink(missing_ok=True)
+        return
     with path.open("wb") as f:
         f.write(snapshot)
+
+
+def _scenario_uses_dynamic_security(scenario: ScenarioConfig) -> bool:
+    return (
+        "mosquitto_dynsec.conf" in str(scenario.get("mosquitto_conf") or "")
+        or bool(scenario.get("dynamic_security_config"))
+        or bool(scenario.get("dynamic_security_generated_profile"))
+        or bool(scenario.get("runtime_control_username"))
+    )
+
+
+@contextmanager
+def _dynamic_security_scenario_config(
+    scenario: ScenarioConfig,
+    *,
+    extra_env: dict[str, str] | None = None,
+    compose_files: list[str] | None = None,
+    host: str = "localhost",
+    port: int = 1883,
+) -> Iterator[DynamicSecurityScenarioState]:
+    baseline = _capture_dynamic_security_baseline()
+    generated_path: str | None = None
+    state = DynamicSecurityScenarioState(generated_path=None)
+    try:
+        if scenario.get("dynamic_security_generated_profile"):
+            generated_path = _generate_dynamic_security_config(
+                cast(str, scenario["dynamic_security_generated_profile"])
+            )
+            state.generated_path = generated_path
+            _apply_dynamic_security_config(generated_path)
+        elif scenario.get("dynamic_security_config"):
+            _apply_dynamic_security_config(cast(str, scenario["dynamic_security_config"]))
+        yield state
+    finally:
+        policy_churn.cleanup_dynsec_snapshot(generated_path)
+        _restore_dynamic_security_baseline(baseline)
+        if (
+            state.broker_started
+            and _scenario_uses_dynamic_security(scenario)
+            and extra_env is not None
+            and compose_files is not None
+        ):
+            _restart_mosquitto(
+                extra_env=extra_env,
+                compose_files=compose_files,
+                host=host,
+                port=port,
+            )
+
+
+def _wait_for_mqtt_listener(host: str, port: int, *, timeout_seconds: float = 30.0) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    last_error: OSError | None = None
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=1.0):
+                return
+        except OSError as exc:
+            last_error = exc
+            time.sleep(0.25)
+    raise RuntimeError(f"timed out waiting for Mosquitto listener at {host}:{port}: {last_error!r}")
+
+
+def _restart_mosquitto(
+    *,
+    extra_env: dict[str, str],
+    compose_files: list[str],
+    host: str,
+    port: int,
+) -> None:
+    _compose(
+        ["restart", "mosquitto"],
+        extra_env=extra_env,
+        compose_files=compose_files,
+    )
+    _wait_for_mqtt_listener(host, port)
+
+
+def _reset_generated_dynamic_security_between_repeats(
+    run_index: int,
+    generated_path: str | None,
+    *,
+    extra_env: dict[str, str],
+    compose_files: list[str],
+    host: str,
+    port: int,
+) -> None:
+    if run_index == 0 or generated_path is None:
+        return
+    _apply_dynamic_security_config(generated_path)
+    _restart_mosquitto(
+        extra_env=extra_env,
+        compose_files=compose_files,
+        host=host,
+        port=port,
+    )
 
 
 def _resolve_repo_path(path: str | Path) -> Path:
@@ -3077,14 +3461,18 @@ def _validate_dynamic_security_alignment(
     *,
     default_clients: int,
 ) -> None:
-    dynamic_security_config = scenario.get("dynamic_security_config")
+    dynamic_security_config = cast(str | None, scenario.get("dynamic_security_config"))
     generated_snapshot_path: str | None = None
     if not dynamic_security_config and scenario.get("dynamic_security_generated_profile"):
         generated_snapshot_path = _generate_dynamic_security_config(
             cast(str, scenario["dynamic_security_generated_profile"])
         )
         dynamic_security_config = generated_snapshot_path
-    if not dynamic_security_config:
+    has_churn_validation_input = bool(
+        scenario.get("fanout_churn_dynamic_security_source")
+        or scenario.get("dynamic_security_churn")
+    )
+    if not dynamic_security_config and not has_churn_validation_input:
         return
 
     effective_client_count = _effective_scenario_client_count(scenario, default_clients)
@@ -3093,16 +3481,16 @@ def _validate_dynamic_security_alignment(
     publisher_username = scenario.get("fanout_publisher_username")
 
     try:
-        if subscriber_username:
+        if dynamic_security_config and subscriber_username:
             _validate_dynamic_security_snapshot_supports_principal(
                 scenario_id=scenario_id,
                 snapshot_path=dynamic_security_config,
                 username=subscriber_username,
                 principal_label="username",
-                disallow_pinned_clientid=is_fanout and effective_client_count > 1,
+                disallow_pinned_clientid=effective_client_count > 1,
                 effective_client_count=effective_client_count,
             )
-        if publisher_username:
+        if dynamic_security_config and publisher_username:
             _validate_dynamic_security_snapshot_supports_principal(
                 scenario_id=scenario_id,
                 snapshot_path=dynamic_security_config,
@@ -3135,6 +3523,25 @@ def _validate_dynamic_security_alignment(
                     principal_label="fanout_publisher_username",
                     required_clientid="fanout_publisher",
                 )
+        elif scenario.get("dynamic_security_churn"):
+            for churn_snapshot in cast(list[str], scenario["dynamic_security_churn"]):
+                if subscriber_username:
+                    _validate_dynamic_security_snapshot_supports_principal(
+                        scenario_id=scenario_id,
+                        snapshot_path=churn_snapshot,
+                        username=subscriber_username,
+                        principal_label="username",
+                        disallow_pinned_clientid=effective_client_count > 1,
+                        effective_client_count=effective_client_count,
+                    )
+                if publisher_username:
+                    _validate_dynamic_security_snapshot_supports_principal(
+                        scenario_id=scenario_id,
+                        snapshot_path=churn_snapshot,
+                        username=publisher_username,
+                        principal_label="fanout_publisher_username",
+                        required_clientid="fanout_publisher",
+                    )
     finally:
         policy_churn.cleanup_dynsec_snapshot(generated_snapshot_path)
 
@@ -4939,7 +5346,7 @@ def _build_available_scenarios(
             "authz_config": None,
             "netem": {"clear": True},
             "message_size": 0,
-            "dynamic_security_config": "docker/dynamic-security.json",
+            "dynamic_security_generated_profile": "publish_multi_client_base",
         },
         "DYNAMIC-SECURITY-CHURN": {
             "mosquitto_conf": "./mosquitto_dynsec.conf",
@@ -4949,12 +5356,21 @@ def _build_available_scenarios(
             "authz_config": None,
             "netem": {"clear": True},
             "message_size": 0,
-            "repeat": 2,
-            "sleep_between": 2,
-            "dynamic_security_churn": [
-                "docker/dynamic-security.json",
-                "docker/dynamic-security-churn.json",
-            ],
+            "dynamic_security_generated_profile": "publish_multi_client_base",
+            "control_topic": "$CONTROL/dynamic-security/v1",
+            "control_payload": dynsec_commands.generate_command_payload(
+                [
+                    dynsec_commands.generate_remove_role_acl_command(
+                        "sensor_writer",
+                        "publishClientSend",
+                        "sensors/+/#",
+                    )
+                ]
+            ),
+            "runtime_control_username": "admin",
+            "runtime_control_password": tokens["jwt_admin"],
+            "runtime_control_after_messages": 10,
+            "runtime_control_expect_denial": True,
         },
         "DYNAMIC-SECURITY-READ-FANOUT": {
             "mosquitto_conf": "./mosquitto_dynsec.conf",
@@ -5642,332 +6058,350 @@ def main(
             }
         )
 
-        # Add iperf3 service to compose deployment
-        services_to_deploy = [
-            "up",
-            "--build",
-            "-d",
-            "mosquitto",
-            "authz",
-            "netem",
-            "metrics-collector",
-            "cadvisor",
-            "token-issuer",
-            "iperf3",
-        ]
-
-        # Auto-enable tcpdump for MTU scenarios to capture fragmentation data
-        netem = s.get("netem")
-        capture_this_scenario = (
-            tcpdump_enabled
-            and tcpdump_status.get("installed", False)
-            and netem is not None
-            and "mtu" in netem
-        )
-
-        if capture_this_scenario:
-            services_to_deploy.append("tcpdump")
-            pcap_filename = f"{s['id']}.pcap"
-            extra_env.update(
-                {
-                    "TCPDUMP_FILTER": tcpdump_filter,
-                    "TCPDUMP_DURATION": str(tcpdump_duration),
-                    "TCPDUMP_OUTPUT": f"/pcap/{pcap_filename}",
-                    "TCPDUMP_OUTPUT_DIR": normalized_tcpdump_output_dir,
-                    "TCPDUMP_KEEP_ALIVE": "0",
-                }
-            )
-            Path(normalized_tcpdump_output_dir).mkdir(parents=True, exist_ok=True)
-
-        compose_project_name = extra_env.get("COMPOSE_PROJECT_NAME") or os.environ.get(
-            "COMPOSE_PROJECT_NAME"
-        )
-        _compose(
-            services_to_deploy,
+        with _dynamic_security_scenario_config(
+            s,
             extra_env=extra_env,
             compose_files=compose_files,
-        )
-        time.sleep(1)
-        _wait_for_service_health("authz", authz_base, tls_ca, tls_insecure)
-        _wait_for_service_health("token-issuer", token_issuer_base, tls_ca, tls_insecure)
-        _wait_for_prometheus_api(prom_base, tls_ca, tls_insecure)
-        _wait_for_non_empty_resource_snapshot(
-            prom_base,
-            tls_ca,
-            tls_insecure,
-            compose_files=compose_files,
-            compose_project_name=compose_project_name,
-        )
+            host=host_mqtt_host,
+            port=mqtt_port,
+        ) as dynamic_security_state:
+            # Add iperf3 service to compose deployment
+            services_to_deploy = [
+                "up",
+                "--build",
+                "-d",
+                "mosquitto",
+                "authz",
+                "netem",
+                "metrics-collector",
+                "cadvisor",
+                "token-issuer",
+                "iperf3",
+            ]
 
-        # Run iperf3 baseline measurement before test batch
-        iperf3_baseline_result: dict[str, Any] = {}
-        network_validity: dict[str, Any] = {}
-        if iperf3_enabled:
-            time.sleep(2)  # Give iperf3 server time to start
-            iperf3_baseline_result = run_baseline_with_retry(
-                host=iperf3_host,
-                port=iperf3_port,
-                duration=iperf3_duration,
-                parallel_streams=iperf3_streams,
-                retries=2,
+            # Auto-enable tcpdump for MTU scenarios to capture fragmentation data
+            netem = s.get("netem")
+            capture_this_scenario = (
+                tcpdump_enabled
+                and tcpdump_status.get("installed", False)
+                and netem is not None
+                and "mtu" in netem
             )
-            network_validity = check_network_validity(
-                iperf3_baseline_result,
-                expected_min_mbps=iperf3_min_mbps,
-            )
-            if network_validity.get("warnings"):
-                for warning in network_validity["warnings"]:
-                    logger.warning("Network baseline: %s", warning)
-            else:
-                throughput_mbps = iperf3_baseline_result.get("throughput", {}).get(
-                    "megabits_per_second", 0
+
+            if capture_this_scenario:
+                services_to_deploy.append("tcpdump")
+                pcap_filename = f"{s['id']}.pcap"
+                extra_env.update(
+                    {
+                        "TCPDUMP_FILTER": tcpdump_filter,
+                        "TCPDUMP_DURATION": str(tcpdump_duration),
+                        "TCPDUMP_OUTPUT": f"/pcap/{pcap_filename}",
+                        "TCPDUMP_OUTPUT_DIR": normalized_tcpdump_output_dir,
+                        "TCPDUMP_KEEP_ALIVE": "0",
+                    }
                 )
-                logger.info("Network baseline: %.2f Mbps capacity confirmed", throughput_mbps)
+                Path(normalized_tcpdump_output_dir).mkdir(parents=True, exist_ok=True)
 
-        cfg = s.get("authz_config")
-        uses_http_authz = (
-            "mosquitto_http.conf" in s["mosquitto_conf"]
-            or "mosquitto_hybrid.conf" in s["mosquitto_conf"]
-            or cfg is not None
-        )
-        reset_baseline: dict[str, object] | None = None
-        if uses_http_authz:
-            reset_res = _authz_reset(
-                authz_base,
-                ca_file=tls_ca,
-                insecure=tls_insecure,
+            compose_project_name = extra_env.get("COMPOSE_PROJECT_NAME") or os.environ.get(
+                "COMPOSE_PROJECT_NAME"
             )
-            reset_baseline = _validated_authz_state_baseline(
-                s["id"],
-                "authz reset",
-                reset_res,
+            _compose(
+                services_to_deploy,
+                extra_env=extra_env,
+                compose_files=compose_files,
             )
-            _assert_authz_state(
-                s["id"],
-                "authz reset",
-                reset_res,
-                reset_baseline,
-            )
-
-        if cfg is not None:
-            if reset_baseline is None:
-                raise RuntimeError(
-                    f"Authz reset baseline unavailable before config apply in scenario {s['id']}"
-                )
-            apply_res = _authz_config(
-                authz_base,
-                delay_ms=cfg.get("delay_ms"),
-                fail_mode=cfg.get("fail_mode"),
-                fail_rate=cfg.get("fail_rate"),
-                authz_profile=cfg.get("authz_profile"),
-                rules=cfg.get("rules"),
-                client_roles=cfg.get("client_roles"),
-                jwt_identity_binding=cfg.get("jwt_identity_binding"),
-                ca_file=tls_ca,
-                insecure=tls_insecure,
-            )
-            _assert_authz_state(
-                s["id"],
-                "authz config apply",
-                apply_res,
-                _expected_authz_state(cfg, reset_baseline),
-            )
-
-        repeats = int(s.get("repeat", 1))
-        token_len = len(s.get("password", "")) if s.get("password") else 0
-        token_issuer_no_default_grants = s.get(
-            "token_issuer_no_default_grants", token_issuer_no_default_grants
-        )
-        token_issuer_no_default_roles = s.get(
-            "token_issuer_no_default_roles", token_issuer_no_default_roles
-        )
-        token_schema = tokens.get("jwt_grants_schema")
-        token_schema_version = token_schema.get("version") if token_schema else None
-        token_denies_schema = tokens.get("jwt_denies_schema")
-        token_denies_schema_version = (
-            token_denies_schema.get("version") if token_denies_schema else None
-        )
-        grants_default_enabled = None
-        if s.get("username") == "jwt" and token_schema is not None:
-            grants_default_enabled = not token_issuer_no_default_grants
-
-        biscuit_only = bool(s.get("biscuit_attenuate") or s.get("biscuit_delegate"))
-        complexity_axis = s.get("complexity_axis")
-        complexity_level = s.get("complexity_level")
-        policy_source = s.get("policy_source") or _infer_policy_source(s)
-        authz_profile = s.get("authz_profile")
-        if authz_profile is None and isinstance(s.get("authz_config"), dict):
-            authz_profile = cast(dict[str, Any], s["authz_config"]).get("authz_profile")
-        authorizer_profile = s.get("authorizer_profile")
-        acl_read_enforcement = _infer_acl_read_enforcement(s)
-        if s.get("reauth_storm") and client_topology_mode == "container-per-client":
-            raise RuntimeError(
-                f"{s['id']}: reauth storm is only supported with host or container-single topology"
-            )
-        effective_client_count = (
-            int(reauth_storm_clients)
-            if s.get("reauth_storm") and reauth_storm_clients is not None
-            else _effective_scenario_client_count(s, clients)
-        )
-        scenario_messages = int(s.get("message_count", messages))
-        out_payload: dict[str, Any] = {
-            "scenario": s["id"],
-            "token_len": token_len,
-            "token_schema": token_schema,
-            "token_metadata": {
-                "jwt_grants_schema_version": token_schema_version,
-                "jwt_default_grants_enabled": grants_default_enabled,
-                "jwt_denies_schema_version": token_denies_schema_version,
-            },
-            "tls": {
-                "enabled": scenario_tls,
-                "ca_file": tls_ca,
-                "insecure": tls_insecure,
-            },
-            "parity": {
-                "token_issuer_no_default_roles": token_issuer_no_default_roles,
-                "token_issuer_no_default_grants": token_issuer_no_default_grants,
-                "token_refresh_codes": token_refresh_codes,
-            },
-            "capability_flags": {
-                "biscuit_only": biscuit_only,
-            },
-            "complexity": {
-                "axis": complexity_axis,
-                "level": complexity_level,
-            },
-            "attenuation": s.get("biscuit_attenuate"),
-            "delegation": s.get("biscuit_delegate"),
-            "scenario_config": {
-                **scenario_semantics,
-                "clients": effective_client_count,
-                "client_count": s.get("client_count"),
-                "messages": scenario_messages,
-                "qos": qos,
-                "qos_distribution": qos_distribution,
-                "token_issuer_no_default_roles": token_issuer_no_default_roles,
-                "token_issuer_no_default_grants": token_issuer_no_default_grants,
-                "proactive_refresh": s.get("proactive_refresh", False),
-                "proactive_refresh_margin_seconds": s.get("proactive_refresh_margin_seconds"),
-                "proactive_refresh_timeout_seconds": s.get("proactive_refresh_timeout_seconds"),
-                "proactive_refresh_assert_continuity": s.get(
-                    "proactive_refresh_assert_continuity", False
-                ),
-                "reauth_storm": s.get("reauth_storm", False),
-                "credential_mode": s.get("credential_mode"),
-                "password_map_profile": s.get("password_map_profile"),
-                "fanout_publisher_password_map_profile": s.get(
-                    "fanout_publisher_password_map_profile"
-                ),
-                "traffic_pattern": s.get("traffic_pattern"),
-                "fanout_topic": s.get("fanout_topic"),
-                "subscriber_count": s.get("subscriber_count"),
-                "policy_source": policy_source,
-                "authz_profile": authz_profile,
-                "authorizer_profile": authorizer_profile,
-                "acl_read_enforcement": acl_read_enforcement,
-                "fanout_churn_kind": s.get("fanout_churn_kind"),
-                "fanout_churn_after_messages": s.get("fanout_churn_after_messages"),
-                "fanout_churn_interval_messages": s.get("fanout_churn_interval_messages"),
-                "fanout_churn_max_events": s.get("fanout_churn_max_events"),
-                "fanout_churn_settle_ms": s.get("fanout_churn_settle_ms"),
-                "fanout_churn_control_topic": s.get("fanout_churn_control_topic"),
-                "fanout_churn_control_payload": s.get("fanout_churn_control_payload"),
-                "sqlite_seed_fanout": s.get("sqlite_seed_fanout"),
-                "sqlite_seed_profile": s.get("sqlite_seed_profile"),
-                "sqlite_seed_db": s.get("sqlite_seed_db"),
-                "sqlite_seed_topic": s.get("sqlite_seed_topic"),
-                "sqlite_seed_subscribers": s.get("sqlite_seed_subscribers"),
-                "fanout_churn_sqlite_db": s.get("fanout_churn_sqlite_db"),
-                "fanout_churn_sqlite_topic": s.get("fanout_churn_sqlite_topic"),
-                "fanout_churn_sqlite_subscribers": s.get("fanout_churn_sqlite_subscribers"),
-                "client_topology": {
-                    "mode": client_topology_mode,
-                    "loadgen_service": loadgen_service,
-                    "cpus": loadgen_cpus,
-                    "memory": loadgen_memory,
-                    "cpuset": loadgen_cpuset,
-                    "internal_mqtt_host": (
-                        loadgen_mqtt_host if client_topology_mode != "host" else None
-                    ),
-                    "internal_token_issuer_url": (
-                        loadgen_token_issuer_base if client_topology_mode != "host" else None
-                    ),
-                },
-                "cache_context": {
-                    "acl_read_enforcement_expected": acl_read_enforcement,
-                    "cache_ttl_seconds": 3600,
-                    "note": (
-                        "strict ACL_READ scenarios should enforce policy changes on fan-out "
-                        "delivery; cache must not mask runtime authorization changes"
-                    ),
-                },
-            },
-            "fanout_metrics": {
-                "subscriber_count": (
-                    effective_client_count if s.get("traffic_pattern") == "fanout" else None
-                ),
-                "message_count": (
-                    scenario_messages if s.get("traffic_pattern") == "fanout" else None
-                ),
-                "acl_read_cost_per_subscriber_ms": None,  # Calculated from receive latencies
-            },
-            "network_baseline": {
-                "enabled": iperf3_enabled,
-                "config": {
-                    "host": iperf3_host,
-                    "port": iperf3_port,
-                    "duration": iperf3_duration,
-                    "streams": iperf3_streams,
-                    "min_mbps": iperf3_min_mbps,
-                },
-                "result": iperf3_baseline_result,
-                "validity": network_validity,
-            },
-            "perf_profiling": {
-                "enabled": perf_enabled and perf_status.get("installed", False),
-                "config": {
-                    "duration": perf_duration,
-                    "sample_rate": perf_sample_rate,
-                    "events": perf_events,
-                    "callgraph": perf_callgraph,
-                    "output_dir": perf_output_dir,
-                },
-                "status": perf_status,
-            },
-            "packet_analysis": {
-                "enabled": tcpdump_enabled and tcpdump_status.get("installed", False),
-                "config": {
-                    "filter": tcpdump_filter,
-                    "duration": tcpdump_duration,
-                    "output_dir": tcpdump_output_dir,
-                    "analyze": tcpdump_analyze,
-                },
-                "status": tcpdump_status,
-            },
-            "runs": [],
-        }
-
-        if s.get("restart_mosquitto"):
-            _compose(["restart", "mosquitto"], extra_env=extra_env)
+            dynamic_security_state.broker_started = True
             time.sleep(1)
+            _wait_for_service_health("authz", authz_base, tls_ca, tls_insecure)
+            _wait_for_service_health("token-issuer", token_issuer_base, tls_ca, tls_insecure)
+            _wait_for_prometheus_api(prom_base, tls_ca, tls_insecure)
+            _wait_for_non_empty_resource_snapshot(
+                prom_base,
+                tls_ca,
+                tls_insecure,
+                compose_files=compose_files,
+                compose_project_name=compose_project_name,
+            )
 
-        _validate_dynamic_security_alignment(s["id"], s, default_clients=clients)
-        dynsec_baseline = _capture_dynamic_security_baseline()
-        try:
+            # Run iperf3 baseline measurement before test batch
+            iperf3_baseline_result: dict[str, Any] = {}
+            network_validity: dict[str, Any] = {}
+            if iperf3_enabled:
+                time.sleep(2)  # Give iperf3 server time to start
+                iperf3_baseline_result = run_baseline_with_retry(
+                    host=iperf3_host,
+                    port=iperf3_port,
+                    duration=iperf3_duration,
+                    parallel_streams=iperf3_streams,
+                    retries=2,
+                )
+                network_validity = check_network_validity(
+                    iperf3_baseline_result,
+                    expected_min_mbps=iperf3_min_mbps,
+                )
+                if network_validity.get("warnings"):
+                    for warning in network_validity["warnings"]:
+                        logger.warning("Network baseline: %s", warning)
+                else:
+                    throughput_mbps = iperf3_baseline_result.get("throughput", {}).get(
+                        "megabits_per_second", 0
+                    )
+                    logger.info("Network baseline: %.2f Mbps capacity confirmed", throughput_mbps)
+
+            cfg = s.get("authz_config")
+            uses_http_authz = (
+                "mosquitto_http.conf" in s["mosquitto_conf"]
+                or "mosquitto_hybrid.conf" in s["mosquitto_conf"]
+                or cfg is not None
+            )
+            reset_baseline: dict[str, object] | None = None
+            if uses_http_authz:
+                reset_res = _authz_reset(
+                    authz_base,
+                    ca_file=tls_ca,
+                    insecure=tls_insecure,
+                )
+                reset_baseline = _validated_authz_state_baseline(
+                    s["id"],
+                    "authz reset",
+                    reset_res,
+                )
+                _assert_authz_state(
+                    s["id"],
+                    "authz reset",
+                    reset_res,
+                    reset_baseline,
+                )
+
+            if cfg is not None:
+                if reset_baseline is None:
+                    raise RuntimeError(
+                        "Authz reset baseline unavailable before config apply in scenario "
+                        f"{s['id']}"
+                    )
+                apply_res = _authz_config(
+                    authz_base,
+                    delay_ms=cfg.get("delay_ms"),
+                    fail_mode=cfg.get("fail_mode"),
+                    fail_rate=cfg.get("fail_rate"),
+                    authz_profile=cfg.get("authz_profile"),
+                    rules=cfg.get("rules"),
+                    client_roles=cfg.get("client_roles"),
+                    jwt_identity_binding=cfg.get("jwt_identity_binding"),
+                    ca_file=tls_ca,
+                    insecure=tls_insecure,
+                )
+                _assert_authz_state(
+                    s["id"],
+                    "authz config apply",
+                    apply_res,
+                    _expected_authz_state(cfg, reset_baseline),
+                )
+
+            repeats = int(s.get("repeat", 1))
+            token_len = len(s.get("password", "")) if s.get("password") else 0
+            token_issuer_no_default_grants = s.get(
+                "token_issuer_no_default_grants", token_issuer_no_default_grants
+            )
+            token_issuer_no_default_roles = s.get(
+                "token_issuer_no_default_roles", token_issuer_no_default_roles
+            )
+            token_schema = tokens.get("jwt_grants_schema")
+            token_schema_version = token_schema.get("version") if token_schema else None
+            token_denies_schema = tokens.get("jwt_denies_schema")
+            token_denies_schema_version = (
+                token_denies_schema.get("version") if token_denies_schema else None
+            )
+            grants_default_enabled = None
+            if s.get("username") == "jwt" and token_schema is not None:
+                grants_default_enabled = not token_issuer_no_default_grants
+
+            biscuit_only = bool(s.get("biscuit_attenuate") or s.get("biscuit_delegate"))
+            complexity_axis = s.get("complexity_axis")
+            complexity_level = s.get("complexity_level")
+            policy_source = s.get("policy_source") or _infer_policy_source(s)
+            authz_profile = s.get("authz_profile")
+            if authz_profile is None and isinstance(s.get("authz_config"), dict):
+                authz_profile = cast(dict[str, Any], s["authz_config"]).get("authz_profile")
+            authorizer_profile = s.get("authorizer_profile")
+            acl_read_enforcement = _infer_acl_read_enforcement(s)
+            if s.get("reauth_storm") and client_topology_mode == "container-per-client":
+                raise RuntimeError(
+                    f"{s['id']}: reauth storm is only supported with host or "
+                    "container-single topology"
+                )
+            effective_client_count = (
+                int(reauth_storm_clients)
+                if s.get("reauth_storm") and reauth_storm_clients is not None
+                else _effective_scenario_client_count(s, clients)
+            )
+            scenario_messages = int(s.get("message_count", messages))
+            out_payload: dict[str, Any] = {
+                "scenario": s["id"],
+                "token_len": token_len,
+                "token_schema": token_schema,
+                "token_metadata": {
+                    "jwt_grants_schema_version": token_schema_version,
+                    "jwt_default_grants_enabled": grants_default_enabled,
+                    "jwt_denies_schema_version": token_denies_schema_version,
+                },
+                "tls": {
+                    "enabled": scenario_tls,
+                    "ca_file": tls_ca,
+                    "insecure": tls_insecure,
+                },
+                "parity": {
+                    "token_issuer_no_default_roles": token_issuer_no_default_roles,
+                    "token_issuer_no_default_grants": token_issuer_no_default_grants,
+                    "token_refresh_codes": token_refresh_codes,
+                },
+                "capability_flags": {
+                    "biscuit_only": biscuit_only,
+                },
+                "complexity": {
+                    "axis": complexity_axis,
+                    "level": complexity_level,
+                },
+                "attenuation": s.get("biscuit_attenuate"),
+                "delegation": s.get("biscuit_delegate"),
+                "scenario_config": {
+                    **scenario_semantics,
+                    "clients": effective_client_count,
+                    "client_count": s.get("client_count"),
+                    "messages": scenario_messages,
+                    "qos": qos,
+                    "qos_distribution": qos_distribution,
+                    "token_issuer_no_default_roles": token_issuer_no_default_roles,
+                    "token_issuer_no_default_grants": token_issuer_no_default_grants,
+                    "proactive_refresh": s.get("proactive_refresh", False),
+                    "proactive_refresh_margin_seconds": s.get("proactive_refresh_margin_seconds"),
+                    "proactive_refresh_timeout_seconds": s.get("proactive_refresh_timeout_seconds"),
+                    "proactive_refresh_assert_continuity": s.get(
+                        "proactive_refresh_assert_continuity", False
+                    ),
+                    "reauth_storm": s.get("reauth_storm", False),
+                    "credential_mode": s.get("credential_mode"),
+                    "password_map_profile": s.get("password_map_profile"),
+                    "fanout_publisher_password_map_profile": s.get(
+                        "fanout_publisher_password_map_profile"
+                    ),
+                    "traffic_pattern": s.get("traffic_pattern"),
+                    "fanout_topic": s.get("fanout_topic"),
+                    "subscriber_count": s.get("subscriber_count"),
+                    "policy_source": policy_source,
+                    "authz_profile": authz_profile,
+                    "authorizer_profile": authorizer_profile,
+                    "acl_read_enforcement": acl_read_enforcement,
+                    "fanout_churn_kind": s.get("fanout_churn_kind"),
+                    "fanout_churn_after_messages": s.get("fanout_churn_after_messages"),
+                    "fanout_churn_interval_messages": s.get("fanout_churn_interval_messages"),
+                    "fanout_churn_max_events": s.get("fanout_churn_max_events"),
+                    "fanout_churn_settle_ms": s.get("fanout_churn_settle_ms"),
+                    "fanout_churn_control_topic": s.get("fanout_churn_control_topic"),
+                    "fanout_churn_control_payload": s.get("fanout_churn_control_payload"),
+                    "sqlite_seed_fanout": s.get("sqlite_seed_fanout"),
+                    "sqlite_seed_profile": s.get("sqlite_seed_profile"),
+                    "sqlite_seed_db": s.get("sqlite_seed_db"),
+                    "sqlite_seed_topic": s.get("sqlite_seed_topic"),
+                    "sqlite_seed_subscribers": s.get("sqlite_seed_subscribers"),
+                    "fanout_churn_sqlite_db": s.get("fanout_churn_sqlite_db"),
+                    "fanout_churn_sqlite_topic": s.get("fanout_churn_sqlite_topic"),
+                    "fanout_churn_sqlite_subscribers": s.get("fanout_churn_sqlite_subscribers"),
+                    "client_topology": {
+                        "mode": client_topology_mode,
+                        "loadgen_service": loadgen_service,
+                        "cpus": loadgen_cpus,
+                        "memory": loadgen_memory,
+                        "cpuset": loadgen_cpuset,
+                        "internal_mqtt_host": (
+                            loadgen_mqtt_host if client_topology_mode != "host" else None
+                        ),
+                        "internal_token_issuer_url": (
+                            loadgen_token_issuer_base if client_topology_mode != "host" else None
+                        ),
+                    },
+                    "cache_context": {
+                        "acl_read_enforcement_expected": acl_read_enforcement,
+                        "cache_ttl_seconds": 3600,
+                        "note": (
+                            "strict ACL_READ scenarios should enforce policy changes on fan-out "
+                            "delivery; cache must not mask runtime authorization changes"
+                        ),
+                    },
+                },
+                "fanout_metrics": {
+                    "subscriber_count": (
+                        effective_client_count if s.get("traffic_pattern") == "fanout" else None
+                    ),
+                    "message_count": (
+                        scenario_messages if s.get("traffic_pattern") == "fanout" else None
+                    ),
+                    "acl_read_cost_per_subscriber_ms": None,  # Calculated from receive latencies
+                },
+                "network_baseline": {
+                    "enabled": iperf3_enabled,
+                    "config": {
+                        "host": iperf3_host,
+                        "port": iperf3_port,
+                        "duration": iperf3_duration,
+                        "streams": iperf3_streams,
+                        "min_mbps": iperf3_min_mbps,
+                    },
+                    "result": iperf3_baseline_result,
+                    "validity": network_validity,
+                },
+                "perf_profiling": {
+                    "enabled": perf_enabled and perf_status.get("installed", False),
+                    "config": {
+                        "duration": perf_duration,
+                        "sample_rate": perf_sample_rate,
+                        "events": perf_events,
+                        "callgraph": perf_callgraph,
+                        "output_dir": perf_output_dir,
+                    },
+                    "status": perf_status,
+                },
+                "packet_analysis": {
+                    "enabled": tcpdump_enabled and tcpdump_status.get("installed", False),
+                    "config": {
+                        "filter": tcpdump_filter,
+                        "duration": tcpdump_duration,
+                        "output_dir": tcpdump_output_dir,
+                        "analyze": tcpdump_analyze,
+                    },
+                    "status": tcpdump_status,
+                },
+                "runs": [],
+            }
+
+            if s.get("restart_mosquitto"):
+                _restart_mosquitto(
+                    extra_env=extra_env,
+                    compose_files=compose_files,
+                    host=host_mqtt_host,
+                    port=mqtt_port,
+                )
+
+            _validate_dynamic_security_alignment(s["id"], s, default_clients=clients)
             for idx in range(repeats):
-                generated_dynsec_path: str | None = None
                 try:
-                    if s.get("dynamic_security_generated_profile"):
-                        generated_dynsec_path = _generate_dynamic_security_config(
-                            cast(str, s["dynamic_security_generated_profile"])
-                        )
-                        _apply_dynamic_security_config(generated_dynsec_path)
-                    elif s.get("dynamic_security_config"):
-                        _apply_dynamic_security_config(s["dynamic_security_config"])
-                    elif s.get("dynamic_security_churn"):
-                        churn_list = s["dynamic_security_churn"]
+                    _reset_generated_dynamic_security_between_repeats(
+                        idx,
+                        dynamic_security_state.generated_path,
+                        extra_env=extra_env,
+                        compose_files=compose_files,
+                        host=host_mqtt_host,
+                        port=mqtt_port,
+                    )
+                    if s.get("dynamic_security_churn"):
+                        churn_list = cast(list[str], s["dynamic_security_churn"])
                         _apply_dynamic_security_config(churn_list[idx % len(churn_list)])
+                        _restart_mosquitto(
+                            extra_env=extra_env,
+                            compose_files=compose_files,
+                            host=host_mqtt_host,
+                            port=mqtt_port,
+                        )
                     if s.get("sqlite_seed_fanout"):
                         policy_churn.seed_sqlite_fanout_policy(
                             s.get("sqlite_seed_db", "docker/sqlite/policy.db"),
@@ -6191,6 +6625,14 @@ def main(
                             control_mode=bool(s.get("control_mode", False)),
                             control_repeat=s.get("control_repeat", 1),
                             control_after_messages=s.get("control_after_messages", 0),
+                            runtime_control_username=s.get("runtime_control_username"),
+                            runtime_control_password=s.get("runtime_control_password"),
+                            runtime_control_after_messages=s.get(
+                                "runtime_control_after_messages", 0
+                            ),
+                            runtime_control_expect_denial=bool(
+                                s.get("runtime_control_expect_denial", False)
+                            ),
                             fanout_churn_kind=s.get("fanout_churn_kind"),
                             fanout_churn_after_messages=s.get("fanout_churn_after_messages", 0),
                             fanout_churn_interval_messages=s.get(
@@ -6249,7 +6691,7 @@ def main(
                             client_count=scenario_clients,
                         )
                 finally:
-                    policy_churn.cleanup_dynsec_snapshot(generated_dynsec_path)
+                    pass
                 # Small delay to ensure container metrics are available after loadgen
                 time.sleep(2)
                 snap = _resource_snapshot(
@@ -6311,9 +6753,6 @@ def main(
                 out_payload["runs"].append({"loadgen": res, "resources": snap, "perf": perf_result})
                 if s.get("sleep_between"):
                     time.sleep(float(s["sleep_between"]))
-        finally:
-            _restore_dynamic_security_baseline(dynsec_baseline)
-
         # Issue 15: Run packet analysis if tcpdump was enabled for this scenario
         packet_analysis_result: dict[str, Any] = {"enabled": False}
         if capture_this_scenario and tcpdump_analyze:

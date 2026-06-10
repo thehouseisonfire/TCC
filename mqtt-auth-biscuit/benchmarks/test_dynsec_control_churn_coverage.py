@@ -55,6 +55,27 @@ def test_dynsec_control_families_use_generated_profiles_with_matching_principals
         scenarios["CONTROL-INTERLEAVED-DATA-BISCUIT"]["dynamic_security_generated_profile"]
         == "control_interleaved_base"
     )
+    assert (
+        scenarios["DYNAMIC-SECURITY-BASELINE"]["dynamic_security_generated_profile"]
+        == "publish_multi_client_base"
+    )
+    churn = scenarios["DYNAMIC-SECURITY-CHURN"]
+    assert churn["dynamic_security_generated_profile"] == "publish_multi_client_base"
+    assert "dynamic_security_generated_churn_profiles" not in churn
+    assert "dynamic_security_churn" not in churn
+    assert "restart_mosquitto" not in churn
+    assert churn["runtime_control_username"] == "admin"
+    assert churn["runtime_control_after_messages"] == 10
+    assert churn["runtime_control_expect_denial"] is True
+    assert churn["control_topic"] == "$CONTROL/dynamic-security/v1"
+    assert churn["control_payload"]["commands"] == [
+        {
+            "command": "removeRoleACL",
+            "rolename": "sensor_writer",
+            "acltype": "publishClientSend",
+            "topic": "sensors/+/#",
+        }
+    ]
 
 
 def test_advanced_dynsec_control_churn_families_are_registered_with_expected_counts() -> None:
@@ -159,5 +180,37 @@ def test_dynamic_security_read_fanout_is_explicit_single_subscriber_and_passes_a
     rs._validate_dynamic_security_alignment(
         "DYNAMIC-SECURITY-READ-FANOUT",
         scenario,
+        default_clients=10,
+    )
+
+
+def test_dynsec_alignment_rejects_pinned_multi_client_publish_identity() -> None:
+    scenario: rs.ScenarioConfig = {
+        "id": "TEST-DYNSEC-PINNED-MULTI-CLIENT-PUBLISH",
+        "username": "dynsec_client_1",
+        "dynamic_security_config": "docker/dynamic-security.json",
+    }
+
+    try:
+        rs._validate_dynamic_security_alignment(scenario["id"], scenario, default_clients=10)
+    except ValueError as exc:
+        message = str(exc)
+        assert "pins username 'dynsec_client_1' to clientid 'client_1'" in message
+        assert "effective_client_count=10" in message
+    else:
+        raise AssertionError("expected pinned multi-client dynsec validation error")
+
+
+def test_dynsec_alignment_accepts_generated_multi_client_publish_profiles() -> None:
+    scenarios = _scenario_registry()
+
+    rs._validate_dynamic_security_alignment(
+        "DYNAMIC-SECURITY-BASELINE",
+        scenarios["DYNAMIC-SECURITY-BASELINE"],
+        default_clients=10,
+    )
+    rs._validate_dynamic_security_alignment(
+        "DYNAMIC-SECURITY-CHURN",
+        scenarios["DYNAMIC-SECURITY-CHURN"],
         default_clients=10,
     )

@@ -88,6 +88,14 @@ def _is_denied(codes: list[int]) -> bool:
     return any(code >= 128 for code in codes)
 
 
+def _publish_is_granted(code: int | None) -> bool:
+    return code is None or code < 128
+
+
+def _publish_is_denied(code: int | None) -> bool:
+    return code is not None and code >= 128
+
+
 def _issue_token(
     issuer: _TokenIssuerLike,
     *,
@@ -569,6 +577,98 @@ def test_runtime_control_acl_read_notify_workflow(
     finally:
         subscriber.close()
         publisher.close()
+
+
+@pytest.mark.broker_integration
+def test_runtime_dynsec_publish_churn_keeps_broker_alive_for_two_clients(
+    compose_harness,
+    mqtt_client_factory,
+    unique_suffix: str,
+) -> None:
+    snapshot = policy_churn.generate_dynsec_snapshot("publish_multi_client_base")
+    policy_churn.apply_dynsec_snapshot(snapshot)
+    policy_churn.cleanup_dynsec_snapshot(snapshot)
+    compose_harness.up(mosquitto_conf="./mosquitto_dynsec.conf", tls=False)
+    issuer = compose_harness.token_issuer(tls=False)
+
+    publisher_token = _issue_token(
+        issuer,
+        token_kind="jwt",
+        client_id="client_1",
+        topic="sensors/client_1/temp",
+        ttl_seconds=180,
+        grants=[],
+    )
+    admin_token = _issue_token(
+        issuer,
+        token_kind="jwt",
+        client_id="runtime-dynsec-controller",
+        topic="$CONTROL/dynamic-security/v1",
+        ttl_seconds=180,
+        grants=[],
+    )
+    topic_1 = "sensors/client_1/temp"
+    topic_2 = "sensors/client_2/temp"
+    publishers = [
+        mqtt_client_factory(
+            host="localhost",
+            port=1883,
+            client_id=f"client_{index}",
+            username="dynsec_client_1",
+            password=publisher_token,
+        )
+        for index in (1, 2)
+    ]
+    controller = mqtt_client_factory(
+        host="localhost",
+        port=1883,
+        client_id="runtime-dynsec-controller",
+        username="admin",
+        password=admin_token,
+    )
+
+    try:
+        for publisher in publishers:
+            publisher.connect()
+        controller.connect()
+        assert _publish_is_granted(publishers[0].publish(topic_1, "before", qos=1))
+        assert _publish_is_granted(publishers[1].publish(topic_2, "before", qos=1))
+        container_before = compose_harness._run_compose(  # noqa: SLF001
+            ["ps", "-q", "mosquitto"],
+            tls=False,
+            capture_output=True,
+        ).stdout.strip()
+
+        payload = json.dumps(
+            {
+                "commands": [
+                    {
+                        "command": "removeRoleACL",
+                        "rolename": "sensor_writer",
+                        "acltype": "publishClientSend",
+                        "topic": "sensors/+/#",
+                    }
+                ]
+            }
+        )
+        assert _publish_is_granted(
+            controller.publish("$CONTROL/dynamic-security/v1", payload, qos=1)
+        )
+        time.sleep(1.2)
+
+        assert _publish_is_denied(publishers[0].publish(topic_1, "after", qos=1))
+        assert _publish_is_denied(publishers[1].publish(topic_2, "after", qos=1))
+        container_after = compose_harness._run_compose(  # noqa: SLF001
+            ["ps", "-q", "mosquitto"],
+            tls=False,
+            capture_output=True,
+        ).stdout.strip()
+        assert container_before
+        assert container_after == container_before
+    finally:
+        for publisher in publishers:
+            publisher.close()
+        controller.close()
 
 
 @pytest.mark.broker_integration

@@ -6750,6 +6750,10 @@ def main(
                             "reason": "not in profile list",
                         }
 
+                if "policy_denial_count" not in res:
+                    raw = res.get("raw_metrics")
+                    if isinstance(raw, dict) and "policy_denial_count" in raw:
+                        res["policy_denial_count"] = int(raw.get("policy_denial_count") or 0)
                 out_payload["runs"].append({"loadgen": res, "resources": snap, "perf": perf_result})
                 if s.get("sleep_between"):
                     time.sleep(float(s["sleep_between"]))

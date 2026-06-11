@@ -2669,6 +2669,7 @@ async fn publish_handoff_tokens(
 }
 
 struct FanoutSubscriber {
+    _client: AsyncClient,
     eventloop: rumqttc::EventLoop,
     result: WorkerResult,
 }
@@ -2888,12 +2889,24 @@ async fn connect_fanout_subscriber(
         result
             .errors
             .push(format!("connect_denied:{:?}", report.connect_reason));
-        return Ok((FanoutSubscriber { eventloop, result }, false));
+        return Ok((
+            FanoutSubscriber {
+                _client: client,
+                eventloop,
+                result,
+            },
+            false,
+        ));
     }
     match subscribe_and_wait(&client, &mut eventloop, &args.fanout_topic, subscribe_qos).await {
-        Ok(codes) if codes.iter().all(|code| matches!(code, 0..=2)) => {
-            Ok((FanoutSubscriber { eventloop, result }, true))
-        }
+        Ok(codes) if codes.iter().all(|code| matches!(code, 0..=2)) => Ok((
+            FanoutSubscriber {
+                _client: client,
+                eventloop,
+                result,
+            },
+            true,
+        )),
         Ok(codes) => {
             result.errors.push(format!(
                 "fanout_suback_rejected:{}",
@@ -2903,11 +2916,25 @@ async fn connect_fanout_subscriber(
                     .collect::<Vec<_>>()
                     .join(",")
             ));
-            Ok((FanoutSubscriber { eventloop, result }, false))
+            Ok((
+                FanoutSubscriber {
+                    _client: client,
+                    eventloop,
+                    result,
+                },
+                false,
+            ))
         }
         Err(err) => {
             result.errors.push(format!("subscribe_failed:{err}"));
-            Ok((FanoutSubscriber { eventloop, result }, false))
+            Ok((
+                FanoutSubscriber {
+                    _client: client,
+                    eventloop,
+                    result,
+                },
+                false,
+            ))
         }
     }
 }

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
+import subprocess
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -8,6 +11,198 @@ import pytest
 
 from benchmarks import run_scenarios as rs
 from benchmarks.perf_profiler import PerfConfig
+
+
+def _resolved_mosquitto_healthcheck(
+    compose_files: list[str],
+    *,
+    health_port: int | None = None,
+) -> list[str]:
+    env = os.environ.copy()
+    if health_port is not None:
+        env["MOSQUITTO_HEALTH_PORT"] = str(health_port)
+    else:
+        env.pop("MOSQUITTO_HEALTH_PORT", None)
+    output = subprocess.check_output(
+        rs._compose_cmd(["config", "--format", "json"], compose_files=compose_files),
+        cwd=rs.REPO_ROOT,
+        env=env,
+        text=True,
+    )
+    payload = json.loads(output)
+    return payload["services"]["mosquitto"]["healthcheck"]["test"]
+
+
+def test_mosquitto_healthcheck_uses_plain_listener_by_default() -> None:
+    assert _resolved_mosquitto_healthcheck(["docker/docker-compose.yml"]) == [
+        "CMD-SHELL",
+        "nc -z 127.0.0.1 1883",
+    ]
+
+
+def test_mosquitto_healthcheck_uses_tls_listener_with_tls_override() -> None:
+    assert _resolved_mosquitto_healthcheck(
+        ["docker/docker-compose.yml", "docker/docker-compose.tls.yml"]
+    ) == [
+        "CMD-SHELL",
+        "nc -z 127.0.0.1 8883",
+    ]
+
+
+def test_mosquitto_healthcheck_honors_explicit_runner_port() -> None:
+    assert _resolved_mosquitto_healthcheck(
+        ["docker/docker-compose.yml", "docker/docker-compose.tls.yml"],
+        health_port=9443,
+    ) == [
+        "CMD-SHELL",
+        "nc -z 127.0.0.1 9443",
+    ]
+
+
+def _sqlite_seed_scenario() -> rs.ScenarioConfig:
+    return {
+        "id": "SQLITE-SEED",
+        "sqlite_seed_fanout": True,
+        "sqlite_seed_db": "policy.db",
+        "sqlite_seed_topic": "fanout/broadcast",
+        "sqlite_seed_subscribers": 2,
+        "sqlite_seed_profile": "fanout_basic",
+    }
+
+
+def test_sqlite_seed_replaces_readonly_fixture_before_broker_start(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "policy.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("CREATE TABLE stale(value INTEGER)")
+    db_path.chmod(0o444)
+    monkeypatch.setattr(rs, "_resolve_repo_path", lambda _path: db_path)
+    monkeypatch.setattr(rs.policy_churn, "_resolve_repo_path", lambda _path: db_path)
+
+    rs._seed_sqlite_scenario_policy(
+        _sqlite_seed_scenario(),
+        default_clients=2,
+        allow_replace=True,
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM user_roles").fetchone() == (3,)
+    assert db_path.stat().st_mode & 0o777 == 0o666
+
+
+def test_sqlite_reseed_preserves_live_database_inode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "policy.db"
+    monkeypatch.setattr(rs, "_resolve_repo_path", lambda _path: db_path)
+    monkeypatch.setattr(rs.policy_churn, "_resolve_repo_path", lambda _path: db_path)
+    scenario = _sqlite_seed_scenario()
+
+    rs._seed_sqlite_scenario_policy(scenario, default_clients=2, allow_replace=True)
+    inode = db_path.stat().st_ino
+    rs._seed_sqlite_scenario_policy(scenario, default_clients=2, allow_replace=False)
+
+    assert db_path.stat().st_ino == inode
+
+
+def test_compose_checked_includes_broker_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        rs,
+        "_compose",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            subprocess.CalledProcessError(1, ["docker", "compose"])
+        ),
+    )
+    monkeypatch.setattr(rs, "_compose_diagnostics", lambda **_kwargs: "broker exited 1")
+
+    with pytest.raises(RuntimeError, match="broker exited 1"):
+        rs._compose_checked(
+            ["up", "-d", "mosquitto"],
+            extra_env={},
+            compose_files=["docker/docker-compose.yml"],
+            phase="core service startup",
+        )
+
+
+@pytest.mark.parametrize(
+    ("result", "match"),
+    [
+        (
+            {
+                "errors": ["fanout_suback_rejected:135"],
+                "publish": {"count": 0},
+                "receive": {"count": 0},
+            },
+            "fanout setup failed",
+        ),
+        (
+            {"errors": [], "publish": {"count": 0}, "receive": {"count": 0}},
+            "published 0/10",
+        ),
+        (
+            {"errors": [], "publish": {"count": 10}, "receive": {"count": 0}},
+            "no subscriber deliveries",
+        ),
+    ],
+)
+def test_fanout_validation_rejects_invalid_benchmark_data(
+    result: dict[str, object],
+    match: str,
+) -> None:
+    with pytest.raises(RuntimeError, match=match):
+        rs._validate_fanout_result(
+            "SQLITE-RBAC-CHURN-JWT",
+            result,
+            message_count=10,
+            require_receive=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "setup_error",
+    [
+        "attenuation_failed:invalid token",
+        "connect_denied:NotAuthorized",
+        "connect_failed:client_7:connection refused",
+        "delegation_failed:invalid block",
+        "delegation_handoff_failed:client_8:missing token",
+        "delegation_handoff_join_failed:task cancelled",
+        "fanout_ready_write_failed:permission denied",
+        "startup_provisioning_failed:client_9:issuer unavailable",
+    ],
+)
+def test_fanout_validation_rejects_partial_subscriber_initialization(
+    setup_error: str,
+) -> None:
+    with pytest.raises(RuntimeError, match="fanout setup failed"):
+        rs._validate_fanout_result(
+            "FANOUT",
+            {
+                "errors": [setup_error],
+                "publish": {"count": 10},
+                "receive": {"count": 90},
+            },
+            message_count=10,
+            require_receive=True,
+        )
+
+
+def test_fanout_validation_accepts_valid_churn_result() -> None:
+    rs._validate_fanout_result(
+        "SQLITE-RBAC-CHURN-JWT",
+        {
+            "errors": [],
+            "publish": {"count": 10},
+            "receive": {"count": 200},
+        },
+        message_count=10,
+        require_receive=True,
+    )
 
 
 def test_restore_dynamic_security_baseline_removes_file_when_baseline_was_absent(
@@ -304,6 +499,7 @@ def test_main_normalizes_output_directory_strings(
     tmp_path: Path,
 ) -> None:
     captured: dict[str, object] = {}
+    compose_calls: list[list[str]] = []
     scenario_id = "TEST-SCENARIO"
     tcpdump_output_dir = tmp_path / "pcap"
     perf_output_dir = tmp_path / "perf"
@@ -376,16 +572,18 @@ def test_main_normalizes_output_directory_strings(
     )
 
     def fake_compose(
-        _args: list[str],
+        args: list[str],
         *,
         extra_env: dict[str, str] | None = None,
         compose_files: list[str] | None = None,
     ) -> None:
+        compose_calls.append(args)
         captured["compose_extra_env"] = extra_env
         captured["compose_files"] = compose_files
 
     monkeypatch.setattr(rs, "_compose", fake_compose)
     monkeypatch.setattr(rs.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(rs, "_wait_for_mqtt_listener", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(rs, "_wait_for_service_health", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(rs, "_wait_for_prometheus_api", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(rs, "_wait_for_non_empty_resource_snapshot", lambda *_args, **_kwargs: {})
@@ -426,7 +624,11 @@ def test_main_normalizes_output_directory_strings(
 
     compose_extra_env = captured["compose_extra_env"]
     assert isinstance(compose_extra_env, dict)
+    assert compose_extra_env["MOSQUITTO_HEALTH_PORT"] == "1883"
     assert compose_extra_env["TCPDUMP_OUTPUT_DIR"] == str(tcpdump_output_dir.resolve())
+    assert compose_calls[0] == ["rm", "-s", "-f", "netem", "tcpdump"]
+    assert compose_calls[1][:4] == ["up", "--build", "-d", "mosquitto"]
+    assert compose_calls[2] == ["up", "--build", "--no-deps", "-d", "netem", "tcpdump"]
     assert captured["perf_output_dir"] == str(perf_output_dir)
     result = json.loads((tmp_path / "results" / f"{scenario_id}.json").read_text())
     assert result["perf_profiling"]["config"]["callgraph"] is True

@@ -18,6 +18,12 @@ services:
       - ./sqlite:/mosquitto/config/sqlite
     cpuset: "0-1"
     mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 ${MOSQUITTO_HEALTH_PORT:-1883}"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 1s
     networks:
       - mqtt-net
 
@@ -36,7 +42,8 @@ services:
       - NETEM_RATE_KBIT=${NETEM_RATE_KBIT:-}
       - NETEM_CLEAR=${NETEM_CLEAR:-0}
     depends_on:
-      - mosquitto
+      mosquitto:
+        condition: service_healthy
 
   metrics-collector:
     image: prom/prometheus:v3.10.0@sha256:4a61322ac1103a0e3aea2a61ef1718422a48fa046441f299d71e660a3bc71ae9
@@ -146,7 +153,8 @@ services:
     volumes:
       - ${TCPDUMP_OUTPUT_DIR:-./pcap}:/pcap
     depends_on:
-      - mosquitto
+      mosquitto:
+        condition: service_healthy
     profiles:
       - tcpdump
 

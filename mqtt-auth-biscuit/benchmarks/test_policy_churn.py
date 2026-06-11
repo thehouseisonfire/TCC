@@ -105,6 +105,9 @@ def test_seed_sqlite_deep_policy_sets_conflict_and_control_roles(tmp_path) -> No
         ).fetchone()
         assert even is not None
         assert int(even[0]) == 40
+        assert _count_role_acl(conn, policy_churn.ACL_SUBSCRIBE) >= 1
+        assert _count_role_acl(conn, policy_churn.ACL_READ) >= 1
+        assert _count_role_acl(conn, policy_churn.ACL_WRITE) >= 1
         assert _count_role_deny_acl(conn, policy_churn.ACL_READ) >= 1
         assert _count_role_deny_acl(conn, policy_churn.ACL_CONTROL) >= 1
 

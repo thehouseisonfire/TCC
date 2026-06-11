@@ -2,6 +2,7 @@ import json
 import os
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -345,6 +346,49 @@ def _compose(
         file_args.extend(["-f", path])
     cmd = _compose_bin().split(" ") + file_args + args
     subprocess.check_call(cmd, cwd=REPO_ROOT, env=env)
+
+
+def _compose_diagnostics(
+    *,
+    extra_env: dict[str, str],
+    compose_files: list[str],
+) -> str:
+    env = os.environ.copy()
+    env.update(extra_env)
+    diagnostics: list[str] = []
+    for label, args in (
+        ("compose ps", ["ps", "-a"]),
+        ("mosquitto logs", ["logs", "--no-color", "--tail", "100", "mosquitto"]),
+    ):
+        cmd = _compose_cmd(args, compose_files=compose_files)
+        result = subprocess.run(
+            cmd,
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+        diagnostics.append(f"{label}:\n{output or '(no output)'}")
+    return "\n".join(diagnostics)
+
+
+def _compose_checked(
+    args: list[str],
+    *,
+    extra_env: dict[str, str],
+    compose_files: list[str],
+    phase: str,
+) -> None:
+    try:
+        _compose(args, extra_env=extra_env, compose_files=compose_files)
+    except subprocess.CalledProcessError as exc:
+        diagnostics = _compose_diagnostics(
+            extra_env=extra_env,
+            compose_files=compose_files,
+        )
+        raise RuntimeError(f"{phase} failed: {exc}\n{diagnostics}") from exc
 
 
 def _compose_cmd(
@@ -1896,6 +1940,47 @@ def _validate_reauth_storm_result(
         raise RuntimeError(f"{scenario_id}: reauth storm did not preserve session continuity")
 
 
+FANOUT_SETUP_ERROR_PREFIXES = (
+    "attenuation_failed:",
+    "connect_denied:",
+    "connect_failed:",
+    "delegation_failed:",
+    "delegation_handoff_failed:",
+    "delegation_handoff_join_failed:",
+    "fanout_ready_write_failed:",
+    "fanout_suback_rejected:",
+    "fanout_subscribe_ready_timeout",
+    "startup_provisioning_failed:",
+    "subscribe_failed:",
+)
+
+
+def _validate_fanout_result(
+    scenario_id: str,
+    result: dict[str, Any],
+    *,
+    message_count: int,
+    require_receive: bool,
+) -> None:
+    errors = [str(error) for error in result.get("errors", [])]
+    fatal_errors = [error for error in errors if error.startswith(FANOUT_SETUP_ERROR_PREFIXES)]
+    if fatal_errors:
+        raise RuntimeError(f"{scenario_id}: fanout setup failed: {', '.join(fatal_errors[:5])}")
+
+    publish = result.get("publish")
+    publish_count = int(publish.get("count") or 0) if isinstance(publish, dict) else 0
+    if publish_count != message_count:
+        raise RuntimeError(
+            f"{scenario_id}: fanout published {publish_count}/{message_count} messages"
+        )
+
+    if require_receive:
+        receive = result.get("receive")
+        receive_count = int(receive.get("count") or 0) if isinstance(receive, dict) else 0
+        if receive_count == 0:
+            raise RuntimeError(f"{scenario_id}: fanout produced no subscriber deliveries")
+
+
 def _merge_fanout_role_loadgen_results(
     *,
     publisher: dict[str, Any],
@@ -2766,6 +2851,49 @@ def _wait_for_mqtt_listener(host: str, port: int, *, timeout_seconds: float = 30
             last_error = exc
             time.sleep(0.25)
     raise RuntimeError(f"timed out waiting for Mosquitto listener at {host}:{port}: {last_error!r}")
+
+
+def _seed_sqlite_scenario_policy(
+    scenario: ScenarioConfig,
+    *,
+    default_clients: int,
+    allow_replace: bool,
+) -> None:
+    db_path = str(scenario.get("sqlite_seed_db", "docker/sqlite/policy.db"))
+    resolved_db_path = _resolve_repo_path(db_path)
+    resolved_db_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_db_path.parent.chmod(0o777)
+
+    def seed() -> None:
+        policy_churn.seed_sqlite_fanout_policy(
+            db_path,
+            topic=str(
+                scenario.get(
+                    "sqlite_seed_topic",
+                    scenario.get("fanout_topic", "fanout/broadcast"),
+                )
+            ),
+            subscriber_count=int(
+                scenario.get(
+                    "sqlite_seed_subscribers",
+                    scenario.get("subscriber_count", default_clients),
+                )
+            ),
+            profile=str(scenario.get("sqlite_seed_profile", "fanout_basic")),
+        )
+
+    try:
+        seed()
+    except sqlite3.OperationalError as exc:
+        if not allow_replace or "readonly" not in str(exc).lower():
+            raise
+        for suffix in ("", "-wal", "-shm"):
+            candidate = Path(f"{resolved_db_path}{suffix}")
+            if candidate.exists():
+                candidate.unlink()
+        seed()
+
+    resolved_db_path.chmod(0o666)
 
 
 def _restart_mosquitto(
@@ -6019,6 +6147,7 @@ def main(
         loadgen_mqtt_host = endpoints["loadgen_mqtt_host"]
         mqtt_port = endpoints["mqtt_port"]
         loadgen_tls_ca = endpoints["loadgen_tls_ca"]
+        extra_env["MOSQUITTO_HEALTH_PORT"] = str(mqtt_port)
         compose_files = ["docker/docker-compose.yml"]
         if scenario_tls:
             compose_files.append("docker/docker-compose.tls.yml")
@@ -6065,19 +6194,25 @@ def main(
             host=host_mqtt_host,
             port=mqtt_port,
         ) as dynamic_security_state:
-            # Add iperf3 service to compose deployment
-            services_to_deploy = [
+            if s.get("sqlite_seed_fanout"):
+                _seed_sqlite_scenario_policy(
+                    s,
+                    default_clients=clients,
+                    allow_replace=True,
+                )
+
+            core_services = [
                 "up",
                 "--build",
                 "-d",
                 "mosquitto",
                 "authz",
-                "netem",
                 "metrics-collector",
                 "cadvisor",
                 "token-issuer",
                 "iperf3",
             ]
+            namespace_services = ["netem"]
 
             # Auto-enable tcpdump for MTU scenarios to capture fragmentation data
             netem = s.get("netem")
@@ -6089,7 +6224,7 @@ def main(
             )
 
             if capture_this_scenario:
-                services_to_deploy.append("tcpdump")
+                namespace_services.append("tcpdump")
                 pcap_filename = f"{s['id']}.pcap"
                 extra_env.update(
                     {
@@ -6105,13 +6240,33 @@ def main(
             compose_project_name = extra_env.get("COMPOSE_PROJECT_NAME") or os.environ.get(
                 "COMPOSE_PROJECT_NAME"
             )
-            _compose(
-                services_to_deploy,
+            _compose_checked(
+                ["rm", "-s", "-f", "netem", "tcpdump"],
                 extra_env=extra_env,
                 compose_files=compose_files,
+                phase="namespace-service cleanup",
+            )
+            _compose_checked(
+                core_services,
+                extra_env=extra_env,
+                compose_files=compose_files,
+                phase="core service startup",
             )
             dynamic_security_state.broker_started = True
-            time.sleep(1)
+            try:
+                _wait_for_mqtt_listener(host_mqtt_host, mqtt_port)
+            except RuntimeError as exc:
+                diagnostics = _compose_diagnostics(
+                    extra_env=extra_env,
+                    compose_files=compose_files,
+                )
+                raise RuntimeError(f"mosquitto startup failed: {exc}\n{diagnostics}") from exc
+            _compose_checked(
+                ["up", "--build", "--no-deps", "-d", *namespace_services],
+                extra_env=extra_env,
+                compose_files=compose_files,
+                phase="namespace-service startup",
+            )
             _wait_for_service_health("authz", authz_base, tls_ca, tls_insecure)
             _wait_for_service_health("token-issuer", token_issuer_base, tls_ca, tls_insecure)
             _wait_for_prometheus_api(prom_base, tls_ca, tls_insecure)
@@ -6402,16 +6557,11 @@ def main(
                             host=host_mqtt_host,
                             port=mqtt_port,
                         )
-                    if s.get("sqlite_seed_fanout"):
-                        policy_churn.seed_sqlite_fanout_policy(
-                            s.get("sqlite_seed_db", "docker/sqlite/policy.db"),
-                            topic=s.get(
-                                "sqlite_seed_topic", s.get("fanout_topic", "fanout/broadcast")
-                            ),
-                            subscriber_count=int(
-                                s.get("sqlite_seed_subscribers", s.get("subscriber_count", clients))
-                            ),
-                            profile=str(s.get("sqlite_seed_profile", "fanout_basic")),
+                    if idx > 0 and s.get("sqlite_seed_fanout"):
+                        _seed_sqlite_scenario_policy(
+                            s,
+                            default_clients=clients,
+                            allow_replace=False,
                         )
                     mqtt5_cfg = s.get("mqtt5_auth")
                     scenario_clients = effective_client_count
@@ -6674,6 +6824,13 @@ def main(
                             fanout_publisher_password_map_profile=s.get(
                                 "fanout_publisher_password_map_profile"
                             ),
+                        )
+                    if s.get("traffic_pattern") == "fanout":
+                        _validate_fanout_result(
+                            s["id"],
+                            res,
+                            message_count=scenario_messages,
+                            require_receive=bool(s.get("sqlite_seed_fanout")),
                         )
                     if s.get("proactive_refresh_assert_continuity"):
                         if not res.get("session_continuity_ok"):

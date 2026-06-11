@@ -30,6 +30,7 @@ mqtt-auth-biscuit/benchmarks/**.json
 
 # Generated Mosquitto configs (benchmark matrix variants)
 /mqtt-auth-biscuit/docker/.generated/
+/mqtt-auth-biscuit/docker/sqlite/policy.db
 
 # benchmark results
 

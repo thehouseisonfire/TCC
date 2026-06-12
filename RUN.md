@@ -25,7 +25,7 @@ Every lever below is pulled at least twice across the full plan.
 | Policy backend | Static ACL, DynSec, HTTP, SQLite, Hybrid | (same) | Scenario ID |
 | Token complexity | Baseline, Chain-1/5/25, Datalog-low/med/high | (same) | Scenario ID |
 | TLS | Off, On | Off, On | `-TLS` suffix |
-| Client count | 10, 500 | 10, 50, 500 | `--clients` |
+| Client count | 10, 200 | 10, 50, 200 | `--clients` |
 | Message volume | 10, 100 | 10, 100 | `--messages` |
 | QoS | 1 (default) | 0, 1, 2 | `--qos` |
 | Token issuer | Default | Default, Stripped | `--token-issuer-no-default-roles` |
@@ -166,7 +166,7 @@ REAUTH_STORM_SCENARIOS=${SCENARIO_GROUPS[1]}
 Run the 2×2 matrix (clients × messages) with 3 repetitions:
 
 ```bash
-for clients in 10 500; do
+for clients in 10 200; do
   for messages in 10 100; do
     for run in 1 2 3; do
       echo "=== Part 1: clients=$clients messages=$messages run=$run ==="
@@ -274,7 +274,7 @@ Run the full sweep (3 clients × 2 messages × 3 QoS × 2 token issuer × 3 runs
 = 108 iterations, 3,456 scenario runs total):
 
 ```bash
-for clients in 10 50 500; do
+for clients in 10 50 200; do
   for messages in 10 100; do
     for qos in 0 1 2; do
       for stripped in 0 1; do
@@ -346,9 +346,9 @@ Each directory contains:
 | Component | Per-invocation time | Invocations | Subtotal |
 |-----------|-------------------|-------------|----------|
 | Part 1 (428 scenarios, 10 clients, 10 msgs) | ~4–8 h | 3 | ~12–24 h |
-| Part 1 (428 scenarios, 500 clients, 10 msgs) | ~8–16 h | 3 | ~24–48 h |
+| Part 1 (428 scenarios, 200 clients, 10 msgs) | ~8–16 h | 3 | ~24–48 h |
 | Part 1 (428 scenarios, 10 clients, 100 msgs) | ~6–12 h | 3 | ~18–36 h |
-| Part 1 (428 scenarios, 500 clients, 100 msgs) | ~12–24 h | 3 | ~36–72 h |
+| Part 1 (428 scenarios, 200 clients, 100 msgs) | ~12–24 h | 3 | ~36–72 h |
 | Part 2 (32 scenarios per invocation) | ~1–3 h | 108 | ~108–324 h |
 
 **Conservative total: 9–14 days continuous execution.** Plan for overnight and

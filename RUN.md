@@ -131,6 +131,8 @@ All commands run from the repository root (`TCC2/`).
 
 **Default client topology:** run every scenario with `--client-topology container-per-client` unless a step explicitly requires a different mode.
 
+**Default client memory:** keep every `container-per-client` run at `--client-memory 96m` because the previous 512 MB default is not feasible at high client counts.
+
 ### Step 1: Build the plugin and generate tokens
 
 Build once and reuse across all iterations:
@@ -147,13 +149,18 @@ cd ../..
 Generate the full scenario list:
 
 ```bash
-SCENARIOS=$(cd mqtt-auth-biscuit && uv run --locked python -c "
+readarray -t SCENARIO_GROUPS < <(cd mqtt-auth-biscuit && uv run --locked python -c "
 from benchmarks.run_scenarios import _read_tokens, _build_available_scenarios, _expand_tls_matrix
 t = _read_tokens('benchmarks/tokens.json')
 a = _expand_tls_matrix(_build_available_scenarios(
     t, token_issuer_no_default_roles=False, token_issuer_no_default_grants=False))
-print(','.join(sorted(a.keys())))
+reauth = sorted(name for name in a if name.startswith('TOKEN-LIFECYCLE-REAUTH-STORM-'))
+regular = sorted(name for name in a if name not in reauth)
+print(','.join(regular))
+print(','.join(reauth))
 " 2>/dev/null)
+SCENARIOS=${SCENARIO_GROUPS[0]}
+REAUTH_STORM_SCENARIOS=${SCENARIO_GROUPS[1]}
 ```
 
 Run the 2×2 matrix (clients × messages) with 3 repetitions:
@@ -168,8 +175,19 @@ for clients in 10 500; do
         --clients "$clients" \
         --messages "$messages" \
         --client-topology container-per-client \
+        --client-memory 96m \
         --skip-build \
         --skip-tokens
+
+      # Reauth storms are incompatible with container-per-client.
+      ./scripts/run-benchmarks \
+        --scenarios "$REAUTH_STORM_SCENARIOS" \
+        --clients "$clients" \
+        --messages "$messages" \
+        --client-topology host \
+        --skip-build \
+        --skip-tokens
+
       # Preserve results to avoid stale data in aggregator
       mv mqtt-auth-biscuit/benchmarks/results \
          mqtt-auth-biscuit/benchmarks/results-p1-c${clients}-m${messages}-r${run}
@@ -219,12 +237,14 @@ HTTP-AUTHZ-COMPLEXITY-SIMPLE-JWT,HTTP-AUTHZ-COMPLEXITY-SIMPLE-BISCUIT,\
 HTTP-AUTHZ-COMPLEXITY-MED-JWT,HTTP-AUTHZ-COMPLEXITY-MED-BISCUIT,\
 HTTP-AUTHZ-COMPLEXITY-COMPLEX-JWT,HTTP-AUTHZ-COMPLEXITY-COMPLEX-BISCUIT \
   --client-topology container-per-client \
+  --client-memory 96m \
   --skip-build \
   --skip-tokens
 
 ./scripts/run-benchmarks \
   --scenarios TOKEN-PUBLISH-STRESS-RECONNECT-JWT,TOKEN-PUBLISH-STRESS-RECONNECT-BISCUIT \
   --client-topology container-per-client \
+  --client-memory 96m \
   --skip-build \
   --skip-tokens
 ```
@@ -233,13 +253,19 @@ Run the excluded lifecycle/control/fan-out targeted scenarios separately:
 
 ```bash
 ./scripts/run-benchmarks \
-  --scenarios TOKEN-LIFECYCLE-REAUTH-STORM-JWT,TOKEN-LIFECYCLE-REAUTH-STORM-BISCUIT,\
-TOKEN-LIFECYCLE-PROACTIVE-REAUTH-JWT,TOKEN-LIFECYCLE-PROACTIVE-REAUTH-BISCUIT,\
+  --scenarios TOKEN-LIFECYCLE-PROACTIVE-REAUTH-JWT,TOKEN-LIFECYCLE-PROACTIVE-REAUTH-BISCUIT,\
 TOKEN-LIFECYCLE-RECONNECT-PUBLISH-JWT,TOKEN-LIFECYCLE-RECONNECT-PUBLISH-BISCUIT,\
 CONTROL-OVERHEAD-KICK-REAUTH-JWT,CONTROL-OVERHEAD-ACL-READ-NOTIFY-JWT,\
 CONTROL-CHURN-ACL-MODIFY-JWT,CONTROL-CHURN-GROUP-CLIENT-JWT,\
 SQLITE-RBAC-CHURN-JWT,SQLITE-RBAC-CHURN-BISCUIT \
   --client-topology container-per-client \
+  --client-memory 96m \
+  --skip-build \
+  --skip-tokens
+
+./scripts/run-benchmarks \
+  --scenarios TOKEN-LIFECYCLE-REAUTH-STORM-JWT,TOKEN-LIFECYCLE-REAUTH-STORM-BISCUIT \
+  --client-topology host \
   --skip-build \
   --skip-tokens
 ```
@@ -261,6 +287,7 @@ for clients in 10 50 500; do
               --messages "$messages" \
               --qos "$qos" \
               --client-topology container-per-client \
+              --client-memory 96m \
               --token-issuer-no-default-roles \
               --skip-build \
               --skip-tokens
@@ -271,6 +298,7 @@ for clients in 10 50 500; do
               --messages "$messages" \
               --qos "$qos" \
               --client-topology container-per-client \
+              --client-memory 96m \
               --skip-build \
               --skip-tokens
           fi
@@ -283,8 +311,7 @@ for clients in 10 50 500; do
 done
 ```
 
-**Note**: `--token-issuer-no-default-grants` is not exposed by the Rust wrapper.
-To include it, invoke the Python module directly instead of `run-benchmarks`:
+**Note**: `--token-issuer-no-default-grants` is now forwarded by the Rust wrapper, but if you need to invoke the Python module directly for other lower-level flags, use:
 
 ```bash
 cd mqtt-auth-biscuit
@@ -294,6 +321,7 @@ uv run --locked python -m benchmarks.run_scenarios \
   --messages "$messages" \
   --qos "$qos" \
   --client-topology container-per-client \
+  --client-memory 96m \
   --token-issuer-no-default-roles \
   --token-issuer-no-default-grants
 cd ..
@@ -380,7 +408,8 @@ uv run --locked python benchmarks/aggregate_results.py \
 - MTU scenarios (`NETWORK-MTU-*`) use `netem` for traffic shaping. These
   require `NET_ADMIN` capability on the mosquitto container (already configured
   in `docker-compose.yml`).
-- Every command in this run plan uses `--client-topology container-per-client` because the research environment expects one independent container per MQTT client. Do not revert to `container-single` unless the step explicitly documents a different requirement.
+- Every compatible command in this run plan uses `--client-topology container-per-client` because the research environment expects one independent container per MQTT client. REAUTH-STORM scenarios explicitly use `host` because the runner does not support them with `container-per-client`.
+- Every command in this run plan also uses `--client-memory 96m` for `container-per-client` runs because the default 512 MB loadgen limit is not feasible at high client counts. Keep this explicit memory override unless the documented step intentionally changes the limit.
 - REAUTH-STORM, RECONNECT-PUBLISH, and THUNDERING-HERD scenarios have internal
   client counts that override `--clients`. The `--clients` flag still affects
   other scenarios in the same batch.

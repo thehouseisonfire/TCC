@@ -116,10 +116,11 @@ remains `benchmarks.run_scenarios`.
 
 Supported wrapper pass-through flags are currently `--scenarios`, `--clients`,
 `--messages`, `--qos`, `--tls`, `--tls-insecure`, `--tls-ca-file`,
-`--token-issuer-no-default-roles`, `--biscuit-base64url`, and
-`--token-refresh-codes`. Use the direct module entrypoint for lower-level
-runner options such as `--perf`, `--iperf3-*`, `--tcpdump-*`,
-`--client-topology`, or `--out`.
+`--token-issuer-no-default-roles`, `--token-issuer-no-default-grants`,
+`--biscuit-base64url`, `--token-refresh-codes`, `--client-topology`,
+`--client-memory`, and `--client-cpus`. Use the direct module entrypoint for
+lower-level runner options such as `--perf`, `--iperf3-*`, `--tcpdump-*`,
+or `--out`.
 
 ## Step 1: Build the Plugin
 

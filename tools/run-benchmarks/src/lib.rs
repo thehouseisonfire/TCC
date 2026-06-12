@@ -40,10 +40,22 @@ pub struct Cli {
     pub token_issuer_no_default_roles: bool,
 
     #[arg(long)]
+    pub token_issuer_no_default_grants: bool,
+
+    #[arg(long)]
     pub biscuit_base64url: bool,
 
     #[arg(long)]
     pub token_refresh_codes: Option<String>,
+
+    #[arg(long)]
+    pub client_topology: Option<String>,
+
+    #[arg(long)]
+    pub client_memory: Option<String>,
+
+    #[arg(long)]
+    pub client_cpus: Option<String>,
 
     #[arg(long)]
     pub compose_bin: Option<String>,
@@ -196,12 +208,27 @@ pub fn scenario_args(cli: &Cli) -> Vec<String> {
     if cli.token_issuer_no_default_roles {
         args.push("--token-issuer-no-default-roles".to_owned());
     }
+    if cli.token_issuer_no_default_grants {
+        args.push("--token-issuer-no-default-grants".to_owned());
+    }
     if cli.biscuit_base64url {
         args.push("--biscuit-base64url".to_owned());
     }
     if let Some(token_refresh_codes) = &cli.token_refresh_codes {
         args.push("--token-refresh-codes".to_owned());
         args.push(token_refresh_codes.clone());
+    }
+    if let Some(client_topology) = &cli.client_topology {
+        args.push("--client-topology".to_owned());
+        args.push(client_topology.clone());
+    }
+    if let Some(client_memory) = &cli.client_memory {
+        args.push("--client-memory".to_owned());
+        args.push(client_memory.clone());
+    }
+    if let Some(client_cpus) = &cli.client_cpus {
+        args.push("--client-cpus".to_owned());
+        args.push(client_cpus.clone());
     }
 
     args
@@ -450,8 +477,12 @@ mod tests {
             tls_insecure: true,
             tls_ca_file: Some("ca.pem".to_owned()),
             token_issuer_no_default_roles: true,
+            token_issuer_no_default_grants: true,
             biscuit_base64url: true,
             token_refresh_codes: Some("204,500".to_owned()),
+            client_topology: Some("container-per-client".to_owned()),
+            client_memory: Some("96m".to_owned()),
+            client_cpus: Some("0.5".to_owned()),
             compose_bin: None,
             no_cleanup: false,
             log_level: "INFO".to_owned(),
@@ -473,9 +504,16 @@ mod tests {
                 "--tls-ca-file".to_owned(),
                 "ca.pem".to_owned(),
                 "--token-issuer-no-default-roles".to_owned(),
+                "--token-issuer-no-default-grants".to_owned(),
                 "--biscuit-base64url".to_owned(),
                 "--token-refresh-codes".to_owned(),
-                "204,500".to_owned()
+                "204,500".to_owned(),
+                "--client-topology".to_owned(),
+                "container-per-client".to_owned(),
+                "--client-memory".to_owned(),
+                "96m".to_owned(),
+                "--client-cpus".to_owned(),
+                "0.5".to_owned(),
             ]
         );
     }
@@ -493,8 +531,12 @@ mod tests {
             tls_insecure: false,
             tls_ca_file: None,
             token_issuer_no_default_roles: false,
+            token_issuer_no_default_grants: false,
             biscuit_base64url: false,
             token_refresh_codes: None,
+            client_topology: None,
+            client_memory: None,
+            client_cpus: None,
             compose_bin: None,
             no_cleanup: false,
             log_level: "INFO".to_owned(),

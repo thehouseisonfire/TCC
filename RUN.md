@@ -129,6 +129,8 @@ iperf3 --version  # sudo apt-get install iperf3
 
 All commands run from the repository root (`TCC2/`).
 
+**Default client topology:** run every scenario with `--client-topology container-per-client` unless a step explicitly requires a different mode.
+
 ### Step 1: Build the plugin and generate tokens
 
 Build once and reuse across all iterations:
@@ -165,6 +167,7 @@ for clients in 10 500; do
         --scenarios "$SCENARIOS" \
         --clients "$clients" \
         --messages "$messages" \
+        --client-topology container-per-client \
         --skip-build \
         --skip-tokens
       # Preserve results to avoid stale data in aggregator
@@ -215,11 +218,13 @@ TOKEN-COMPOSABILITY-DELEGATED-DATALOG-HIGH-BISCUIT,\
 HTTP-AUTHZ-COMPLEXITY-SIMPLE-JWT,HTTP-AUTHZ-COMPLEXITY-SIMPLE-BISCUIT,\
 HTTP-AUTHZ-COMPLEXITY-MED-JWT,HTTP-AUTHZ-COMPLEXITY-MED-BISCUIT,\
 HTTP-AUTHZ-COMPLEXITY-COMPLEX-JWT,HTTP-AUTHZ-COMPLEXITY-COMPLEX-BISCUIT \
+  --client-topology container-per-client \
   --skip-build \
   --skip-tokens
 
 ./scripts/run-benchmarks \
   --scenarios TOKEN-PUBLISH-STRESS-RECONNECT-JWT,TOKEN-PUBLISH-STRESS-RECONNECT-BISCUIT \
+  --client-topology container-per-client \
   --skip-build \
   --skip-tokens
 ```
@@ -234,6 +239,7 @@ TOKEN-LIFECYCLE-RECONNECT-PUBLISH-JWT,TOKEN-LIFECYCLE-RECONNECT-PUBLISH-BISCUIT,
 CONTROL-OVERHEAD-KICK-REAUTH-JWT,CONTROL-OVERHEAD-ACL-READ-NOTIFY-JWT,\
 CONTROL-CHURN-ACL-MODIFY-JWT,CONTROL-CHURN-GROUP-CLIENT-JWT,\
 SQLITE-RBAC-CHURN-JWT,SQLITE-RBAC-CHURN-BISCUIT \
+  --client-topology container-per-client \
   --skip-build \
   --skip-tokens
 ```
@@ -254,6 +260,7 @@ for clients in 10 50 500; do
               --clients "$clients" \
               --messages "$messages" \
               --qos "$qos" \
+              --client-topology container-per-client \
               --token-issuer-no-default-roles \
               --skip-build \
               --skip-tokens
@@ -263,6 +270,7 @@ for clients in 10 50 500; do
               --clients "$clients" \
               --messages "$messages" \
               --qos "$qos" \
+              --client-topology container-per-client \
               --skip-build \
               --skip-tokens
           fi
@@ -285,6 +293,7 @@ uv run --locked python -m benchmarks.run_scenarios \
   --clients "$clients" \
   --messages "$messages" \
   --qos "$qos" \
+  --client-topology container-per-client \
   --token-issuer-no-default-roles \
   --token-issuer-no-default-grants
 cd ..
@@ -371,6 +380,7 @@ uv run --locked python benchmarks/aggregate_results.py \
 - MTU scenarios (`NETWORK-MTU-*`) use `netem` for traffic shaping. These
   require `NET_ADMIN` capability on the mosquitto container (already configured
   in `docker-compose.yml`).
+- Every command in this run plan uses `--client-topology container-per-client` because the research environment expects one independent container per MQTT client. Do not revert to `container-single` unless the step explicitly documents a different requirement.
 - REAUTH-STORM, RECONNECT-PUBLISH, and THUNDERING-HERD scenarios have internal
   client counts that override `--clients`. The `--clients` flag still affects
   other scenarios in the same batch.

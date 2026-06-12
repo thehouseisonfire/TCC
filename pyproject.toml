@@ -9,7 +9,7 @@ dependencies = [
   "pandas==3.0.3",
   "pydantic==2.13.4",
   "rich==15.0.0",
-  "typer==0.26.5",
+  "typer==0.26.7",
 ]
 
 [dependency-groups]
@@ -20,7 +20,7 @@ dev = [
   "pandas-stubs==3.0.3.260530",
   "pyrefly==1.0.0",
   "pytest==9.0.3",
-  "ruff==0.15.15",
+  "ruff==0.15.17",
 ]
 
 [tool.uv]

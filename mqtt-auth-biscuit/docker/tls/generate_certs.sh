@@ -5,6 +5,7 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$DIR"
 
 if [[ -f ca.pem && -f ca.key && -f server.pem && -f server.key ]]; then
+  chmod 644 server.key
   echo "TLS certs already exist in $DIR"
   exit 0
 fi
@@ -25,5 +26,6 @@ openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial \
 
 rm -f server.csr san.ext ca.srl
 chmod 600 *.key
+chmod 644 server.key
 
 echo "Generated TLS certs in $DIR"

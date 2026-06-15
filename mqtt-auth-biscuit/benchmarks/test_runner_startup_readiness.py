@@ -393,6 +393,35 @@ def test_wait_for_service_health_retries_until_ok(monkeypatch) -> None:
     assert attempts["count"] == 3
 
 
+@pytest.mark.parametrize(
+    ("ca_file", "insecure", "expected_verify"),
+    [
+        (None, True, False),
+        ("docker/tls/ca.pem", False, "docker/tls/ca.pem"),
+    ],
+)
+def test_http2_client_configures_verification_on_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    ca_file: str | None,
+    insecure: bool,
+    expected_verify: bool | str,
+) -> None:
+    transport = object()
+
+    def fake_transport(**kwargs):  # noqa: ANN003, ANN202
+        assert kwargs == {"http1": False, "http2": True, "verify": expected_verify}
+        return transport
+
+    def fake_client(**kwargs):  # noqa: ANN003, ANN202
+        assert kwargs == {"timeout": 5.0, "transport": transport}
+        return object()
+
+    monkeypatch.setattr(rs.httpx, "HTTPTransport", fake_transport)
+    monkeypatch.setattr(rs.httpx, "Client", fake_client)
+
+    rs._http_client(ca_file, insecure)
+
+
 def test_prometheus_query_uses_default_http_transport(monkeypatch) -> None:
     class FakeResponse:
         def raise_for_status(self) -> None:

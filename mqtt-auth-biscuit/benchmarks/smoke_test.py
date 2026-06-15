@@ -68,8 +68,8 @@ def _http_client(
         verify = False
     elif ca_file:
         verify = ca_file
-    transport = httpx.HTTPTransport(http1=False, http2=True)
-    return httpx.Client(verify=verify, timeout=5.0, transport=transport)
+    transport = httpx.HTTPTransport(http1=False, http2=True, verify=verify)
+    return httpx.Client(timeout=5.0, transport=transport)
 
 
 def _http_get(

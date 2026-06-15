@@ -55,6 +55,12 @@ def test_dynsec_control_families_use_generated_profiles_with_matching_principals
         scenarios["CONTROL-INTERLEAVED-DATA-BISCUIT"]["dynamic_security_generated_profile"]
         == "control_interleaved_base"
     )
+    assert scenarios["CONTROL-INTERLEAVED-DATA-JWT"]["control_payload"] == {
+        "commands": [{"command": "getClient", "username": "jwt"}]
+    }
+    assert scenarios["CONTROL-INTERLEAVED-DATA-BISCUIT"]["control_payload"] == {
+        "commands": [{"command": "getClient", "username": "biscuit"}]
+    }
     assert (
         scenarios["DYNAMIC-SECURITY-BASELINE"]["dynamic_security_generated_profile"]
         == "publish_multi_client_base"
@@ -122,6 +128,13 @@ def test_control_notify_fanout_metrics_should_use_client_count_not_global_defaul
     scenario = _scenario_registry()["CONTROL-OVERHEAD-ACL-READ-NOTIFY-JWT"]
 
     assert rs._effective_scenario_client_count(scenario, 25) == 1
+
+
+def test_interleaved_control_raises_low_global_message_count_to_threshold() -> None:
+    scenario = _scenario_registry()["CONTROL-INTERLEAVED-DATA-JWT"]
+
+    assert rs._effective_scenario_message_count(scenario, 5) == 10
+    assert rs._effective_scenario_message_count(scenario, 25) == 25
 
 
 def test_dynsec_alignment_accepts_generated_control_profiles() -> None:

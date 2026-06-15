@@ -458,8 +458,8 @@ def _http_client(ca_file: str | None, insecure: bool) -> httpx.Client:
         verify = False
     elif ca_file:
         verify = ca_file
-    transport = httpx.HTTPTransport(http1=False, http2=True)
-    return httpx.Client(verify=verify, timeout=5.0, transport=transport)
+    transport = httpx.HTTPTransport(http1=False, http2=True, verify=verify)
+    return httpx.Client(timeout=5.0, transport=transport)
 
 
 def _mark_biscuit_cli_token(tokens: dict[str, Any], token: str | None) -> str | None:
@@ -843,13 +843,7 @@ def _python_subprocess_env(extra_env: dict[str, str] | None = None) -> dict[str,
 
 
 def _health_check(name: str, base_url: str, ca_file: str | None, insecure: bool) -> None:
-    verify: bool | str = True
-    if insecure:
-        verify = False
-    elif ca_file:
-        verify = ca_file
-    transport = httpx.HTTPTransport(http1=False, http2=True)
-    with httpx.Client(verify=verify, timeout=5.0, transport=transport) as client:
+    with _http_client(ca_file, insecure) as client:
         resp = client.get(base_url.rstrip("/") + "/health")
         resp.raise_for_status()
         payload = resp.json()
@@ -2965,6 +2959,11 @@ def _load_dynamic_security_snapshot(path: str) -> dict[str, Any]:
 
 def _effective_scenario_client_count(scenario: ScenarioConfig, default_clients: int) -> int:
     return int(scenario.get("client_count", scenario.get("subscriber_count", default_clients)))
+
+
+def _effective_scenario_message_count(scenario: ScenarioConfig, default_messages: int) -> int:
+    configured = int(scenario.get("message_count", default_messages))
+    return max(configured, int(scenario.get("control_after_messages", 0)))
 
 
 def _set_scenario_semantics(
@@ -5819,6 +5818,7 @@ def _build_available_scenarios(
             "password": tokens["jwt"],
             "topic": "sensors/{client_id}/temp",
             "control_topic": "$CONTROL/dynamic-security/v1",
+            "control_payload": {"commands": [{"command": "getClient", "username": "jwt"}]},
             "control_mode": False,
             "control_repeat": 1,
             "control_after_messages": 10,
@@ -5834,6 +5834,7 @@ def _build_available_scenarios(
             "password": tokens["biscuit"],
             "topic": "sensors/{client_id}/temp",
             "control_topic": "$CONTROL/dynamic-security/v1",
+            "control_payload": {"commands": [{"command": "getClient", "username": "biscuit"}]},
             "control_mode": False,
             "control_repeat": 1,
             "control_after_messages": 10,
@@ -6390,7 +6391,17 @@ def main(
                 if s.get("reauth_storm") and reauth_storm_clients is not None
                 else _effective_scenario_client_count(s, clients)
             )
-            scenario_messages = int(s.get("message_count", messages))
+            scenario_messages = _effective_scenario_message_count(s, messages)
+            control_after_messages = int(s.get("control_after_messages", 0))
+            configured_messages = int(s.get("message_count", messages))
+            if control_after_messages > configured_messages:
+                logger.info(
+                    "%s requires at least %d messages per client for interleaved control; "
+                    "raising the configured count from %d",
+                    s["id"],
+                    control_after_messages,
+                    configured_messages,
+                )
             out_payload: dict[str, Any] = {
                 "scenario": s["id"],
                 "token_len": token_len,

@@ -1067,6 +1067,29 @@ fn validate_startup_provisioning(args: &Args) -> Result<()> {
             "client_id override requires --clients 1".to_string(),
         ));
     }
+    if args.control_after_messages > 0 {
+        if args.control_mode {
+            return Err(MqttHelperError::Message(
+                "control after-messages cannot be combined with control mode".to_string(),
+            ));
+        }
+        if args.control_topic.as_deref().is_none_or(str::is_empty) {
+            return Err(MqttHelperError::Message(
+                "control after-messages requires a control topic".to_string(),
+            ));
+        }
+        if args.control_payload.is_none() && args.control_payload_file.is_none() {
+            return Err(MqttHelperError::Message(
+                "control after-messages requires a control payload or payload file".to_string(),
+            ));
+        }
+        if args.messages < args.control_after_messages {
+            return Err(MqttHelperError::Message(format!(
+                "control after-messages ({}) exceeds messages per client ({})",
+                args.control_after_messages, args.messages
+            )));
+        }
+    }
     if args.runtime_control_username.is_some() {
         if args.runtime_control_after_messages == 0 {
             return Err(MqttHelperError::Message(
@@ -3936,26 +3959,6 @@ async fn run_publish_mode(
         }
     }
     for _ in 0..args.messages {
-        if args.control_after_messages > 0 && since_control >= args.control_after_messages {
-            if let Some(topic) = plan.control_topic {
-                let start = Instant::now();
-                match publish_tracked_and_wait(
-                    client,
-                    topic,
-                    plan.control_payload.to_vec(),
-                    args.control_qos,
-                )
-                .await
-                {
-                    Ok(ms) => result.control_ms.push(ms),
-                    Err(err) => result.errors.push(format!("control_publish_failed:{err}")),
-                }
-                result
-                    .control_injection_ms
-                    .push(start.elapsed().as_secs_f64() * 1000.0);
-            }
-            since_control = 0;
-        }
         let publish_qos = plan
             .qos_distribution
             .map_or(args.qos, QosDistribution::choose);
@@ -4013,7 +4016,31 @@ async fn run_publish_mode(
             }
         }
         since_control += 1;
+        if control_injection_due(since_control, args.control_after_messages) {
+            if let Some(topic) = plan.control_topic {
+                let start = Instant::now();
+                match publish_tracked_and_wait(
+                    client,
+                    topic,
+                    plan.control_payload.to_vec(),
+                    args.control_qos,
+                )
+                .await
+                {
+                    Ok(ms) => result.control_ms.push(ms),
+                    Err(err) => result.errors.push(format!("control_publish_failed:{err}")),
+                }
+                result
+                    .control_injection_ms
+                    .push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            since_control = 0;
+        }
     }
+}
+
+const fn control_injection_due(messages_since_control: usize, after_messages: usize) -> bool {
+    after_messages > 0 && messages_since_control >= after_messages
 }
 
 async fn run_worker_session(
@@ -5107,6 +5134,63 @@ mod tests {
             err.to_string()
                 .contains("exceeds configured publish capacity")
         );
+    }
+
+    #[test]
+    fn interleaved_control_requires_complete_reachable_configuration() {
+        for args in [
+            Args::parse_from([
+                "mqtt-loadgen",
+                "--messages",
+                "10",
+                "--control-after-messages",
+                "10",
+                "--control-payload",
+                "{}",
+            ]),
+            Args::parse_from([
+                "mqtt-loadgen",
+                "--messages",
+                "10",
+                "--control-after-messages",
+                "10",
+                "--control-topic",
+                "control/topic",
+            ]),
+            Args::parse_from([
+                "mqtt-loadgen",
+                "--messages",
+                "9",
+                "--control-after-messages",
+                "10",
+                "--control-topic",
+                "control/topic",
+                "--control-payload",
+                "{}",
+            ]),
+        ] {
+            assert!(validate_startup_provisioning(&args).is_err());
+        }
+
+        let valid = Args::parse_from([
+            "mqtt-loadgen",
+            "--messages",
+            "10",
+            "--control-after-messages",
+            "10",
+            "--control-topic",
+            "control/topic",
+            "--control-payload",
+            "{}",
+        ]);
+        assert!(validate_startup_provisioning(&valid).is_ok());
+    }
+
+    #[test]
+    fn interleaved_control_is_due_on_the_nth_message() {
+        assert!(!control_injection_due(9, 10));
+        assert!(control_injection_due(10, 10));
+        assert!(!control_injection_due(10, 0));
     }
 
     #[test]

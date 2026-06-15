@@ -35,3 +35,4 @@ mqtt-auth-biscuit/benchmarks/**.json
 # benchmark results
 
 /mqtt-auth-biscuit/benchmarks/results/
+/mqtt-auth-biscuit/benchmarks/result*

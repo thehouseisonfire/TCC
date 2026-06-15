@@ -36,6 +36,7 @@ services:
       - ./tls/ca.pem:/etc/tls/ca.pem:ro
 
   metrics-collector:
+    user: "0:0"
     ports:
       - "9443:9090"
     command:
@@ -48,11 +49,4 @@ services:
       - ./tls/server.key:/etc/prometheus/server.key:ro
 
   cadvisor:
-    ports:
-      - "9444:8080"
-    command:
-      - "--http_tls_cert=/etc/cadvisor/server.pem"
-      - "--http_tls_key=/etc/cadvisor/server.key"
-    volumes:
-      - ./tls/server.pem:/etc/cadvisor/server.pem:ro
-      - ./tls/server.key:/etc/cadvisor/server.key:ro
+    ports: !reset []

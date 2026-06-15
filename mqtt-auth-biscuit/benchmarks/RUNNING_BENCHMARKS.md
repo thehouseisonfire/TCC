@@ -663,7 +663,8 @@ uv run --locked python -m benchmarks.run_scenarios
 
 ### TLS-Enabled Runs
 
-To measure TLS overhead across all network paths (MQTT, token issuer, authz HTTP, Prometheus):
+To measure TLS overhead across externally accessed network paths (MQTT, token
+issuer, authz HTTP, and the Prometheus query API):
 
 ```bash
 bash docker/tls/generate_certs.sh
@@ -675,6 +676,10 @@ Optional TLS flags:
 
 - `--tls-ca-file <path>`: custom CA bundle (default: `docker/tls/ca.pem`)
 - `--tls-insecure`: disable certificate verification for local testing (obviously not recommended for production)
+
+Prometheus continues to scrape cAdvisor over HTTP on the private Compose
+network. cAdvisor is not exposed through a TLS endpoint in this configuration;
+only Prometheus's externally accessed query API uses TLS.
 
 For the microbenchmark or single-run metrics collector over TLS:
 
@@ -749,7 +754,8 @@ uv run --locked python benchmarks/mqtt_auth_client.py --token1 "<token>" --token
 
 You can also monitor resource usage via:
 
-- **Prometheus**: `http://localhost:9090`
+- **Prometheus (plaintext stack)**: `http://localhost:9090`
+- **Prometheus (TLS stack)**: `https://localhost:9443`
 - **Docker Stats**: `docker stats`
 
 If resource snapshots fail because vectors are empty, validate telemetry wiring

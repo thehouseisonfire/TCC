@@ -59,6 +59,27 @@ def test_mosquitto_healthcheck_honors_explicit_runner_port() -> None:
     ]
 
 
+def test_tls_compose_keeps_cadvisor_on_private_http_network() -> None:
+    output = subprocess.check_output(
+        rs._compose_cmd(
+            ["config", "--format", "json"],
+            compose_files=["docker/docker-compose.yml", "docker/docker-compose.tls.yml"],
+        ),
+        cwd=rs.REPO_ROOT,
+        text=True,
+    )
+    services = json.loads(output)["services"]
+    prometheus = services["metrics-collector"]
+
+    assert prometheus["user"] == "0:0"
+    assert services["cadvisor"].get("command") is None
+    assert services["cadvisor"].get("ports") is None
+    assert all(
+        volume["target"] not in {"/etc/cadvisor/server.pem", "/etc/cadvisor/server.key"}
+        for volume in services["cadvisor"]["volumes"]
+    )
+
+
 def _sqlite_seed_scenario() -> rs.ScenarioConfig:
     return {
         "id": "SQLITE-SEED",

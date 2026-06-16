@@ -240,6 +240,68 @@ def test_effective_mosquitto_runtime_conf_keeps_tls_base_config_path() -> None:
     )
 
 
+def test_effective_scenario_message_count_crosses_fanout_churn_threshold() -> None:
+    scenario: rs.ScenarioConfig = {
+        "fanout_churn_kind": "dynamic_security_swap",
+        "fanout_churn_after_messages": 5,
+    }
+
+    assert rs._effective_scenario_message_count(scenario, 5, effective_clients=5) == 6
+
+
+def test_effective_scenario_message_count_reserves_runtime_control_denial_publish() -> None:
+    scenario: rs.ScenarioConfig = {
+        "runtime_control_after_messages": 10,
+        "runtime_control_expect_denial": True,
+    }
+
+    assert rs._effective_scenario_message_count(scenario, 5, effective_clients=2) == 6
+
+
+def test_validate_fanout_result_requires_enabled_churn_to_trigger() -> None:
+    with pytest.raises(RuntimeError, match="fanout churn did not trigger"):
+        rs._validate_fanout_result(
+            "DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-JWT-10",
+            {
+                "errors": [],
+                "publish": {"count": 6},
+                "fanout_churn": {
+                    "enabled": True,
+                    "expected_post_churn": 10,
+                    "triggered": False,
+                    "applied_events": 0,
+                },
+            },
+            message_count=6,
+            require_receive=False,
+            require_churn=True,
+            require_churn_denial=True,
+        )
+
+
+def test_validate_fanout_result_requires_denial_signal_for_denying_churn() -> None:
+    with pytest.raises(RuntimeError, match="did not reduce post-churn delivery"):
+        rs._validate_fanout_result(
+            "DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-REVOKE-JWT-10",
+            {
+                "errors": [],
+                "publish": {"count": 6},
+                "fanout_churn": {
+                    "enabled": True,
+                    "expected_post_churn": 10,
+                    "received_post_churn": 10,
+                    "triggered": True,
+                    "applied_events": 1,
+                    "cache_validity_signal": False,
+                },
+            },
+            message_count=6,
+            require_receive=False,
+            require_churn=True,
+            require_churn_denial=True,
+        )
+
+
 def test_effective_mosquitto_runtime_conf_materializes_plugin_backed_config() -> None:
     generated_conf = rs._resolve_compose_path(
         ".generated/mosquitto.jwt-strict.biscuit-off.fact-client_id.conf"

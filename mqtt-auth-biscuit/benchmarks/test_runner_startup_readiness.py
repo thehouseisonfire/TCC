@@ -181,6 +181,8 @@ def test_fanout_validation_rejects_invalid_benchmark_data(
             result,
             message_count=10,
             require_receive=True,
+            require_churn=False,
+            require_churn_denial=False,
         )
 
 
@@ -210,6 +212,8 @@ def test_fanout_validation_rejects_partial_subscriber_initialization(
             },
             message_count=10,
             require_receive=True,
+            require_churn=False,
+            require_churn_denial=False,
         )
 
 
@@ -223,6 +227,8 @@ def test_fanout_validation_accepts_valid_churn_result() -> None:
         },
         message_count=10,
         require_receive=True,
+        require_churn=False,
+        require_churn_denial=False,
     )
 
 
@@ -511,10 +517,11 @@ def test_wait_for_non_empty_resource_snapshot_retries_until_valid(monkeypatch) -
 
 
 def test_container_endpoint_config_keeps_host_mqtt_for_host_subprocesses() -> None:
+    host_ca = str(rs._resolve_repo_path("docker/tls/ca.pem"))
     endpoints = rs._scenario_endpoint_config(
         client_topology_mode="container-single",
         scenario_tls=False,
-        tls_ca="docker/tls/ca.pem",
+        tls_ca=host_ca,
     )
 
     assert endpoints["host_mqtt_host"] == "localhost"
@@ -525,17 +532,18 @@ def test_container_endpoint_config_keeps_host_mqtt_for_host_subprocesses() -> No
 
 
 def test_host_endpoint_config_uses_localhost_for_loadgen_and_mqtt5_auth() -> None:
+    host_ca = str(rs._resolve_repo_path("docker/tls/ca.pem"))
     endpoints = rs._scenario_endpoint_config(
         client_topology_mode="host",
         scenario_tls=True,
-        tls_ca="docker/tls/ca.pem",
+        tls_ca=host_ca,
     )
 
     assert endpoints["host_mqtt_host"] == "localhost"
     assert endpoints["loadgen_mqtt_host"] == "localhost"
     assert endpoints["mqtt_port"] == 8883
     assert endpoints["loadgen_token_issuer_base"] == "https://localhost:8444"
-    assert endpoints["loadgen_tls_ca"] == "docker/tls/ca.pem"
+    assert endpoints["loadgen_tls_ca"] == host_ca
 
 
 def test_normalize_tcpdump_output_dir_returns_absolute_repo_path() -> None:

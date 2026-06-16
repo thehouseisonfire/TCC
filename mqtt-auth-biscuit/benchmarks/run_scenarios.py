@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import shutil
 import socket
@@ -1955,6 +1956,8 @@ def _validate_fanout_result(
     *,
     message_count: int,
     require_receive: bool,
+    require_churn: bool,
+    require_churn_denial: bool,
 ) -> None:
     errors = [str(error) for error in result.get("errors", [])]
     fatal_errors = [error for error in errors if error.startswith(FANOUT_SETUP_ERROR_PREFIXES)]
@@ -1973,6 +1976,27 @@ def _validate_fanout_result(
         receive_count = int(receive.get("count") or 0) if isinstance(receive, dict) else 0
         if receive_count == 0:
             raise RuntimeError(f"{scenario_id}: fanout produced no subscriber deliveries")
+
+    if not require_churn:
+        return
+
+    churn = result.get("fanout_churn")
+    if not isinstance(churn, dict) or churn.get("enabled") is not True:
+        raise RuntimeError(f"{scenario_id}: fanout churn metadata missing")
+    expected_post = int(churn.get("expected_post_churn") or 0)
+    if expected_post <= 0:
+        raise RuntimeError(
+            f"{scenario_id}: fanout churn has no post-churn publish window; "
+            "raise messages above fanout_churn_after_messages"
+        )
+    if churn.get("triggered") is not True or int(churn.get("applied_events") or 0) <= 0:
+        raise RuntimeError(f"{scenario_id}: fanout churn did not trigger")
+    if require_churn_denial and churn.get("cache_validity_signal") is not True:
+        received_post = int(churn.get("received_post_churn") or 0)
+        raise RuntimeError(
+            f"{scenario_id}: fanout churn did not reduce post-churn delivery "
+            f"({received_post}/{expected_post})"
+        )
 
 
 def _merge_fanout_role_loadgen_results(
@@ -2961,9 +2985,33 @@ def _effective_scenario_client_count(scenario: ScenarioConfig, default_clients: 
     return int(scenario.get("client_count", scenario.get("subscriber_count", default_clients)))
 
 
-def _effective_scenario_message_count(scenario: ScenarioConfig, default_messages: int) -> int:
+def _effective_scenario_message_count(
+    scenario: ScenarioConfig,
+    default_messages: int,
+    *,
+    effective_clients: int | None = None,
+) -> int:
     configured = int(scenario.get("message_count", default_messages))
-    return max(configured, int(scenario.get("control_after_messages", 0)))
+    minimum = int(scenario.get("control_after_messages", 0))
+    fanout_churn_after = int(scenario.get("fanout_churn_after_messages", 0))
+    if scenario.get("fanout_churn_kind") and fanout_churn_after > 0:
+        minimum = max(minimum, fanout_churn_after + 1)
+    runtime_control_after = int(scenario.get("runtime_control_after_messages", 0))
+    if runtime_control_after > 0 and effective_clients is not None:
+        post_control_publishes = 1 if scenario.get("runtime_control_expect_denial") else 0
+        minimum = max(
+            minimum,
+            math.ceil((runtime_control_after + post_control_publishes) / effective_clients),
+        )
+    return max(configured, minimum)
+
+
+def _scenario_expects_fanout_churn_denial(scenario: ScenarioConfig) -> bool:
+    return scenario.get("fanout_churn_kind") in {
+        "dynamic_security_swap",
+        "dynamic_security_control",
+        "sqlite_revoke_read",
+    }
 
 
 def _set_scenario_semantics(
@@ -6116,6 +6164,17 @@ def main(
             default_clients=clients,
         )
         scenario_tls = bool(s.get("tls")) or tls_enabled
+        scenario_tls_ca_config = tls_ca if tls_ca else (
+            "docker/tls/ca.pem" if scenario_tls else None
+        )
+        scenario_tls_ca = (
+            str(_resolve_repo_path(scenario_tls_ca_config)) if scenario_tls_ca_config else None
+        )
+        if scenario_tls and scenario_tls_ca and not Path(scenario_tls_ca).exists():
+            raise SystemExit(
+                f"{s['id']} enables TLS but CA file was not found at {scenario_tls_ca_config}. "
+                "Run docker/tls/generate_certs.sh"
+            )
         mosq_conf = s["mosquitto_conf"]
         if scenario_tls:
             mosq_conf = mosq_conf.replace("./", "./tls/")
@@ -6138,7 +6197,7 @@ def main(
         endpoints = _scenario_endpoint_config(
             client_topology_mode=client_topology_mode,
             scenario_tls=scenario_tls,
-            tls_ca=tls_ca,
+            tls_ca=scenario_tls_ca,
         )
         authz_base = endpoints["authz_base"]
         prom_base = endpoints["prom_base"]
@@ -6268,12 +6327,17 @@ def main(
                 compose_files=compose_files,
                 phase="namespace-service startup",
             )
-            _wait_for_service_health("authz", authz_base, tls_ca, tls_insecure)
-            _wait_for_service_health("token-issuer", token_issuer_base, tls_ca, tls_insecure)
-            _wait_for_prometheus_api(prom_base, tls_ca, tls_insecure)
+            _wait_for_service_health("authz", authz_base, scenario_tls_ca, tls_insecure)
+            _wait_for_service_health(
+                "token-issuer",
+                token_issuer_base,
+                scenario_tls_ca,
+                tls_insecure,
+            )
+            _wait_for_prometheus_api(prom_base, scenario_tls_ca, tls_insecure)
             _wait_for_non_empty_resource_snapshot(
                 prom_base,
-                tls_ca,
+                scenario_tls_ca,
                 tls_insecure,
                 compose_files=compose_files,
                 compose_project_name=compose_project_name,
@@ -6314,7 +6378,7 @@ def main(
             if uses_http_authz:
                 reset_res = _authz_reset(
                     authz_base,
-                    ca_file=tls_ca,
+                    ca_file=scenario_tls_ca,
                     insecure=tls_insecure,
                 )
                 reset_baseline = _validated_authz_state_baseline(
@@ -6344,7 +6408,7 @@ def main(
                     rules=cfg.get("rules"),
                     client_roles=cfg.get("client_roles"),
                     jwt_identity_binding=cfg.get("jwt_identity_binding"),
-                    ca_file=tls_ca,
+                    ca_file=scenario_tls_ca,
                     insecure=tls_insecure,
                 )
                 _assert_authz_state(
@@ -6391,15 +6455,18 @@ def main(
                 if s.get("reauth_storm") and reauth_storm_clients is not None
                 else _effective_scenario_client_count(s, clients)
             )
-            scenario_messages = _effective_scenario_message_count(s, messages)
-            control_after_messages = int(s.get("control_after_messages", 0))
             configured_messages = int(s.get("message_count", messages))
-            if control_after_messages > configured_messages:
+            scenario_messages = _effective_scenario_message_count(
+                s,
+                messages,
+                effective_clients=effective_client_count,
+            )
+            if scenario_messages > configured_messages:
                 logger.info(
-                    "%s requires at least %d messages per client for interleaved control; "
+                    "%s requires at least %d messages per client for thresholded behavior; "
                     "raising the configured count from %d",
                     s["id"],
-                    control_after_messages,
+                    scenario_messages,
                     configured_messages,
                 )
             out_payload: dict[str, Any] = {
@@ -6413,7 +6480,7 @@ def main(
                 },
                 "tls": {
                     "enabled": scenario_tls,
-                    "ca_file": tls_ca,
+                    "ca_file": scenario_tls_ca,
                     "insecure": tls_insecure,
                 },
                 "parity": {
@@ -6581,7 +6648,7 @@ def main(
                             s["id"],
                             s,
                             token_issuer_base,
-                            ca_file=tls_ca,
+                            ca_file=scenario_tls_ca,
                             insecure=tls_insecure,
                         )
                         res = _run_mqtt5_auth(
@@ -6590,7 +6657,7 @@ def main(
                             token1,
                             token2,
                             scenario_tls,
-                            tls_ca,
+                            scenario_tls_ca,
                             tls_insecure,
                         )
                     else:
@@ -6842,6 +6909,8 @@ def main(
                             res,
                             message_count=scenario_messages,
                             require_receive=bool(s.get("sqlite_seed_fanout")),
+                            require_churn=bool(s.get("fanout_churn_kind")),
+                            require_churn_denial=_scenario_expects_fanout_churn_denial(s),
                         )
                     if s.get("proactive_refresh_assert_continuity"):
                         if not res.get("session_continuity_ok"):
@@ -6864,7 +6933,7 @@ def main(
                 time.sleep(2)
                 snap = _resource_snapshot(
                     prom_base,
-                    tls_ca,
+                    scenario_tls_ca,
                     tls_insecure,
                     compose_files=compose_files,
                     compose_project_name=compose_project_name,

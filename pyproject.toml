@@ -14,13 +14,13 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-  "ansible-core==2.21.0",
+  "ansible-core==2.21.1",
   "black==26.5.1",
   "mypy==2.1.0",
   "pandas-stubs==3.0.3.260530",
-  "pyrefly==1.0.0",
-  "pytest==9.1.0",
-  "ruff==0.15.17",
+  "pyrefly==1.1.1",
+  "pytest==9.1.1",
+  "ruff==0.15.18",
 ]
 
 [tool.uv]

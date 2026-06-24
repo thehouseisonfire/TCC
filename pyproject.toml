@@ -5,7 +5,7 @@ requires-python = "==3.14.2"
 dependencies = [
   "dpkt==1.9.8",
   "httpx[http2]==0.28.1",
-  "numpy==2.4.6",
+  "numpy==2.5.0",
   "pandas==3.0.3",
   "pydantic==2.13.4",
   "rich==15.0.0",
@@ -20,7 +20,7 @@ dev = [
   "pandas-stubs==3.0.3.260530",
   "pyrefly==1.1.1",
   "pytest==9.1.1",
-  "ruff==0.15.18",
+  "ruff==0.15.19",
 ]
 
 [tool.uv]

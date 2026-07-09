@@ -6164,8 +6164,8 @@ def main(
             default_clients=clients,
         )
         scenario_tls = bool(s.get("tls")) or tls_enabled
-        scenario_tls_ca_config = tls_ca if tls_ca else (
-            "docker/tls/ca.pem" if scenario_tls else None
+        scenario_tls_ca_config = (
+            tls_ca if tls_ca else ("docker/tls/ca.pem" if scenario_tls else None)
         )
         scenario_tls_ca = (
             str(_resolve_repo_path(scenario_tls_ca_config)) if scenario_tls_ca_config else None

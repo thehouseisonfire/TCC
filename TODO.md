@@ -11,6 +11,11 @@ Remember to remove 'good-pulls' from all references in .git. completely wipe the
 
 
 
+optimize-docker-images:
+
+FROM alpine:3.23 <- nein, do not do that
+
+
 
 
 

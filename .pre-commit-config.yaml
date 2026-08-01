@@ -42,7 +42,7 @@ repos:
         stages: [commit, push]
       - id: ruff-format
         name: ruff format
-        entry: bash -c 'uv run --locked --group dev ruff format --check .'
+        entry: bash -c 'uv run --locked --group dev ruff format .'
         language: system
         pass_filenames: false
         stages: [commit, push]

@@ -1344,8 +1344,7 @@ def main() -> int:
         action=argparse.BooleanOptionalAction,
         default=False,
         help=(
-            "Interleave baseline/target runs in branch comparison mode "
-            "(A/B then B/A alternating)."
+            "Interleave baseline/target runs in branch comparison mode (A/B then B/A alternating)."
         ),
     )
     parser.add_argument(

@@ -78,7 +78,7 @@ def _wait_for_non_empty_snapshot(
             last_error = exc
             time.sleep(2.0)
     raise AssertionError(
-        "timed out waiting for non-empty Prometheus vectors for mosquitto: " f"{last_error!r}"
+        f"timed out waiting for non-empty Prometheus vectors for mosquitto: {last_error!r}"
     )
 
 

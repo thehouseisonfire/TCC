@@ -40,9 +40,9 @@ repos:
         language: system
         pass_filenames: false
         stages: [commit, push]
-      - id: black-check
-        name: black
-        entry: bash -c 'uv run --locked --group dev black . || true'
+      - id: ruff-format
+        name: ruff format
+        entry: bash -c 'uv run --locked --group dev ruff format --check .'
         language: system
         pass_filenames: false
         stages: [commit, push]

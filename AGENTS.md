@@ -18,7 +18,7 @@ This is a reproducible MQTT authorization benchmark workspace. Root Rust helper 
 
 ## Coding Style & Naming Conventions
 
-Rust uses `rustfmt` from `rust-toolchain.toml` and Clippy with pedantic/nursery checks for `mqtt-auth-biscuit`. Keep Rust modules in `snake_case`; package names use kebab-case. Python uses Black and Ruff with 100-character lines, Python 3.14 syntax, sorted imports, and `snake_case` names. Prefer typed Python functions because mypy checks untyped definitions.
+Rust uses `rustfmt` from `rust-toolchain.toml` and Clippy with pedantic/nursery checks for `mqtt-auth-biscuit`. Keep Rust modules in `snake_case`; package names use kebab-case. Python uses Ruff (linting + formatting) with 100-character lines, Python 3.14 syntax, sorted imports, and `snake_case` names. Prefer typed Python functions because mypy checks untyped definitions.
 
 ## Testing Guidelines
 

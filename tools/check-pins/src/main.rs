@@ -68,12 +68,12 @@ fn check_pyproject(root: &Path) -> Result<()> {
 }
 
 fn check_requirements(root: &Path) -> Result<()> {
-    let pattern = Regex::new(r"^[A-Za-z0-9_.\-\[\]]+==[^ ;]+(?: ; .+)?$")?;
+    let pattern = Regex::new(r"^[A-Za-z0-9_.\-\[\]]+==[^ ;]+(?: ; .+)?[ ]*\\?$")?;
     let path = root.join("requirements.txt");
 
     for raw_line in read_to_string(&path)?.lines() {
         let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        if line.is_empty() || line.starts_with('#') || line.starts_with("--hash=") {
             continue;
         }
         if !pattern.is_match(line) {

@@ -14,7 +14,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-  "ansible-core==2.21.2",
+  "ansible-core==2.21.3",
   "mypy==2.3.0",
   "pandas-stubs==3.0.3.260530",
   "pyrefly==1.1.1",

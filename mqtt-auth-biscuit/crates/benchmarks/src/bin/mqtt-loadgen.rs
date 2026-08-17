@@ -2742,6 +2742,29 @@ struct WorkerPublishPlan<'a> {
     qos_distribution: Option<&'a QosDistribution>,
 }
 
+struct FanoutMessage {
+    sent: f64,
+    sequence_id: Option<usize>,
+}
+
+fn parse_fanout_message(payload: &[u8]) -> Option<FanoutMessage> {
+    let pos = payload.iter().position(|byte| *byte == b'|')?;
+    let sent = std::str::from_utf8(&payload[..pos])
+        .ok()?
+        .parse::<f64>()
+        .ok()?;
+    let sequence_id = payload
+        .iter()
+        .skip(pos + 1)
+        .position(|byte| *byte == b'|')
+        .and_then(|end| {
+            std::str::from_utf8(&payload[pos + 1..pos + 1 + end])
+                .ok()
+                .and_then(|raw| raw.parse::<usize>().ok())
+        });
+    Some(FanoutMessage { sent, sequence_id })
+}
+
 async fn collect_fanout_subscriber(
     mut subscriber: FanoutSubscriber,
     start: Instant,
@@ -2769,35 +2792,16 @@ async fn collect_fanout_subscriber(
         };
         match event {
             Ok(Event::Incoming(Packet::Publish(publish))) => {
-                let payload = publish.payload;
-                if let Some(pos) = payload.iter().position(|byte| *byte == b'|') {
-                    let sequence_id = payload
-                        .iter()
-                        .skip(pos + 1)
-                        .position(|byte| *byte == b'|')
-                        .and_then(|end| {
-                            std::str::from_utf8(&payload[pos + 1..pos + 1 + end])
-                                .ok()
-                                .and_then(|raw| raw.parse::<usize>().ok())
-                        });
-                    if let Ok(sent) = std::str::from_utf8(&payload[..pos])
-                        .unwrap_or_default()
-                        .parse::<f64>()
-                    {
-                        let elapsed = (start.elapsed().as_secs_f64() - sent) * 1000.0;
-                        subscriber.result.receive_ms.push(elapsed.max(0.0));
-                        if let Some(sequence_id) = sequence_id {
-                            if sequence_id < churn_after_messages {
-                                subscriber.result.receive_pre_churn += 1;
-                            } else {
-                                subscriber.result.receive_post_churn += 1;
-                            }
+                if let Some(message) = parse_fanout_message(&publish.payload) {
+                    let elapsed = (start.elapsed().as_secs_f64() - message.sent) * 1000.0;
+                    subscriber.result.receive_ms.push(elapsed.max(0.0));
+                    if let Some(sequence_id) = message.sequence_id {
+                        if sequence_id < churn_after_messages {
+                            subscriber.result.receive_pre_churn += 1;
+                        } else {
+                            subscriber.result.receive_post_churn += 1;
                         }
-                    } else {
-                        subscriber.result.receive_ms.push(0.0);
                     }
-                } else {
-                    subscriber.result.receive_ms.push(0.0);
                 }
             }
             Ok(_) => {}
@@ -6057,5 +6061,42 @@ mod tests {
         assert_eq!(client.bytes, b"token-1");
         assert_eq!(client.exp, Some(2_000_000_000));
         assert_eq!(map.profiles["jwt"]["fanout_publisher"].bytes, b"publisher");
+    }
+
+    #[test]
+    fn parse_fanout_message_matches_publisher_format() {
+        let payload = format!("{:.9}|7|", 1.25).into_bytes();
+        let message = parse_fanout_message(&payload).unwrap();
+        assert!((message.sent - 1.25).abs() < 1e-9);
+        assert_eq!(message.sequence_id, Some(7));
+    }
+
+    #[test]
+    fn parse_fanout_message_accepts_size_padding() {
+        let mut payload = format!("{:.9}|3|", 0.5).into_bytes();
+        payload.extend(vec![b'A'; 64]);
+        let message = parse_fanout_message(&payload).unwrap();
+        assert!((message.sent - 0.5).abs() < 1e-9);
+        assert_eq!(message.sequence_id, Some(3));
+    }
+
+    #[test]
+    fn parse_fanout_message_rejects_json_notification() {
+        assert!(
+            parse_fanout_message(br#"{"event":"acl_read_policy_changed","client_id":"client_1"}"#)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn parse_fanout_message_rejects_unparseable_prefix() {
+        assert!(parse_fanout_message(b"not-a-number|5|").is_none());
+    }
+
+    #[test]
+    fn parse_fanout_message_accepts_missing_sequence_id() {
+        let message = parse_fanout_message(b"0.5|").unwrap();
+        assert!((message.sent - 0.5).abs() < 1e-9);
+        assert_eq!(message.sequence_id, None);
     }
 }

@@ -6570,7 +6570,6 @@ def main(
                     "message_count": (
                         scenario_messages if s.get("traffic_pattern") == "fanout" else None
                     ),
-                    "acl_read_cost_per_subscriber_ms": None,  # Calculated from receive latencies
                 },
                 "network_baseline": {
                     "enabled": iperf3_enabled,
@@ -7030,29 +7029,6 @@ def main(
 
         # Add packet analysis result to output payload
         out_payload["packet_analysis_result"] = packet_analysis_result
-
-        # Issue 19: Calculate ACL_READ cost per subscriber for fanout scenarios
-        subscriber_count = _effective_scenario_client_count(s, clients)
-        if s.get("traffic_pattern") == "fanout" and out_payload["runs"] and subscriber_count:
-            total_receive_ms = 0.0
-            total_receive_count = 0
-            for run in out_payload["runs"]:
-                loadgen_res = run.get("loadgen", {})
-                receive_stats = loadgen_res.get("receive", {})
-                if receive_stats and receive_stats.get("count", 0) > 0:
-                    # Use mean receive latency as proxy for per-message delivery cost
-                    mean_receive = receive_stats.get("mean_ms", 0)
-                    count = receive_stats.get("count", 0)
-                    total_receive_ms += mean_receive * count
-                    total_receive_count += count
-            if total_receive_count > 0 and subscriber_count > 0:
-                # Average receive latency per message per subscriber
-                avg_receive_per_msg = total_receive_ms / total_receive_count
-                # Estimate ACL_READ cost as portion of receive latency
-                # This is a proxy metric - actual ACL_READ cost is part of auth overhead
-                out_payload["fanout_metrics"]["acl_read_cost_per_subscriber_ms"] = round(
-                    avg_receive_per_msg / subscriber_count, 3
-                )
 
         path = _write_result(out, s["id"], out_payload)
         logger.info("Wrote %s", path)

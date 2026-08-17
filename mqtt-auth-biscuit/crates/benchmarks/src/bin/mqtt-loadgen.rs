@@ -13,10 +13,12 @@ use gen_tokens::mqtt_helpers::{
 use rand::{Rng as _, RngExt as _};
 use rumqttc::mqttbytes::v5::{AuthProperties, Packet};
 use rumqttc::{AsyncClient, Event, Outgoing};
+use serde::de::{DeserializeSeed, Error as _, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
@@ -28,13 +30,6 @@ use tokio::sync::Notify;
 const SYNC_CONNECT_RELEASE_DELAY: Duration = Duration::from_millis(200);
 const DEFAULT_CONTROL_TOPIC: &str = "$CONTROL/dynamic-security/v1";
 const CLIENT_ID_PLACEHOLDER: &str = "{client_id}";
-
-#[derive(Debug, Deserialize)]
-struct PasswordMapFile {
-    version: u64,
-    max_clients: usize,
-    profiles: HashMap<String, PasswordMapProfile>,
-}
 
 #[derive(Debug, Deserialize)]
 struct PasswordMapProfile {
@@ -60,41 +55,170 @@ struct PasswordMap {
     profiles: HashMap<String, HashMap<String, ResolvedPassword>>,
 }
 
-fn load_password_map(path: &Path) -> Result<PasswordMap> {
-    let data = fs::read_to_string(path)
-        .map_err(|e| MqttHelperError::Message(format!("failed to read password-map: {e}")))?;
-    let raw: PasswordMapFile = serde_json::from_str(&data)
-        .map_err(|e| MqttHelperError::Message(format!("failed to parse password-map: {e}")))?;
-    if raw.version != 1 {
-        return Err(MqttHelperError::Message(format!(
-            "unsupported password-map version {}; expected 1",
-            raw.version
-        )));
+struct PasswordMapSeed<'a> {
+    selected_profiles: Option<&'a HashSet<String>>,
+}
+
+impl<'de> DeserializeSeed<'de> for PasswordMapSeed<'_> {
+    type Value = PasswordMap;
+
+    fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(PasswordMapVisitor {
+            selected_profiles: self.selected_profiles,
+        })
     }
-    let mut profiles = HashMap::new();
-    for (name, profile) in raw.profiles {
-        if profile.kind != "jwt" && profile.kind != "biscuit" {
-            return Err(MqttHelperError::Message(format!(
-                "password-map profile {name:?} has unsupported kind {:?}",
-                profile.kind
+}
+
+struct PasswordMapVisitor<'a> {
+    selected_profiles: Option<&'a HashSet<String>>,
+}
+
+impl<'de> Visitor<'de> for PasswordMapVisitor<'_> {
+    type Value = PasswordMap;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a password-map object")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut version: Option<u64> = None;
+        let mut max_clients: Option<usize> = None;
+        let mut profiles: Option<HashMap<String, HashMap<String, ResolvedPassword>>> = None;
+
+        while let Some(field) = map.next_key::<String>()? {
+            match field.as_str() {
+                "version" => {
+                    if version.is_some() {
+                        return Err(A::Error::duplicate_field("version"));
+                    }
+                    version = Some(map.next_value()?);
+                }
+                "max_clients" => {
+                    if max_clients.is_some() {
+                        return Err(A::Error::duplicate_field("max_clients"));
+                    }
+                    max_clients = Some(map.next_value()?);
+                }
+                "profiles" => {
+                    if profiles.is_some() {
+                        return Err(A::Error::duplicate_field("profiles"));
+                    }
+                    profiles = Some(map.next_value_seed(PasswordMapProfilesSeed {
+                        selected_profiles: self.selected_profiles,
+                    })?);
+                }
+                _ => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+
+        let version = version.ok_or_else(|| A::Error::missing_field("version"))?;
+        if version != 1 {
+            return Err(A::Error::custom(format!(
+                "unsupported password-map version {version}; expected 1"
             )));
         }
-        let mut entries = HashMap::new();
-        for (client_id, entry) in profile.entries {
-            entries.insert(
-                client_id,
-                ResolvedPassword {
-                    bytes: decode_token_arg(&entry.token)?,
-                    exp: entry.exp,
-                },
-            );
-        }
-        profiles.insert(name, entries);
+        Ok(PasswordMap {
+            max_clients: max_clients.ok_or_else(|| A::Error::missing_field("max_clients"))?,
+            profiles: profiles.ok_or_else(|| A::Error::missing_field("profiles"))?,
+        })
     }
-    Ok(PasswordMap {
-        max_clients: raw.max_clients,
-        profiles,
-    })
+}
+
+struct PasswordMapProfilesSeed<'a> {
+    selected_profiles: Option<&'a HashSet<String>>,
+}
+
+impl<'de> DeserializeSeed<'de> for PasswordMapProfilesSeed<'_> {
+    type Value = HashMap<String, HashMap<String, ResolvedPassword>>;
+
+    fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(PasswordMapProfilesVisitor {
+            selected_profiles: self.selected_profiles,
+        })
+    }
+}
+
+struct PasswordMapProfilesVisitor<'a> {
+    selected_profiles: Option<&'a HashSet<String>>,
+}
+
+impl<'de> Visitor<'de> for PasswordMapProfilesVisitor<'_> {
+    type Value = HashMap<String, HashMap<String, ResolvedPassword>>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a password-map profiles object")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut profiles = HashMap::new();
+        while let Some(name) = map.next_key::<String>()? {
+            let selected = self
+                .selected_profiles
+                .is_none_or(|requested| requested.contains(&name));
+            if selected {
+                let profile: PasswordMapProfile = map.next_value()?;
+                let entries = resolve_password_map_profile(&name, profile)
+                    .map_err(|err| A::Error::custom(err.to_string()))?;
+                profiles.insert(name, entries);
+            } else {
+                map.next_value::<IgnoredAny>()?;
+            }
+        }
+        Ok(profiles)
+    }
+}
+
+fn resolve_password_map_profile(
+    name: &str,
+    profile: PasswordMapProfile,
+) -> Result<HashMap<String, ResolvedPassword>> {
+    if profile.kind != "jwt" && profile.kind != "biscuit" {
+        return Err(MqttHelperError::Message(format!(
+            "password-map profile {name:?} has unsupported kind {:?}",
+            profile.kind
+        )));
+    }
+    let mut entries = HashMap::new();
+    for (client_id, entry) in profile.entries {
+        entries.insert(
+            client_id,
+            ResolvedPassword {
+                bytes: decode_token_arg(&entry.token)?,
+                exp: entry.exp,
+            },
+        );
+    }
+    Ok(entries)
+}
+
+fn load_password_map(
+    path: &Path,
+    selected_profiles: Option<&HashSet<String>>,
+) -> Result<PasswordMap> {
+    let file = fs::File::open(path)
+        .map_err(|e| MqttHelperError::Message(format!("failed to read password-map: {e}")))?;
+    let mut deserializer = serde_json::Deserializer::from_reader(BufReader::new(file));
+    let map = PasswordMapSeed { selected_profiles }
+        .deserialize(&mut deserializer)
+        .map_err(|e| MqttHelperError::Message(format!("failed to parse password-map: {e}")))?;
+    deserializer
+        .end()
+        .map_err(|e| MqttHelperError::Message(format!("failed to parse password-map: {e}")))?;
+    Ok(map)
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -4936,7 +5060,16 @@ async fn main() -> Result<()> {
                 path.display()
             )));
         }
-        args.password_map_data = Some(Arc::new(load_password_map(path)?));
+        let requested_profiles: HashSet<_> = [
+            args.password_map_profile.as_ref(),
+            args.fanout_publisher_password_map_profile.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect();
+        let selected_profiles = (!requested_profiles.is_empty()).then_some(&requested_profiles);
+        args.password_map_data = Some(Arc::new(load_password_map(path, selected_profiles)?));
     }
     if (args.password_map_profile.is_some() || args.fanout_publisher_password_map_profile.is_some())
         && args.password_map_data.is_none()
@@ -6055,12 +6188,58 @@ mod tests {
         )
         .unwrap();
 
-        let map = load_password_map(&path).unwrap();
+        let map = load_password_map(&path, None).unwrap();
         fs::remove_file(path).unwrap();
         let client = &map.profiles["jwt"]["client_1"];
         assert_eq!(client.bytes, b"token-1");
         assert_eq!(client.exp, Some(2_000_000_000));
         assert_eq!(map.profiles["jwt"]["fanout_publisher"].bytes, b"publisher");
+    }
+
+    #[test]
+    fn password_map_loads_only_selected_profiles() {
+        let path = std::env::temp_dir().join(format!(
+            "mqtt-password-map-selected-{}-{}.json",
+            std::process::id(),
+            unix_ms_now()
+        ));
+        fs::write(
+            &path,
+            r#"{"version":1,"max_clients":2,"profiles":{"jwt":{"kind":"jwt","entries":{"client_1":{"token":"token-1","exp":2000000000}}},"biscuit":{"kind":"biscuit","entries":{"fanout_publisher":{"token":"publisher","exp":2000000001}}},"unused":{"kind":"unsupported","entries":{"client_1":{"token":"not-a-token"}}}}}"#,
+        )
+        .unwrap();
+
+        let selected = HashSet::from(["jwt".to_string(), "biscuit".to_string()]);
+        let map = load_password_map(&path, Some(&selected)).unwrap();
+        fs::remove_file(path).unwrap();
+
+        assert_eq!(map.profiles.len(), 2);
+        assert_eq!(map.profiles["jwt"]["client_1"].bytes, b"token-1");
+        assert_eq!(
+            map.profiles["biscuit"]["fanout_publisher"].exp,
+            Some(2_000_000_001)
+        );
+        assert!(!map.profiles.contains_key("unused"));
+    }
+
+    #[test]
+    fn password_map_rejects_invalid_selected_profile() {
+        let path = std::env::temp_dir().join(format!(
+            "mqtt-password-map-invalid-{}-{}.json",
+            std::process::id(),
+            unix_ms_now()
+        ));
+        fs::write(
+            &path,
+            r#"{"version":1,"max_clients":1,"profiles":{"invalid":{"kind":"unsupported","entries":{}}}}"#,
+        )
+        .unwrap();
+
+        let selected = HashSet::from(["invalid".to_string()]);
+        let error = load_password_map(&path, Some(&selected)).unwrap_err();
+        fs::remove_file(path).unwrap();
+
+        assert!(error.to_string().contains("unsupported kind"));
     }
 
     #[test]

@@ -5576,6 +5576,7 @@ def _build_available_scenarios(
             "message_size": 0,
             "repeat": 2,
             "sleep_between": 2,
+            "subscriber_count": 1,
             "dynamic_security_churn": [
                 "docker/dynamic-security.json",
                 "docker/dynamic-security-fanout-churn.json",

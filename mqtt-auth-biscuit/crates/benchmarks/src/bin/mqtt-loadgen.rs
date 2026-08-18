@@ -16,7 +16,7 @@ use rumqttc::{AsyncClient, Event, Outgoing};
 use serde::de::{DeserializeSeed, Error as _, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -535,8 +535,7 @@ struct WorkerResult {
     publish_ms: Vec<f64>,
     publish_by_qos: [Vec<f64>; 3],
     receive_ms: Vec<f64>,
-    receive_pre_churn: usize,
-    receive_post_churn: usize,
+    receive_by_churn_phase: BTreeMap<usize, usize>,
     control_ms: Vec<f64>,
     control_injection_ms: Vec<f64>,
     sync_barrier_wait_ms: Option<f64>,
@@ -2229,6 +2228,24 @@ const fn should_apply_churn(args: &Args, sequence_id: usize, state: &FanoutChurn
             .is_multiple_of(args.fanout_churn_interval_messages)
 }
 
+fn fanout_phase_publish_counts(args: &Args, applied_events: usize) -> Vec<usize> {
+    let mut counts = vec![0];
+    let mut simulated = FanoutChurnState::default();
+    for sequence_id in 0..args.messages {
+        if simulated.applied_events < applied_events
+            && should_apply_churn(args, sequence_id, &simulated)
+        {
+            simulated.applied_events += 1;
+            counts.push(0);
+        }
+        let phase = simulated.applied_events;
+        if let Some(count) = counts.get_mut(phase) {
+            *count += 1;
+        }
+    }
+    counts
+}
+
 async fn apply_fanout_churn(
     args: &Args,
     publisher: &rumqttc::AsyncClient,
@@ -2401,35 +2418,30 @@ fn fanout_churn_json(
     args: &Args,
     mode: &str,
     state: Option<&FanoutChurnState>,
-    received_pre_churn: Option<usize>,
-    received_post_churn: Option<usize>,
+    received_by_phase: Option<&[usize]>,
+    phase_events: Option<usize>,
 ) -> Value {
     let enabled = mode == "fanout" && args.fanout_churn_kind.is_some();
     let triggered = state.is_some_and(|state| state.triggered);
     let applied_events = state.map_or(0, |state| state.applied_events);
-    let expected_pre = if enabled {
-        Some(args.messages.min(args.fanout_churn_after_messages) * args.clients)
-    } else {
-        None
-    };
-    let expected_post = if enabled {
-        Some(
-            args.messages
-                .saturating_sub(args.fanout_churn_after_messages)
-                * args.clients,
-        )
-    } else {
-        None
-    };
-    let post_ratio = match (received_post_churn, expected_post) {
-        (Some(received), Some(expected)) if expected > 0 => {
-            Some(usize_as_f64(received) / usize_as_f64(expected))
-        }
-        _ => None,
-    };
-    let cache_validity = match (expected_post, received_post_churn) {
-        (Some(expected), Some(received)) => Some(triggered && received < expected),
-        _ => None,
+    let expected_by_phase = state.map(|state| {
+        fanout_phase_publish_counts(args, phase_events.unwrap_or(state.applied_events))
+    });
+    let phases = match (expected_by_phase, received_by_phase) {
+        (Some(expected), Some(received)) if enabled => Value::Array(
+            expected
+                .into_iter()
+                .enumerate()
+                .map(|(phase, published)| {
+                    serde_json::json!({
+                        "phase": phase,
+                        "expected_deliveries": published * args.clients,
+                        "received_deliveries": received.get(phase).copied().unwrap_or(0),
+                    })
+                })
+                .collect(),
+        ),
+        _ => Value::Null,
     };
     serde_json::json!({
         "enabled": enabled,
@@ -2440,12 +2452,7 @@ fn fanout_churn_json(
         "settle_ms": if mode == "fanout" { Some(args.fanout_churn_settle_ms) } else { None },
         "triggered": if mode == "fanout" { Some(triggered) } else { None },
         "applied_events": if mode == "fanout" { Some(applied_events) } else { None },
-        "received_pre_churn": if mode == "fanout" { received_pre_churn.map_or(Value::Null, Value::from) } else { Value::Null },
-        "received_post_churn": if mode == "fanout" { received_post_churn.map_or(Value::Null, Value::from) } else { Value::Null },
-        "expected_pre_churn": if mode == "fanout" { expected_pre.map_or(Value::Null, Value::from) } else { Value::Null },
-        "expected_post_churn": if mode == "fanout" { expected_post.map_or(Value::Null, Value::from) } else { Value::Null },
-        "post_churn_delivery_ratio": if mode == "fanout" { post_ratio.map_or(Value::Null, Value::from) } else { Value::Null },
-        "cache_validity_signal": if mode == "fanout" { cache_validity.map_or(Value::Null, Value::from) } else { Value::Null },
+        "phases": phases,
     })
 }
 
@@ -2842,8 +2849,7 @@ struct FanoutMetrics {
     attenuation: Vec<f64>,
     attenuation_len: Vec<f64>,
     receive: Vec<f64>,
-    received_pre: Option<usize>,
-    received_post: Option<usize>,
+    received_by_phase: Option<Vec<usize>>,
     publish_throughput_mps: f64,
     receive_throughput_mps: f64,
 }
@@ -2855,6 +2861,7 @@ struct FanoutOutputParts<'a> {
     fanout_publish_ms: Vec<f64>,
     fanout_publish_by_qos: &'a [Vec<f64>; 3],
     churn_state: &'a FanoutChurnState,
+    phase_events: Option<usize>,
     metrics: &'a FanoutMetrics,
 }
 
@@ -2869,6 +2876,7 @@ struct WorkerPublishPlan<'a> {
 struct FanoutMessage {
     sent: f64,
     sequence_id: Option<usize>,
+    phase: Option<usize>,
 }
 
 fn parse_fanout_message(payload: &[u8]) -> Option<FanoutMessage> {
@@ -2877,23 +2885,37 @@ fn parse_fanout_message(payload: &[u8]) -> Option<FanoutMessage> {
         .ok()?
         .parse::<f64>()
         .ok()?;
-    let sequence_id = payload
+    let Some(sequence_end) = payload.iter().skip(pos + 1).position(|byte| *byte == b'|') else {
+        return Some(FanoutMessage {
+            sent,
+            sequence_id: None,
+            phase: None,
+        });
+    };
+    let sequence_id = std::str::from_utf8(&payload[pos + 1..pos + 1 + sequence_end])
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok());
+    let phase_start = pos + 1 + sequence_end + 1;
+    let phase = payload
         .iter()
-        .skip(pos + 1)
+        .skip(phase_start)
         .position(|byte| *byte == b'|')
         .and_then(|end| {
-            std::str::from_utf8(&payload[pos + 1..pos + 1 + end])
+            std::str::from_utf8(&payload[phase_start..phase_start + end])
                 .ok()
                 .and_then(|raw| raw.parse::<usize>().ok())
         });
-    Some(FanoutMessage { sent, sequence_id })
+    Some(FanoutMessage {
+        sent,
+        sequence_id,
+        phase,
+    })
 }
 
 async fn collect_fanout_subscriber(
     mut subscriber: FanoutSubscriber,
     start: Instant,
     expected_messages: usize,
-    churn_after_messages: usize,
     publishing_done: Arc<AtomicBool>,
 ) -> WorkerResult {
     let drain_timeout = Duration::from_secs(10).max(Duration::from_millis(
@@ -2919,12 +2941,12 @@ async fn collect_fanout_subscriber(
                 if let Some(message) = parse_fanout_message(&publish.payload) {
                     let elapsed = (start.elapsed().as_secs_f64() - message.sent) * 1000.0;
                     subscriber.result.receive_ms.push(elapsed.max(0.0));
-                    if let Some(sequence_id) = message.sequence_id {
-                        if sequence_id < churn_after_messages {
-                            subscriber.result.receive_pre_churn += 1;
-                        } else {
-                            subscriber.result.receive_post_churn += 1;
-                        }
+                    if let Some(phase) = message.phase {
+                        *subscriber
+                            .result
+                            .receive_by_churn_phase
+                            .entry(phase)
+                            .or_default() += 1;
                     }
                 }
             }
@@ -3153,7 +3175,10 @@ fn write_fanout_done(dir: &Path, applied_events: usize, errors: &[String]) -> Re
         "fanout_churn_applied_events": applied_events,
         "errors": errors,
     });
-    fs::write(fanout_done_path(dir), serde_json::to_vec(&payload)?)?;
+    let done_path = fanout_done_path(dir);
+    let temporary_path = dir.join("publisher.done.tmp");
+    fs::write(&temporary_path, serde_json::to_vec(&payload)?)?;
+    fs::rename(temporary_path, done_path)?;
     Ok(())
 }
 
@@ -3173,17 +3198,30 @@ async fn wait_for_fanout_ready_files(dir: &Path, client_ids: &[String], timeout:
     }
 }
 
-async fn watch_fanout_done_file(dir: PathBuf, timeout: Duration, done: Arc<AtomicBool>) -> bool {
+async fn watch_fanout_done_file(
+    dir: PathBuf,
+    timeout: Duration,
+    done: Arc<AtomicBool>,
+) -> Result<usize> {
     let done_path = fanout_done_path(&dir);
     let deadline = Instant::now() + timeout;
     loop {
         if done_path.exists() {
+            let payload = fs::read(&done_path)?;
+            let value: Value = serde_json::from_slice(&payload)?;
+            let applied_events = value
+                .get("fanout_churn_applied_events")
+                .and_then(Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| {
+                    MqttHelperError::Message("fanout_done_missing_churn_applied_events".to_string())
+                })?;
             done.store(true, Ordering::Release);
-            return true;
+            return Ok(applied_events);
         }
         if Instant::now() >= deadline {
             done.store(true, Ordering::Release);
-            return false;
+            return Err(MqttHelperError::Message("fanout_done_timeout".to_string()));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -3211,7 +3249,8 @@ async fn publish_fanout(
         }
         let publish_qos = qos_distribution.map_or(args.qos, QosDistribution::choose);
         let sent = start.elapsed().as_secs_f64();
-        let mut payload = format!("{sent:.9}|{sequence_id}|").into_bytes();
+        let phase = churn_state.applied_events;
+        let mut payload = format!("{sent:.9}|{sequence_id}|{phase}|").into_bytes();
         if args.message_size > payload.len() {
             payload.extend(vec![b'A'; args.message_size - payload.len()]);
         }
@@ -3240,7 +3279,6 @@ fn spawn_fanout_collectors(
     start: Instant,
     subscribers: Vec<FanoutSubscriber>,
     expected_messages: usize,
-    churn_after_messages: usize,
     publishing_done: &Arc<AtomicBool>,
 ) -> Vec<tokio::task::JoinHandle<WorkerResult>> {
     let mut subscriber_tasks = Vec::new();
@@ -3249,7 +3287,6 @@ fn spawn_fanout_collectors(
             subscriber,
             start,
             expected_messages,
-            churn_after_messages,
             Arc::clone(publishing_done),
         )));
     }
@@ -3329,8 +3366,18 @@ fn fanout_metrics(
         delegation_len: results.iter().filter_map(|r| r.delegation_len).collect(),
         attenuation: results.iter().filter_map(|r| r.attenuation_ms).collect(),
         attenuation_len: results.iter().filter_map(|r| r.attenuation_len).collect(),
-        received_pre: churn_enabled.then(|| results.iter().map(|r| r.receive_pre_churn).sum()),
-        received_post: churn_enabled.then(|| results.iter().map(|r| r.receive_post_churn).sum()),
+        received_by_phase: churn_enabled.then(|| {
+            let mut counts = BTreeMap::new();
+            for result in results {
+                for (phase, received) in &result.receive_by_churn_phase {
+                    *counts.entry(*phase).or_insert(0) += received;
+                }
+            }
+            let phases = counts.keys().next_back().map_or(0, |phase| phase + 1);
+            (0..phases)
+                .map(|phase| counts.get(&phase).copied().unwrap_or(0))
+                .collect()
+        }),
         publish_throughput_mps: usize_as_f64(fanout_publish_ms.len()) / duration_s,
         receive_throughput_mps: usize_as_f64(receive.len()) / duration_s,
         receive,
@@ -3410,8 +3457,8 @@ fn fanout_output(args: &Args, parts: FanoutOutputParts<'_>) -> Output {
             args,
             "fanout",
             Some(parts.churn_state),
-            metrics.received_pre,
-            metrics.received_post,
+            metrics.received_by_phase.as_deref(),
+            parts.phase_events,
         ),
         sync_connect: sync_connect_json(args, &[], &[], &parts.runtime.errors),
         reauth_storm: serde_json::json!({"enabled": false}),
@@ -3446,7 +3493,6 @@ async fn run_fanout(args: Args) -> Result<Output> {
             start,
             std::mem::take(&mut subscribers),
             args.messages,
-            args.fanout_churn_after_messages,
             &publishing_done,
         ))
     } else {
@@ -3491,6 +3537,7 @@ async fn run_fanout(args: Args) -> Result<Output> {
             fanout_publish_ms,
             fanout_publish_by_qos: &fanout_publish_by_qos,
             churn_state: &churn_state,
+            phase_events: None,
             metrics: &metrics,
         },
     ))
@@ -3540,7 +3587,6 @@ async fn run_fanout_subscriber(args: Args) -> Result<Output> {
                     subscriber,
                     start,
                     args.messages,
-                    args.fanout_churn_after_messages,
                     Arc::clone(&publishing_done),
                 )
                 .await,
@@ -3551,10 +3597,19 @@ async fn run_fanout_subscriber(args: Args) -> Result<Output> {
     } else {
         subscribers.into_iter().map(|sub| sub.result).collect()
     };
-    let done_seen = watcher.await.unwrap_or(false);
-    if !done_seen {
-        runtime.errors.push("fanout_done_timeout".to_string());
-    }
+    let phase_events = match watcher.await {
+        Ok(Ok(applied_events)) => Some(applied_events),
+        Ok(Err(err)) => {
+            runtime.errors.push(err.to_string());
+            None
+        }
+        Err(err) => {
+            runtime
+                .errors
+                .push(format!("fanout_done_join_failed:{err}"));
+            None
+        }
+    };
 
     let duration_s = start.elapsed().as_secs_f64().max(1e-9);
     let mut results = results;
@@ -3579,6 +3634,7 @@ async fn run_fanout_subscriber(args: Args) -> Result<Output> {
             fanout_publish_ms,
             fanout_publish_by_qos: &fanout_publish_by_qos,
             churn_state: &churn_state,
+            phase_events,
             metrics: &metrics,
         },
     ))
@@ -3656,6 +3712,7 @@ async fn run_fanout_publisher(args: Args) -> Result<Output> {
             fanout_publish_ms,
             fanout_publish_by_qos: &fanout_publish_by_qos,
             churn_state: &churn_state,
+            phase_events: None,
             metrics: &metrics,
         },
     ))
@@ -6244,10 +6301,11 @@ mod tests {
 
     #[test]
     fn parse_fanout_message_matches_publisher_format() {
-        let payload = format!("{:.9}|7|", 1.25).into_bytes();
+        let payload = format!("{:.9}|7|2|", 1.25).into_bytes();
         let message = parse_fanout_message(&payload).unwrap();
         assert!((message.sent - 1.25).abs() < 1e-9);
         assert_eq!(message.sequence_id, Some(7));
+        assert_eq!(message.phase, Some(2));
     }
 
     #[test]
@@ -6277,5 +6335,36 @@ mod tests {
         let message = parse_fanout_message(b"0.5|").unwrap();
         assert!((message.sent - 0.5).abs() < 1e-9);
         assert_eq!(message.sequence_id, None);
+    }
+
+    #[test]
+    fn subscriber_churn_output_uses_publisher_applied_phase_count() {
+        let args = Args::parse_from([
+            "mqtt-loadgen",
+            "--mode",
+            "fanout",
+            "--clients",
+            "1",
+            "--messages",
+            "5",
+            "--fanout-churn-kind",
+            "sqlite_toggle_read",
+            "--fanout-churn-after-messages",
+            "4",
+            "--fanout-churn-interval-messages",
+            "4",
+            "--fanout-churn-max-events",
+            "4",
+        ]);
+        let churn = fanout_churn_json(
+            &args,
+            "fanout",
+            Some(&FanoutChurnState::default()),
+            Some(&[4, 0]),
+            Some(1),
+        );
+        let phases = churn["phases"].as_array().unwrap();
+        assert_eq!(phases.len(), 2);
+        assert_eq!(phases[1]["received_deliveries"], 0);
     }
 }

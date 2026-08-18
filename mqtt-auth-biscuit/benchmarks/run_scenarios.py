@@ -59,6 +59,7 @@ SemanticClass = Literal["capability", "mixed", "parity_identity_bound"]
 CredentialMode = Literal["none", "shared", "per_client", "issuer"]
 ClientTopology = Literal["host", "container-single", "container-per-client"]
 DEFAULT_CLIENT_TOPOLOGY: ClientTopology = "container-single"
+EXPECTED_DISABLE_RECEIVE_ERROR_PREFIX = "receive_failed:Mqtt state: Connection closed by peer"
 LOADGEN_CONTAINER_REPO_ROOT = "/workspace"
 SYNC_BARRIER_SERVICE = "sync-barrier"
 SYNC_BARRIER_CONTAINER_URL = "http://sync-barrier:8083"
@@ -327,6 +328,10 @@ class ScenarioConfig(TypedDict, total=False):
     jwt_identity_binding: IdentityBindingMode
     biscuit_identity_binding: IdentityBindingMode
     semantic_class: SemanticClass
+    # Result contracts.  A scenario is successful only when these expectations hold.
+    expected_delivery: Literal["all", "none", "unvalidated"]
+    allowed_error_prefixes: list[str]
+    fanout_churn_phase_delivery: list[Literal["all", "none"]]
 
 
 def _compose_bin():
@@ -1935,68 +1940,95 @@ def _validate_reauth_storm_result(
         raise RuntimeError(f"{scenario_id}: reauth storm did not preserve session continuity")
 
 
-FANOUT_SETUP_ERROR_PREFIXES = (
-    "attenuation_failed:",
-    "connect_denied:",
-    "connect_failed:",
-    "delegation_failed:",
-    "delegation_handoff_failed:",
-    "delegation_handoff_join_failed:",
-    "fanout_ready_write_failed:",
-    "fanout_suback_rejected:",
-    "fanout_subscribe_ready_timeout",
-    "startup_provisioning_failed:",
-    "subscribe_failed:",
-)
+def _validate_mqtt5_auth_result(scenario_id: str, result: dict[str, Any]) -> None:
+    if result.get("connect_ok") is not True:
+        raise RuntimeError(f"{scenario_id}: MQTT5 AUTH connection did not succeed")
+    if result.get("reauth_ok") is not True:
+        detail = result.get("reauth_error") or "unknown error"
+        raise RuntimeError(f"{scenario_id}: MQTT5 reauthentication failed: {detail}")
+    if not isinstance(result.get("connect_ms"), int | float):
+        raise RuntimeError(f"{scenario_id}: MQTT5 AUTH result is missing connect timing")
+    if not isinstance(result.get("reauth_ms"), int | float):
+        raise RuntimeError(f"{scenario_id}: MQTT5 AUTH result is missing reauth timing")
 
 
-def _validate_fanout_result(
-    scenario_id: str,
+def _validate_result_contract(
+    scenario: ScenarioConfig,
     result: dict[str, Any],
     *,
     message_count: int,
-    require_receive: bool,
-    require_churn: bool,
-    require_churn_denial: bool,
+    client_count: int,
 ) -> None:
+    scenario_id = scenario["id"]
     errors = [str(error) for error in result.get("errors", [])]
-    fatal_errors = [error for error in errors if error.startswith(FANOUT_SETUP_ERROR_PREFIXES)]
-    if fatal_errors:
-        raise RuntimeError(f"{scenario_id}: fanout setup failed: {', '.join(fatal_errors[:5])}")
+    allowed_prefixes = tuple(scenario.get("allowed_error_prefixes", []))
+    unexpected_errors = [error for error in errors if not error.startswith(allowed_prefixes)]
+    if unexpected_errors:
+        raise RuntimeError(f"{scenario_id}: loadgen errors: {', '.join(unexpected_errors[:5])}")
+
+    if scenario.get("mqtt5_auth") is not None:
+        _validate_mqtt5_auth_result(scenario_id, result)
+        return
 
     publish = result.get("publish")
     publish_count = int(publish.get("count") or 0) if isinstance(publish, dict) else 0
-    if publish_count != message_count:
+    expected_publish_count = (
+        message_count
+        if scenario.get("traffic_pattern") == "fanout"
+        else message_count * client_count
+    )
+    if (
+        publish_count != expected_publish_count
+        and not scenario.get("control_mode")
+        and not scenario.get("runtime_control_expect_denial")
+    ):
         raise RuntimeError(
-            f"{scenario_id}: fanout published {publish_count}/{message_count} messages"
+            f"{scenario_id}: published {publish_count}/{expected_publish_count} messages"
         )
 
-    if require_receive:
-        receive = result.get("receive")
-        receive_count = int(receive.get("count") or 0) if isinstance(receive, dict) else 0
-        if receive_count == 0:
-            raise RuntimeError(f"{scenario_id}: fanout produced no subscriber deliveries")
+    if scenario.get("traffic_pattern") != "fanout":
+        return
 
-    if not require_churn:
+    receive = result.get("receive")
+    receive_count = int(receive.get("count") or 0) if isinstance(receive, dict) else 0
+    expected_delivery = scenario.get("expected_delivery", "unvalidated")
+    expected_count = message_count * client_count
+    if expected_delivery == "all" and receive_count != expected_count:
+        raise RuntimeError(f"{scenario_id}: received {receive_count}/{expected_count} deliveries")
+    if expected_delivery == "none" and receive_count != 0:
+        raise RuntimeError(f"{scenario_id}: expected no deliveries, got {receive_count}")
+
+    phase_expectations = scenario.get("fanout_churn_phase_delivery")
+    if phase_expectations is None:
         return
 
     churn = result.get("fanout_churn")
     if not isinstance(churn, dict) or churn.get("enabled") is not True:
         raise RuntimeError(f"{scenario_id}: fanout churn metadata missing")
-    expected_post = int(churn.get("expected_post_churn") or 0)
-    if expected_post <= 0:
-        raise RuntimeError(
-            f"{scenario_id}: fanout churn has no post-churn publish window; "
-            "raise messages above fanout_churn_after_messages"
-        )
     if churn.get("triggered") is not True or int(churn.get("applied_events") or 0) <= 0:
         raise RuntimeError(f"{scenario_id}: fanout churn did not trigger")
-    if require_churn_denial and churn.get("cache_validity_signal") is not True:
-        received_post = int(churn.get("received_post_churn") or 0)
-        raise RuntimeError(
-            f"{scenario_id}: fanout churn did not reduce post-churn delivery "
-            f"({received_post}/{expected_post})"
-        )
+    phases = churn.get("phases")
+    applied_events = int(churn.get("applied_events") or 0)
+    required_phase_count = applied_events + 1
+    if (
+        not isinstance(phases, list)
+        or len(phases) != required_phase_count
+        or len(phases) > len(phase_expectations)
+    ):
+        raise RuntimeError(f"{scenario_id}: fanout churn phase metadata is incomplete")
+    for index, (phase, expectation) in enumerate(zip(phases, phase_expectations, strict=False)):
+        if not isinstance(phase, dict):
+            raise RuntimeError(f"{scenario_id}: invalid fanout churn phase {index}")
+        expected = int(phase.get("expected_deliveries") or 0)
+        received = int(phase.get("received_deliveries") or 0)
+        if expectation == "all" and received != expected:
+            raise RuntimeError(
+                f"{scenario_id}: churn phase {index} received {received}/{expected} deliveries"
+            )
+        if expectation == "none" and received != 0:
+            raise RuntimeError(
+                f"{scenario_id}: churn phase {index} expected no deliveries, got {received}"
+            )
 
 
 def _merge_fanout_role_loadgen_results(
@@ -2025,28 +2057,37 @@ def _merge_fanout_role_loadgen_results(
         enabled = bool(churn.get("enabled"))
         if enabled:
             after = int(churn.get("after_messages") or 0)
-            expected_pre = min(messages, after) * subscriber_count
-            expected_post = max(messages - after, 0) * subscriber_count
-            received_pre = sum(
-                int(result.get("fanout_churn", {}).get("received_pre_churn") or 0)
-                for result in subscribers
-                if isinstance(result.get("fanout_churn"), dict)
-            )
-            received_post = sum(
-                int(result.get("fanout_churn", {}).get("received_post_churn") or 0)
-                for result in subscribers
-                if isinstance(result.get("fanout_churn"), dict)
-            )
-            churn["received_pre_churn"] = received_pre
-            churn["received_post_churn"] = received_post
-            churn["expected_pre_churn"] = expected_pre
-            churn["expected_post_churn"] = expected_post
-            churn["post_churn_delivery_ratio"] = (
-                float(received_post / expected_post) if expected_post > 0 else None
-            )
-            churn["cache_validity_signal"] = bool(churn.get("triggered")) and (
-                received_post < expected_post
-            )
+            interval = int(churn.get("interval_messages") or 0)
+            applied = int(churn.get("applied_events") or 0)
+            phase_publishes = [0]
+            phase = 0
+            for sequence_id in range(messages):
+                is_boundary = sequence_id == after or (
+                    interval > 0 and sequence_id > after and (sequence_id - after) % interval == 0
+                )
+                if is_boundary and phase < applied:
+                    phase += 1
+                    phase_publishes.append(0)
+                phase_publishes[phase] += 1
+            received_by_phase = [0] * len(phase_publishes)
+            for result in subscribers:
+                subscriber_churn = result.get("fanout_churn")
+                phases = (
+                    subscriber_churn.get("phases", []) if isinstance(subscriber_churn, dict) else []
+                )
+                if not isinstance(phases, list):
+                    continue
+                for index, entry in enumerate(phases):
+                    if index < len(received_by_phase) and isinstance(entry, dict):
+                        received_by_phase[index] += int(entry.get("received_deliveries") or 0)
+            churn["phases"] = [
+                {
+                    "phase": index,
+                    "expected_deliveries": publishes * subscriber_count,
+                    "received_deliveries": received_by_phase[index],
+                }
+                for index, publishes in enumerate(phase_publishes)
+            ]
         merged["fanout_churn"] = churn
 
     inputs = merged.get("inputs")
@@ -3006,12 +3047,25 @@ def _effective_scenario_message_count(
     return max(configured, minimum)
 
 
-def _scenario_expects_fanout_churn_denial(scenario: ScenarioConfig) -> bool:
-    return scenario.get("fanout_churn_kind") in {
-        "dynamic_security_swap",
-        "dynamic_security_control",
-        "sqlite_revoke_read",
-    }
+def _apply_result_contracts(scenarios: dict[str, ScenarioConfig]) -> dict[str, ScenarioConfig]:
+    """Populate the invariant result contracts shared by scenario families."""
+    for scenario_id, scenario in scenarios.items():
+        if scenario.get("traffic_pattern") != "fanout":
+            continue
+        if scenario.get("fanout_churn_kind"):
+            scenario.setdefault("expected_delivery", "unvalidated")
+            kind = scenario["fanout_churn_kind"]
+            if kind in {"dynamic_security_swap", "dynamic_security_control", "sqlite_revoke_read"}:
+                scenario.setdefault("fanout_churn_phase_delivery", ["all", "none"])
+            elif kind in {"sqlite_toggle_read", "sqlite_toggle_private_deny"}:
+                # The seeded policy is allowed; each toggle alternates its delivery state.
+                scenario.setdefault(
+                    "fanout_churn_phase_delivery", ["all", "none", "all", "none", "all"]
+                )
+            continue
+        if scenario.get("acl_read_enforcement") == "strict" or scenario.get("sqlite_seed_fanout"):
+            scenario.setdefault("expected_delivery", "none" if "-DENY-" in scenario_id else "all")
+    return scenarios
 
 
 def _set_scenario_semantics(
@@ -4255,6 +4309,7 @@ def _acl_read_fanout_churn_scenarios(tokens: dict[str, Any]) -> dict[str, Scenar
             "fanout_churn_kind": "dynamic_security_control",
             "fanout_churn_after_messages": 5,
             "fanout_churn_settle_ms": 1200,
+            "allowed_error_prefixes": [EXPECTED_DISABLE_RECEIVE_ERROR_PREFIX],
             "fanout_churn_control_topic": "$CONTROL/dynamic-security/v1",
             "fanout_churn_control_payload": {
                 "commands": [{"command": "disableClient", "username": "dynsec_client_1"}]
@@ -4278,6 +4333,7 @@ def _acl_read_fanout_churn_scenarios(tokens: dict[str, Any]) -> dict[str, Scenar
             "fanout_churn_kind": "dynamic_security_control",
             "fanout_churn_after_messages": 5,
             "fanout_churn_settle_ms": 1200,
+            "allowed_error_prefixes": [EXPECTED_DISABLE_RECEIVE_ERROR_PREFIX],
             "fanout_churn_control_topic": "$CONTROL/dynamic-security/v1",
             "fanout_churn_control_payload": {
                 "commands": [{"command": "disableClient", "username": "dynsec_client_1"}]
@@ -4736,13 +4792,21 @@ def _build_available_scenarios(
             "qos": 2,
         },
         "TOKEN-DENY-READ-JWT": {
-            "mosquitto_conf": "./mosquitto.conf",
+            "mosquitto_conf": "./mosquitto_integration_acl_read_full.conf",
             "username": "jwt",
-            "password": tokens["jwt_deny"],
-            "topic": "sensors/{client_id}/temp",
+            "password": tokens["jwt_fanout_read_deny"],
+            "fanout_publisher_username": "jwt",
+            "fanout_publisher_password": tokens["jwt_fanout_allow"],
+            "topic": "fanout/broadcast",
+            "traffic_pattern": "fanout",
+            "fanout_topic": "fanout/broadcast",
             "authz_config": None,
             "netem": {"clear": True},
             "message_size": 0,
+            "qos": 1,
+            "subscriber_count": 10,
+            "acl_read_enforcement": "strict",
+            "expected_delivery": "none",
         },
         "TOKEN-BASELINE-BISCUIT": {
             "mosquitto_conf": "./mosquitto.conf",
@@ -4812,13 +4876,21 @@ def _build_available_scenarios(
             "qos_distribution": "0:0.6,1:0.3,2:0.1",
         },
         "TOKEN-ATTENUATED-DENY-BISCUIT": {
-            "mosquitto_conf": "./mosquitto.conf",
+            "mosquitto_conf": "./mosquitto_integration_acl_read_full.conf",
             "username": "biscuit",
-            "password": tokens["biscuit_deny"],
-            "topic": "sensors/{client_id}/temp",
+            "password": tokens["biscuit_fanout_read_deny"],
+            "fanout_publisher_username": "biscuit",
+            "fanout_publisher_password": tokens["biscuit_fanout_allow"],
+            "topic": "fanout/broadcast",
+            "traffic_pattern": "fanout",
+            "fanout_topic": "fanout/broadcast",
             "authz_config": None,
             "netem": {"clear": True},
             "message_size": 0,
+            "qos": 1,
+            "subscriber_count": 10,
+            "acl_read_enforcement": "strict",
+            "expected_delivery": "none",
         },
         "TOKEN-ATTENUATION-CLIENT-BISCUIT": {
             "mosquitto_conf": "./mosquitto.conf",
@@ -4829,10 +4901,10 @@ def _build_available_scenarios(
             "netem": {"clear": True},
             "message_size": 0,
             "biscuit_attenuate": {
-                "denies": ["publish:sensors/{client_id}/temp"],
+                "denies": ["subscribe:sensors/{client_id}/temp"],
                 "ttl_seconds": 300,
                 "topic": "sensors/{client_id}/temp",
-                "op": "publish",
+                "op": "subscribe",
             },
         },
         "TOKEN-ATTENUATION-TTL-BISCUIT": {
@@ -5934,6 +6006,7 @@ def _build_available_scenarios(
         }
 
     available_scenarios = _apply_scenario_classification(available_scenarios, tokens)
+    available_scenarios = _apply_result_contracts(available_scenarios)
 
     for scenario in available_scenarios.values():
         scenario.setdefault("token_issuer_no_default_roles", token_issuer_no_default_roles)
@@ -6903,15 +6976,12 @@ def main(
                                 "fanout_publisher_password_map_profile"
                             ),
                         )
-                    if s.get("traffic_pattern") == "fanout":
-                        _validate_fanout_result(
-                            s["id"],
-                            res,
-                            message_count=scenario_messages,
-                            require_receive=bool(s.get("sqlite_seed_fanout")),
-                            require_churn=bool(s.get("fanout_churn_kind")),
-                            require_churn_denial=_scenario_expects_fanout_churn_denial(s),
-                        )
+                    _validate_result_contract(
+                        s,
+                        res,
+                        message_count=scenario_messages,
+                        client_count=effective_client_count,
+                    )
                     if s.get("proactive_refresh_assert_continuity"):
                         if not res.get("session_continuity_ok"):
                             raise RuntimeError(

@@ -107,8 +107,8 @@ references scenario family names rather than brittle source-line ranges.
 | BASELINE-NO-AUTH-QOS0 | None | None | No authn/authz with explicit QoS 0 baseline | Allows all |
 | TOKEN-BASELINE-JWT | JWT | Token-only | `grants` include publish/subscribe on `sensors/{client_id}/temp` | Allows |
 | TOKEN-BASELINE-BISCUIT | Biscuit | Token-only | `right(publish|subscribe, sensors/{client_id}/temp)` | Allows |
-| TOKEN-DENY-READ-JWT | JWT | Token-only | Same as TOKEN-BASELINE-JWT + deny read on same topic | Deny read |
-| TOKEN-ATTENUATED-DENY-BISCUIT | Biscuit | Token-only | Base rights + deny fact in appended block | Deny read |
+| TOKEN-DENY-READ-JWT | JWT | Token-only | Fan-out subscriber token grants publish/subscribe and denies read on `fanout/broadcast`; a separate allowed publisher emits the workload | Strict ACL_READ deny; zero deliveries required |
+| TOKEN-ATTENUATED-DENY-BISCUIT | Biscuit | Token-only | Fan-out subscriber token has base rights plus a deny-read fact on `fanout/broadcast`; a separate allowed publisher emits the workload | Strict ACL_READ deny; zero deliveries required |
 | TOKEN-QOS2-JWT / TOKEN-QOS2-BISCUIT | JWT/Biscuit | Token-only | Baseline token policy with QoS 2 publishing | Allows |
 | TOKEN-QOS-MIXED-JWT / TOKEN-QOS-MIXED-BISCUIT | JWT/Biscuit | Token-only | Baseline token policy with mixed QoS distribution | Allows |
 
@@ -375,7 +375,7 @@ Tokens are issued with the same default grants/rights in token-only mode.
 
 | Scenario | Policy Source | Policy Detail | Notes |
 | --- | --- | --- | --- |
-| TOKEN-ATTENUATION-CLIENT-BISCUIT | Token-only | Client appends deny + checks + TTL | Measures attenuation cost |
+| TOKEN-ATTENUATION-CLIENT-BISCUIT | Token-only | Client appends a subscribe deny plus TTL, leaving the measured publish right intact | Measures attenuation cost with a complete publish workload |
 | TOKEN-ATTENUATION-TTL-BISCUIT | Token-only | Client adds TTL block only | Attenuation baseline |
 | TOKEN-ATTENUATION-DENY-BISCUIT | Token-only | Client adds deny + resource check | Policy restriction |
 | TOKEN-ATTENUATION-OP-ONLY-BISCUIT | Token-only | Client restricts operation only | Policy restriction |

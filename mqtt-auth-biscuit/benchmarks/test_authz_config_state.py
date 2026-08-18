@@ -258,47 +258,161 @@ def test_effective_scenario_message_count_reserves_runtime_control_denial_publis
     assert rs._effective_scenario_message_count(scenario, 5, effective_clients=2) == 6
 
 
-def test_validate_fanout_result_requires_enabled_churn_to_trigger() -> None:
+def test_result_contract_requires_enabled_churn_to_trigger() -> None:
     with pytest.raises(RuntimeError, match="fanout churn did not trigger"):
-        rs._validate_fanout_result(
-            "DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-JWT-10",
+        rs._validate_result_contract(
+            {
+                "id": "DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-JWT-10",
+                "traffic_pattern": "fanout",
+                "fanout_churn_phase_delivery": ["all", "none"],
+            },
             {
                 "errors": [],
                 "publish": {"count": 6},
                 "fanout_churn": {
                     "enabled": True,
-                    "expected_post_churn": 10,
                     "triggered": False,
                     "applied_events": 0,
                 },
             },
             message_count=6,
-            require_receive=False,
-            require_churn=True,
-            require_churn_denial=True,
+            client_count=10,
         )
 
 
-def test_validate_fanout_result_requires_denial_signal_for_denying_churn() -> None:
-    with pytest.raises(RuntimeError, match="did not reduce post-churn delivery"):
-        rs._validate_fanout_result(
-            "DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-REVOKE-JWT-10",
+def test_result_contract_requires_zero_delivery_in_deny_phase() -> None:
+    with pytest.raises(RuntimeError, match="phase 1 expected no deliveries"):
+        rs._validate_result_contract(
+            {
+                "id": "DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-REVOKE-JWT-10",
+                "traffic_pattern": "fanout",
+                "fanout_churn_phase_delivery": ["all", "none"],
+            },
             {
                 "errors": [],
                 "publish": {"count": 6},
                 "fanout_churn": {
                     "enabled": True,
-                    "expected_post_churn": 10,
-                    "received_post_churn": 10,
                     "triggered": True,
                     "applied_events": 1,
-                    "cache_validity_signal": False,
+                    "phases": [
+                        {"expected_deliveries": 50, "received_deliveries": 50},
+                        {"expected_deliveries": 10, "received_deliveries": 10},
+                    ],
                 },
             },
             message_count=6,
-            require_receive=False,
-            require_churn=True,
-            require_churn_denial=True,
+            client_count=10,
+        )
+
+
+def test_result_contract_requires_every_standard_worker_to_finish() -> None:
+    with pytest.raises(RuntimeError, match="published 19/20 messages"):
+        rs._validate_result_contract(
+            {"id": "STANDARD"},
+            {"errors": [], "publish": {"count": 19}},
+            message_count=10,
+            client_count=2,
+        )
+
+
+def test_result_contract_validates_only_toggle_phases_exercised_by_short_run() -> None:
+    rs._validate_result_contract(
+        {
+            "id": "SQLITE-RBAC-CHURN-JWT",
+            "traffic_pattern": "fanout",
+            "fanout_churn_phase_delivery": ["all", "none", "all", "none", "all"],
+        },
+        {
+            "errors": [],
+            "publish": {"count": 5},
+            "fanout_churn": {
+                "enabled": True,
+                "triggered": True,
+                "applied_events": 1,
+                "phases": [
+                    {"expected_deliveries": 40, "received_deliveries": 40},
+                    {"expected_deliveries": 10, "received_deliveries": 0},
+                ],
+            },
+        },
+        message_count=5,
+        client_count=10,
+    )
+
+
+def test_result_contract_rejects_missing_phase_after_applied_churn() -> None:
+    with pytest.raises(RuntimeError, match="phase metadata is incomplete"):
+        rs._validate_result_contract(
+            {
+                "id": "DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-JWT-10",
+                "traffic_pattern": "fanout",
+                "fanout_churn_phase_delivery": ["all", "none"],
+            },
+            {
+                "errors": [],
+                "publish": {"count": 6},
+                "fanout_churn": {
+                    "enabled": True,
+                    "triggered": True,
+                    "applied_events": 1,
+                    "phases": [{"expected_deliveries": 50, "received_deliveries": 50}],
+                },
+            },
+            message_count=6,
+            client_count=10,
+        )
+
+
+def test_result_contract_allows_only_expected_disable_disconnects() -> None:
+    scenario: rs.ScenarioConfig = {
+        "id": "DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-DISABLE-JWT-10",
+        "traffic_pattern": "fanout",
+        "allowed_error_prefixes": [rs.EXPECTED_DISABLE_RECEIVE_ERROR_PREFIX],
+        "fanout_churn_phase_delivery": ["all", "none"],
+    }
+    result = {
+        "errors": ["receive_failed:Mqtt state: Connection closed by peer abruptly"],
+        "publish": {"count": 6},
+        "fanout_churn": {
+            "enabled": True,
+            "triggered": True,
+            "applied_events": 1,
+            "phases": [
+                {"expected_deliveries": 50, "received_deliveries": 50},
+                {"expected_deliveries": 10, "received_deliveries": 0},
+            ],
+        },
+    }
+    rs._validate_result_contract(scenario, result, message_count=6, client_count=10)
+
+    result["errors"].append("fanout_publish_failed:NotAuthorized")
+    with pytest.raises(RuntimeError, match="fanout_publish_failed:NotAuthorized"):
+        rs._validate_result_contract(scenario, result, message_count=6, client_count=10)
+
+
+def test_mqtt5_result_contract_validates_auth_without_publish_metrics() -> None:
+    rs._validate_result_contract(
+        {"id": "TOKEN-MQTT5-REAUTH-JWT", "mqtt5_auth": {"kind": "jwt"}},
+        {"connect_ok": True, "connect_ms": 1.0, "reauth_ok": True, "reauth_ms": 2.0},
+        message_count=10,
+        client_count=10,
+    )
+
+
+def test_mqtt5_result_contract_rejects_failed_reauthentication() -> None:
+    with pytest.raises(RuntimeError, match="reauthentication failed: NotAuthorized"):
+        rs._validate_result_contract(
+            {"id": "TOKEN-MQTT5-REAUTH-JWT", "mqtt5_auth": {"kind": "jwt"}},
+            {
+                "connect_ok": True,
+                "connect_ms": 1.0,
+                "reauth_ok": False,
+                "reauth_ms": 2.0,
+                "reauth_error": "NotAuthorized",
+            },
+            message_count=10,
+            client_count=10,
         )
 
 

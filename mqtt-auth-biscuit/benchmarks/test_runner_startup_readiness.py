@@ -159,7 +159,7 @@ def test_compose_checked_includes_broker_diagnostics(
                 "publish": {"count": 0},
                 "receive": {"count": 0},
             },
-            "fanout setup failed",
+            "loadgen errors",
         ),
         (
             {"errors": [], "publish": {"count": 0}, "receive": {"count": 0}},
@@ -167,7 +167,7 @@ def test_compose_checked_includes_broker_diagnostics(
         ),
         (
             {"errors": [], "publish": {"count": 10}, "receive": {"count": 0}},
-            "no subscriber deliveries",
+            "received 0/100 deliveries",
         ),
     ],
 )
@@ -176,13 +176,15 @@ def test_fanout_validation_rejects_invalid_benchmark_data(
     match: str,
 ) -> None:
     with pytest.raises(RuntimeError, match=match):
-        rs._validate_fanout_result(
-            "SQLITE-RBAC-CHURN-JWT",
+        rs._validate_result_contract(
+            {
+                "id": "SQLITE-RBAC-CHURN-JWT",
+                "traffic_pattern": "fanout",
+                "expected_delivery": "all",
+            },
             result,
             message_count=10,
-            require_receive=True,
-            require_churn=False,
-            require_churn_denial=False,
+            client_count=10,
         )
 
 
@@ -202,33 +204,29 @@ def test_fanout_validation_rejects_invalid_benchmark_data(
 def test_fanout_validation_rejects_partial_subscriber_initialization(
     setup_error: str,
 ) -> None:
-    with pytest.raises(RuntimeError, match="fanout setup failed"):
-        rs._validate_fanout_result(
-            "FANOUT",
+    with pytest.raises(RuntimeError, match="loadgen errors"):
+        rs._validate_result_contract(
+            {"id": "FANOUT", "traffic_pattern": "fanout", "expected_delivery": "all"},
             {
                 "errors": [setup_error],
                 "publish": {"count": 10},
                 "receive": {"count": 90},
             },
             message_count=10,
-            require_receive=True,
-            require_churn=False,
-            require_churn_denial=False,
+            client_count=10,
         )
 
 
 def test_fanout_validation_accepts_valid_churn_result() -> None:
-    rs._validate_fanout_result(
-        "SQLITE-RBAC-CHURN-JWT",
+    rs._validate_result_contract(
+        {"id": "SQLITE-RBAC-CHURN-JWT", "traffic_pattern": "fanout", "expected_delivery": "all"},
         {
             "errors": [],
             "publish": {"count": 10},
             "receive": {"count": 200},
         },
         message_count=10,
-        require_receive=True,
-        require_churn=False,
-        require_churn_denial=False,
+        client_count=20,
     )
 
 
@@ -652,7 +650,11 @@ def test_main_normalizes_output_directory_strings(
     monkeypatch.setattr(rs, "_validate_dynamic_security_alignment", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(rs, "_resource_snapshot", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(rs, "_validate_resource_snapshot", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(rs, "_run_loadgen", lambda **_kwargs: {"errors": [], "receive": {}})
+    monkeypatch.setattr(
+        rs,
+        "_run_loadgen",
+        lambda **_kwargs: {"errors": [], "publish": {"count": 1000}, "receive": {}},
+    )
 
     def fake_profile(
         *,
@@ -1260,8 +1262,10 @@ def test_fanout_role_merge_recomputes_receive_expectations_and_churn() -> None:
         "received_messages": {"count": 3, "expected": 4},
         "fanout_churn": {
             "enabled": True,
-            "received_pre_churn": 2,
-            "received_post_churn": 1,
+            "phases": [
+                {"expected_deliveries": 2, "received_deliveries": 2},
+                {"expected_deliveries": 2, "received_deliveries": 1},
+            ],
         },
         "errors": [],
     }
@@ -1276,10 +1280,10 @@ def test_fanout_role_merge_recomputes_receive_expectations_and_churn() -> None:
     )
 
     assert merged["received_messages"] == {"count": 6, "expected": 8}
-    assert merged["fanout_churn"]["expected_pre_churn"] == 4
-    assert merged["fanout_churn"]["expected_post_churn"] == 4
-    assert merged["fanout_churn"]["received_pre_churn"] == 4
-    assert merged["fanout_churn"]["received_post_churn"] == 2
+    assert merged["fanout_churn"]["phases"] == [
+        {"phase": 0, "expected_deliveries": 4, "received_deliveries": 4},
+        {"phase": 1, "expected_deliveries": 4, "received_deliveries": 2},
+    ]
     assert merged["topology"]["fanout_roles"] == {"publishers": 1, "subscribers": 2}
 
 

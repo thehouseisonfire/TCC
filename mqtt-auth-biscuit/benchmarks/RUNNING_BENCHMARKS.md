@@ -526,8 +526,8 @@ uv run --locked python -m benchmarks.run_scenarios \
 
 Validation signal in scenario result JSON (`runs[].loadgen.fanout_churn`):
 - `triggered=true`
-- `received_pre_churn > 0`
-- `received_post_churn` drops below `expected_post_churn`
+- `phases[]` records exact expected and observed deliveries for each policy epoch
+- allow phases receive every expected delivery and deny phases receive none
 
 ### Anonymous Flow Scenario (DYNAMIC-SECURITY-ANONYMOUS-BASELINE)
 

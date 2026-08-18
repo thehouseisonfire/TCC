@@ -487,7 +487,7 @@ def test_every_scenario_declares_and_validates_credential_mode() -> None:
         rs._validate_scenario_credentials(scenario_id, scenario)
 
     assert scenarios["TOKEN-BASELINE-JWT"]["password_map_profile"] == "jwt"
-    assert scenarios["TOKEN-DENY-READ-JWT"]["password_map_profile"] == "jwt_deny"
+    assert scenarios["TOKEN-DENY-READ-JWT"]["credential_mode"] == "shared"
     assert scenarios["TOKEN-COMPLEXITY-CHAIN-25-BISCUIT"]["password_map_profile"] == "biscuit_25"
     assert scenarios["STATIC-ACL-FANOUT-JWT"]["password_map_profile"] == "jwt_static_reader"
     assert (
@@ -507,6 +507,7 @@ def test_every_scenario_declares_and_validates_credential_mode() -> None:
         scenarios["TOKEN-COMPOSABILITY-ATTENUATED-DATALOG-MED-BISCUIT"]["credential_mode"]
         == "per_client"
     )
+
     assert (
         scenarios["TOKEN-COMPOSABILITY-DELEGATED-DATALOG-HIGH-BISCUIT"]["credential_mode"]
         == "per_client"
@@ -523,6 +524,20 @@ def test_every_scenario_declares_and_validates_credential_mode() -> None:
         scenarios["HTTP-LATENCY-200MS-PARITY-BISCUIT"]["password_map_profile"]
         == "biscuit_strict_client_id"
     )
+
+
+def test_phase_one_deny_and_attenuation_scenarios_have_executable_contracts() -> None:
+    scenarios = _scenario_registry()
+    for scenario_id in ("TOKEN-DENY-READ-JWT", "TOKEN-ATTENUATED-DENY-BISCUIT"):
+        scenario = scenarios[scenario_id]
+        assert scenario["traffic_pattern"] == "fanout"
+        assert scenario["acl_read_enforcement"] == "strict"
+        assert scenario["expected_delivery"] == "none"
+        assert scenario["fanout_publisher_password"] != scenario["password"]
+
+    attenuation = scenarios["TOKEN-ATTENUATION-CLIENT-BISCUIT"]["biscuit_attenuate"]
+    assert attenuation["op"] == "subscribe"
+    assert attenuation["denies"] == ["subscribe:sensors/{client_id}/temp"]
 
 
 @pytest.mark.parametrize("scenario_id", MULTI_CLIENT_FANOUT_PARITY_SCENARIOS)

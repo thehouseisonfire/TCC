@@ -90,25 +90,25 @@ def test_seed_sqlite_deep_policy_sets_conflict_and_control_roles(tmp_path) -> No
         profile="rbac_deep",
     )
     assert seeded["profile"] == "rbac_deep"
-    assert seeded["rows_seeded"] == 36
+    assert seeded["rows_seeded"] == 34
 
     with sqlite3.connect(db_path) as conn:
-        odd = conn.execute(
-            "SELECT priority FROM user_roles WHERE client_id = ? AND role_name = ?",
-            ("client_1", policy_churn.DEEP_DATA_ALLOW_ROLE),
-        ).fetchone()
-        assert odd is not None
-        assert int(odd[0]) == 100
-        even = conn.execute(
-            "SELECT priority FROM user_roles WHERE client_id = ? AND role_name = ?",
-            ("client_2", policy_churn.DEEP_DATA_ALLOW_ROLE),
-        ).fetchone()
-        assert even is not None
-        assert int(even[0]) == 40
+        for client_id in ["client_1", "client_2"]:
+            allow = conn.execute(
+                "SELECT priority FROM user_roles WHERE client_id = ? AND role_name = ?",
+                (client_id, policy_churn.DEEP_DATA_ALLOW_ROLE),
+            ).fetchone()
+            deny = conn.execute(
+                "SELECT priority FROM user_roles WHERE client_id = ? AND role_name = ?",
+                (client_id, policy_churn.DEEP_PRIVATE_DENY_ROLE),
+            ).fetchone()
+            assert allow is not None
+            assert deny is not None
+            assert int(allow[0]) == int(deny[0]) == 100
         assert _count_role_acl(conn, policy_churn.ACL_SUBSCRIBE) >= 1
         assert _count_role_acl(conn, policy_churn.ACL_READ) >= 1
         assert _count_role_acl(conn, policy_churn.ACL_WRITE) >= 1
-        assert _count_role_deny_acl(conn, policy_churn.ACL_READ) >= 1
+        assert _count_role_deny_acl(conn, policy_churn.ACL_READ) == 0
         assert _count_role_deny_acl(conn, policy_churn.ACL_CONTROL) >= 1
 
 
@@ -126,22 +126,7 @@ def test_toggle_sqlite_private_deny_fanout_switches_deny_rows(tmp_path) -> None:
         topic="sensors/private/broadcast",
         subscriber_count=2,
     )
-    assert first["action"] == "revoke_deny"
-    with sqlite3.connect(db_path) as conn:
-        assert (
-            conn.execute(
-                "SELECT COUNT(*) FROM role_deny_acls WHERE role_name = ? AND topic_filter = ?",
-                (policy_churn.DEEP_PRIVATE_DENY_ROLE, "sensors/private/broadcast"),
-            ).fetchone()[0]
-            == 0
-        )
-
-    second = policy_churn.toggle_sqlite_private_deny_fanout(
-        str(db_path),
-        topic="sensors/private/broadcast",
-        subscriber_count=2,
-    )
-    assert second["action"] == "grant_deny"
+    assert first["action"] == "grant_deny"
     with sqlite3.connect(db_path) as conn:
         assert (
             conn.execute(
@@ -149,6 +134,21 @@ def test_toggle_sqlite_private_deny_fanout_switches_deny_rows(tmp_path) -> None:
                 (policy_churn.DEEP_PRIVATE_DENY_ROLE, "sensors/private/broadcast"),
             ).fetchone()[0]
             == 2
+        )
+
+    second = policy_churn.toggle_sqlite_private_deny_fanout(
+        str(db_path),
+        topic="sensors/private/broadcast",
+        subscriber_count=2,
+    )
+    assert second["action"] == "revoke_deny"
+    with sqlite3.connect(db_path) as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM role_deny_acls WHERE role_name = ? AND topic_filter = ?",
+                (policy_churn.DEEP_PRIVATE_DENY_ROLE, "sensors/private/broadcast"),
+            ).fetchone()[0]
+            == 0
         )
 
 

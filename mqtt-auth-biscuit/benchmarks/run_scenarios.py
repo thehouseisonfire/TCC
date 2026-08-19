@@ -59,7 +59,14 @@ SemanticClass = Literal["capability", "mixed", "parity_identity_bound"]
 CredentialMode = Literal["none", "shared", "per_client", "issuer"]
 ClientTopology = Literal["host", "container-single", "container-per-client"]
 DEFAULT_CLIENT_TOPOLOGY: ClientTopology = "container-single"
-EXPECTED_DISABLE_RECEIVE_ERROR_PREFIX = "receive_failed:Mqtt state: Connection closed by peer"
+# Disabling a connected dynamic-security client deliberately severs its socket. The
+# MQTT client surfaces that broker action as either a peer close or a TCP reset,
+# depending on timing and the host networking stack.
+EXPECTED_DISABLE_RECEIVE_ERROR_PREFIXES = (
+    "receive_failed:Mqtt state: Connection closed by peer",
+    "receive_failed:Mqtt state: Mqtt serialization/deserialization error: "
+    "IO: Connection reset by peer",
+)
 LOADGEN_CONTAINER_REPO_ROOT = "/workspace"
 SYNC_BARRIER_SERVICE = "sync-barrier"
 SYNC_BARRIER_CONTAINER_URL = "http://sync-barrier:8083"
@@ -1098,6 +1105,7 @@ def _run_loadgen(
     fanout_churn_interval_messages: int = 0,
     fanout_churn_max_events: int = 1,
     fanout_churn_settle_ms: int = 0,
+    fanout_churn_phase_delivery: list[Literal["all", "none"]] | None = None,
     fanout_churn_dynamic_security_source: str | None = None,
     fanout_churn_control_topic: str | None = None,
     fanout_churn_control_payload: dict[str, Any] | None = None,
@@ -1287,6 +1295,10 @@ def _run_loadgen(
         cmd.extend(["--fanout-churn-max-events", str(fanout_churn_max_events)])
     if fanout_churn_settle_ms > 0:
         cmd.extend(["--fanout-churn-settle-ms", str(fanout_churn_settle_ms)])
+    if fanout_churn_phase_delivery:
+        cmd.extend(
+            ["--fanout-churn-phase-delivery", ",".join(fanout_churn_phase_delivery)]
+        )
     if fanout_churn_dynamic_security_source:
         cmd.extend(
             [
@@ -4309,7 +4321,7 @@ def _acl_read_fanout_churn_scenarios(tokens: dict[str, Any]) -> dict[str, Scenar
             "fanout_churn_kind": "dynamic_security_control",
             "fanout_churn_after_messages": 5,
             "fanout_churn_settle_ms": 1200,
-            "allowed_error_prefixes": [EXPECTED_DISABLE_RECEIVE_ERROR_PREFIX],
+            "allowed_error_prefixes": list(EXPECTED_DISABLE_RECEIVE_ERROR_PREFIXES),
             "fanout_churn_control_topic": "$CONTROL/dynamic-security/v1",
             "fanout_churn_control_payload": {
                 "commands": [{"command": "disableClient", "username": "dynsec_client_1"}]
@@ -4333,7 +4345,7 @@ def _acl_read_fanout_churn_scenarios(tokens: dict[str, Any]) -> dict[str, Scenar
             "fanout_churn_kind": "dynamic_security_control",
             "fanout_churn_after_messages": 5,
             "fanout_churn_settle_ms": 1200,
-            "allowed_error_prefixes": [EXPECTED_DISABLE_RECEIVE_ERROR_PREFIX],
+            "allowed_error_prefixes": list(EXPECTED_DISABLE_RECEIVE_ERROR_PREFIXES),
             "fanout_churn_control_topic": "$CONTROL/dynamic-security/v1",
             "fanout_churn_control_payload": {
                 "commands": [{"command": "disableClient", "username": "dynsec_client_1"}]
@@ -4902,9 +4914,8 @@ def _build_available_scenarios(
             "message_size": 0,
             "biscuit_attenuate": {
                 "denies": ["subscribe:sensors/{client_id}/temp"],
+                "checks": ['resource("sensors/{client_id}/temp")'],
                 "ttl_seconds": 300,
-                "topic": "sensors/{client_id}/temp",
-                "op": "subscribe",
             },
         },
         "TOKEN-ATTENUATION-TTL-BISCUIT": {
@@ -6941,6 +6952,9 @@ def main(
                             ),
                             fanout_churn_max_events=s.get("fanout_churn_max_events", 1),
                             fanout_churn_settle_ms=s.get("fanout_churn_settle_ms", 0),
+                            fanout_churn_phase_delivery=s.get(
+                                "fanout_churn_phase_delivery"
+                            ),
                             fanout_churn_dynamic_security_source=(
                                 _container_repo_path(s.get("fanout_churn_dynamic_security_source"))
                                 if client_topology_mode != "host"

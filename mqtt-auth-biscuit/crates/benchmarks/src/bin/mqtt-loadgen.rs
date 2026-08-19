@@ -436,6 +436,8 @@ struct Args {
     fanout_churn_max_events: usize,
     #[arg(long, env = "MQTT_FANOUT_CHURN_SETTLE_MS", default_value_t = 0)]
     fanout_churn_settle_ms: u64,
+    #[arg(long, env = "MQTT_FANOUT_CHURN_PHASE_DELIVERY")]
+    fanout_churn_phase_delivery: Option<String>,
     #[arg(long, env = "MQTT_FANOUT_CHURN_DYNAMIC_SECURITY_SOURCE")]
     fanout_churn_dynamic_security_source: Option<String>,
     #[arg(long, env = "MQTT_FANOUT_CHURN_CONTROL_TOPIC")]
@@ -2228,6 +2230,34 @@ const fn should_apply_churn(args: &Args, sequence_id: usize, state: &FanoutChurn
             .is_multiple_of(args.fanout_churn_interval_messages)
 }
 
+// Cumulative count of deliveries expected before the churn event at `sequence_id`,
+// derived from the `--fanout-churn-phase-delivery` contract ("all"/"none" per phase).
+// Returns None when no contract is supplied, which skips the receipt barrier entirely:
+// direct loadgen invocations without the contract accept the churn/delivery race.
+// The benchmark runner always supplies the contract for churn scenarios.
+fn expected_fanout_churn_receipts(args: &Args, sequence_id: usize) -> Option<usize> {
+    let expectations = args.fanout_churn_phase_delivery.as_deref()?;
+    let expectations = expectations.split(',').collect::<Vec<_>>();
+    if expectations
+        .iter()
+        .any(|expectation| !matches!(*expectation, "all" | "none"))
+    {
+        return None;
+    }
+
+    let mut state = FanoutChurnState::default();
+    let mut expected = 0usize;
+    for prior_sequence_id in 0..sequence_id {
+        if should_apply_churn(args, prior_sequence_id, &state) {
+            state.applied_events += 1;
+        }
+        if expectations.get(state.applied_events).copied() == Some("all") {
+            expected = expected.saturating_add(args.clients);
+        }
+    }
+    Some(expected)
+}
+
 fn fanout_phase_publish_counts(args: &Args, applied_events: usize) -> Vec<usize> {
     let mut counts = vec![0];
     let mut simulated = FanoutChurnState::default();
@@ -2404,6 +2434,7 @@ fn inputs_json(
             "interval_messages": args.fanout_churn_interval_messages,
             "max_events": args.fanout_churn_max_events,
             "settle_ms": args.fanout_churn_settle_ms,
+            "phase_delivery": args.fanout_churn_phase_delivery,
             "dynamic_security_source": args.fanout_churn_dynamic_security_source,
             "control_topic": args.fanout_churn_control_topic,
             "control_payload": args.fanout_churn_control_payload,
@@ -2917,6 +2948,8 @@ async fn collect_fanout_subscriber(
     start: Instant,
     expected_messages: usize,
     publishing_done: Arc<AtomicBool>,
+    churn_receipts: Arc<AtomicUsize>,
+    mut churn_receipt_path: Option<PathBuf>,
 ) -> WorkerResult {
     let drain_timeout = Duration::from_secs(10).max(Duration::from_millis(
         u64::try_from(expected_messages)
@@ -2947,6 +2980,16 @@ async fn collect_fanout_subscriber(
                             .receive_by_churn_phase
                             .entry(phase)
                             .or_default() += 1;
+                    }
+                    let receipt_count = churn_receipts.fetch_add(1, Ordering::Relaxed) + 1;
+                    if let Some(path) = churn_receipt_path.as_deref()
+                        && let Err(err) = write_fanout_churn_receipts(path, receipt_count)
+                    {
+                        subscriber
+                            .result
+                            .errors
+                            .push(format!("fanout_churn_receipt_write_failed:{err}"));
+                        churn_receipt_path = None;
                     }
                 }
             }
@@ -3151,6 +3194,17 @@ fn fanout_ready_path(dir: &Path, client_id: &str) -> PathBuf {
     dir.join(format!("{client_id}.ready"))
 }
 
+fn fanout_churn_receipt_path(dir: &Path, client_id: &str) -> PathBuf {
+    dir.join(format!("{client_id}.receipts"))
+}
+
+fn write_fanout_churn_receipts(path: &Path, receipts: usize) -> Result<()> {
+    let temporary_path = path.with_extension("receipts.tmp");
+    fs::write(&temporary_path, receipts.to_string())?;
+    fs::rename(temporary_path, path)?;
+    Ok(())
+}
+
 fn fanout_done_path(dir: &Path) -> PathBuf {
     dir.join("publisher.done")
 }
@@ -3227,6 +3281,37 @@ async fn watch_fanout_done_file(
     }
 }
 
+enum FanoutChurnReceiptSource<'a> {
+    InMemory(&'a AtomicUsize),
+    Files(&'a [PathBuf]),
+}
+
+fn fanout_churn_receipt_count(source: &FanoutChurnReceiptSource<'_>) -> usize {
+    match source {
+        FanoutChurnReceiptSource::InMemory(confirmed) => confirmed.load(Ordering::Acquire),
+        FanoutChurnReceiptSource::Files(paths) => paths
+            .iter()
+            .filter_map(|path| fs::read_to_string(path).ok())
+            .filter_map(|contents| contents.trim().parse::<usize>().ok())
+            .sum(),
+    }
+}
+
+async fn wait_for_fanout_churn_receipts(
+    source: &FanoutChurnReceiptSource<'_>,
+    expected: usize,
+    timeout: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+    while fanout_churn_receipt_count(source) < expected {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    true
+}
+
 async fn publish_fanout(
     args: &Args,
     start: Instant,
@@ -3234,12 +3319,24 @@ async fn publish_fanout(
     publisher_eventloop: &mut rumqttc::EventLoop,
     qos_distribution: Option<&QosDistribution>,
     errors: &mut Vec<String>,
+    churn_receipts: Option<FanoutChurnReceiptSource<'_>>,
 ) -> (Vec<f64>, [Vec<f64>; 3], FanoutChurnState) {
     let mut fanout_publish_ms = Vec::new();
     let mut fanout_publish_by_qos: [Vec<f64>; 3] = Default::default();
     let mut churn_state = FanoutChurnState::default();
     for sequence_id in 0..args.messages {
         if should_apply_churn(args, sequence_id, &churn_state) {
+            if let Some(receipts) = churn_receipts.as_ref()
+                && let Some(expected) = expected_fanout_churn_receipts(args, sequence_id)
+                && !wait_for_fanout_churn_receipts(
+                    receipts,
+                    expected,
+                    Duration::from_secs(args.fanout_ready_timeout_seconds.max(1)),
+                )
+                .await
+            {
+                errors.push(format!("fanout_churn_receipt_timeout:expected={expected}"));
+            }
             if let Some(err) = apply_fanout_churn(args, publisher, publisher_eventloop).await {
                 errors.push(err);
             } else {
@@ -3280,6 +3377,7 @@ fn spawn_fanout_collectors(
     subscribers: Vec<FanoutSubscriber>,
     expected_messages: usize,
     publishing_done: &Arc<AtomicBool>,
+    churn_receipts: &Arc<AtomicUsize>,
 ) -> Vec<tokio::task::JoinHandle<WorkerResult>> {
     let mut subscriber_tasks = Vec::new();
     for subscriber in subscribers {
@@ -3288,6 +3386,8 @@ fn spawn_fanout_collectors(
             start,
             expected_messages,
             Arc::clone(publishing_done),
+            Arc::clone(churn_receipts),
+            None,
         )));
     }
     subscriber_tasks
@@ -3488,12 +3588,14 @@ async fn run_fanout(args: Args) -> Result<Output> {
     let (publisher, mut publisher_eventloop) =
         connect_fanout_publisher(&args, &fallback_password).await?;
     let publishing_done = Arc::new(AtomicBool::new(false));
+    let churn_receipts = Arc::new(AtomicUsize::new(0));
     let subscriber_tasks = if fanout_ready {
         Some(spawn_fanout_collectors(
             start,
             std::mem::take(&mut subscribers),
             args.messages,
             &publishing_done,
+            &churn_receipts,
         ))
     } else {
         None
@@ -3506,6 +3608,7 @@ async fn run_fanout(args: Args) -> Result<Output> {
             &mut publisher_eventloop,
             qos_distribution.as_ref(),
             &mut runtime.errors,
+            Some(FanoutChurnReceiptSource::InMemory(&churn_receipts)),
         )
         .await
     } else {
@@ -3565,6 +3668,13 @@ async fn run_fanout_subscriber(args: Args) -> Result<Output> {
                 .errors
                 .push(format!("fanout_ready_write_failed:{err}"));
         }
+        if let Err(err) =
+            write_fanout_churn_receipts(&fanout_churn_receipt_path(&ready_dir, &client_id), 0)
+        {
+            runtime
+                .errors
+                .push(format!("fanout_churn_receipt_write_failed:{err}"));
+        }
     }
 
     let publishing_done = Arc::new(AtomicBool::new(false));
@@ -3576,7 +3686,7 @@ async fn run_fanout_subscriber(args: Args) -> Result<Output> {
         ),
     );
     let watcher = tokio::spawn(watch_fanout_done_file(
-        ready_dir,
+        ready_dir.clone(),
         done_timeout,
         Arc::clone(&publishing_done),
     ));
@@ -3588,6 +3698,11 @@ async fn run_fanout_subscriber(args: Args) -> Result<Output> {
                     start,
                     args.messages,
                     Arc::clone(&publishing_done),
+                    Arc::new(AtomicUsize::new(0)),
+                    Some(fanout_churn_receipt_path(
+                        &ready_dir,
+                        &client_id_for(&args, 0),
+                    )),
                 )
                 .await,
             ]
@@ -3653,6 +3768,10 @@ async fn run_fanout_publisher(args: Args) -> Result<Output> {
     let subscriber_ids = (0..args.clients)
         .map(|index| client_id_for(&args, index))
         .collect::<Vec<_>>();
+    let churn_receipt_paths = subscriber_ids
+        .iter()
+        .map(|client_id| fanout_churn_receipt_path(&ready_dir, client_id))
+        .collect::<Vec<_>>();
     let ready = wait_for_fanout_ready_files(
         &ready_dir,
         &subscriber_ids,
@@ -3682,6 +3801,7 @@ async fn run_fanout_publisher(args: Args) -> Result<Output> {
             &mut publisher_eventloop,
             qos_distribution.as_ref(),
             &mut runtime.errors,
+            Some(FanoutChurnReceiptSource::Files(&churn_receipt_paths)),
         )
         .await;
         fanout_publish_ms = published.0;
@@ -6366,5 +6486,29 @@ mod tests {
         let phases = churn["phases"].as_array().unwrap();
         assert_eq!(phases.len(), 2);
         assert_eq!(phases[1]["received_deliveries"], 0);
+    }
+
+    #[test]
+    fn fanout_churn_receipts_follow_delivery_phase_contract() {
+        let args = Args::parse_from([
+            "mqtt-loadgen",
+            "--clients",
+            "2",
+            "--fanout-churn-kind",
+            "sqlite_toggle_private_deny",
+            "--fanout-churn-after-messages",
+            "4",
+            "--fanout-churn-interval-messages",
+            "4",
+            "--fanout-churn-max-events",
+            "4",
+            "--fanout-churn-phase-delivery",
+            "all,none,all,none,all",
+        ]);
+
+        assert_eq!(expected_fanout_churn_receipts(&args, 4), Some(8));
+        assert_eq!(expected_fanout_churn_receipts(&args, 8), Some(8));
+        assert_eq!(expected_fanout_churn_receipts(&args, 12), Some(16));
+        assert_eq!(expected_fanout_churn_receipts(&args, 16), Some(16));
     }
 }

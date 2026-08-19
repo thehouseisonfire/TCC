@@ -61,9 +61,9 @@ def test_acl_read_fanout_churn_scenarios_use_fanout_and_subscriber_scaling() -> 
                         "command": "disableClient",
                         "username": "dynsec_client_1",
                     }
-                    assert scenario["allowed_error_prefixes"] == [
-                        rs.EXPECTED_DISABLE_RECEIVE_ERROR_PREFIX
-                    ]
+                    assert scenario["allowed_error_prefixes"] == list(
+                        rs.EXPECTED_DISABLE_RECEIVE_ERROR_PREFIXES
+                    )
             else:
                 assert (
                     scenario["dynamic_security_config"]

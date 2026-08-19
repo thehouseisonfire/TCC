@@ -494,13 +494,9 @@ def seed_sqlite_deep_policy(
         )
 
         user_roles_rows: list[tuple[str, str, int]] = []
-        for idx, client_id in enumerate(subscriber_ids, start=1):
-            if idx % 2 == 1:
-                user_roles_rows.append((client_id, DEEP_DATA_ALLOW_ROLE, 100))
-                user_roles_rows.append((client_id, DEEP_PRIVATE_DENY_ROLE, 100))
-            else:
-                user_roles_rows.append((client_id, DEEP_DATA_ALLOW_ROLE, 40))
-                user_roles_rows.append((client_id, DEEP_PRIVATE_DENY_ROLE, 120))
+        for client_id in subscriber_ids:
+            user_roles_rows.append((client_id, DEEP_DATA_ALLOW_ROLE, 100))
+            user_roles_rows.append((client_id, DEEP_PRIVATE_DENY_ROLE, 100))
         user_roles_rows.extend(
             [
                 (publisher_client_id, DEEP_PUBLISHER_ROLE, 30),
@@ -538,8 +534,6 @@ def seed_sqlite_deep_policy(
                 "VALUES(?, ?, ?)"
             ),
             [
-                (DEEP_PRIVATE_DENY_ROLE, topic, ACL_SUBSCRIBE),
-                (DEEP_PRIVATE_DENY_ROLE, topic, ACL_READ),
                 (DEEP_CONTROL_OBSERVER_ROLE, "$CONTROL/#", ACL_CONTROL),
                 (DEEP_CONTROL_OBSERVER_ROLE, "system/notifications/#", ACL_WRITE),
             ],
@@ -548,7 +542,7 @@ def seed_sqlite_deep_policy(
 
     return {
         "subscriber_count": subscriber_count,
-        "rows_seeded": (3 * subscriber_count) + 24,
+        "rows_seeded": (3 * subscriber_count) + 22,
         "topic": topic,
         "profile": profile_name,
     }

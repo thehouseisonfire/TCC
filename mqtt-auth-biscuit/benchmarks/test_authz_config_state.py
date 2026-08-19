@@ -368,7 +368,7 @@ def test_result_contract_allows_only_expected_disable_disconnects() -> None:
     scenario: rs.ScenarioConfig = {
         "id": "DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-DISABLE-JWT-10",
         "traffic_pattern": "fanout",
-        "allowed_error_prefixes": [rs.EXPECTED_DISABLE_RECEIVE_ERROR_PREFIX],
+        "allowed_error_prefixes": list(rs.EXPECTED_DISABLE_RECEIVE_ERROR_PREFIXES),
         "fanout_churn_phase_delivery": ["all", "none"],
     }
     result = {
@@ -384,6 +384,12 @@ def test_result_contract_allows_only_expected_disable_disconnects() -> None:
             ],
         },
     }
+    rs._validate_result_contract(scenario, result, message_count=6, client_count=10)
+
+    result["errors"] = [
+        "receive_failed:Mqtt state: Mqtt serialization/deserialization error: "
+        "IO: Connection reset by peer (os error 104)"
+    ]
     rs._validate_result_contract(scenario, result, message_count=6, client_count=10)
 
     result["errors"].append("fanout_publish_failed:NotAuthorized")

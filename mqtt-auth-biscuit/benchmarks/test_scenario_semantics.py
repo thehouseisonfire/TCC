@@ -536,8 +536,9 @@ def test_phase_one_deny_and_attenuation_scenarios_have_executable_contracts() ->
         assert scenario["fanout_publisher_password"] != scenario["password"]
 
     attenuation = scenarios["TOKEN-ATTENUATION-CLIENT-BISCUIT"]["biscuit_attenuate"]
-    assert attenuation["op"] == "subscribe"
     assert attenuation["denies"] == ["subscribe:sensors/{client_id}/temp"]
+    assert attenuation["checks"] == ['resource("sensors/{client_id}/temp")']
+    assert "op" not in attenuation
 
 
 @pytest.mark.parametrize("scenario_id", MULTI_CLIENT_FANOUT_PARITY_SCENARIOS)

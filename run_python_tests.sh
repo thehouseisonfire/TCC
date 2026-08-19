@@ -8,6 +8,7 @@ COMPOSE_FILES=("-f" "$WORKDIR/docker/docker-compose.yml")
 SERVICES=(mosquitto authz netem metrics-collector cadvisor token-issuer)
 CAPABILITY_OUT_DIR=$(mktemp -d /tmp/python-tests-capability.XXXXXX)
 PARITY_OUT_DIR=$(mktemp -d /tmp/python-tests-parity.XXXXXX)
+PER_CLIENT_OUT_DIR=$(mktemp -d /tmp/python-tests-per-client.XXXXXX)
 TOKEN_BACKUP=$(mktemp /tmp/python-tests-tokens.XXXXXX)
 TOKEN_FILE="$WORKDIR/benchmarks/tokens.json"
 TOKEN_FILE_EXISTED=0
@@ -22,7 +23,7 @@ cleanup() {
   else
     rm -f "$TOKEN_FILE"
   fi
-  rm -rf "$CAPABILITY_OUT_DIR" "$PARITY_OUT_DIR" "$TOKEN_BACKUP"
+  rm -rf "$CAPABILITY_OUT_DIR" "$PARITY_OUT_DIR" "$PER_CLIENT_OUT_DIR" "$TOKEN_BACKUP"
 }
 trap cleanup EXIT
 
@@ -110,6 +111,20 @@ PYTHONPATH="$WORKDIR" uv run --locked python "$WORKDIR/benchmarks/smoke_test.py"
       --clients 1 \
       --messages 1 \
       --scenarios-arg HTTP-LATENCY-200MS-PARITY-JWT \
+      --no-iperf3 \
+      --no-tcpdump \
+      --log-level INFO
+)
+
+(
+  cd "$WORKDIR" &&
+    PYTHONPATH="$WORKDIR" uv run --locked python -m benchmarks.run_scenarios \
+      --tokens-path benchmarks/tokens.json \
+      --out "$PER_CLIENT_OUT_DIR" \
+      --clients 10 \
+      --messages 10 \
+      --client-topology container-per-client \
+      --scenarios-arg DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-DISABLE-JWT-10 \
       --no-iperf3 \
       --no-tcpdump \
       --log-level INFO

@@ -180,7 +180,7 @@ def test_fanout_validation_rejects_invalid_benchmark_data(
             {
                 "id": "SQLITE-RBAC-CHURN-JWT",
                 "traffic_pattern": "fanout",
-                "expected_delivery": "all",
+                "delivery_contract": {"steady": "all"},
             },
             result,
             message_count=10,
@@ -206,7 +206,7 @@ def test_fanout_validation_rejects_partial_subscriber_initialization(
 ) -> None:
     with pytest.raises(RuntimeError, match="loadgen errors"):
         rs._validate_result_contract(
-            {"id": "FANOUT", "traffic_pattern": "fanout", "expected_delivery": "all"},
+            {"id": "FANOUT", "traffic_pattern": "fanout", "delivery_contract": {"steady": "all"}},
             {
                 "errors": [setup_error],
                 "publish": {"count": 10},
@@ -219,7 +219,7 @@ def test_fanout_validation_rejects_partial_subscriber_initialization(
 
 def test_fanout_validation_accepts_valid_churn_result() -> None:
     rs._validate_result_contract(
-        {"id": "SQLITE-RBAC-CHURN-JWT", "traffic_pattern": "fanout", "expected_delivery": "all"},
+        {"id": "SQLITE-RBAC-CHURN-JWT", "traffic_pattern": "fanout", "delivery_contract": {"steady": "all"}},
         {
             "errors": [],
             "publish": {"count": 10},
@@ -577,6 +577,8 @@ def test_main_normalizes_output_directory_strings(
         "mosquitto_conf": "./mosquitto.conf",
         "netem": {"mtu": 1200},
     }
+    tcpdump_output_dir.mkdir(parents=True)
+    (tcpdump_output_dir / f"{scenario_id}.pcap").write_bytes(b"pcap")
 
     monkeypatch.setattr(rs, "setup_logging", lambda _log_level: None)
     monkeypatch.setattr(
@@ -650,6 +652,12 @@ def test_main_normalizes_output_directory_strings(
     monkeypatch.setattr(rs, "_validate_dynamic_security_alignment", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(rs, "_resource_snapshot", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(rs, "_validate_resource_snapshot", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(rs, "_read_effective_mtu", lambda **_kwargs: 1200)
+    monkeypatch.setattr(
+        rs,
+        "analyze_pcap",
+        lambda *_args, **_kwargs: {"metrics": {"tcp_packets": 1}},
+    )
     monkeypatch.setattr(
         rs,
         "_run_loadgen",
@@ -678,7 +686,7 @@ def test_main_normalizes_output_directory_strings(
         perf_scenarios=scenario_id,
         perf_output_dir=str(perf_output_dir),
         tcpdump_enabled=True,
-        tcpdump_analyze=False,
+        tcpdump_analyze=True,
         tcpdump_output_dir=str(tcpdump_output_dir),
     )
 
@@ -692,7 +700,7 @@ def test_main_normalizes_output_directory_strings(
     assert captured["perf_output_dir"] == str(perf_output_dir)
     result = json.loads((tmp_path / "results" / f"{scenario_id}.json").read_text())
     assert result["perf_profiling"]["config"]["callgraph"] is True
-    assert result["packet_analysis"]["config"]["analyze"] is False
+    assert result["packet_analysis"]["config"]["analyze"] is True
 
 
 def test_resolve_mqtt5_auth_tokens_uses_static_tokens_when_present() -> None:

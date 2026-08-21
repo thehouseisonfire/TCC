@@ -4,7 +4,7 @@ set -eu
 IFACE="${NETEM_IFACE:-eth0}"
 
 if [ "${NETEM_MTU:-}" != "" ]; then
-  ip link set dev "$IFACE" mtu "$NETEM_MTU" || true
+  ip link set dev "$IFACE" mtu "$NETEM_MTU"
 fi
 
 if [ "${NETEM_CLEAR:-0}" = "1" ]; then

@@ -143,6 +143,18 @@ def test_authz_reset_posts_reset_path(monkeypatch):
     assert fake.calls[0]["url"].endswith("/config/reset")
 
 
+def test_external_policy_activity_requires_observed_authorization_requests():
+    rs._validate_external_policy_activity("HTTP-PROFILE-SIMPLE-JWT", {"requests": 1})
+
+    with pytest.raises(RuntimeError, match="handled no authorization requests"):
+        rs._validate_external_policy_activity("HTTP-PROFILE-SIMPLE-JWT", {"requests": 0})
+
+
+def test_external_policy_activity_requires_statistics():
+    with pytest.raises(RuntimeError, match="statistics missing"):
+        rs._validate_external_policy_activity("HTTP-PROFILE-SIMPLE-JWT", None)
+
+
 def test_http_latency_and_hybrid_scenarios_explicitly_set_simple_profile():
     scenarios = rs._build_available_scenarios(
         _placeholder_tokens(),
@@ -153,8 +165,8 @@ def test_http_latency_and_hybrid_scenarios_explicitly_set_simple_profile():
         "HTTP-LATENCY-200MS-JWT",
         "HTTP-LATENCY-1000MS-JWT",
         "HTTP-LATENCY-200MS-BISCUIT",
-        "HTTP-LATENCY-200MS-FAILURE-1PCT-JWT",
-        "HTTP-LATENCY-200MS-FAILURE-5PCT-JWT",
+        "HTTP-FAILURE-INJECTION-200MS-1PCT-JWT",
+        "HTTP-FAILURE-INJECTION-200MS-5PCT-JWT",
         "HYBRID-FALLBACK-AUTHZ-DOWN-JWT",
     )
 
@@ -264,7 +276,7 @@ def test_result_contract_requires_enabled_churn_to_trigger() -> None:
             {
                 "id": "DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-JWT-10",
                 "traffic_pattern": "fanout",
-                "fanout_churn_phase_delivery": ["all", "none"],
+                "delivery_contract": {"phases": ["all", "none"]},
             },
             {
                 "errors": [],
@@ -286,7 +298,7 @@ def test_result_contract_requires_zero_delivery_in_deny_phase() -> None:
             {
                 "id": "DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-REVOKE-JWT-10",
                 "traffic_pattern": "fanout",
-                "fanout_churn_phase_delivery": ["all", "none"],
+                "delivery_contract": {"phases": ["all", "none"]},
             },
             {
                 "errors": [],
@@ -321,7 +333,7 @@ def test_result_contract_validates_only_toggle_phases_exercised_by_short_run() -
         {
             "id": "SQLITE-RBAC-CHURN-JWT",
             "traffic_pattern": "fanout",
-            "fanout_churn_phase_delivery": ["all", "none", "all", "none", "all"],
+            "delivery_contract": {"phases": ["all", "none", "all", "none", "all"]},
         },
         {
             "errors": [],
@@ -347,7 +359,7 @@ def test_result_contract_rejects_missing_phase_after_applied_churn() -> None:
             {
                 "id": "DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-JWT-10",
                 "traffic_pattern": "fanout",
-                "fanout_churn_phase_delivery": ["all", "none"],
+                "delivery_contract": {"phases": ["all", "none"]},
             },
             {
                 "errors": [],
@@ -369,7 +381,7 @@ def test_result_contract_allows_only_expected_disable_disconnects() -> None:
         "id": "DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-DISABLE-JWT-10",
         "traffic_pattern": "fanout",
         "allowed_error_prefixes": list(rs.EXPECTED_DISABLE_RECEIVE_ERROR_PREFIXES),
-        "fanout_churn_phase_delivery": ["all", "none"],
+        "delivery_contract": {"phases": ["all", "none"]},
     }
     result = {
         "errors": ["receive_failed:Mqtt state: Connection closed by peer abruptly"],

@@ -170,8 +170,8 @@ MOSQUITTO_BASE_CONFIGS = frozenset(
 
 MIXED_SCENARIO_IDS = frozenset(
     {
-        "CONTROL-OVERHEAD-KICK-REAUTH-JWT",
-        "CONTROL-OVERHEAD-KICK-REAUTH-BISCUIT",
+        "CONTROL-ENFORCEMENT-KICK-JWT",
+        "CONTROL-ENFORCEMENT-KICK-BISCUIT",
         "CONTROL-CHURN-CREATE-ROLE-JWT",
         "CONTROL-CHURN-CREATE-ROLE-BISCUIT",
         "CONTROL-CHURN-GROUP-CLIENT-JWT",
@@ -211,6 +211,16 @@ class BiscuitAttenuateConfig(TypedDict, total=False):
     ttl_seconds: int
     topic: str
     op: str
+
+
+class DeliveryContract(TypedDict, total=False):
+    """Required semantic contract for fan-out workloads.
+
+    Exactly one of ``steady`` or ``phases`` is populated by registry validation.
+    """
+
+    steady: Literal["all", "none"]
+    phases: list[Literal["all", "none"]]
 
 
 class BiscuitDelegateHandoffConfig(TypedDict, total=False):
@@ -258,6 +268,7 @@ class ScenarioConfig(TypedDict, total=False):
     traffic_pattern: str
     fanout_topic: str
     biscuit_attenuate: BiscuitAttenuateConfig
+    attenuation_probe_subscribe_denied: bool
     biscuit_public_key_hex: str | None
     biscuit_public_key_file: str | None
     biscuit_delegate: BiscuitDelegateConfig
@@ -298,6 +309,7 @@ class ScenarioConfig(TypedDict, total=False):
     fanout_churn_dynamic_security_source: str
     fanout_churn_control_topic: str
     fanout_churn_control_payload: dict[str, Any]
+    fanout_expect_control_notification: bool
     fanout_churn_sqlite_db: str
     fanout_churn_sqlite_topic: str
     fanout_churn_sqlite_subscribers: int
@@ -318,6 +330,7 @@ class ScenarioConfig(TypedDict, total=False):
     control_payload: dict[str, Any]
     control_mode: bool
     control_repeat: int
+    control_response_topic: str
     # Issue 36: Interleaved control message support
     control_after_messages: int
     runtime_control_username: str
@@ -336,9 +349,9 @@ class ScenarioConfig(TypedDict, total=False):
     biscuit_identity_binding: IdentityBindingMode
     semantic_class: SemanticClass
     # Result contracts.  A scenario is successful only when these expectations hold.
-    expected_delivery: Literal["all", "none", "unvalidated"]
+    delivery_contract: DeliveryContract
     allowed_error_prefixes: list[str]
-    fanout_churn_phase_delivery: list[Literal["all", "none"]]
+    http_failure_rate: float
 
 
 def _compose_bin():
@@ -402,6 +415,32 @@ def _compose_checked(
             compose_files=compose_files,
         )
         raise RuntimeError(f"{phase} failed: {exc}\n{diagnostics}") from exc
+
+
+def _read_effective_mtu(
+    *,
+    interface: str,
+    extra_env: dict[str, str],
+    compose_files: list[str],
+    compose_project_name: str | None,
+) -> int:
+    cmd = _compose_cmd(
+        ["exec", "-T", "netem", "cat", f"/sys/class/net/{interface}/mtu"],
+        compose_files=compose_files,
+        compose_project_name=compose_project_name,
+    )
+    completed = subprocess.run(
+        cmd,
+        cwd=REPO_ROOT,
+        env={**os.environ, **extra_env},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    try:
+        return int(completed.stdout.strip())
+    except ValueError as exc:
+        raise RuntimeError(f"invalid effective MTU output: {completed.stdout!r}") from exc
 
 
 def _compose_cmd(
@@ -722,6 +761,24 @@ def _authz_reset(authz_url: str, ca_file: str | None = None, insecure: bool = Fa
         )
         resp.raise_for_status()
         return resp.json()
+
+
+def _authz_stats(
+    authz_url: str,
+    *,
+    reset: bool = False,
+    ca_file: str | None = None,
+    insecure: bool = False,
+) -> dict[str, int]:
+    with _http_client(ca_file, insecure) as client:
+        url = authz_url.rstrip("/") + ("/stats/reset" if reset else "/stats")
+        resp = client.post(url) if reset else client.get(url)
+        resp.raise_for_status()
+        payload = resp.json()
+    return {
+        key: int(payload.get(key) or 0)
+        for key in ("requests", "injected_failures", "policy_allows", "policy_denies")
+    }
 
 
 def _validated_authz_state_baseline(
@@ -1087,6 +1144,7 @@ def _run_loadgen(
     biscuit_delegate_handoff_qos: int | None,
     biscuit_delegate_handoff_retain: bool | None,
     biscuit_delegate_handoff_ready_timeout_seconds: int | None,
+    attenuation_probe_subscribe_denied: bool = False,
     password_map_path: str | None = None,
     password_map_profile: str | None = None,
     fanout_publisher_password_map_profile: str | None = None,
@@ -1096,6 +1154,7 @@ def _run_loadgen(
     control_mode: bool = False,
     control_after_messages: int = 0,
     control_repeat: int = 1,
+    control_response_topic: str | None = None,
     runtime_control_username: str | None = None,
     runtime_control_password: str | None = None,
     runtime_control_after_messages: int = 0,
@@ -1109,6 +1168,7 @@ def _run_loadgen(
     fanout_churn_dynamic_security_source: str | None = None,
     fanout_churn_control_topic: str | None = None,
     fanout_churn_control_payload: dict[str, Any] | None = None,
+    fanout_expect_control_notification: bool = False,
     fanout_churn_sqlite_db: str | None = None,
     fanout_churn_sqlite_topic: str | None = None,
     fanout_churn_sqlite_subscribers: int | None = None,
@@ -1216,6 +1276,8 @@ def _run_loadgen(
         cmd.extend(["--biscuit-attenuate-op", biscuit_attenuate_op])
     if biscuit_attenuate_ttl is not None:
         cmd.extend(["--biscuit-attenuate-ttl", str(biscuit_attenuate_ttl)])
+    if attenuation_probe_subscribe_denied:
+        cmd.append("--attenuation-probe-subscribe-denied")
     if biscuit_public_key_hex:
         cmd.extend(["--biscuit-public-key-hex", biscuit_public_key_hex])
     if biscuit_public_key_file:
@@ -1285,6 +1347,8 @@ def _run_loadgen(
         cmd.append("--runtime-control-expect-denial")
     if control_repeat != 1:
         cmd.extend(["--control-repeat", str(control_repeat)])
+    if control_response_topic:
+        cmd.extend(["--control-response-topic", control_response_topic])
     if fanout_churn_kind:
         cmd.extend(["--fanout-churn-kind", fanout_churn_kind])
     if fanout_churn_after_messages > 0:
@@ -1310,6 +1374,8 @@ def _run_loadgen(
         cmd.extend(["--fanout-churn-control-topic", fanout_churn_control_topic])
     if fanout_churn_control_payload:
         cmd.extend(["--fanout-churn-control-payload", json.dumps(fanout_churn_control_payload)])
+    if fanout_expect_control_notification:
+        cmd.append("--fanout-expect-control-notification")
     if fanout_churn_sqlite_db:
         cmd.extend(["--fanout-churn-sqlite-db", fanout_churn_sqlite_db])
     if fanout_churn_sqlite_topic:
@@ -1964,6 +2030,49 @@ def _validate_mqtt5_auth_result(scenario_id: str, result: dict[str, Any]) -> Non
         raise RuntimeError(f"{scenario_id}: MQTT5 AUTH result is missing reauth timing")
 
 
+def _validate_external_policy_activity(
+    scenario_id: str,
+    stats: object,
+) -> None:
+    """Require evidence that an HTTP/hybrid workload reached the external PDP."""
+    if not isinstance(stats, dict):
+        raise RuntimeError(f"{scenario_id}: external policy statistics missing")
+    requests = int(stats.get("requests") or 0)
+    if requests <= 0:
+        raise RuntimeError(
+            f"{scenario_id}: external policy backend handled no authorization requests"
+        )
+
+
+def _expected_qos_distribution_counts(
+    raw: str, *, messages_per_publisher: int, publisher_count: int
+) -> dict[int, int]:
+    entries: list[tuple[int, float]] = []
+    for part in raw.split(","):
+        qos_raw, weight_raw = part.split(":", 1)
+        entries.append((int(qos_raw.strip()), float(weight_raw.strip())))
+    total_weight = sum(weight for _, weight in entries)
+    normalized = [(qos, weight / total_weight) for qos, weight in entries]
+    slots = 1000
+    exact = [weight * slots for _, weight in normalized]
+    counts = [math.floor(value) for value in exact]
+    order = sorted(range(len(entries)), key=lambda i: (-(exact[i] - counts[i]), i))
+    for index in order[: slots - sum(counts)]:
+        counts[index] += 1
+    current = [0] * len(entries)
+    schedule: list[int] = []
+    for _ in range(slots):
+        for index, count in enumerate(counts):
+            current[index] += count
+        selected = max(range(len(entries)), key=lambda i: (current[i], -i))
+        schedule.append(entries[selected][0])
+        current[selected] -= slots
+    per_publisher = {0: 0, 1: 0, 2: 0}
+    for ordinal in range(messages_per_publisher):
+        per_publisher[schedule[ordinal % slots]] += 1
+    return {qos: count * publisher_count for qos, count in per_publisher.items()}
+
+
 def _validate_result_contract(
     scenario: ScenarioConfig,
     result: dict[str, Any],
@@ -1989,28 +2098,113 @@ def _validate_result_contract(
         if scenario.get("traffic_pattern") == "fanout"
         else message_count * client_count
     )
+    http_failure_rate = scenario.get("http_failure_rate")
     if (
         publish_count != expected_publish_count
         and not scenario.get("control_mode")
         and not scenario.get("runtime_control_expect_denial")
+        and http_failure_rate is None
     ):
         raise RuntimeError(
             f"{scenario_id}: published {publish_count}/{expected_publish_count} messages"
         )
+
+    if http_failure_rate is not None:
+        stats = result.get("authz_stats")
+        if not isinstance(stats, dict):
+            raise RuntimeError(f"{scenario_id}: authz failure statistics missing")
+        requests = int(stats.get("requests") or 0)
+        failures = int(stats.get("injected_failures") or 0)
+        expected_failures = math.floor(requests * float(http_failure_rate) + 1e-12)
+        if failures <= 0 or failures != expected_failures:
+            raise RuntimeError(
+                f"{scenario_id}: injected {failures}/{expected_failures} expected HTTP failures"
+            )
+        if publish_count >= expected_publish_count:
+            raise RuntimeError(f"{scenario_id}: HTTP failures had no observable publish impact")
+        if not any(error.startswith("publish_failed:") for error in errors):
+            raise RuntimeError(f"{scenario_id}: expected a workload-visible publish failure")
+
+    if scenario.get("qos") == 2 and scenario.get("qos_distribution") is None:
+        qos2 = result.get("publish_qos_2")
+        qos2_count = int(qos2.get("count") or 0) if isinstance(qos2, dict) else 0
+        if qos2_count != expected_publish_count:
+            raise RuntimeError(
+                f"{scenario_id}: QoS 2 path handled {qos2_count}/{expected_publish_count} publishes"
+            )
+    if distribution := scenario.get("qos_distribution"):
+        publisher_count = 1 if scenario.get("traffic_pattern") == "fanout" else client_count
+        expected_qos = _expected_qos_distribution_counts(
+            distribution,
+            messages_per_publisher=message_count,
+            publisher_count=publisher_count,
+        )
+        actual_object = result.get("qos_distribution_actual")
+        if not isinstance(actual_object, dict):
+            raise RuntimeError(f"{scenario_id}: QoS distribution metrics missing")
+        for qos_value, expected_qos_count in expected_qos.items():
+            summary = result.get(f"publish_qos_{qos_value}")
+            summary_count = int(summary.get("count") or 0) if isinstance(summary, dict) else 0
+            actual_count = int(actual_object.get(f"qos_{qos_value}_count") or 0)
+            if summary_count != expected_qos_count or actual_count != expected_qos_count:
+                raise RuntimeError(
+                    f"{scenario_id}: QoS {qos_value} count was "
+                    f"summary={summary_count}, actual={actual_count}, expected={expected_qos_count}"
+                )
+
+    if scenario.get("attenuation_probe_subscribe_denied"):
+        probes = result.get("authorization_probes")
+        successes = int(probes.get("successes") or 0) if isinstance(probes, dict) else 0
+        failures = int(probes.get("failures") or 0) if isinstance(probes, dict) else 0
+        if successes != client_count or failures != 0:
+            raise RuntimeError(
+                f"{scenario_id}: attenuation denial probes passed "
+                f"{successes}/{client_count} with {failures} failures"
+            )
+
+    if scenario.get("control_response_topic"):
+        response = result.get("control_responses")
+        successes = int(response.get("successes") or 0) if isinstance(response, dict) else 0
+        failures = int(response.get("failures") or 0) if isinstance(response, dict) else 0
+        if scenario.get("control_mode"):
+            expected_responses = client_count * int(scenario.get("control_repeat", 1))
+        elif scenario.get("runtime_control_username"):
+            expected_responses = 1
+        else:
+            interval = int(scenario.get("control_after_messages", 0))
+            expected_responses = client_count * (message_count // interval) if interval else 0
+        if successes != expected_responses or failures != 0:
+            raise RuntimeError(
+                f"{scenario_id}: validated {successes}/{expected_responses} control responses "
+                f"with {failures} failures"
+            )
+
+    if scenario.get("fanout_expect_control_notification"):
+        effect = result.get("control_effect")
+        notifications = int(effect.get("notifications") or 0) if isinstance(effect, dict) else 0
+        if notifications != client_count:
+            raise RuntimeError(
+                f"{scenario_id}: received {notifications}/{client_count} control notifications"
+            )
 
     if scenario.get("traffic_pattern") != "fanout":
         return
 
     receive = result.get("receive")
     receive_count = int(receive.get("count") or 0) if isinstance(receive, dict) else 0
-    expected_delivery = scenario.get("expected_delivery", "unvalidated")
+    contract = scenario.get("delivery_contract")
+    if not isinstance(contract, dict):
+        raise RuntimeError(f"{scenario_id}: fan-out delivery contract missing")
+    steady_expectation = contract.get("steady")
+    phase_expectations = contract.get("phases")
+    if (steady_expectation is None) == (phase_expectations is None):
+        raise RuntimeError(f"{scenario_id}: fan-out delivery contract must select steady or phases")
     expected_count = message_count * client_count
-    if expected_delivery == "all" and receive_count != expected_count:
+    if steady_expectation == "all" and receive_count != expected_count:
         raise RuntimeError(f"{scenario_id}: received {receive_count}/{expected_count} deliveries")
-    if expected_delivery == "none" and receive_count != 0:
+    if steady_expectation == "none" and receive_count != 0:
         raise RuntimeError(f"{scenario_id}: expected no deliveries, got {receive_count}")
 
-    phase_expectations = scenario.get("fanout_churn_phase_delivery")
     if phase_expectations is None:
         return
 
@@ -3060,23 +3254,28 @@ def _effective_scenario_message_count(
 
 
 def _apply_result_contracts(scenarios: dict[str, ScenarioConfig]) -> dict[str, ScenarioConfig]:
-    """Populate the invariant result contracts shared by scenario families."""
+    """Populate and validate the invariant contracts shared by fan-out families."""
     for scenario_id, scenario in scenarios.items():
+        if scenario.get("control_topic") == "$CONTROL/dynamic-security/v1":
+            scenario["control_response_topic"] = "$CONTROL/dynamic-security/v1/response"
         if scenario.get("traffic_pattern") != "fanout":
             continue
         if scenario.get("fanout_churn_kind"):
-            scenario.setdefault("expected_delivery", "unvalidated")
             kind = scenario["fanout_churn_kind"]
             if kind in {"dynamic_security_swap", "dynamic_security_control", "sqlite_revoke_read"}:
-                scenario.setdefault("fanout_churn_phase_delivery", ["all", "none"])
+                phases: list[Literal["all", "none"]] = ["all", "none"]
             elif kind in {"sqlite_toggle_read", "sqlite_toggle_private_deny"}:
                 # The seeded policy is allowed; each toggle alternates its delivery state.
-                scenario.setdefault(
-                    "fanout_churn_phase_delivery", ["all", "none", "all", "none", "all"]
-                )
+                phases = ["all", "none", "all", "none", "all"]
+            else:
+                raise ValueError(f"{scenario_id}: unknown fan-out churn kind {kind!r}")
+            scenario["delivery_contract"] = {"phases": phases}
+            scenario.pop("fanout_churn_phase_delivery", None)
             continue
-        if scenario.get("acl_read_enforcement") == "strict" or scenario.get("sqlite_seed_fanout"):
-            scenario.setdefault("expected_delivery", "none" if "-DENY-" in scenario_id else "all")
+        expectation: Literal["all", "none"] = (
+            "none" if "-DENY-" in scenario_id else "all"
+        )
+        scenario["delivery_contract"] = {"steady": expectation}
     return scenarios
 
 
@@ -4818,7 +5017,6 @@ def _build_available_scenarios(
             "qos": 1,
             "subscriber_count": 10,
             "acl_read_enforcement": "strict",
-            "expected_delivery": "none",
         },
         "TOKEN-BASELINE-BISCUIT": {
             "mosquitto_conf": "./mosquitto.conf",
@@ -4902,9 +5100,8 @@ def _build_available_scenarios(
             "qos": 1,
             "subscriber_count": 10,
             "acl_read_enforcement": "strict",
-            "expected_delivery": "none",
         },
-        "TOKEN-ATTENUATION-CLIENT-BISCUIT": {
+        "TOKEN-ATTENUATION-COMBINED-BISCUIT": {
             "mosquitto_conf": "./mosquitto.conf",
             "username": "biscuit",
             "password": tokens["biscuit"],
@@ -4917,6 +5114,7 @@ def _build_available_scenarios(
                 "checks": ['resource("sensors/{client_id}/temp")'],
                 "ttl_seconds": 300,
             },
+            "attenuation_probe_subscribe_denied": True,
         },
         "TOKEN-ATTENUATION-TTL-BISCUIT": {
             "mosquitto_conf": "./mosquitto.conf",
@@ -4928,7 +5126,7 @@ def _build_available_scenarios(
             "message_size": 0,
             "biscuit_attenuate": {"ttl_seconds": 120},
         },
-        "TOKEN-ATTENUATION-DENY-BISCUIT": {
+        "TOKEN-ATTENUATION-SUBSCRIBE-DENY-BISCUIT": {
             "mosquitto_conf": "./mosquitto.conf",
             "username": "biscuit",
             "password": tokens["biscuit"],
@@ -4940,8 +5138,9 @@ def _build_available_scenarios(
                 "denies": ["subscribe:sensors/{client_id}/temp"],
                 "checks": ['resource("sensors/{client_id}/temp")'],
             },
+            "attenuation_probe_subscribe_denied": True,
         },
-        "TOKEN-ATTENUATION-OP-ONLY-BISCUIT": {
+        "TOKEN-ATTENUATION-PUBLISH-ONLY-BISCUIT": {
             "mosquitto_conf": "./mosquitto.conf",
             "username": "biscuit",
             "password": tokens["biscuit"],
@@ -4950,6 +5149,7 @@ def _build_available_scenarios(
             "netem": {"clear": True},
             "message_size": 0,
             "biscuit_attenuate": {"op": "publish"},
+            "attenuation_probe_subscribe_denied": True,
         },
         "TOKEN-COMPLEXITY-CHAIN-1-BISCUIT": {
             "mosquitto_conf": "./mosquitto.conf",
@@ -5333,7 +5533,7 @@ def _build_available_scenarios(
             "complexity_axis": "http_profile",
             "complexity_level": "complex",
         },
-        "HTTP-LATENCY-200MS-FAILURE-1PCT-JWT": {
+        "HTTP-FAILURE-INJECTION-200MS-1PCT-JWT": {
             "mosquitto_conf": "./mosquitto_http.conf",
             "username": "jwt",
             "password": tokens["jwt"],
@@ -5346,8 +5546,12 @@ def _build_available_scenarios(
             ),
             "netem": {"clear": True},
             "message_size": 0,
+            "client_count": 25,
+            "message_count": 100,
+            "http_failure_rate": 0.01,
+            "allowed_error_prefixes": ["publish_failed:"],
         },
-        "HTTP-LATENCY-200MS-FAILURE-5PCT-JWT": {
+        "HTTP-FAILURE-INJECTION-200MS-5PCT-JWT": {
             "mosquitto_conf": "./mosquitto_http.conf",
             "username": "jwt",
             "password": tokens["jwt"],
@@ -5360,6 +5564,10 @@ def _build_available_scenarios(
             ),
             "netem": {"clear": True},
             "message_size": 0,
+            "client_count": 25,
+            "message_count": 100,
+            "http_failure_rate": 0.05,
+            "allowed_error_prefixes": ["publish_failed:"],
         },
         "TOKEN-MQTT5-REAUTH-JWT": {
             "mosquitto_conf": "./mosquitto.conf",
@@ -5645,26 +5853,6 @@ def _build_available_scenarios(
             "dynamic_security_config": "docker/dynamic-security.json",
             "subscriber_count": 1,
         },
-        "DYNAMIC-SECURITY-READ-FANOUT-CHURN": {
-            "mosquitto_conf": "./mosquitto_dynsec.conf",
-            "username": "dynsec_client_1",
-            "password": tokens["jwt"],
-            "fanout_publisher_username": "dynsec_publisher",
-            "fanout_publisher_password": tokens["jwt"],
-            "topic": "fanout/broadcast",
-            "traffic_pattern": "fanout",
-            "fanout_topic": "fanout/broadcast",
-            "authz_config": None,
-            "netem": {"clear": True},
-            "message_size": 0,
-            "repeat": 2,
-            "sleep_between": 2,
-            "subscriber_count": 1,
-            "dynamic_security_churn": [
-                "docker/dynamic-security.json",
-                "docker/dynamic-security-fanout-churn.json",
-            ],
-        },
         # Issue 19: ACL_READ fan-out authorization cost measurement scenarios
         # These scenarios measure per-subscriber authorization scaling with varying counts
         "TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-JWT-10": {
@@ -5756,74 +5944,6 @@ def _build_available_scenarios(
             "netem": {"clear": True},
             "message_size": 256,
             "qos": 1,
-        },
-        # Issue 20: Control-Triggered Enforcement Scenarios
-        # These scenarios exercise the $CONTROL callback semantics and measure
-        # control-plane overhead vs data-plane operations.
-        # Issue 35: Renamed to CONTROL-OVERHEAD to distinguish from CONTROL-CHURN
-        "CONTROL-OVERHEAD-KICK-REAUTH-JWT": {
-            "mosquitto_conf": "./mosquitto_dynsec.conf",
-            "username": "admin",
-            "password": tokens["jwt_admin"],
-            "topic": "$CONTROL/dynamic-security/v1",
-            "authz_config": None,
-            "netem": {"clear": True},
-            "message_size": 256,
-            "qos": 1,
-            "dynamic_security_generated_profile": "control_admin_base",
-            "repeat": 2,
-            "sleep_between": 3,
-            "client_count": 1,
-        },
-        "CONTROL-OVERHEAD-KICK-REAUTH-BISCUIT": {
-            "mosquitto_conf": "./mosquitto_dynsec.conf",
-            "username": "admin",
-            "password": tokens["biscuit_admin"],
-            "topic": "$CONTROL/dynamic-security/v1",
-            "authz_config": None,
-            "netem": {"clear": True},
-            "message_size": 256,
-            "qos": 1,
-            "dynamic_security_generated_profile": "control_admin_base",
-            "repeat": 2,
-            "sleep_between": 3,
-            "client_count": 1,
-        },
-        "CONTROL-OVERHEAD-ACL-READ-NOTIFY-JWT": {
-            "mosquitto_conf": "./mosquitto_dynsec.conf",
-            "username": "admin",
-            "password": tokens["jwt_admin"],
-            "topic": "$CONTROL/dynamic-security/v1",
-            "authz_config": None,
-            "netem": {"clear": True},
-            "message_size": 256,
-            "qos": 1,
-            "fanout_publisher_username": "admin",
-            "fanout_publisher_password": tokens["jwt_admin"],
-            "traffic_pattern": "fanout",
-            "fanout_topic": "system/notifications/acl-change",
-            "dynamic_security_generated_profile": "control_admin_base",
-            "repeat": 2,
-            "sleep_between": 3,
-            "client_count": 1,
-        },
-        "CONTROL-OVERHEAD-ACL-READ-NOTIFY-BISCUIT": {
-            "mosquitto_conf": "./mosquitto_dynsec.conf",
-            "username": "admin",
-            "password": tokens["biscuit_admin"],
-            "topic": "$CONTROL/dynamic-security/v1",
-            "authz_config": None,
-            "netem": {"clear": True},
-            "message_size": 256,
-            "qos": 1,
-            "fanout_publisher_username": "admin",
-            "fanout_publisher_password": tokens["biscuit_admin"],
-            "traffic_pattern": "fanout",
-            "fanout_topic": "system/notifications/acl-change",
-            "dynamic_security_generated_profile": "control_admin_base",
-            "repeat": 2,
-            "sleep_between": 3,
-            "client_count": 1,
         },
         # Issue 35: CONTROL-CHURN scenarios with actual Dynamic Security command payloads
         # These scenarios exercise actual policy modifications via Dynamic Security commands
@@ -6014,6 +6134,21 @@ def _build_available_scenarios(
             "authz_config": None,
             "netem": {"mtu": mtu},
             "message_size": 0,
+        }
+
+    # Real runtime enforcement workloads replace the former transport-only
+    # control scenarios and restart-between-repeat pseudo-churn case.
+    for token_label in ("JWT", "BISCUIT"):
+        kick_source = f"DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-DISABLE-{token_label}-10"
+        notify_source = f"DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-REVOKE-{token_label}-10"
+        available_scenarios[f"CONTROL-ENFORCEMENT-KICK-{token_label}"] = {
+            **available_scenarios[kick_source],
+            "complexity_axis": None,
+        }
+        available_scenarios[f"CONTROL-ENFORCEMENT-ACL-READ-NOTIFY-{token_label}"] = {
+            **available_scenarios[notify_source],
+            "fanout_expect_control_notification": True,
+            "complexity_axis": None,
         }
 
     available_scenarios = _apply_scenario_classification(available_scenarios, tokens)
@@ -6367,6 +6502,13 @@ def main(
                 and netem is not None
                 and "mtu" in netem
             )
+            if netem is not None and "mtu" in netem:
+                if not tcpdump_enabled or not tcpdump_analyze:
+                    raise RuntimeError(
+                        f"{s['id']}: MTU scenarios require tcpdump capture and analysis"
+                    )
+                if not tcpdump_status.get("installed", False):
+                    raise RuntimeError(f"{s['id']}: packet parser unavailable for MTU contract")
 
             if capture_this_scenario:
                 namespace_services.append("tcpdump")
@@ -6412,6 +6554,19 @@ def main(
                 compose_files=compose_files,
                 phase="namespace-service startup",
             )
+            effective_mtu: int | None = None
+            if netem is not None and "mtu" in netem:
+                requested_mtu = int(netem["mtu"])
+                effective_mtu = _read_effective_mtu(
+                    interface=os.environ.get("NETEM_IFACE", "eth0"),
+                    extra_env=extra_env,
+                    compose_files=compose_files,
+                    compose_project_name=compose_project_name,
+                )
+                if effective_mtu != requested_mtu:
+                    raise RuntimeError(
+                        f"{s['id']}: effective MTU {effective_mtu} != requested {requested_mtu}"
+                    )
             _wait_for_service_health("authz", authz_base, scenario_tls_ca, tls_insecure)
             _wait_for_service_health(
                 "token-issuer",
@@ -6702,6 +6857,13 @@ def main(
             _validate_dynamic_security_alignment(s["id"], s, default_clients=clients)
             for idx in range(repeats):
                 try:
+                    if uses_http_authz:
+                        _authz_stats(
+                            authz_base,
+                            reset=True,
+                            ca_file=scenario_tls_ca,
+                            insecure=tls_insecure,
+                        )
                     _reset_generated_dynamic_security_between_repeats(
                         idx,
                         dynamic_security_state.generated_path,
@@ -6853,6 +7015,9 @@ def main(
                                 if s.get("biscuit_attenuate")
                                 else None
                             ),
+                            attenuation_probe_subscribe_denied=bool(
+                                s.get("attenuation_probe_subscribe_denied", False)
+                            ),
                             biscuit_public_key_hex=s.get("biscuit_public_key_hex"),
                             biscuit_public_key_file=(
                                 _container_repo_path(
@@ -6936,6 +7101,7 @@ def main(
                             or _generate_control_churn_payload(s["id"], "admin"),
                             control_mode=bool(s.get("control_mode", False)),
                             control_repeat=s.get("control_repeat", 1),
+                            control_response_topic=s.get("control_response_topic"),
                             control_after_messages=s.get("control_after_messages", 0),
                             runtime_control_username=s.get("runtime_control_username"),
                             runtime_control_password=s.get("runtime_control_password"),
@@ -6952,8 +7118,8 @@ def main(
                             ),
                             fanout_churn_max_events=s.get("fanout_churn_max_events", 1),
                             fanout_churn_settle_ms=s.get("fanout_churn_settle_ms", 0),
-                            fanout_churn_phase_delivery=s.get(
-                                "fanout_churn_phase_delivery"
+                            fanout_churn_phase_delivery=(
+                                cast(DeliveryContract, s.get("delivery_contract", {})).get("phases")
                             ),
                             fanout_churn_dynamic_security_source=(
                                 _container_repo_path(s.get("fanout_churn_dynamic_security_source"))
@@ -6962,6 +7128,9 @@ def main(
                             ),
                             fanout_churn_control_topic=s.get("fanout_churn_control_topic"),
                             fanout_churn_control_payload=s.get("fanout_churn_control_payload"),
+                            fanout_expect_control_notification=bool(
+                                s.get("fanout_expect_control_notification", False)
+                            ),
                             fanout_churn_sqlite_db=(
                                 _container_repo_path(s.get("fanout_churn_sqlite_db"))
                                 if client_topology_mode != "host"
@@ -6990,6 +7159,13 @@ def main(
                                 "fanout_publisher_password_map_profile"
                             ),
                         )
+                    if uses_http_authz:
+                        res["authz_stats"] = _authz_stats(
+                            authz_base,
+                            ca_file=scenario_tls_ca,
+                            insecure=tls_insecure,
+                        )
+                        _validate_external_policy_activity(s["id"], res["authz_stats"])
                     _validate_result_contract(
                         s,
                         res,
@@ -7081,6 +7257,12 @@ def main(
         # Issue 15: Run packet analysis if tcpdump was enabled for this scenario
         packet_analysis_result: dict[str, Any] = {"enabled": False}
         if capture_this_scenario and tcpdump_analyze:
+            _compose_checked(
+                ["stop", "tcpdump"],
+                extra_env=extra_env,
+                compose_files=compose_files,
+                phase="packet capture flush",
+            )
             pcap_file = Path(tcpdump_output_dir) / f"{s['id']}.pcap"
             if pcap_file.exists():
                 logger.info("Running packet analysis for scenario %s", s["id"])
@@ -7093,6 +7275,13 @@ def main(
                     packet_analysis_result = analyze_pcap(str(pcap_file), mtu, token_length)
                     packet_analysis_result["enabled"] = True
                     packet_analysis_result["pcap_file"] = str(pcap_file)
+                    packet_analysis_result["effective_mtu"] = effective_mtu
+                    metrics = packet_analysis_result.get("metrics")
+                    if (
+                        not isinstance(metrics, dict)
+                        or int(metrics.get("tcp_packets") or 0) <= 0
+                    ):
+                        raise RuntimeError(f"{s['id']}: capture contains no MQTT TCP traffic")
 
                     # Log summary
                     summary = format_packet_summary(packet_analysis_result)
@@ -7104,12 +7293,14 @@ def main(
                         "error": str(e),
                         "pcap_file": str(pcap_file),
                     }
+                    raise RuntimeError(f"{s['id']}: packet analysis failed: {e}") from e
             else:
                 logger.warning("Pcap file not found: %s", pcap_file)
                 packet_analysis_result = {
                     "enabled": True,
                     "error": f"Pcap file not found: {pcap_file}",
                 }
+                raise RuntimeError(f"{s['id']}: required pcap file is missing")
 
         # Add packet analysis result to output payload
         out_payload["packet_analysis_result"] = packet_analysis_result

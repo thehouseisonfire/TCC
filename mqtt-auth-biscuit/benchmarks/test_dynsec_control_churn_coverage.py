@@ -24,8 +24,8 @@ def _scenario_registry() -> dict[str, rs.ScenarioConfig]:
 def test_control_only_families_use_explicit_client_counts() -> None:
     scenarios = _scenario_registry()
 
-    assert scenarios["CONTROL-OVERHEAD-KICK-REAUTH-JWT"]["client_count"] == 1
-    assert scenarios["CONTROL-OVERHEAD-ACL-READ-NOTIFY-BISCUIT"]["client_count"] == 1
+    assert scenarios["CONTROL-ENFORCEMENT-KICK-JWT"]["subscriber_count"] == 10
+    assert scenarios["CONTROL-ENFORCEMENT-ACL-READ-NOTIFY-BISCUIT"]["subscriber_count"] == 10
     assert scenarios["CONTROL-CHURN-CREATE-ROLE-JWT"]["client_count"] == 1
     assert scenarios["CONTROL-CHURN-GROUP-CLIENT-BISCUIT"]["client_count"] == 1
     assert scenarios["SQLITE-RBAC-DEEP-CONTROL-JWT"]["client_count"] == 1
@@ -36,12 +36,12 @@ def test_dynsec_control_families_use_generated_profiles_with_matching_principals
     scenarios = _scenario_registry()
 
     assert (
-        scenarios["CONTROL-OVERHEAD-KICK-REAUTH-JWT"]["dynamic_security_generated_profile"]
-        == "control_admin_base"
+        scenarios["CONTROL-ENFORCEMENT-KICK-JWT"]["dynamic_security_generated_profile"]
+        == "fanout_control_allow"
     )
     assert (
-        scenarios["CONTROL-OVERHEAD-ACL-READ-NOTIFY-BISCUIT"]["dynamic_security_generated_profile"]
-        == "control_admin_base"
+        scenarios["CONTROL-ENFORCEMENT-ACL-READ-NOTIFY-BISCUIT"]["dynamic_security_generated_profile"]
+        == "fanout_control_allow"
     )
     assert (
         scenarios["CONTROL-CHURN-CREATE-ROLE-JWT"]["dynamic_security_generated_profile"]
@@ -125,9 +125,9 @@ def test_advanced_dynsec_control_churn_profiles_and_repeat_settings_match_intent
 
 
 def test_control_notify_fanout_metrics_should_use_client_count_not_global_default() -> None:
-    scenario = _scenario_registry()["CONTROL-OVERHEAD-ACL-READ-NOTIFY-JWT"]
+    scenario = _scenario_registry()["CONTROL-ENFORCEMENT-ACL-READ-NOTIFY-JWT"]
 
-    assert rs._effective_scenario_client_count(scenario, 25) == 1
+    assert rs._effective_scenario_client_count(scenario, 25) == 10
 
 
 def test_interleaved_control_raises_low_global_message_count_to_threshold() -> None:
@@ -141,7 +141,7 @@ def test_dynsec_alignment_accepts_generated_control_profiles() -> None:
     scenarios = _scenario_registry()
 
     for scenario_id in (
-        "CONTROL-OVERHEAD-KICK-REAUTH-JWT",
+        "CONTROL-ENFORCEMENT-KICK-JWT",
         "CONTROL-CHURN-CREATE-ROLE-JWT",
         "CONTROL-INTERLEAVED-DATA-JWT",
     ):

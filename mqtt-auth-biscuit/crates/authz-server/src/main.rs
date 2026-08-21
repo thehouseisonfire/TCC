@@ -14,7 +14,10 @@ use std::{
     env,
     net::SocketAddr,
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -24,7 +27,6 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{Method, Request, Response, StatusCode, body::Incoming, server::conn::http2};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use rand::RngExt;
 use rustls::ServerConfig;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -247,6 +249,33 @@ struct AppState {
     baseline_config: Arc<AppConfig>,
     conn_sema: Arc<Semaphore>,
     max_conns: usize,
+    stats: Arc<AuthzStats>,
+}
+
+#[derive(Debug, Default)]
+struct AuthzStats {
+    requests: AtomicU64,
+    injected_failures: AtomicU64,
+    policy_allows: AtomicU64,
+    policy_denies: AtomicU64,
+}
+
+impl AuthzStats {
+    fn reset(&self) {
+        self.requests.store(0, Ordering::Release);
+        self.injected_failures.store(0, Ordering::Release);
+        self.policy_allows.store(0, Ordering::Release);
+        self.policy_denies.store(0, Ordering::Release);
+    }
+
+    fn snapshot(&self) -> serde_json::Value {
+        serde_json::json!({
+            "requests": self.requests.load(Ordering::Acquire),
+            "injected_failures": self.injected_failures.load(Ordering::Acquire),
+            "policy_allows": self.policy_allows.load(Ordering::Acquire),
+            "policy_denies": self.policy_denies.load(Ordering::Acquire),
+        })
+    }
 }
 
 impl Clone for AppState {
@@ -256,8 +285,22 @@ impl Clone for AppState {
             baseline_config: self.baseline_config.clone(),
             conn_sema: self.conn_sema.clone(),
             max_conns: self.max_conns,
+            stats: self.stats.clone(),
         }
     }
+}
+
+fn deterministic_rate_failure(request_ordinal: u64, rate: f64) -> bool {
+    let rate = rate.clamp(0.0, 1.0);
+    if rate == 0.0 {
+        return false;
+    }
+    if rate == 1.0 {
+        return true;
+    }
+    let current = ((request_ordinal as f64) * rate + f64::EPSILON).floor();
+    let previous = (((request_ordinal - 1) as f64) * rate + f64::EPSILON).floor();
+    current > previous
 }
 
 // ------------------- Utilities -------------------
@@ -693,6 +736,13 @@ async fn handle(
             Ok(json_response(StatusCode::OK, &body))
         }
 
+        (Method::GET, "/stats") => Ok(json_response(StatusCode::OK, &state.stats.snapshot())),
+
+        (Method::POST, "/stats/reset") => {
+            state.stats.reset();
+            Ok(json_response(StatusCode::OK, &state.stats.snapshot()))
+        }
+
         (Method::POST, "/config") => {
             // collect body
             let collected = match req.into_body().collect().await {
@@ -720,6 +770,7 @@ async fn handle(
             apply_config_update(&mut next, update);
 
             state.config.store(Arc::new(next.clone()));
+            state.stats.reset();
             let body = config_summary_body(&next);
 
             Ok(json_response(StatusCode::OK, &body))
@@ -728,11 +779,13 @@ async fn handle(
         (Method::POST, "/config/reset") => {
             let next = (*state.baseline_config).clone();
             state.config.store(Arc::new(next.clone()));
+            state.stats.reset();
             let body = config_summary_body(&next);
             Ok(json_response(StatusCode::OK, &body))
         }
 
         (Method::POST, "/authorize") => {
+            let request_ordinal = state.stats.requests.fetch_add(1, Ordering::AcqRel) + 1;
             let collected = match req.into_body().collect().await {
                 Ok(full) => full,
                 Err(e) => {
@@ -765,14 +818,15 @@ async fn handle(
             // Fail mode handling
             match cfg.fail_mode {
                 FailMode::Always => {
+                    state.stats.injected_failures.fetch_add(1, Ordering::AcqRel);
                     warn!("forced failure");
                     let body = serde_json::json!({"allow": false, "error": "forced failure"});
                     return Ok(json_response(StatusCode::SERVICE_UNAVAILABLE, &body));
                 }
                 FailMode::Rate => {
-                    let r: f64 = rand::rng().random();
-                    if r < cfg.fail_rate.clamp(0.0, 1.0) {
-                        warn!(%r, "random failure triggered");
+                    if deterministic_rate_failure(request_ordinal, cfg.fail_rate) {
+                        state.stats.injected_failures.fetch_add(1, Ordering::AcqRel);
+                        warn!(%request_ordinal, "deterministic rate failure triggered");
                         let body = serde_json::json!({"allow": false, "error": "random failure"});
                         return Ok(json_response(StatusCode::SERVICE_UNAVAILABLE, &body));
                     }
@@ -782,6 +836,11 @@ async fn handle(
 
             // Authorization logic
             let allowed = evaluate_authorization(&cfg, &ar);
+            if allowed {
+                state.stats.policy_allows.fetch_add(1, Ordering::AcqRel);
+            } else {
+                state.stats.policy_denies.fetch_add(1, Ordering::AcqRel);
+            }
 
             debug!(
                 topic = %ar.topic,
@@ -861,6 +920,7 @@ async fn main() -> anyhow::Result<()> {
         baseline_config: Arc::new(shared_config.clone()),
         conn_sema: Arc::new(Semaphore::new(shared_config.max_conns)),
         max_conns: shared_config.max_conns,
+        stats: Arc::new(AuthzStats::default()),
     };
 
     let use_tls = env::var("AUTHZ_TLS").unwrap_or_else(|_| "0".to_string());
@@ -996,6 +1056,18 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deterministic_failure_rate_has_exact_ordinals() {
+        let one_percent = (1..=250)
+            .filter(|ordinal| deterministic_rate_failure(*ordinal, 0.01))
+            .collect::<Vec<_>>();
+        assert_eq!(one_percent, vec![100, 200]);
+        let five_percent = (1..=50)
+            .filter(|ordinal| deterministic_rate_failure(*ordinal, 0.05))
+            .collect::<Vec<_>>();
+        assert_eq!(five_percent, vec![20, 40]);
+    }
     use std::env;
     use std::sync::{Mutex, OnceLock};
 

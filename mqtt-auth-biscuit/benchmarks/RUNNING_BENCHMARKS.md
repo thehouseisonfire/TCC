@@ -167,11 +167,13 @@ the external PDP before timing begins.
 
 ### Client-Side (Online) Attenuation
 
-To exercise **online attenuation** (client-side block append), use the
-`TOKEN-ATTENUATION-CLIENT-BISCUIT` scenario. The Rust `mqtt-loadgen` path now
-performs Biscuit attenuation in-process, so the reported `attenuation` and
-`delegation` timings measure parse/block-append/serialization work without
-subprocess startup overhead.
+The `TOKEN-ATTENUATION-COMBINED-BISCUIT`,
+`TOKEN-ATTENUATION-SUBSCRIBE-DENY-BISCUIT`, and
+`TOKEN-ATTENUATION-PUBLISH-ONLY-BISCUIT` scenarios exercise online attenuation.
+The Rust `mqtt-loadgen` path performs Biscuit attenuation in-process and then
+probes the attenuated subscribe restriction, so the run fails if the broker
+ignores the appended capability or deny. Reported `attenuation` and `delegation`
+timings exclude subprocess startup overhead.
 
 The standalone `biscuit-attenuate` binary remains available as a thin CLI
 wrapper around the same shared attenuation function for manual token inspection.
@@ -852,18 +854,21 @@ The `iperf3` service is defined in `docker/docker-compose.yml` and starts automa
 
 ## CONTROL Scenarios (Dynamic Security)
 
-The benchmark suite includes two categories of CONTROL scenarios that exercise Mosquitto's Dynamic Security plugin via the `$CONTROL/dynamic-security/v1` topic:
+The benchmark suite exercises Mosquitto's Dynamic Security plugin through
+`$CONTROL/dynamic-security/v1`. Every command workload subscribes to the
+response topic, correlates responses with commands, and fails on missing or
+application-level error responses.
 
-### CONTROL-OVERHEAD Scenarios
+### CONTROL-ENFORCEMENT Scenarios
 
-These scenarios measure authorization overhead only - they publish to `$CONTROL/dynamic-security/v1` without actual command payloads:
+These workloads apply a command while fan-out traffic is active and validate
+the resulting policy effect:
 
-- `CONTROL-OVERHEAD-KICK-REAUTH-JWT` - JWT admin control-plane authorization
-- `CONTROL-OVERHEAD-KICK-REAUTH-BISCUIT` - Biscuit admin control-plane authorization
-- `CONTROL-OVERHEAD-ACL-READ-NOTIFY-JWT` - JWT control with fanout notifications
-- `CONTROL-OVERHEAD-ACL-READ-NOTIFY-BISCUIT` - Biscuit control with fanout notifications
+- `CONTROL-ENFORCEMENT-KICK-JWT/BISCUIT` - disable active subscribers and require delivery to stop
+- `CONTROL-ENFORCEMENT-ACL-READ-NOTIFY-JWT/BISCUIT` - revoke read access, require delivery to stop, and require one notification per subscriber
 
-Control-only scenario families use explicit `client_count` values in the scenario registry instead of inheriting the global benchmark `clients` default.
+Both families validate the allow-before/deny-after delivery phases in addition
+to command responses.
 
 ### CONTROL-CHURN Scenarios (Issue 35)
 
@@ -993,7 +998,11 @@ activity.
 
 ## CONTROL-INTERLEAVED-DATA Scenarios (Issue 36)
 
-These scenarios measure **control plane latency under active data plane load** by publishing control messages interleaved with regular data messages. Unlike CONTROL-OVERHEAD (control-only) and CONTROL-CHURN (batch policy churn), these scenarios simulate realistic mixed workloads where control messages (policy updates, reauthentication triggers) must be processed while ongoing data traffic continues.
+These scenarios measure **control plane latency under active data plane load**
+by publishing control messages interleaved with regular data messages. Unlike
+CONTROL-ENFORCEMENT (fan-out policy effects) and CONTROL-CHURN (batch policy
+churn), these scenarios isolate mixed workloads where control commands must be
+processed while data traffic continues.
 
 ### Scenario Configuration
 
@@ -1066,7 +1075,7 @@ cargo run --locked -p gen-tokens --bin mqtt-loadgen -- \
 
 ### Research Notes
 
-- **Control overhead**: Compare `control.mean_ms` between `CONTROL-INTERLEAVED-DATA-*` and `CONTROL-OVERHEAD-*` to measure the impact of concurrent data traffic
+- **Control latency**: Compare `control_response.mean_ms` across `CONTROL-INTERLEAVED-DATA-*` and `CONTROL-CHURN-*`; `control.mean_ms` records transport acknowledgement separately
 - **Data impact**: Compare `publish.mean_ms` between baseline (`TOKEN-BASELINE-JWT`, `TOKEN-BASELINE-BISCUIT`) and interleaved scenarios to quantify data plane degradation
 - **Injection efficiency**: `control_injection_delay` should remain low (<5ms); high values indicate broker contention
 

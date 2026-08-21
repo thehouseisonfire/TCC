@@ -6,14 +6,14 @@ lever, and produces a reproducible dataset for analysis.
 
 ## Overview
 
-The benchmark suite has **428 scenarios** (214 base + 214 TLS variants) across
+The benchmark suite currently has **440 scenarios** (220 base + 220 TLS variants) across
 multiple functional categories. The run plan has two parts:
 
 | Part | What | Runs | Est. time |
 |------|------|------|-----------|
-| 1 | All 428 scenarios × 2 clients × 2 messages × 3 runs | 5,136 | ~4–7 days |
+| 1 | All 440 scenarios × 2 clients × 2 messages × 3 runs | 5,280 | ~4–7 days |
 | 2 | 32 scenarios × 3 clients × 2 messages × 3 QoS × 2 token issuer × 3 runs | 3,456 | ~4–7 days |
-| **Total** | | **8,592** | **~9–14 days** |
+| **Total** | | **8,736** | **~9–14 days** |
 
 ## Research Dimensions
 
@@ -144,7 +144,7 @@ cargo run --locked -p gen-tokens --bin gen-tokens
 cd ../..
 ```
 
-### Step 2: Part 1 — Full baseline (all 428 × 2 clients × 2 messages × 3 runs)
+### Step 2: Part 1 — Full baseline (all 440 × 2 clients × 2 messages × 3 runs)
 
 Generate the full scenario list:
 
@@ -196,7 +196,13 @@ for clients in 10 200; do
 done
 ```
 
-This produces 5,136 scenario runs across 12 invocations of `run-benchmarks`.
+This produces 5,280 scenario runs across 12 invocations of `run-benchmarks`.
+
+Scenarios that declare their own `client_count` or `message_count` retain that
+fixed workload in every invocation. Treat those executions as repeated
+observations of the fixed workload; do not analyze the enclosing loop's nominal
+client/message values as distinct experimental levels for those scenarios. The
+effective values are recorded in each result's `scenario_config`.
 
 ### Step 3: Part 2 — Parameter sweep (32 scenarios × 36 combos × 3 runs)
 

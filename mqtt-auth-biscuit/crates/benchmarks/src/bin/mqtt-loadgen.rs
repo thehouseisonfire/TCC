@@ -10,7 +10,7 @@ use gen_tokens::mqtt_helpers::{
     ClientSpec, ConnectReport, MqttHelperError, Result, connect, decode_token_arg, poll_until,
     puback_reason_code, qos,
 };
-use rand::{Rng as _, RngExt as _};
+use rand::Rng as _;
 use rumqttc::mqttbytes::v5::{AuthProperties, Packet};
 use rumqttc::{AsyncClient, Event, Outgoing};
 use serde::de::{DeserializeSeed, Error as _, IgnoredAny, MapAccess, Visitor};
@@ -25,7 +25,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 
 const SYNC_CONNECT_RELEASE_DELAY: Duration = Duration::from_millis(200);
 const DEFAULT_CONTROL_TOPIC: &str = "$CONTROL/dynamic-security/v1";
@@ -298,6 +298,8 @@ struct Args {
     control_qos: u8,
     #[arg(long, env = "MQTT_CONTROL_AFTER_MESSAGES", default_value_t = 0)]
     control_after_messages: usize,
+    #[arg(long, env = "MQTT_CONTROL_RESPONSE_TOPIC")]
+    control_response_topic: Option<String>,
     #[arg(long, env = "MQTT_RUNTIME_CONTROL_USERNAME")]
     runtime_control_username: Option<String>,
     #[arg(long, env = "MQTT_RUNTIME_CONTROL_PASSWORD")]
@@ -376,6 +378,8 @@ struct Args {
     biscuit_attenuate_op: Option<String>,
     #[arg(long)]
     biscuit_attenuate_ttl: Option<u64>,
+    #[arg(long, env = "MQTT_ATTENUATION_PROBE_SUBSCRIBE_DENIED")]
+    attenuation_probe_subscribe_denied: bool,
     #[arg(long)]
     biscuit_public_key_hex: Option<String>,
     #[arg(long)]
@@ -444,6 +448,8 @@ struct Args {
     fanout_churn_control_topic: Option<String>,
     #[arg(long, env = "MQTT_FANOUT_CHURN_CONTROL_PAYLOAD")]
     fanout_churn_control_payload: Option<String>,
+    #[arg(long, env = "MQTT_FANOUT_EXPECT_CONTROL_NOTIFICATION")]
+    fanout_expect_control_notification: bool,
     #[arg(long, env = "MQTT_FANOUT_CHURN_SQLITE_DB")]
     fanout_churn_sqlite_db: Option<String>,
     #[arg(long, env = "MQTT_FANOUT_CHURN_SQLITE_TOPIC")]
@@ -497,6 +503,7 @@ struct Output {
     delegation_handoff_publish: Summary,
     attenuation: Summary,
     attenuation_len: Summary,
+    authorization_probes: Value,
     publish: Summary,
     publish_qos_0: Summary,
     publish_qos_1: Summary,
@@ -504,6 +511,9 @@ struct Output {
     qos_distribution_actual: Value,
     receive: Summary,
     control: Summary,
+    control_response: Summary,
+    control_responses: Value,
+    control_effect: Value,
     control_injection_delay: Summary,
     throughput_mps: f64,
     publish_throughput_mps: f64,
@@ -534,11 +544,17 @@ struct WorkerResult {
     delegation_len: Option<f64>,
     attenuation_ms: Option<f64>,
     attenuation_len: Option<f64>,
+    authorization_probe_successes: usize,
+    authorization_probe_failures: usize,
     publish_ms: Vec<f64>,
     publish_by_qos: [Vec<f64>; 3],
     receive_ms: Vec<f64>,
     receive_by_churn_phase: BTreeMap<usize, usize>,
     control_ms: Vec<f64>,
+    control_response_ms: Vec<f64>,
+    control_response_successes: usize,
+    control_response_failures: usize,
+    control_notifications: usize,
     control_injection_ms: Vec<f64>,
     sync_barrier_wait_ms: Option<f64>,
     sync_barrier_released_at_unix_ms: Option<u128>,
@@ -584,12 +600,17 @@ struct StandardMetrics {
     delegation_handoff_publish: Vec<f64>,
     attenuation: Vec<f64>,
     attenuation_len: Vec<f64>,
+    authorization_probe_successes: usize,
+    authorization_probe_failures: usize,
     publish: Vec<f64>,
     publish_qos_0: Vec<f64>,
     publish_qos_1: Vec<f64>,
     publish_qos_2: Vec<f64>,
     receive: Vec<f64>,
     control: Vec<f64>,
+    control_response: Vec<f64>,
+    control_response_successes: usize,
+    control_response_failures: usize,
     control_injection: Vec<f64>,
     sync_barrier_wait: Vec<f64>,
     sync_barrier_released_at_unix_ms: Vec<u128>,
@@ -639,8 +660,12 @@ impl IssuedToken {
     }
 }
 
-#[derive(Debug, Clone)]
-struct QosDistribution(Vec<(u8, f64)>);
+#[derive(Debug)]
+struct QosDistribution {
+    entries: Vec<(u8, f64)>,
+    schedule: Vec<u8>,
+    cursor: AtomicUsize,
+}
 
 impl QosDistribution {
     fn parse(raw: Option<&str>) -> Result<Option<Self>> {
@@ -686,22 +711,57 @@ impl QosDistribution {
         for (_, weight) in &mut entries {
             *weight /= total;
         }
-        Ok(Some(Self(entries)))
+        // A fixed schedule makes benchmark mixes reproducible. Largest-remainder
+        // allocation preserves the normalized weights, while smooth weighted
+        // round-robin avoids long single-QoS runs.
+        const SLOTS: usize = 1000;
+        let mut counts = entries
+            .iter()
+            .map(|(_, weight)| {
+                (
+                    (*weight * SLOTS as f64).floor() as usize,
+                    *weight * SLOTS as f64,
+                )
+            })
+            .collect::<Vec<_>>();
+        let assigned = counts.iter().map(|(count, _)| *count).sum::<usize>();
+        let mut remainder_order = counts
+            .iter()
+            .enumerate()
+            .map(|(index, (count, exact))| (index, exact - *count as f64))
+            .collect::<Vec<_>>();
+        remainder_order.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        for (index, _) in remainder_order.into_iter().take(SLOTS - assigned) {
+            counts[index].0 += 1;
+        }
+        let mut current = vec![0isize; entries.len()];
+        let mut schedule = Vec::with_capacity(SLOTS);
+        for _ in 0..SLOTS {
+            for (index, (count, _)) in counts.iter().enumerate() {
+                current[index] += *count as isize;
+            }
+            let selected = current
+                .iter()
+                .enumerate()
+                .max_by_key(|(index, score)| (**score, std::cmp::Reverse(*index)))
+                .map_or(0, |(index, _)| index);
+            schedule.push(entries[selected].0);
+            current[selected] -= SLOTS as isize;
+        }
+        Ok(Some(Self {
+            entries,
+            schedule,
+            cursor: AtomicUsize::new(0),
+        }))
     }
 
     fn choose(&self) -> u8 {
-        let mut sample = rand::rng().random::<f64>();
-        for (qos_value, weight) in &self.0 {
-            if sample < *weight {
-                return *qos_value;
-            }
-            sample -= *weight;
-        }
-        self.0.last().map_or(0, |(qos_value, _)| *qos_value)
+        let ordinal = self.cursor.fetch_add(1, Ordering::Relaxed);
+        self.schedule[ordinal % self.schedule.len()]
     }
 
     fn subscribe_qos(&self) -> u8 {
-        self.0
+        self.entries
             .iter()
             .map(|(qos_value, _)| *qos_value)
             .max()
@@ -710,7 +770,7 @@ impl QosDistribution {
 
     fn as_json(&self) -> Value {
         Value::Array(
-            self.0
+            self.entries
                 .iter()
                 .map(|(qos_value, weight)| serde_json::json!({"qos": qos_value, "weight": weight}))
                 .collect(),
@@ -2301,15 +2361,23 @@ async fn apply_fanout_churn(
             let Some(payload) = &args.fanout_churn_control_payload else {
                 return Some("fanout_churn_missing_control_payload".to_string());
             };
-            publish_and_wait(
-                publisher,
-                publisher_eventloop,
-                topic,
-                payload.clone().into_bytes(),
-                1,
-            )
+            async {
+                let correlation = format!("fanout-churn-{}", args.fanout_churn_after_messages);
+                let correlated = correlated_control_payload(payload.as_bytes(), &correlation)?;
+                publish_and_wait(publisher, publisher_eventloop, topic, correlated, 1).await?;
+                poll_until(publisher_eventloop, Duration::from_secs(10), |event| {
+                    let Event::Incoming(Packet::Publish(response)) = event else {
+                        return None;
+                    };
+                    match validate_control_response(&response.payload, &correlation) {
+                        Ok(true) => Some(Ok(())),
+                        Ok(false) => None,
+                        Err(err) => Some(Err(err)),
+                    }
+                })
+                .await?
+            }
             .await
-            .map(|_| ())
         }
         "sqlite_revoke_read" => {
             let Some(db) = &args.fanout_churn_sqlite_db else {
@@ -2881,6 +2949,7 @@ struct FanoutMetrics {
     attenuation_len: Vec<f64>,
     receive: Vec<f64>,
     received_by_phase: Option<Vec<usize>>,
+    control_notifications: usize,
     publish_throughput_mps: f64,
     receive_throughput_mps: f64,
 }
@@ -2957,6 +3026,8 @@ async fn collect_fanout_subscriber(
             .saturating_mul(200),
     ));
     let mut drain_deadline = None;
+    let mut last_sequence_id = None;
+    let mut last_sequence_phase = None;
     while subscriber.result.receive_ms.len() < expected_messages {
         if publishing_done.load(Ordering::Acquire) {
             let deadline = drain_deadline.get_or_insert_with(|| Instant::now() + drain_timeout);
@@ -2971,7 +3042,39 @@ async fn collect_fanout_subscriber(
         };
         match event {
             Ok(Event::Incoming(Packet::Publish(publish))) => {
+                if publish.topic.starts_with(b"system_notification/") {
+                    subscriber.result.control_notifications += 1;
+                    continue;
+                }
                 if let Some(message) = parse_fanout_message(&publish.payload) {
+                    if let Some(sequence_id) = message.sequence_id {
+                        match last_sequence_id {
+                            None if message.phase.unwrap_or(0) == 0 && sequence_id != 0 => subscriber
+                                .result
+                                .errors
+                                .push(format!("fanout_sequence_gap:expected=0,actual={sequence_id}")),
+                            Some(last) if sequence_id == last => subscriber
+                                .result
+                                .errors
+                                .push(format!("fanout_sequence_duplicate:{sequence_id}")),
+                            Some(last) if sequence_id < last => subscriber.result.errors.push(
+                                format!("fanout_sequence_out_of_order:previous={last},actual={sequence_id}"),
+                            ),
+                            Some(last)
+                                if message.phase == last_sequence_phase && sequence_id > last + 1 =>
+                            {
+                                subscriber.result.errors.push(format!(
+                                    "fanout_sequence_gap:expected={},actual={sequence_id}",
+                                    last + 1
+                                ));
+                            }
+                            _ => {}
+                        }
+                        if last_sequence_id.is_none_or(|last| sequence_id > last) {
+                            last_sequence_id = Some(sequence_id);
+                            last_sequence_phase = message.phase;
+                        }
+                    }
                     let elapsed = (start.elapsed().as_secs_f64() - message.sent) * 1000.0;
                     subscriber.result.receive_ms.push(elapsed.max(0.0));
                     if let Some(phase) = message.phase {
@@ -3115,14 +3218,30 @@ async fn connect_fanout_subscriber(
         ));
     }
     match subscribe_and_wait(&client, &mut eventloop, &args.fanout_topic, subscribe_qos).await {
-        Ok(codes) if codes.iter().all(|code| matches!(code, 0..=2)) => Ok((
-            FanoutSubscriber {
-                _client: client,
-                eventloop,
-                result,
-            },
-            true,
-        )),
+        Ok(codes) if codes.iter().all(|code| matches!(code, 0..=2)) => {
+            if args.fanout_expect_control_notification {
+                let notification_topic = format!("system_notification/{}", prepared.client_id);
+                match subscribe_and_wait(&client, &mut eventloop, &notification_topic, 1).await {
+                    Ok(notification_codes)
+                        if notification_codes.iter().all(|code| matches!(code, 0..=2)) => {}
+                    Ok(notification_codes) => result.errors.push(format!(
+                        "control_notification_suback_rejected:{notification_codes:?}"
+                    )),
+                    Err(err) => result
+                        .errors
+                        .push(format!("control_notification_subscribe_failed:{err}")),
+                }
+            }
+            let ready = result.errors.is_empty();
+            Ok((
+                FanoutSubscriber {
+                    _client: client,
+                    eventloop,
+                    result,
+                },
+                ready,
+            ))
+        }
         Ok(codes) => {
             result.errors.push(format!(
                 "fanout_suback_rejected:{}",
@@ -3478,6 +3597,7 @@ fn fanout_metrics(
                 .map(|phase| counts.get(&phase).copied().unwrap_or(0))
                 .collect()
         }),
+        control_notifications: results.iter().map(|r| r.control_notifications).sum(),
         publish_throughput_mps: usize_as_f64(fanout_publish_ms.len()) / duration_s,
         receive_throughput_mps: usize_as_f64(receive.len()) / duration_s,
         receive,
@@ -3504,6 +3624,7 @@ fn fanout_output(args: &Args, parts: FanoutOutputParts<'_>) -> Output {
         "publish_qos_2": parts.fanout_publish_by_qos[2].clone(),
         "receive": metrics.receive.clone(),
         "control": [],
+        "control_response": [],
         "control_injection_delay": [],
         "sync_connect_barrier_wait": [],
     });
@@ -3534,6 +3655,7 @@ fn fanout_output(args: &Args, parts: FanoutOutputParts<'_>) -> Output {
         delegation_handoff_publish: summarize(&parts.runtime.handoff_publish_ms),
         attenuation: summarize(&metrics.attenuation),
         attenuation_len: summarize(&metrics.attenuation_len),
+        authorization_probes: serde_json::json!({"enabled": false}),
         publish: summarize(&parts.fanout_publish_ms),
         publish_qos_0: summarize(&parts.fanout_publish_by_qos[0]),
         publish_qos_1: summarize(&parts.fanout_publish_by_qos[1]),
@@ -3545,6 +3667,12 @@ fn fanout_output(args: &Args, parts: FanoutOutputParts<'_>) -> Output {
         }),
         receive: summarize(&metrics.receive),
         control: Summary::default(),
+        control_response: Summary::default(),
+        control_responses: serde_json::json!({"enabled": false}),
+        control_effect: serde_json::json!({
+            "notification_expected": args.fanout_expect_control_notification,
+            "notifications": metrics.control_notifications,
+        }),
         control_injection_delay: Summary::default(),
         throughput_mps: metrics.receive_throughput_mps,
         publish_throughput_mps: metrics.publish_throughput_mps,
@@ -3587,6 +3715,19 @@ async fn run_fanout(args: Args) -> Result<Output> {
     }
     let (publisher, mut publisher_eventloop) =
         connect_fanout_publisher(&args, &fallback_password).await?;
+    if args.fanout_churn_kind.as_deref() == Some("dynamic_security_control") {
+        let response_topic = args
+            .control_response_topic
+            .as_deref()
+            .unwrap_or("$CONTROL/dynamic-security/v1/response");
+        let codes =
+            subscribe_and_wait(&publisher, &mut publisher_eventloop, response_topic, 1).await?;
+        if codes.iter().any(|code| !matches!(code, 0..=2)) {
+            runtime
+                .errors
+                .push(format!("fanout_control_response_suback_rejected:{codes:?}"));
+        }
+    }
     let publishing_done = Arc::new(AtomicBool::new(false));
     let churn_receipts = Arc::new(AtomicUsize::new(0));
     let subscriber_tasks = if fanout_ready {
@@ -4112,6 +4253,7 @@ async fn drive_worker_eventloop(
     mut eventloop: rumqttc::EventLoop,
     shutdown: Arc<Notify>,
     shutdown_requested: Arc<AtomicBool>,
+    control_response_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
 ) -> Option<String> {
     loop {
         if shutdown_requested.load(Ordering::Acquire) {
@@ -4120,8 +4262,16 @@ async fn drive_worker_eventloop(
         tokio::select! {
             () = shutdown.notified() => return None,
             result = eventloop.poll() => {
-                if let Err(err) = result {
-                    return Some(format!("eventloop_failed:{err}"));
+                match result {
+                    Ok(Event::Incoming(Packet::Publish(publish)))
+                        if control_response_tx.is_some() =>
+                    {
+                        if let Some(tx) = &control_response_tx {
+                            let _ = tx.send(publish.payload.to_vec());
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(err) => return Some(format!("eventloop_failed:{err}")),
                 }
             }
         }
@@ -4211,33 +4361,185 @@ fn merge_proactive_result(result: &mut WorkerResult, proactive: &mut WorkerResul
 
 async fn run_control_mode(
     args: &Args,
+    client_id: &str,
     client: &AsyncClient,
     control_topic: Option<&str>,
     control_payload: &[u8],
+    control_response_rx: Option<&mut mpsc::UnboundedReceiver<Vec<u8>>>,
     result: &mut WorkerResult,
 ) {
     if let Some(control_topic) = control_topic {
-        for _ in 0..args.control_repeat {
-            match publish_tracked_and_wait(
+        let mut response_rx = control_response_rx;
+        for repeat in 0..args.control_repeat {
+            publish_control_and_validate(
+                args,
                 client,
                 control_topic,
-                control_payload.to_vec(),
-                args.control_qos,
+                control_payload,
+                format!("{client_id}-{repeat}"),
+                response_rx.as_deref_mut(),
+                result,
             )
-            .await
-            {
-                Ok(ms) => result.control_ms.push(ms),
-                Err(err) => result.errors.push(format!("control_publish_failed:{err}")),
+            .await;
+        }
+    }
+}
+
+fn correlated_control_payload(payload: &[u8], correlation: &str) -> Result<Vec<u8>> {
+    let mut value: Value = serde_json::from_slice(payload)
+        .map_err(|err| MqttHelperError::Message(format!("control_payload_invalid:{err}")))?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        MqttHelperError::Message("control payload must be a JSON object".to_string())
+    })?;
+    let commands = object
+        .get_mut("commands")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| MqttHelperError::Message("control payload missing commands".to_string()))?;
+    for command in commands {
+        let command = command.as_object_mut().ok_or_else(|| {
+            MqttHelperError::Message("control command must be an object".to_string())
+        })?;
+        command.insert(
+            "correlationData".to_string(),
+            Value::String(correlation.to_string()),
+        );
+    }
+    serde_json::to_vec(&value)
+        .map_err(|err| MqttHelperError::Message(format!("control_payload_encode_failed:{err}")))
+}
+
+fn validate_control_response(payload: &[u8], correlation: &str) -> Result<bool> {
+    let value: Value = serde_json::from_slice(payload)
+        .map_err(|err| MqttHelperError::Message(format!("control_response_invalid_json:{err}")))?;
+    let responses = value
+        .get("responses")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            MqttHelperError::Message("control_response_missing_responses".to_string())
+        })?;
+    if responses.is_empty() {
+        return Err(MqttHelperError::Message(
+            "control_response_empty_responses".to_string(),
+        ));
+    }
+    if responses.iter().any(|response| {
+        response.get("correlationData").and_then(Value::as_str) != Some(correlation)
+    }) {
+        return Ok(false);
+    }
+    for response in responses {
+        if let Some(error) = response.get("error").and_then(Value::as_str)
+            && !error.is_empty()
+        {
+            return Err(MqttHelperError::Message(format!(
+                "control_response_command_error:{error}"
+            )));
+        }
+        if response.get("command").and_then(Value::as_str).is_none() {
+            return Err(MqttHelperError::Message(
+                "control_response_missing_command".to_string(),
+            ));
+        }
+    }
+    Ok(true)
+}
+
+async fn publish_control_and_validate(
+    args: &Args,
+    client: &AsyncClient,
+    topic: &str,
+    payload: &[u8],
+    correlation: String,
+    response_rx: Option<&mut mpsc::UnboundedReceiver<Vec<u8>>>,
+    result: &mut WorkerResult,
+) {
+    let correlated = match correlated_control_payload(payload, &correlation) {
+        Ok(payload) => payload,
+        Err(err) => {
+            result.errors.push(err.to_string());
+            return;
+        }
+    };
+    let started = Instant::now();
+    match publish_tracked_and_wait(client, topic, correlated, args.control_qos).await {
+        Ok(ms) => result.control_ms.push(ms),
+        Err(err) => {
+            result.errors.push(format!("control_publish_failed:{err}"));
+            return;
+        }
+    }
+    let Some(response_rx) = response_rx else {
+        return;
+    };
+    let response = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let payload = response_rx.recv().await.ok_or_else(|| {
+                MqttHelperError::Message("control_response_channel_closed".to_string())
+            })?;
+            if validate_control_response(&payload, &correlation)? {
+                return Ok::<(), MqttHelperError>(());
             }
+        }
+    })
+    .await;
+    match response {
+        Ok(Ok(())) => {
+            result.control_response_successes += 1;
+            result
+                .control_response_ms
+                .push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        Ok(Err(err)) => {
+            result.control_response_failures += 1;
+            result.errors.push(err.to_string());
+        }
+        Err(_) => {
+            result.control_response_failures += 1;
+            result.errors.push("control_response_timeout".to_string());
+        }
+    }
+}
+
+async fn run_attenuation_subscribe_denial_probe(
+    client: &AsyncClient,
+    topic: &str,
+    result: &mut WorkerResult,
+) {
+    let outcome = async {
+        let notice = client.subscribe_tracked(topic, qos(1)?).await?;
+        let suback = tokio::time::timeout(Duration::from_secs(10), notice.wait_async())
+            .await
+            .map_err(|_| MqttHelperError::Message("attenuation_probe_timeout".to_string()))?
+            .map_err(|err| MqttHelperError::Message(format!("attenuation_probe_failed:{err}")))?;
+        let codes = suback
+            .return_codes
+            .into_iter()
+            .map(gen_tokens::mqtt_helpers::subscribe_reason_code)
+            .collect::<Vec<_>>();
+        if codes.is_empty() || codes.iter().any(|code| matches!(code, 0..=2)) {
+            return Err(MqttHelperError::Message(format!(
+                "attenuation_probe_unexpected_allow:{codes:?}"
+            )));
+        }
+        Ok(())
+    }
+    .await;
+    match outcome {
+        Ok(()) => result.authorization_probe_successes += 1,
+        Err(err) => {
+            result.authorization_probe_failures += 1;
+            result.errors.push(err.to_string());
         }
     }
 }
 
 async fn run_publish_mode(
     args: &Args,
+    client_id: &str,
     client: &AsyncClient,
     plan: WorkerPublishPlan<'_>,
     runtime_control: Option<&RuntimeControlState>,
+    control_response_rx: Option<&mut mpsc::UnboundedReceiver<Vec<u8>>>,
     result: &mut WorkerResult,
 ) {
     let mut since_control = 0usize;
@@ -4263,7 +4565,8 @@ async fn run_publish_mode(
             }
         }
     }
-    for _ in 0..args.messages {
+    let mut response_rx = control_response_rx;
+    for message_index in 0..args.messages {
         let publish_qos = plan
             .qos_distribution
             .map_or(args.qos, QosDistribution::choose);
@@ -4324,17 +4627,16 @@ async fn run_publish_mode(
         if control_injection_due(since_control, args.control_after_messages) {
             if let Some(topic) = plan.control_topic {
                 let start = Instant::now();
-                match publish_tracked_and_wait(
+                publish_control_and_validate(
+                    args,
                     client,
                     topic,
-                    plan.control_payload.to_vec(),
-                    args.control_qos,
+                    plan.control_payload,
+                    format!("{client_id}-{message_index}"),
+                    response_rx.as_deref_mut(),
+                    result,
                 )
-                .await
-                {
-                    Ok(ms) => result.control_ms.push(ms),
-                    Err(err) => result.errors.push(format!("control_publish_failed:{err}")),
-                }
+                .await;
                 result
                     .control_injection_ms
                     .push(start.elapsed().as_secs_f64() * 1000.0);
@@ -4355,6 +4657,7 @@ async fn run_worker_session(
     qos_distribution: Option<&QosDistribution>,
     client: &AsyncClient,
     runtime_control: Option<&RuntimeControlState>,
+    control_response_rx: Option<&mut mpsc::UnboundedReceiver<Vec<u8>>>,
     result: &mut WorkerResult,
 ) {
     let control_topic = args
@@ -4371,15 +4674,18 @@ async fn run_worker_session(
     if args.control_mode {
         run_control_mode(
             args,
+            client_id,
             client,
             control_topic.as_deref(),
             &control_payload,
+            control_response_rx,
             result,
         )
         .await;
     } else {
         run_publish_mode(
             args,
+            client_id,
             client,
             WorkerPublishPlan {
                 topic,
@@ -4389,6 +4695,7 @@ async fn run_worker_session(
                 qos_distribution,
             },
             runtime_control,
+            control_response_rx,
             result,
         )
         .await;
@@ -4511,7 +4818,7 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
             return result;
         }
     }
-    let Some((client, eventloop, report, refreshed_exp)) = connect_worker(
+    let Some((client, mut eventloop, report, refreshed_exp)) = connect_worker(
         &args,
         &client_id,
         &topic,
@@ -4529,6 +4836,28 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
     }
     result.connect_ms = Some(report.connect_ms);
 
+    let (control_response_tx, mut control_response_rx) = mpsc::unbounded_channel();
+    let control_response_enabled =
+        args.control_response_topic.is_some() && args.runtime_control_username.is_none();
+    if control_response_enabled && let Some(response_topic) = args.control_response_topic.as_deref()
+    {
+        match subscribe_and_wait(&client, &mut eventloop, response_topic, 1).await {
+            Ok(codes) if codes.iter().all(|code| matches!(code, 0..=2)) => {}
+            Ok(codes) => {
+                result
+                    .errors
+                    .push(format!("control_response_suback_rejected:{codes:?}"));
+                return result;
+            }
+            Err(err) => {
+                result
+                    .errors
+                    .push(format!("control_response_subscribe_failed:{err}"));
+                return result;
+            }
+        }
+    }
+
     if let Some(gate) = publish_gate_participant.mark_ready() {
         gate.wait_released().await;
     }
@@ -4541,6 +4870,7 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
         eventloop,
         Arc::clone(&shutdown),
         Arc::clone(&shutdown_requested),
+        control_response_enabled.then_some(control_response_tx),
     ));
     let proactive_task = tokio::spawn(run_proactive_refresh_timer(
         args.clone(),
@@ -4563,9 +4893,13 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
         qos_distribution.as_ref(),
         &client,
         runtime_control.as_deref(),
+        control_response_enabled.then_some(&mut control_response_rx),
         &mut result,
     )
     .await;
+    if args.attenuation_probe_subscribe_denied {
+        run_attenuation_subscribe_denial_probe(&client, &topic, &mut result).await;
+    }
     wait_for_proactive_assertion_attempt(
         &args,
         current_exp,
@@ -4638,6 +4972,11 @@ fn standard_metrics(
     let delegation_len = results.iter().filter_map(|r| r.delegation_len).collect();
     let attenuation = results.iter().filter_map(|r| r.attenuation_ms).collect();
     let attenuation_len = results.iter().filter_map(|r| r.attenuation_len).collect();
+    let authorization_probe_successes = results
+        .iter()
+        .map(|r| r.authorization_probe_successes)
+        .sum();
+    let authorization_probe_failures = results.iter().map(|r| r.authorization_probe_failures).sum();
     let publish: Vec<_> = results.iter().flat_map(|r| r.publish_ms.clone()).collect();
     let publish_qos_0 = results
         .iter()
@@ -4653,6 +4992,12 @@ fn standard_metrics(
         .collect();
     let receive: Vec<_> = results.iter().flat_map(|r| r.receive_ms.clone()).collect();
     let control = results.iter().flat_map(|r| r.control_ms.clone()).collect();
+    let control_response = results
+        .iter()
+        .flat_map(|r| r.control_response_ms.clone())
+        .collect();
+    let control_response_successes = results.iter().map(|r| r.control_response_successes).sum();
+    let control_response_failures = results.iter().map(|r| r.control_response_failures).sum();
     let control_injection = results
         .iter()
         .flat_map(|r| r.control_injection_ms.clone())
@@ -4690,12 +5035,17 @@ fn standard_metrics(
         delegation_handoff_publish: handoff_publish_ms,
         attenuation,
         attenuation_len,
+        authorization_probe_successes,
+        authorization_probe_failures,
         publish,
         publish_qos_0,
         publish_qos_1,
         publish_qos_2,
         receive,
         control,
+        control_response,
+        control_response_successes,
+        control_response_failures,
         control_injection,
         sync_barrier_wait,
         sync_barrier_released_at_unix_ms,
@@ -4706,6 +5056,9 @@ fn standard_metrics(
 fn merge_runtime_control_result(metrics: &mut StandardMetrics, result: WorkerResult) {
     metrics.runtime_control_connect_ms = result.connect_ms;
     metrics.control.extend(result.control_ms);
+    metrics.control_response.extend(result.control_response_ms);
+    metrics.control_response_successes += result.control_response_successes;
+    metrics.control_response_failures += result.control_response_failures;
     metrics.errors.extend(result.errors);
 }
 
@@ -4764,6 +5117,7 @@ fn standard_output(
         "publish_qos_2": metrics.publish_qos_2.clone(),
         "receive": metrics.receive.clone(),
         "control": metrics.control.clone(),
+        "control_response": metrics.control_response.clone(),
         "control_injection_delay": metrics.control_injection.clone(),
         "sync_connect_barrier_wait": metrics.sync_barrier_wait.clone(),
     });
@@ -4796,6 +5150,13 @@ fn standard_output(
         delegation_handoff_publish: summarize(&metrics.delegation_handoff_publish),
         attenuation: summarize(&metrics.attenuation),
         attenuation_len: summarize(&metrics.attenuation_len),
+        authorization_probes: serde_json::json!({
+            "enabled": args.attenuation_probe_subscribe_denied,
+            "operation": "subscribe",
+            "expected": "deny",
+            "successes": metrics.authorization_probe_successes,
+            "failures": metrics.authorization_probe_failures,
+        }),
         publish: summarize(&metrics.publish),
         publish_qos_0: summarize(&metrics.publish_qos_0),
         publish_qos_1: summarize(&metrics.publish_qos_1),
@@ -4807,6 +5168,13 @@ fn standard_output(
         }),
         receive: summarize(&metrics.receive),
         control: summarize(&metrics.control),
+        control_response: summarize(&metrics.control_response),
+        control_responses: serde_json::json!({
+            "enabled": args.control_response_topic.is_some(),
+            "successes": metrics.control_response_successes,
+            "failures": metrics.control_response_failures,
+        }),
+        control_effect: serde_json::json!({"notification_expected": false}),
         control_injection_delay: summarize(&metrics.control_injection),
         throughput_mps: if args.mode == "fanout" {
             metrics.receive_throughput_mps
@@ -4880,7 +5248,7 @@ async fn spawn_runtime_control(
         auth_method: None,
         auth_data: None,
     };
-    let (client, eventloop, report) = connect(&spec).await?;
+    let (client, mut eventloop, report) = connect(&spec).await?;
     if !report.connect_ok {
         return Err(MqttHelperError::Message(format!(
             "runtime control connect rejected with reason {:?}",
@@ -4889,8 +5257,18 @@ async fn spawn_runtime_control(
     }
 
     let topic = topic.to_string();
-    let control_qos = args.control_qos;
     let threshold = args.runtime_control_after_messages;
+    let control_args = args.clone();
+    let (control_response_tx, mut control_response_rx) = mpsc::unbounded_channel();
+    let response_enabled = args.control_response_topic.is_some();
+    if let Some(response_topic) = args.control_response_topic.as_deref() {
+        let codes = subscribe_and_wait(&client, &mut eventloop, response_topic, 1).await?;
+        if codes.iter().any(|code| !matches!(code, 0..=2)) {
+            return Err(MqttHelperError::Message(format!(
+                "runtime control response subscription rejected: {codes:?}"
+            )));
+        }
+    }
     Ok(tokio::spawn(async move {
         let mut result = WorkerResult {
             connect_ms: Some(report.connect_ms),
@@ -4902,15 +5280,20 @@ async fn spawn_runtime_control(
             eventloop,
             Arc::clone(&shutdown),
             Arc::clone(&shutdown_requested),
+            response_enabled.then_some(control_response_tx),
         ));
 
         if wait_for_runtime_control_threshold(&state, threshold).await {
-            match publish_tracked_and_wait(&client, &topic, payload, control_qos).await {
-                Ok(ms) => result.control_ms.push(ms),
-                Err(err) => result
-                    .errors
-                    .push(format!("runtime_control_publish_failed:{err}")),
-            }
+            publish_control_and_validate(
+                &control_args,
+                &client,
+                &topic,
+                &payload,
+                "runtime-controller-0".to_string(),
+                response_enabled.then_some(&mut control_response_rx),
+                &mut result,
+            )
+            .await;
         } else {
             let successful_publishes = state.successful_publishes.load(Ordering::Acquire);
             result.errors.push(format!(
@@ -5055,12 +5438,17 @@ fn empty_standard_metrics() -> StandardMetrics {
         delegation_handoff_publish: Vec::new(),
         attenuation: Vec::new(),
         attenuation_len: Vec::new(),
+        authorization_probe_successes: 0,
+        authorization_probe_failures: 0,
         publish: Vec::new(),
         publish_qos_0: Vec::new(),
         publish_qos_1: Vec::new(),
         publish_qos_2: Vec::new(),
         receive: Vec::new(),
         control: Vec::new(),
+        control_response: Vec::new(),
+        control_response_successes: 0,
+        control_response_failures: 0,
         control_injection: Vec::new(),
         sync_barrier_wait: Vec::new(),
         sync_barrier_released_at_unix_ms: Vec::new(),
@@ -5315,6 +5703,7 @@ mod tests {
             delegation_handoff_publish: Summary::default(),
             attenuation: Summary::default(),
             attenuation_len: Summary::default(),
+            authorization_probes: serde_json::json!({"enabled": false}),
             publish: Summary::default(),
             publish_qos_0: Summary::default(),
             publish_qos_1: Summary::default(),
@@ -5326,6 +5715,9 @@ mod tests {
             }),
             receive: Summary::default(),
             control: Summary::default(),
+            control_response: Summary::default(),
+            control_responses: serde_json::json!({"enabled": false}),
+            control_effect: serde_json::json!({}),
             control_injection_delay: Summary::default(),
             throughput_mps: 0.0,
             publish_throughput_mps: 0.0,
@@ -5376,12 +5768,17 @@ mod tests {
             delegation_handoff_publish: Vec::new(),
             attenuation: Vec::new(),
             attenuation_len: Vec::new(),
+            authorization_probe_successes: 0,
+            authorization_probe_failures: 0,
             publish: Vec::new(),
             publish_qos_0: Vec::new(),
             publish_qos_1: Vec::new(),
             publish_qos_2: Vec::new(),
             receive: Vec::new(),
             control: Vec::new(),
+            control_response: Vec::new(),
+            control_response_successes: 0,
+            control_response_failures: 0,
             control_injection: Vec::new(),
             sync_barrier_wait: Vec::new(),
             sync_barrier_released_at_unix_ms: Vec::new(),
@@ -5695,6 +6092,45 @@ mod tests {
         assert_eq!(distribution.subscribe_qos(), 2);
         assert_eq!(distribution.as_json()[0]["qos"], 0);
         assert!((distribution.as_json()[0]["weight"].as_f64().unwrap() - 0.6).abs() < 1e-12);
+        let selected = (0..10).map(|_| distribution.choose()).collect::<Vec<_>>();
+        assert_eq!(selected.iter().filter(|qos| **qos == 0).count(), 6);
+        assert_eq!(selected.iter().filter(|qos| **qos == 1).count(), 3);
+        assert_eq!(selected.iter().filter(|qos| **qos == 2).count(), 1);
+    }
+
+    #[test]
+    fn control_payload_and_response_use_per_command_correlation() {
+        let payload = correlated_control_payload(
+            br#"{"commands":[{"command":"listClients"},{"command":"listRoles"}]}"#,
+            "worker-1",
+        )
+        .expect("payload should correlate");
+        let value: Value = serde_json::from_slice(&payload).expect("payload should remain JSON");
+        assert!(
+            value["commands"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|command| command["correlationData"] == "worker-1")
+        );
+
+        assert!(validate_control_response(
+            br#"{"responses":[{"command":"listClients","correlationData":"worker-1","data":{}},{"command":"listRoles","correlationData":"worker-1","data":{}}]}"#,
+            "worker-1",
+        )
+        .expect("response should validate"));
+        assert!(
+            validate_control_response(
+                br#"{"responses":[{"command":"listClients","correlationData":"other","data":{}}]}"#,
+                "worker-1",
+            )
+            .is_ok_and(|matched| !matched)
+        );
+        assert!(validate_control_response(
+            br#"{"responses":[{"command":"listClients","correlationData":"worker-1","error":"denied"}]}"#,
+            "worker-1",
+        )
+        .is_err());
     }
 
     #[test]
@@ -5907,7 +6343,7 @@ mod tests {
     }
 
     #[test]
-    fn publish_output_preserves_legacy_result_shape() {
+    fn publish_output_includes_semantic_contract_metrics() {
         let args = Args::parse_from(["mqtt-loadgen", "--clients", "1", "--messages", "1"]);
         let keys = output_keys_for(&args, "publish");
         assert_eq!(
@@ -5915,9 +6351,13 @@ mod tests {
             vec![
                 "attenuation",
                 "attenuation_len",
+                "authorization_probes",
                 "connect",
                 "control",
+                "control_effect",
                 "control_injection_delay",
+                "control_response",
+                "control_responses",
                 "delegation",
                 "delegation_handoff_publish",
                 "delegation_len",

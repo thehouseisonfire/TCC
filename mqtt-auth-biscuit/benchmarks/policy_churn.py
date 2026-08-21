@@ -208,6 +208,18 @@ def _add_control_admin_identity(payload: dict[str, Any]) -> None:
     )
     _upsert_acl(
         role,
+        acltype="subscribeLiteral",
+        topic="$CONTROL/dynamic-security/v1/response",
+        allow=True,
+    )
+    _upsert_acl(
+        role,
+        acltype="publishClientReceive",
+        topic="$CONTROL/dynamic-security/v1/response",
+        allow=True,
+    )
+    _upsert_acl(
+        role,
         acltype="publishClientSend",
         topic="system/notifications/#",
         allow=True,
@@ -243,6 +255,18 @@ def _add_control_data_identity(payload: dict[str, Any], username: str) -> None:
     )
     _upsert_acl(
         role,
+        acltype="subscribeLiteral",
+        topic="$CONTROL/dynamic-security/v1/response",
+        allow=True,
+    )
+    _upsert_acl(
+        role,
+        acltype="publishClientReceive",
+        topic="$CONTROL/dynamic-security/v1/response",
+        allow=True,
+    )
+    _upsert_acl(
+        role,
         acltype="publishClientSend",
         topic="$CONTROL/dynamic-security/v1",
         allow=True,
@@ -269,6 +293,36 @@ def build_dynsec_snapshot(profile: str) -> dict[str, Any]:
             publisher_role,
             acltype="publishClientSend",
             topic="$CONTROL/dynamic-security/v1",
+            allow=True,
+        )
+        notification_role = _upsert_role(payload, "control_notification_reader")
+        _upsert_acl(
+            notification_role,
+            acltype="subscribePattern",
+            topic="system_notification/#",
+            allow=True,
+        )
+        _upsert_acl(
+            notification_role,
+            acltype="publishClientReceive",
+            topic="system_notification/#",
+            allow=True,
+        )
+        _upsert_client_role(
+            payload,
+            username="dynsec_client_1",
+            rolename="control_notification_reader",
+        )
+        _upsert_acl(
+            publisher_role,
+            acltype="subscribeLiteral",
+            topic="$CONTROL/dynamic-security/v1/response",
+            allow=True,
+        )
+        _upsert_acl(
+            publisher_role,
+            acltype="publishClientReceive",
+            topic="$CONTROL/dynamic-security/v1/response",
             allow=True,
         )
     else:

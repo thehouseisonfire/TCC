@@ -103,7 +103,7 @@ def test_http_parity_variants_enable_strict_identity_binding_for_both_token_type
     "scenario_id",
     (
         "TOKEN-DELEGATION-TEMP-ONLY-BISCUIT",
-        "TOKEN-ATTENUATION-CLIENT-BISCUIT",
+        "TOKEN-ATTENUATION-COMBINED-BISCUIT",
         "TOKEN-COMPOSABILITY-ATTENUATED-DATALOG-MED-BISCUIT",
         "TOKEN-COMPOSABILITY-DELEGATED-DATALOG-HIGH-BISCUIT",
         "TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-BISCUIT-100",
@@ -532,10 +532,10 @@ def test_phase_one_deny_and_attenuation_scenarios_have_executable_contracts() ->
         scenario = scenarios[scenario_id]
         assert scenario["traffic_pattern"] == "fanout"
         assert scenario["acl_read_enforcement"] == "strict"
-        assert scenario["expected_delivery"] == "none"
+        assert scenario["delivery_contract"] == {"steady": "none"}
         assert scenario["fanout_publisher_password"] != scenario["password"]
 
-    attenuation = scenarios["TOKEN-ATTENUATION-CLIENT-BISCUIT"]["biscuit_attenuate"]
+    attenuation = scenarios["TOKEN-ATTENUATION-COMBINED-BISCUIT"]["biscuit_attenuate"]
     assert attenuation["denies"] == ["subscribe:sensors/{client_id}/temp"]
     assert attenuation["checks"] == ['resource("sensors/{client_id}/temp")']
     assert "op" not in attenuation

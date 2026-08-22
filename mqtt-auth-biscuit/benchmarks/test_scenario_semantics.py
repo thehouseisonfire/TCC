@@ -323,8 +323,14 @@ def test_composability_delegated_datalog_scenarios_layer_runtime_delegation(
         "ttl_seconds": 300,
         "topic": "sensors/{client_id}/temp",
         "op": "publish",
+        "handoff": {
+            "topic": "delegation/handoff",
+            "token": "biscuit_delegation_handoff-fixture",
+            "qos": 1,
+            "retain": True,
+        },
     }
-    assert scenario.get("biscuit_delegate", {}).get("handoff") is None
+    assert scenario["qos"] == 1
     assert scenario.get("biscuit_attenuate") is None
     assert scenario.get("token_refresh") is None
     assert scenario["attenuation_probe_subscribe_denied"] is True
@@ -336,8 +342,10 @@ def test_composability_result_requires_transform_and_credential_attestation() ->
     result: dict[str, Any] = {
         "errors": [],
         "publish": {"count": 25_000},
+        "publish_qos_1": {"count": 25_000},
         "delegation": {"count": 25},
         "delegation_len": {"count": 25},
+        "delegation_handoff_publish": {"count": 25},
         "authorization_probes": {"successes": 25, "failures": 0},
         "inputs": {
             "credential_attestations": {
@@ -361,6 +369,70 @@ def test_composability_result_requires_transform_and_credential_attestation() ->
     result["delegation"] = {"count": 24}
     with pytest.raises(RuntimeError, match="delegation was applied"):
         rs._validate_result_contract(scenario, result, message_count=1000, client_count=25)
+
+
+def _issuance_record(client_id: str, fingerprint: str, issued_at: int = 100) -> dict[str, Any]:
+    return {
+        "client_id": client_id,
+        "token_kind": "jwt",
+        "successful_requests": 1,
+        "issued_at": issued_at,
+        "exp": issued_at + 30,
+        "requested_ttl_seconds": 30,
+        "token_sha256": fingerprint,
+    }
+
+
+def test_reconnect_contract_requires_issuer_and_broker_attestations() -> None:
+    scenario = _scenario_registry()["TOKEN-PUBLISH-STRESS-RECONNECT-JWT"]
+    scenario["id"] = "TOKEN-PUBLISH-STRESS-RECONNECT-JWT"
+    records = [
+        _issuance_record(f"client_{index}", f"{index:064x}") for index in range(1, 26)
+    ]
+    result = {
+        "errors": [],
+        "publish": {"count": 25_000},
+        "publish_qos_1": {"count": 25_000},
+        "credential_issuance": records,
+        "broker_auth_delta": {
+            "attempts": 25,
+            "successes": 25,
+            "failures": 0,
+            "jwt_validations": 25,
+            "biscuit_validations": 0,
+            "cache_hits": 24_000,
+            "cache_misses": 1_000,
+        },
+    }
+    rs._validate_result_contract(scenario, result, message_count=1000, client_count=25)
+
+    result["credential_issuance"] = records[:-1]
+    with pytest.raises(RuntimeError, match="credential attestations"):
+        rs._validate_result_contract(scenario, result, message_count=1000, client_count=25)
+
+
+def test_reconnect_freshness_rejects_reused_token() -> None:
+    scenario = _scenario_registry()["TOKEN-PUBLISH-STRESS-RECONNECT-JWT"]
+    scenario["id"] = "TOKEN-PUBLISH-STRESS-RECONNECT-JWT"
+    runs = []
+    for repetition in range(6):
+        records = [
+            _issuance_record(
+                f"client_{index}",
+                f"{repetition * 100 + index:064x}",
+                issued_at=100 + repetition,
+            )
+            for index in range(1, 26)
+        ]
+        runs.append({"loadgen": {"credential_issuance": records}})
+    summary = rs._validate_credential_freshness(scenario, runs, client_count=25)
+    assert summary["successful_issuer_requests"] == 150
+
+    runs[-1]["loadgen"]["credential_issuance"][0]["token_sha256"] = runs[0]["loadgen"][
+        "credential_issuance"
+    ][0]["token_sha256"]
+    with pytest.raises(RuntimeError, match="reused or out-of-order credential"):
+        rs._validate_credential_freshness(scenario, runs, client_count=25)
 
 
 def test_fanout_credential_attestations_validate_distinct_role_profiles() -> None:

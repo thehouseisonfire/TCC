@@ -292,6 +292,7 @@ class ScenarioConfig(TypedDict, total=False):
     repeat: int
     sleep_between: int
     token_refresh: TokenRefreshConfig
+    credential_freshness_required: bool
     proactive_refresh: bool
     proactive_refresh_margin_seconds: int
     proactive_refresh_timeout_seconds: int
@@ -458,6 +459,40 @@ def _compose_cmd(
         cmd.extend(["-p", compose_project_name])
     cmd.extend(args)
     return cmd
+
+
+def _broker_auth_counters(
+    *,
+    compose_files: list[str] | None,
+    compose_project_name: str | None,
+    extra_env: dict[str, str],
+) -> dict[str, int]:
+    completed = subprocess.run(
+        _compose_cmd(
+            ["logs", "--no-color", "mosquitto"],
+            compose_files=compose_files,
+            compose_project_name=compose_project_name,
+        ),
+        cwd=REPO_ROOT,
+        env={**os.environ, **extra_env},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    marker = "BENCHMARK_AUTH_COUNTERS "
+    lines = [line.split(marker, 1)[1] for line in completed.stdout.splitlines() if marker in line]
+    if not lines:
+        return {}
+    counters: dict[str, int] = {}
+    for field in lines[-1].split():
+        key, separator, value = field.partition("=")
+        if separator:
+            counters[key] = int(value)
+    return counters
+
+
+def _counter_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
+    return {key: value - int(before.get(key, 0)) for key, value in after.items()}
 
 
 def _compose_service_container_id(
@@ -1967,6 +2002,12 @@ def _merge_per_client_loadgen_results(
         )
     }
     merged["errors"] = errors
+    issuance_records: list[Any] = []
+    for result in results:
+        records = result.get("credential_issuance")
+        if isinstance(records, list):
+            issuance_records.extend(records)
+    merged["credential_issuance"] = issuance_records
     merged["qos_distribution_actual"] = _sum_count_object(results, "qos_distribution_actual")
     merged["received_messages"] = _sum_count_object(results, "received_messages")
     for field in (
@@ -2168,6 +2209,95 @@ def _validate_credential_attestations(
             )
 
 
+def _validate_issuer_credential_issuance(
+    scenario: ScenarioConfig, result: dict[str, Any], *, client_count: int
+) -> None:
+    scenario_id = scenario["id"]
+    records = result.get("credential_issuance")
+    if not isinstance(records, list) or len(records) != client_count:
+        actual = len(records) if isinstance(records, list) else 0
+        raise RuntimeError(
+            f"{scenario_id}: issuer returned {actual}/{client_count} credential attestations"
+        )
+    refresh = scenario.get("token_refresh")
+    refresh_config = cast(dict[str, Any], refresh) if isinstance(refresh, dict) else {}
+    expected_kind = refresh_config.get("kind")
+    expected_ttl = int(refresh_config.get("ttl_seconds") or 0)
+    clients: set[str] = set()
+    fingerprints: set[str] = set()
+    for record in records:
+        if not isinstance(record, dict):
+            raise RuntimeError(f"{scenario_id}: invalid credential issuance record")
+        client_id = record.get("client_id")
+        fingerprint = record.get("token_sha256")
+        issued_at = int(record.get("issued_at") or 0)
+        exp = int(record.get("exp") or 0)
+        if (
+            not isinstance(client_id, str)
+            or not client_id
+            or client_id in clients
+            or record.get("token_kind") != expected_kind
+            or int(record.get("successful_requests") or 0) != 1
+            or int(record.get("requested_ttl_seconds") or 0) != expected_ttl
+            or exp - issued_at != expected_ttl
+            or not isinstance(fingerprint, str)
+            or len(fingerprint) != 64
+            or fingerprint in fingerprints
+        ):
+            raise RuntimeError(f"{scenario_id}: invalid credential issuance attestation")
+        clients.add(client_id)
+        fingerprints.add(fingerprint)
+    if scenario.get("complexity_axis") == "publish_authz_reconnect":
+        delta = result.get("broker_auth_delta")
+        if not isinstance(delta, dict):
+            raise RuntimeError(f"{scenario_id}: broker authentication counters missing")
+        kind_field = f"{expected_kind}_validations"
+        if (
+            int(delta.get("attempts") or 0) != client_count
+            or int(delta.get("successes") or 0) != client_count
+            or int(delta.get("failures") or 0) != 0
+            or int(delta.get(kind_field) or 0) != client_count
+            or int(delta.get("cache_hits") or 0) + int(delta.get("cache_misses") or 0) <= 0
+        ):
+            raise RuntimeError(
+                f"{scenario_id}: broker authentication/cache contract failed: {delta}"
+            )
+
+
+def _validate_credential_freshness(
+    scenario: ScenarioConfig, runs: list[dict[str, Any]], *, client_count: int
+) -> dict[str, Any]:
+    scenario_id = scenario["id"]
+    expected_repeats = int(scenario.get("repeat", 1))
+    by_client: dict[str, list[dict[str, Any]]] = {}
+    for run in runs:
+        loadgen = run.get("loadgen") if isinstance(run, dict) else None
+        records = loadgen.get("credential_issuance") if isinstance(loadgen, dict) else None
+        if not isinstance(records, list):
+            raise RuntimeError(f"{scenario_id}: credential freshness evidence missing")
+        for record in records:
+            if isinstance(record, dict) and isinstance(record.get("client_id"), str):
+                by_client.setdefault(record["client_id"], []).append(record)
+    if len(by_client) != client_count:
+        raise RuntimeError(f"{scenario_id}: credential freshness client set mismatch")
+    for client_id, records in by_client.items():
+        fingerprints = [str(record.get("token_sha256") or "") for record in records]
+        issued = [int(record.get("issued_at") or 0) for record in records]
+        if (
+            len(records) != expected_repeats
+            or len(set(fingerprints)) != expected_repeats
+            or issued != sorted(issued)
+        ):
+            raise RuntimeError(f"{scenario_id}: reused or out-of-order credential for {client_id}")
+    return {
+        "validated": True,
+        "clients": client_count,
+        "repetitions": expected_repeats,
+        "successful_issuer_requests": client_count * expected_repeats,
+        "unique_per_client_per_repetition": True,
+    }
+
+
 def _validate_result_contract(
     scenario: ScenarioConfig,
     result: dict[str, Any],
@@ -2183,6 +2313,8 @@ def _validate_result_contract(
         raise RuntimeError(f"{scenario_id}: loadgen errors: {', '.join(unexpected_errors[:5])}")
 
     _validate_credential_attestations(scenario, result, client_count=client_count)
+    if scenario.get("credential_freshness_required"):
+        _validate_issuer_credential_issuance(scenario, result, client_count=client_count)
 
     if scenario.get("mqtt5_auth") is not None:
         _validate_mqtt5_auth_result(scenario_id, result)
@@ -2253,12 +2385,14 @@ def _validate_result_contract(
             )
         stats["rules_examined_per_request"] = rules_examined / requests
 
-    if scenario.get("qos") == 2 and scenario.get("qos_distribution") is None:
-        qos2 = result.get("publish_qos_2")
-        qos2_count = int(qos2.get("count") or 0) if isinstance(qos2, dict) else 0
-        if qos2_count != expected_publish_count:
+    pinned_qos = scenario.get("qos")
+    if pinned_qos in {1, 2} and scenario.get("qos_distribution") is None:
+        qos_summary = result.get(f"publish_qos_{pinned_qos}")
+        qos_count = int(qos_summary.get("count") or 0) if isinstance(qos_summary, dict) else 0
+        if qos_count != expected_publish_count:
             raise RuntimeError(
-                f"{scenario_id}: QoS 2 path handled {qos2_count}/{expected_publish_count} publishes"
+                f"{scenario_id}: QoS {pinned_qos} path handled "
+                f"{qos_count}/{expected_publish_count} publishes"
             )
     if distribution := scenario.get("qos_distribution"):
         publisher_count = 1 if scenario.get("traffic_pattern") == "fanout" else client_count
@@ -2305,6 +2439,29 @@ def _validate_result_contract(
                 f"{scenario_id}: {transform_field} was applied to "
                 f"{transform_count}/{client_count} clients with {length_count} length samples"
             )
+    handoff = (scenario.get("biscuit_delegate") or {}).get("handoff")
+    if handoff:
+        handoff_publish = result.get("delegation_handoff_publish")
+        handoff_count = (
+            int(handoff_publish.get("count") or 0)
+            if isinstance(handoff_publish, dict)
+            else 0
+        )
+        topology = result.get("topology")
+        topology_handoff = (
+            topology.get("delegation_handoff") if isinstance(topology, dict) else None
+        )
+        if handoff_count != client_count:
+            raise RuntimeError(
+                f"{scenario_id}: delegated credentials handed off "
+                f"{handoff_count}/{client_count} times"
+            )
+        if isinstance(topology_handoff, dict) and (
+            int(topology_handoff.get("delegators") or 0) != 1
+            or int(topology_handoff.get("delegatees") or 0) != client_count
+            or int(topology_handoff.get("qos") or -1) != int(handoff.get("qos", 1))
+        ):
+            raise RuntimeError(f"{scenario_id}: delegation handoff topology mismatch")
 
     if scenario.get("complexity_axis") == "datalog":
         inputs = result.get("inputs")
@@ -5463,6 +5620,7 @@ def _build_available_scenarios(
             "message_size": 0,
             "client_count": 25,
             "message_count": 1000,
+            "qos": 1,
             "complexity_axis": "datalog",
             "complexity_level": "med",
             "biscuit_attenuate": {
@@ -5482,12 +5640,19 @@ def _build_available_scenarios(
             "message_size": 0,
             "client_count": 25,
             "message_count": 1000,
+            "qos": 1,
             "complexity_axis": "datalog",
             "complexity_level": "med",
             "biscuit_delegate": {
                 "ttl_seconds": 300,
                 "topic": "sensors/{client_id}/temp",
                 "op": "publish",
+                "handoff": {
+                    "topic": "delegation/handoff",
+                    "token": tokens["biscuit_delegation_handoff"],
+                    "qos": 1,
+                    "retain": True,
+                },
             },
             "attenuation_probe_subscribe_denied": True,
         },
@@ -5524,6 +5689,7 @@ def _build_available_scenarios(
             "message_size": 0,
             "client_count": 25,
             "message_count": 1000,
+            "qos": 1,
             "complexity_axis": "datalog",
             "complexity_level": "high",
             "biscuit_attenuate": {
@@ -5543,12 +5709,19 @@ def _build_available_scenarios(
             "message_size": 0,
             "client_count": 25,
             "message_count": 1000,
+            "qos": 1,
             "complexity_axis": "datalog",
             "complexity_level": "high",
             "biscuit_delegate": {
                 "ttl_seconds": 300,
                 "topic": "sensors/{client_id}/temp",
                 "op": "publish",
+                "handoff": {
+                    "topic": "delegation/handoff",
+                    "token": tokens["biscuit_delegation_handoff"],
+                    "qos": 1,
+                    "retain": True,
+                },
             },
             "attenuation_probe_subscribe_denied": True,
         },
@@ -5946,9 +6119,11 @@ def _build_available_scenarios(
             "message_size": 0,
             "client_count": 25,
             "message_count": 1000,
+            "qos": 1,
             "repeat": 6,
             "sleep_between": 1,
             "token_refresh": {"kind": "jwt", "ttl_seconds": 30},
+            "credential_freshness_required": True,
             "complexity_axis": "publish_authz_reconnect",
             "complexity_level": "baseline",
         },
@@ -5962,9 +6137,11 @@ def _build_available_scenarios(
             "message_size": 0,
             "client_count": 25,
             "message_count": 1000,
+            "qos": 1,
             "repeat": 6,
             "sleep_between": 1,
             "token_refresh": {"kind": "biscuit", "ttl_seconds": 30},
+            "credential_freshness_required": True,
             "complexity_axis": "publish_authz_reconnect",
             "complexity_level": "baseline",
         },
@@ -7184,6 +7361,18 @@ def main(
                             if strict_startup_provisioning is not None
                             else None
                         )
+                        attest_broker_auth = (
+                            s.get("complexity_axis") == "publish_authz_reconnect"
+                        )
+                        broker_auth_before = (
+                            _broker_auth_counters(
+                                compose_files=compose_files,
+                                compose_project_name=compose_project_name,
+                                extra_env=extra_env,
+                            )
+                            if attest_broker_auth
+                            else {}
+                        )
                         res = _run_loadgen(
                             tokens=tokens,
                             host=loadgen_mqtt_host,
@@ -7414,6 +7603,15 @@ def main(
                                 "fanout_publisher_password_map_profile"
                             ),
                         )
+                        if attest_broker_auth:
+                            broker_auth_after = _broker_auth_counters(
+                                compose_files=compose_files,
+                                compose_project_name=compose_project_name,
+                                extra_env=extra_env,
+                            )
+                            res["broker_auth_delta"] = _counter_delta(
+                                broker_auth_before, broker_auth_after
+                            )
                     if uses_http_authz:
                         res["authz_stats"] = _authz_stats(
                             authz_base,
@@ -7509,6 +7707,12 @@ def main(
                 out_payload["runs"].append({"loadgen": res, "resources": snap, "perf": perf_result})
                 if s.get("sleep_between"):
                     time.sleep(float(s["sleep_between"]))
+            if s.get("credential_freshness_required") and repeats > 1:
+                out_payload["credential_freshness"] = _validate_credential_freshness(
+                    s,
+                    cast(list[dict[str, Any]], out_payload["runs"]),
+                    client_count=effective_client_count,
+                )
         # Issue 15: Run packet analysis if tcpdump was enabled for this scenario
         packet_analysis_result: dict[str, Any] = {"enabled": False}
         if capture_this_scenario and tcpdump_analyze:

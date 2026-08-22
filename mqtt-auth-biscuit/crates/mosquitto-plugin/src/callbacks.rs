@@ -27,6 +27,7 @@ use crate::token_utils::{attach_biscuit_expiry, attach_biscuit_roles, set_synthe
 use std::ffi::c_int;
 use std::ffi::{CStr, c_void};
 use std::slice;
+use std::sync::atomic::Ordering;
 
 pub extern "C" fn basic_auth_callback(
     _event: c_int,
@@ -38,6 +39,7 @@ pub extern "C" fn basic_auth_callback(
     }
     let evt = unsafe { event_mut::<MosquittoEvtBasicAuth>(event_data) };
     let state = unsafe { plugin_state(userdata) };
+    state.auth_metrics.attempts.fetch_add(1, Ordering::Relaxed);
 
     if evt.password.is_null() {
         return if should_defer_no_token_basic_auth(
@@ -65,6 +67,16 @@ pub extern "C" fn basic_auth_callback(
 
     match state.auth_engine.authenticate_basic(password) {
         Ok(token_type) => {
+            match &token_type {
+                crate::auth::TokenType::Jwt { .. } => state
+                    .auth_metrics
+                    .jwt_validations
+                    .fetch_add(1, Ordering::Relaxed),
+                crate::auth::TokenType::Biscuit { .. } => state
+                    .auth_metrics
+                    .biscuit_validations
+                    .fetch_add(1, Ordering::Relaxed),
+            };
             let token_type = match attach_biscuit_expiry(
                 token_type,
                 &state.config.biscuit.root_public_key,
@@ -105,13 +117,25 @@ pub extern "C" fn basic_auth_callback(
             prune_session_index_against_cache(state);
             let session_username = mosq_client_username_string(evt.client);
             bind_session_username(state, &client_id, session_username.as_deref());
+            state.auth_metrics.successes.fetch_add(1, Ordering::Relaxed);
+            if state.config.benchmark_diagnostics {
+                state.auth_metrics.log_snapshot(&state.cache);
+            }
             MOSQ_ERR_SUCCESS
         }
         Err(AuthError::Expired) => {
+            state.auth_metrics.failures.fetch_add(1, Ordering::Relaxed);
+            if state.config.benchmark_diagnostics {
+                state.auth_metrics.log_snapshot(&state.cache);
+            }
             log_debug("Authentication rejected: token expired");
             MOSQ_ERR_AUTH
         }
         Err(AuthError::Invalid(msg)) => {
+            state.auth_metrics.failures.fetch_add(1, Ordering::Relaxed);
+            if state.config.benchmark_diagnostics {
+                state.auth_metrics.log_snapshot(&state.cache);
+            }
             log_debug(&format!("Authentication rejected: {msg}"));
             MOSQ_ERR_AUTH
         }
@@ -232,7 +256,11 @@ pub extern "C" fn acl_check_callback(
     let username = normalize_username(mosq_client_username_string(evt.client));
     let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
 
-    if let Some(token_type) = state.cache.get(&client_id) {
+    let cached_token = state.cache.get(&client_id);
+    if state.config.benchmark_diagnostics {
+        state.auth_metrics.observe_cache(&state.cache);
+    }
+    if let Some(token_type) = cached_token {
         if is_acl_read_only(evt.access) && !state.config.acl_read_full_authz {
             match check_token_expiry(&token_type) {
                 AuthzOutcome::Allowed => return MOSQ_ERR_SUCCESS,

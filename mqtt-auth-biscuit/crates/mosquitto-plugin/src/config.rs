@@ -146,6 +146,7 @@ pub struct PluginConfig {
     pub biscuit_identity_binding: IdentityBindingMode,
     pub sqlite_seed_demo_rules: bool,
     pub cache_ttl_seconds: u64,
+    pub benchmark_diagnostics: bool,
     pub allow_anonymous_no_token: bool,
     pub acl_read_full_authz: bool,
     pub control_notify_topic_prefix: String,
@@ -197,6 +198,7 @@ pub struct PluginConfigBuilder {
     dynamic_security_url: Option<String>,
     dynamic_security_reload_interval_seconds: Option<u64>,
     cache_ttl_seconds: Option<u64>,
+    benchmark_diagnostics: Option<bool>,
     allow_anonymous_no_token: Option<bool>,
     acl_read_full_authz: Option<bool>,
     control_notify_topic_prefix: Option<String>,
@@ -235,6 +237,7 @@ impl PluginConfigBuilder {
             dynamic_security_url: None,
             dynamic_security_reload_interval_seconds: None,
             cache_ttl_seconds: None,
+            benchmark_diagnostics: None,
             allow_anonymous_no_token: None,
             acl_read_full_authz: None,
             control_notify_topic_prefix: None,
@@ -326,6 +329,11 @@ impl PluginConfigBuilder {
 
     pub const fn cache_ttl_seconds(mut self, ttl: u64) -> Self {
         self.cache_ttl_seconds = Some(ttl);
+        self
+    }
+
+    pub const fn benchmark_diagnostics(mut self, enabled: bool) -> Self {
+        self.benchmark_diagnostics = Some(enabled);
         self
     }
 
@@ -451,6 +459,7 @@ impl PluginConfigBuilder {
                 .unwrap_or(IdentityBindingMode::Off),
             sqlite_seed_demo_rules: self.sqlite_seed_demo_rules.unwrap_or(false),
             cache_ttl_seconds,
+            benchmark_diagnostics: self.benchmark_diagnostics.unwrap_or(false),
             allow_anonymous_no_token: self.allow_anonymous_no_token.unwrap_or(false),
             acl_read_full_authz: self.acl_read_full_authz.unwrap_or(false),
             control_notify_topic_prefix,
@@ -638,6 +647,9 @@ fn apply_option(
             )?)),
         "cache_ttl_seconds" => {
             Ok(builder.cache_ttl_seconds(parse_u64_option("cache_ttl_seconds", &value)?))
+        }
+        "benchmark_diagnostics" => {
+            Ok(builder.benchmark_diagnostics(parse_bool_option("benchmark_diagnostics", &value)?))
         }
         "allow_anonymous_no_token" => Ok(builder
             .allow_anonymous_no_token(parse_bool_option("allow_anonymous_no_token", &value)?)),

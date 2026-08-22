@@ -14,6 +14,7 @@ use std::collections::HashSet;
 use std::ffi::c_char;
 use std::ffi::{CString, c_int, c_void};
 use std::ptr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
@@ -210,6 +211,40 @@ pub struct PluginState {
     config: PluginConfig,
     sqlite_policy: Option<SqlitePolicy>,
     dynamic_security_policy: Option<DynamicSecurityPolicy>,
+    auth_metrics: AuthMetrics,
+}
+
+#[derive(Default)]
+struct AuthMetrics {
+    attempts: AtomicU64,
+    successes: AtomicU64,
+    failures: AtomicU64,
+    jwt_validations: AtomicU64,
+    biscuit_validations: AtomicU64,
+    cache_observations: AtomicU64,
+}
+
+impl AuthMetrics {
+    fn log_snapshot(&self, cache: &SessionCache<String, TokenType>) {
+        let cache = cache.stats();
+        log_info(&format!(
+            "BENCHMARK_AUTH_COUNTERS attempts={} successes={} failures={} jwt_validations={} biscuit_validations={} cache_hits={} cache_misses={}",
+            self.attempts.load(Ordering::Relaxed),
+            self.successes.load(Ordering::Relaxed),
+            self.failures.load(Ordering::Relaxed),
+            self.jwt_validations.load(Ordering::Relaxed),
+            self.biscuit_validations.load(Ordering::Relaxed),
+            cache.hits,
+            cache.misses,
+        ));
+    }
+
+    fn observe_cache(&self, cache: &SessionCache<String, TokenType>) {
+        let observations = self.cache_observations.fetch_add(1, Ordering::Relaxed) + 1;
+        if observations == 1 || observations.is_multiple_of(1000) {
+            self.log_snapshot(cache);
+        }
+    }
 }
 
 fn apply_dynamic_security_control_enforcement(
@@ -554,6 +589,7 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
             config,
             sqlite_policy,
             dynamic_security_policy,
+            auth_metrics: AuthMetrics::default(),
         });
         *userdata = Box::into_raw(state).cast::<c_void>();
 

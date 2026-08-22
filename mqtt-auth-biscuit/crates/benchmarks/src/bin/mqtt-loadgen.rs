@@ -16,6 +16,7 @@ use rumqttc::{AsyncClient, Event, Outgoing};
 use serde::de::{DeserializeSeed, Error as _, IgnoredAny, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufReader};
@@ -541,6 +542,18 @@ struct Output {
     raw_publish_ms: Vec<f64>,
     raw_metrics: Value,
     errors: Vec<String>,
+    credential_issuance: Vec<CredentialIssuance>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CredentialIssuance {
+    client_id: String,
+    token_kind: String,
+    successful_requests: usize,
+    issued_at: i64,
+    exp: i64,
+    requested_ttl_seconds: u64,
+    token_sha256: String,
 }
 
 #[derive(Debug, Default)]
@@ -575,6 +588,7 @@ struct WorkerResult {
     sync_barrier_wait_ms: Option<f64>,
     sync_barrier_released_at_unix_ms: Option<u128>,
     errors: Vec<String>,
+    credential_issuance: Vec<CredentialIssuance>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -633,6 +647,7 @@ struct StandardMetrics {
     errors: Vec<String>,
     publish_throughput_mps: f64,
     receive_throughput_mps: f64,
+    credential_issuance: Vec<CredentialIssuance>,
 }
 
 #[derive(Debug, Default)]
@@ -668,11 +683,16 @@ struct FanoutChurnState {
 struct IssuedToken {
     bytes: Vec<u8>,
     exp: Option<i64>,
+    issuance: Option<CredentialIssuance>,
 }
 
 impl IssuedToken {
     fn static_token(bytes: Vec<u8>) -> Self {
-        Self { bytes, exp: None }
+        Self {
+            bytes,
+            exp: None,
+            issuance: None,
+        }
     }
 }
 
@@ -1597,8 +1617,29 @@ async fn fetch_token(args: &Args, kind: &str, client_id: &str, topic: &str) -> R
     let body: Value = response.json().await.map_err(|err| {
         MqttHelperError::Message(format!("token issuer response JSON failed: {err}"))
     })?;
-    let exp = body.get("exp").and_then(Value::as_i64);
-    if kind == "biscuit" {
+    let exp = body
+        .get("exp")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| MqttHelperError::Message("token issuer response missing exp".to_string()))?;
+    let issued_at = body
+        .get("issued_at")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| {
+            MqttHelperError::Message("token issuer response missing issued_at".to_string())
+        })?;
+    let response_ttl = exp.saturating_sub(issued_at);
+    let requested_ttl_seconds = args
+        .token_issuer_ttl
+        .unwrap_or_else(|| u64::try_from(response_ttl).unwrap_or_default());
+    if exp <= issued_at
+        || args.token_issuer_ttl.is_some()
+            && response_ttl != i64::try_from(requested_ttl_seconds).unwrap_or(i64::MAX)
+    {
+        return Err(MqttHelperError::Message(format!(
+            "token issuer lifetime mismatch: issued_at={issued_at}, exp={exp}, requested_ttl={requested_ttl_seconds}"
+        )));
+    }
+    let bytes = if kind == "biscuit" {
         let encoded = body
             .get("data_b64")
             .and_then(Value::as_str)
@@ -1606,17 +1647,31 @@ async fn fetch_token(args: &Args, kind: &str, client_id: &str, topic: &str) -> R
                 MqttHelperError::Message("token issuer response missing data_b64".to_string())
             })?;
         let padding = "=".repeat((4 - encoded.len() % 4) % 4);
-        let bytes = general_purpose::URL_SAFE
+        general_purpose::URL_SAFE
             .decode(format!("{encoded}{padding}"))
-            .map_err(|err| MqttHelperError::Message(format!("invalid data_b64 token: {err}")))?;
-        return Ok(IssuedToken { bytes, exp });
-    }
-    let token = body.get("token").and_then(Value::as_str).ok_or_else(|| {
-        MqttHelperError::Message("token issuer response missing token".to_string())
-    })?;
+            .map_err(|err| MqttHelperError::Message(format!("invalid data_b64 token: {err}")))?
+    } else {
+        body.get("token")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                MqttHelperError::Message("token issuer response missing token".to_string())
+            })?
+            .as_bytes()
+            .to_vec()
+    };
+    let token_sha256 = hex::encode(Sha256::digest(&bytes));
     Ok(IssuedToken {
-        bytes: token.as_bytes().to_vec(),
-        exp,
+        bytes,
+        exp: Some(exp),
+        issuance: Some(CredentialIssuance {
+            client_id: client_id.to_string(),
+            token_kind: kind.to_string(),
+            successful_requests: 1,
+            issued_at,
+            exp,
+            requested_ttl_seconds,
+            token_sha256,
+        }),
     })
 }
 
@@ -1653,6 +1708,7 @@ fn password_map_token(args: &Args, profile: &str, client_id: &str) -> Result<Iss
     Ok(IssuedToken {
         bytes: entry.bytes.clone(),
         exp: entry.exp,
+        issuance: None,
     })
 }
 
@@ -3772,6 +3828,7 @@ fn fanout_output(args: &Args, parts: FanoutOutputParts<'_>) -> Output {
         "sync_connect_barrier_wait": [],
     });
     Output {
+        credential_issuance: Vec::new(),
         inputs: inputs_json(
             args,
             "fanout",
@@ -4898,6 +4955,9 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
         return result;
     };
     let mut issued_token = issued_token;
+    if let Some(issuance) = issued_token.issuance.take() {
+        result.credential_issuance.push(issuance);
+    }
     let mut password = issued_token.bytes;
     let token_refresh_codes = match parse_token_refresh_codes(args.token_refresh_codes.as_deref()) {
         Ok(codes) => codes,
@@ -5149,6 +5209,10 @@ fn standard_metrics(
         .iter()
         .filter_map(|r| r.sync_barrier_released_at_unix_ms)
         .collect();
+    let credential_issuance = results
+        .iter()
+        .flat_map(|r| r.credential_issuance.clone())
+        .collect();
     let mut errors: Vec<_> = results.into_iter().flat_map(|r| r.errors).collect();
     if let Some(plan) = handoff_plan {
         errors.extend(plan.errors.clone());
@@ -5157,6 +5221,7 @@ fn standard_metrics(
     StandardMetrics {
         publish_throughput_mps: usize_as_f64(publish.len()) / duration_s,
         receive_throughput_mps: usize_as_f64(receive.len()) / duration_s,
+        credential_issuance,
         connect,
         token_refresh,
         token_refresh_len,
@@ -5332,6 +5397,7 @@ fn standard_output(
         raw_publish_ms: metrics.publish,
         raw_metrics,
         errors: metrics.errors,
+        credential_issuance: metrics.credential_issuance,
     }
 }
 
@@ -5594,6 +5660,7 @@ fn empty_standard_metrics() -> StandardMetrics {
         errors: Vec::new(),
         publish_throughput_mps: 0.0,
         receive_throughput_mps: 0.0,
+        credential_issuance: Vec::new(),
     }
 }
 
@@ -5826,6 +5893,7 @@ mod tests {
         let refresh_codes = parse_token_refresh_codes(args.token_refresh_codes.as_deref())
             .expect("refresh codes should parse");
         let output = Output {
+            credential_issuance: Vec::new(),
             inputs: inputs_json(args, mode, distribution.as_ref(), &refresh_codes, None),
             connect: Summary::default(),
             token_refresh: Summary::default(),
@@ -5890,6 +5958,7 @@ mod tests {
 
     fn empty_standard_metrics() -> StandardMetrics {
         StandardMetrics {
+            credential_issuance: Vec::new(),
             connect: Vec::new(),
             token_refresh: Vec::new(),
             token_refresh_len: Vec::new(),
@@ -6497,6 +6566,7 @@ mod tests {
                 "control_injection_delay",
                 "control_response",
                 "control_responses",
+                "credential_issuance",
                 "delegation",
                 "delegation_handoff_publish",
                 "delegation_len",
@@ -6828,6 +6898,7 @@ mod tests {
         let mut token = IssuedToken {
             bytes: b"token".to_vec(),
             exp: Some(now + 300),
+            issuance: None,
         };
 
         refresh_token_expiry(&args, &mut token, true).expect("expiry should update");

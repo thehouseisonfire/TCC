@@ -248,22 +248,30 @@ Dedicated fixed-workload composability scenarios:
 - `TOKEN-COMPOSABILITY-ATTENUATED-DATALOG-{MED,HIGH}-BISCUIT`
 - `TOKEN-COMPOSABILITY-DELEGATED-DATALOG-{MED,HIGH}-BISCUIT`
 
-These also pin the workload at 25 clients and 1000 messages per client. They
-reuse the medium/high complex Biscuit tokens and then apply runtime attenuation
-or runtime delegation on top, so the benchmark measures whether richer local
-rules remain practical when Biscuit-only transformations are also performed in
-the client path.
+These pin the workload at 25 clients, 1000 QoS 1 messages per client, and the
+medium/high complex Biscuit profiles. The attenuated variants derive and use a
+token locally. The delegated variants use a separate delegator, transfer one
+derived credential per delegatee over the broker-mediated handoff path, and
+require the delegatees to publish with the received credentials. Results must
+attest all derivations, handoff deliveries, restricted publishes, and denied
+subscription probes.
 
 Reconnect variants:
 
 - `TOKEN-PUBLISH-STRESS-RECONNECT-JWT`
 - `TOKEN-PUBLISH-STRESS-RECONNECT-BISCUIT`
 
-These use the same 25x1000 publish workload, but run 6 repeated
+These use the same pinned QoS 1 25x1000 publish workload, but run 6 repeated
 connect/publish/disconnect cycles with a 1-second pause between runs and fresh
 issuer-backed credentials from `mosquitto_shortcache.conf`. They measure the
 combination of full reconnect authentication overhead and sustained publish-path
 authorization cost. They use full reconnects, not MQTT v5 in-session reauth.
+
+Each run records one successful issuer response per client with issuance and
+expiry metadata plus a SHA-256 token fingerprint (never the credential itself).
+The runner requires fingerprints to change across all six repetitions and
+validates broker-side authentication, token-validation, and session-cache
+counter deltas for every run.
 
 ### HTTP Authorization Complexity Stress
 
@@ -300,9 +308,9 @@ of pre-generated delegated tokens.
 - `TOKEN-DELEGATION-SIMULATED-BISCUIT` keeps the previous pre-generated delegated token to
   compare runtime delegation against the simulated baseline.
 
-The `TOKEN-COMPOSABILITY-DELEGATED-DATALOG-*` scenarios use the same runtime
-delegation path as `TOKEN-DELEGATION-TEMP-ONLY-BISCUIT`, but start from the
-existing medium/high complex Datalog fixtures instead of the baseline token.
+The `TOKEN-COMPOSABILITY-DELEGATED-DATALOG-*` scenarios use the broker-mediated
+handoff path and start from the medium/high complex Datalog fixtures. This keeps
+them operationally distinct from local attenuation.
 
 Handoff-specific knobs (loadgen):
 

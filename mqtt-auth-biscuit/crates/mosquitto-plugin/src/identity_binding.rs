@@ -210,6 +210,7 @@ mod tests {
             biscuit_identity_binding: IdentityBindingMode::Off,
             sqlite_seed_demo_rules: false,
             cache_ttl_seconds: 3600,
+            benchmark_diagnostics: false,
             allow_anonymous_no_token: false,
             acl_read_full_authz: false,
             control_notify_topic_prefix: "system_notification".to_string(),

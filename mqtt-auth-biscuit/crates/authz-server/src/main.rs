@@ -258,6 +258,11 @@ struct AuthzStats {
     injected_failures: AtomicU64,
     policy_allows: AtomicU64,
     policy_denies: AtomicU64,
+    rules_examined: AtomicU64,
+    profile_simple: AtomicU64,
+    profile_med: AtomicU64,
+    profile_complex: AtomicU64,
+    profile_custom: AtomicU64,
 }
 
 impl AuthzStats {
@@ -266,6 +271,11 @@ impl AuthzStats {
         self.injected_failures.store(0, Ordering::Release);
         self.policy_allows.store(0, Ordering::Release);
         self.policy_denies.store(0, Ordering::Release);
+        self.rules_examined.store(0, Ordering::Release);
+        self.profile_simple.store(0, Ordering::Release);
+        self.profile_med.store(0, Ordering::Release);
+        self.profile_complex.store(0, Ordering::Release);
+        self.profile_custom.store(0, Ordering::Release);
     }
 
     fn snapshot(&self) -> serde_json::Value {
@@ -274,7 +284,24 @@ impl AuthzStats {
             "injected_failures": self.injected_failures.load(Ordering::Acquire),
             "policy_allows": self.policy_allows.load(Ordering::Acquire),
             "policy_denies": self.policy_denies.load(Ordering::Acquire),
+            "rules_examined": self.rules_examined.load(Ordering::Acquire),
+            "profile_requests": {
+                "simple": self.profile_simple.load(Ordering::Acquire),
+                "med": self.profile_med.load(Ordering::Acquire),
+                "complex": self.profile_complex.load(Ordering::Acquire),
+                "custom": self.profile_custom.load(Ordering::Acquire),
+            },
         })
+    }
+
+    fn record_profile(&self, profile: &PolicyProfile) {
+        let counter = match profile {
+            PolicyProfile::Simple => &self.profile_simple,
+            PolicyProfile::Med => &self.profile_med,
+            PolicyProfile::Complex => &self.profile_complex,
+            PolicyProfile::Custom => &self.profile_custom,
+        };
+        counter.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -681,18 +708,36 @@ fn rule_matches(rule: &Rule, ctx: &EvalContext<'_>) -> bool {
 }
 
 fn evaluate_rules(rules: &[Rule], ctx: &EvalContext<'_>) -> bool {
+    evaluate_rules_observed(rules, ctx).0
+}
+
+fn evaluate_rules_observed(rules: &[Rule], ctx: &EvalContext<'_>) -> (bool, u64) {
+    let mut examined = 0;
     if rules
         .iter()
-        .any(|rule| rule.effect == RuleEffect::Deny && rule_matches(rule, ctx))
+        .filter(|rule| rule.effect == RuleEffect::Deny)
+        .any(|rule| {
+            examined += 1;
+            rule_matches(rule, ctx)
+        })
     {
-        return false;
+        return (false, examined);
     }
-    rules
+    let allowed = rules
         .iter()
-        .any(|rule| rule.effect == RuleEffect::Allow && rule_matches(rule, ctx))
+        .filter(|rule| rule.effect == RuleEffect::Allow)
+        .any(|rule| {
+            examined += 1;
+            rule_matches(rule, ctx)
+        });
+    (allowed, examined)
 }
 
 fn evaluate_authorization(cfg: &AppConfig, req: &AuthRequest) -> bool {
+    evaluate_authorization_observed(cfg, req).0
+}
+
+fn evaluate_authorization_observed(cfg: &AppConfig, req: &AuthRequest) -> (bool, u64) {
     let operation = access_to_operation(req.access);
     let mut effective_roles = HashSet::new();
     if let Some(role_list) = cfg.client_roles.get(req.client_id.trim()) {
@@ -718,7 +763,7 @@ fn evaluate_authorization(cfg: &AppConfig, req: &AuthRequest) -> bool {
         client_id: req.client_id.trim(),
         roles: &effective_roles,
     };
-    evaluate_rules(&policy_rules, &ctx)
+    evaluate_rules_observed(&policy_rules, &ctx)
 }
 
 // ------------------- Request handler -------------------
@@ -835,7 +880,12 @@ async fn handle(
             }
 
             // Authorization logic
-            let allowed = evaluate_authorization(&cfg, &ar);
+            let (allowed, rules_examined) = evaluate_authorization_observed(&cfg, &ar);
+            state
+                .stats
+                .rules_examined
+                .fetch_add(rules_examined, Ordering::AcqRel);
+            state.stats.record_profile(&cfg.authz_profile);
             if allowed {
                 state.stats.policy_allows.fetch_add(1, Ordering::AcqRel);
             } else {
@@ -1056,6 +1106,28 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observed_rule_evaluation_counts_profile_work() {
+        let mut cfg = AppConfig {
+            authz_profile: PolicyProfile::Simple,
+            ..AppConfig::default()
+        };
+        let req = AuthRequest {
+            client_id: "client_1".to_string(),
+            topic: "sensors/client_1/temp".to_string(),
+            access: 2,
+            token: None,
+        };
+        let (allowed, simple_examined) = evaluate_authorization_observed(&cfg, &req);
+        assert!(allowed);
+        assert!(simple_examined > 0);
+
+        cfg.authz_profile = PolicyProfile::Complex;
+        let (allowed, complex_examined) = evaluate_authorization_observed(&cfg, &req);
+        assert!(allowed);
+        assert!(complex_examined > simple_examined);
+    }
 
     #[test]
     fn deterministic_failure_rate_has_exact_ordinals() {

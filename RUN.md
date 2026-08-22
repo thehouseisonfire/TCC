@@ -11,9 +11,9 @@ multiple functional categories. The run plan has two parts:
 
 | Part | What | Runs | Est. time |
 |------|------|------|-----------|
-| 1 | All 440 scenarios × 2 clients × 2 messages × 3 runs | 5,280 | ~4–7 days |
+| 1 | All 440 scenarios, varying every non-fixed workload axis, × 3 runs | 3,174 | ~3–5 days |
 | 2 | 32 scenarios × 3 clients × 2 messages × 3 QoS × 2 token issuer × 3 runs | 3,456 | ~4–7 days |
-| **Total** | | **8,736** | **~9–14 days** |
+| **Total** | | **6,630** | **~7–12 days** |
 
 ## Research Dimensions
 
@@ -30,11 +30,12 @@ Every lever below is pulled at least twice across the full plan.
 | QoS | 1 (default) | 0, 1, 2 | `--qos` |
 | Token issuer | Default | Default, Stripped | `--token-issuer-no-default-roles` |
 
-Part 1 runs every scenario across a 2×2 matrix of client counts and message
-densities (3 runs each). Part 2 deepens the sweep on 32 representative
-scenarios by adding a third client level, all three QoS levels, and token
-issuer configuration, while excluding scenarios whose workload shape is already
-defined by the scenario itself.
+Part 1 runs every scenario three times and varies each workload axis that the
+scenario does not define itself. Thus an ordinary scenario uses the full 2×2
+client/message matrix, a fan-out scenario with a fixed subscriber slice still
+uses both message levels, and a fully fixed stress workload runs once per
+repetition. Part 2 deepens the sweep on 32 representative scenarios by adding a
+third client level, all three QoS levels, and token issuer configuration.
 
 ## Sweep Scenarios (Part 2)
 
@@ -144,23 +145,30 @@ cargo run --locked -p gen-tokens --bin gen-tokens
 cd ../..
 ```
 
-### Step 2: Part 1 — Full baseline (all 440 × 2 clients × 2 messages × 3 runs)
+### Step 2: Part 1 — Full baseline
 
 Generate the full scenario list:
 
 ```bash
 readarray -t SCENARIO_GROUPS < <(cd mqtt-auth-biscuit && uv run --locked python -c "
-from benchmarks.run_scenarios import _read_tokens, _build_available_scenarios, _expand_tls_matrix
+from benchmarks.run_scenarios import (
+    _read_tokens, _build_available_scenarios, _expand_tls_matrix, _scenario_workload_shape,
+)
 t = _read_tokens('benchmarks/tokens.json')
 a = _expand_tls_matrix(_build_available_scenarios(
     t, token_issuer_no_default_roles=False, token_issuer_no_default_grants=False))
 reauth = sorted(name for name in a if name.startswith('TOKEN-LIFECYCLE-REAUTH-STORM-'))
-regular = sorted(name for name in a if name not in reauth)
-print(','.join(regular))
+regular = {name: scenario for name, scenario in a.items() if name not in reauth}
+for shape in ('matrix', 'fixed-clients', 'fixed-messages', 'fixed'):
+    print(','.join(sorted(name for name, scenario in regular.items()
+                          if _scenario_workload_shape(scenario) == shape)))
 print(','.join(reauth))
 " 2>/dev/null)
-SCENARIOS=${SCENARIO_GROUPS[0]}
-REAUTH_STORM_SCENARIOS=${SCENARIO_GROUPS[1]}
+MATRIX_SCENARIOS=${SCENARIO_GROUPS[0]}
+FIXED_CLIENT_SCENARIOS=${SCENARIO_GROUPS[1]}
+FIXED_MESSAGE_SCENARIOS=${SCENARIO_GROUPS[2]}
+FIXED_SCENARIOS=${SCENARIO_GROUPS[3]}
+REAUTH_STORM_SCENARIOS=${SCENARIO_GROUPS[4]}
 ```
 
 Run the 2×2 matrix (clients × messages) with 3 repetitions:
@@ -171,20 +179,12 @@ for clients in 10 200; do
     for run in 1 2 3; do
       echo "=== Part 1: clients=$clients messages=$messages run=$run ==="
       ./scripts/run-benchmarks \
-        --scenarios "$SCENARIOS" \
+        --scenarios "$MATRIX_SCENARIOS" \
+        --workload-shape matrix \
         --clients "$clients" \
         --messages "$messages" \
         --client-topology container-per-client \
         --client-memory 96m \
-        --skip-build \
-        --skip-tokens
-
-      # Reauth storms are incompatible with container-per-client.
-      ./scripts/run-benchmarks \
-        --scenarios "$REAUTH_STORM_SCENARIOS" \
-        --clients "$clients" \
-        --messages "$messages" \
-        --client-topology host \
         --skip-build \
         --skip-tokens
 
@@ -196,13 +196,68 @@ for clients in 10 200; do
 done
 ```
 
-This produces 5,280 scenario runs across 12 invocations of `run-benchmarks`.
+Run partially fixed workloads over the axis they do not define:
 
-Scenarios that declare their own `client_count` or `message_count` retain that
-fixed workload in every invocation. Treat those executions as repeated
-observations of the fixed workload; do not analyze the enclosing loop's nominal
-client/message values as distinct experimental levels for those scenarios. The
-effective values are recorded in each result's `scenario_config`.
+```bash
+for messages in 10 100; do
+  for run in 1 2 3; do
+    ./scripts/run-benchmarks \
+      --scenarios "$FIXED_CLIENT_SCENARIOS" \
+      --workload-shape fixed-clients \
+      --messages "$messages" \
+      --client-topology container-per-client \
+      --client-memory 96m \
+      --skip-build --skip-tokens
+    mv mqtt-auth-biscuit/benchmarks/results \
+       mqtt-auth-biscuit/benchmarks/results-p1-fixed-clients-m${messages}-r${run}
+  done
+done
+
+# This group is currently empty, but keeps the procedure correct if a scenario
+# later fixes messages while leaving clients parameterized.
+if [[ -n "$FIXED_MESSAGE_SCENARIOS" ]]; then
+  for clients in 10 200; do
+    for run in 1 2 3; do
+      ./scripts/run-benchmarks \
+        --scenarios "$FIXED_MESSAGE_SCENARIOS" \
+        --workload-shape fixed-messages \
+        --clients "$clients" \
+        --client-topology container-per-client \
+        --client-memory 96m \
+        --skip-build --skip-tokens
+      mv mqtt-auth-biscuit/benchmarks/results \
+         mqtt-auth-biscuit/benchmarks/results-p1-fixed-messages-c${clients}-r${run}
+    done
+  done
+fi
+```
+
+Run fully scenario-defined workloads once per repetition. Reauth storms use
+host topology because they are incompatible with container-per-client.
+
+```bash
+for run in 1 2 3; do
+  ./scripts/run-benchmarks \
+    --scenarios "$FIXED_SCENARIOS" \
+    --workload-shape fixed \
+    --client-topology container-per-client \
+    --client-memory 96m \
+    --skip-build --skip-tokens
+  mv mqtt-auth-biscuit/benchmarks/results \
+     mqtt-auth-biscuit/benchmarks/results-p1-fixed-r${run}
+
+  ./scripts/run-benchmarks \
+    --scenarios "$REAUTH_STORM_SCENARIOS" \
+    --workload-shape fixed \
+    --client-topology host \
+    --skip-build --skip-tokens
+  mv mqtt-auth-biscuit/benchmarks/results \
+     mqtt-auth-biscuit/benchmarks/results-p1-reauth-r${run}
+done
+```
+
+Every result records both requested and effective clients, messages, and QoS,
+plus whether each workload axis came from the CLI matrix or the scenario.
 
 ### Step 3: Part 2 — Parameter sweep (32 scenarios × 36 combos × 3 runs)
 

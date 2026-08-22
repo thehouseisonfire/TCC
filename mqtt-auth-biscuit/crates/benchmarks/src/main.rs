@@ -88,6 +88,17 @@ struct CredentialProfile {
     entries: BTreeMap<String, CredentialEntry>,
 }
 
+#[derive(Debug, Serialize)]
+struct CredentialSemantic {
+    token_kind: &'static str,
+    complexity_axis: &'static str,
+    complexity_level: &'static str,
+    biscuit_blocks: usize,
+    facts: usize,
+    rules: usize,
+    checks: usize,
+}
+
 fn encoded_biscuit(token: &Biscuit) -> String {
     format!(
         "b64:{}",
@@ -1097,9 +1108,48 @@ fn main() {
         }
     }
 
+    let profile_semantics = BTreeMap::from([
+        (
+            "biscuit_complex_low",
+            CredentialSemantic {
+                token_kind: "biscuit",
+                complexity_axis: "datalog",
+                complexity_level: "low",
+                biscuit_blocks: 1,
+                facts: 8,
+                rules: 3,
+                checks: 0,
+            },
+        ),
+        (
+            "biscuit_complex_med",
+            CredentialSemantic {
+                token_kind: "biscuit",
+                complexity_axis: "datalog",
+                complexity_level: "med",
+                biscuit_blocks: 3,
+                facts: 14,
+                rules: 6,
+                checks: 1,
+            },
+        ),
+        (
+            "biscuit_complex_high",
+            CredentialSemantic {
+                token_kind: "biscuit",
+                complexity_axis: "datalog",
+                complexity_level: "high",
+                biscuit_blocks: 5,
+                facts: 21,
+                rules: 10,
+                checks: 2,
+            },
+        ),
+    ]);
     let password_map = json!({
-        "version": 1,
+        "version": 2,
         "max_clients": max_clients,
+        "profile_semantics": profile_semantics,
         "profiles": profiles,
     });
     let mut f = File::create("benchmarks/password-map.json").unwrap();
@@ -1170,5 +1220,36 @@ mod tests {
             .unwrap();
 
         assert_eq!(identities, vec![("client_1".to_string(),)]);
+    }
+
+    #[test]
+    fn datalog_complexity_fixtures_are_distinct_and_authorize_the_measured_publish() {
+        let root_keypair = KeyPair::from(
+            &PrivateKey::from_bytes(&TEST_BISCUIT_ROOT_BYTES, biscuit_auth::Algorithm::Ed25519)
+                .unwrap(),
+        );
+        let mut lengths = Vec::new();
+        for level in ["low", "med", "high"] {
+            let biscuit = complex_biscuit(&root_keypair, "client_1", level);
+            lengths.push(biscuit.to_vec().unwrap().len());
+            let mut authorizer = AuthorizerBuilder::new()
+                .fact(r#"operation("publish")"#)
+                .unwrap()
+                .fact(r#"resource("sensors/client_1/temp")"#)
+                .unwrap()
+                .fact("time(1900000000)")
+                .unwrap()
+                .policy(r#"allow if right("publish", "sensors/client_1/temp")"#)
+                .unwrap()
+                .set_limits(biscuit_auth::AuthorizerLimits {
+                    max_time: std::time::Duration::from_secs(2),
+                    ..Default::default()
+                })
+                .build(&biscuit)
+                .unwrap();
+            authorizer.authorize().unwrap();
+        }
+        assert!(lengths[0] < lengths[1]);
+        assert!(lengths[1] < lengths[2]);
     }
 }

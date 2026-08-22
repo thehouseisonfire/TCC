@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::io::BufReader;
+use std::io::{self, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
@@ -30,6 +30,8 @@ use tokio::sync::{Notify, mpsc};
 const SYNC_CONNECT_RELEASE_DELAY: Duration = Duration::from_millis(200);
 const DEFAULT_CONTROL_TOPIC: &str = "$CONTROL/dynamic-security/v1";
 const CLIENT_ID_PLACEHOLDER: &str = "{client_id}";
+const FANOUT_PAYLOAD_VERSION: &str = "v3";
+const FANOUT_LATENCY_CLOCK: &str = "clock_monotonic_raw";
 
 #[derive(Debug, Deserialize)]
 struct PasswordMapProfile {
@@ -52,6 +54,7 @@ struct ResolvedPassword {
 #[derive(Debug)]
 struct PasswordMap {
     max_clients: usize,
+    profile_semantics: HashMap<String, Value>,
     profiles: HashMap<String, HashMap<String, ResolvedPassword>>,
 }
 
@@ -89,6 +92,7 @@ impl<'de> Visitor<'de> for PasswordMapVisitor<'_> {
     {
         let mut version: Option<u64> = None;
         let mut max_clients: Option<usize> = None;
+        let mut profile_semantics: Option<HashMap<String, Value>> = None;
         let mut profiles: Option<HashMap<String, HashMap<String, ResolvedPassword>>> = None;
 
         while let Some(field) = map.next_key::<String>()? {
@@ -105,6 +109,12 @@ impl<'de> Visitor<'de> for PasswordMapVisitor<'_> {
                     }
                     max_clients = Some(map.next_value()?);
                 }
+                "profile_semantics" => {
+                    if profile_semantics.is_some() {
+                        return Err(A::Error::duplicate_field("profile_semantics"));
+                    }
+                    profile_semantics = Some(map.next_value()?);
+                }
                 "profiles" => {
                     if profiles.is_some() {
                         return Err(A::Error::duplicate_field("profiles"));
@@ -120,13 +130,15 @@ impl<'de> Visitor<'de> for PasswordMapVisitor<'_> {
         }
 
         let version = version.ok_or_else(|| A::Error::missing_field("version"))?;
-        if version != 1 {
+        if version != 2 {
             return Err(A::Error::custom(format!(
-                "unsupported password-map version {version}; expected 1"
+                "unsupported password-map version {version}; expected 2; regenerate tokens"
             )));
         }
         Ok(PasswordMap {
             max_clients: max_clients.ok_or_else(|| A::Error::missing_field("max_clients"))?,
+            profile_semantics: profile_semantics
+                .ok_or_else(|| A::Error::missing_field("profile_semantics"))?,
             profiles: profiles.ok_or_else(|| A::Error::missing_field("profiles"))?,
         })
     }
@@ -378,7 +390,11 @@ struct Args {
     biscuit_attenuate_op: Option<String>,
     #[arg(long)]
     biscuit_attenuate_ttl: Option<u64>,
-    #[arg(long, env = "MQTT_ATTENUATION_PROBE_SUBSCRIBE_DENIED")]
+    #[arg(
+        long,
+        visible_alias = "derived-token-probe-subscribe-denied",
+        env = "MQTT_ATTENUATION_PROBE_SUBSCRIBE_DENIED"
+    )]
     attenuation_probe_subscribe_denied: bool,
     #[arg(long)]
     biscuit_public_key_hex: Option<String>,
@@ -1819,6 +1835,33 @@ fn unix_timestamp_now() -> Result<i64> {
         .map_err(|_| MqttHelperError::Message("system timestamp exceeds i64 range".to_string()))
 }
 
+fn monotonic_raw_nanos_now() -> Result<u128> {
+    let mut timestamp = std::mem::MaybeUninit::<libc::timespec>::uninit();
+    // SAFETY: `timestamp` points to writable storage for one `timespec`, and
+    // `clock_gettime` initializes it on success before `assume_init` is used.
+    let result = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_RAW, timestamp.as_mut_ptr()) };
+    if result != 0 {
+        return Err(MqttHelperError::Message(format!(
+            "clock_monotonic_raw_failed:{}",
+            io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: a successful `clock_gettime` call initialized `timestamp`.
+    let timestamp = unsafe { timestamp.assume_init() };
+    let seconds = u128::try_from(timestamp.tv_sec).map_err(|_| {
+        MqttHelperError::Message("clock_monotonic_raw_negative_seconds".to_string())
+    })?;
+    let nanoseconds = u128::try_from(timestamp.tv_nsec).map_err(|_| {
+        MqttHelperError::Message("clock_monotonic_raw_negative_nanoseconds".to_string())
+    })?;
+    if nanoseconds >= 1_000_000_000 {
+        return Err(MqttHelperError::Message(
+            "clock_monotonic_raw_invalid_nanoseconds".to_string(),
+        ));
+    }
+    Ok(seconds * 1_000_000_000 + nanoseconds)
+}
+
 fn unix_ms_now() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2027,6 +2070,7 @@ fn apply_biscuit_transforms(
     password: &mut Vec<u8>,
 ) -> bool {
     if args.biscuit_attenuate {
+        let original = password.clone();
         let restrict_topic = args
             .biscuit_attenuate_topic
             .as_deref()
@@ -2045,6 +2089,12 @@ fn apply_biscuit_transforms(
             checks: &checks,
         }) {
             Ok(transform) => {
+                if transform.password == original {
+                    result
+                        .errors
+                        .push("attenuation_failed:derived token is unchanged".to_string());
+                    return false;
+                }
                 *password = transform.password;
                 result.attenuation_ms = Some(transform.elapsed_ms);
                 result.attenuation_len = Some(transform.token_len);
@@ -2056,6 +2106,7 @@ fn apply_biscuit_transforms(
         }
     }
     if args.biscuit_delegate {
+        let original = password.clone();
         let restrict_topic = args
             .biscuit_delegate_topic
             .as_deref()
@@ -2074,6 +2125,12 @@ fn apply_biscuit_transforms(
             checks: &checks,
         }) {
             Ok(transform) => {
+                if transform.password == original {
+                    result
+                        .errors
+                        .push("delegation_failed:derived token is unchanged".to_string());
+                    return false;
+                }
                 *password = transform.password;
                 result.delegation_ms = Some(transform.elapsed_ms);
                 result.delegation_len = Some(transform.token_len);
@@ -2427,6 +2484,37 @@ fn inputs_json(
     token_refresh_codes: &[u16],
     handoff_nonce: Option<&str>,
 ) -> Value {
+    let credential_attestation = |profile: &str, validated_credentials: usize| {
+        let semantic = args
+            .password_map_data
+            .as_ref()
+            .and_then(|map| map.profile_semantics.get(profile));
+        serde_json::json!({
+            "profile": profile,
+            "semantic": semantic,
+            "validated_credentials": validated_credentials,
+        })
+    };
+    let mut credential_attestations = serde_json::Map::new();
+    let attest_clients = (mode != "fanout"
+        || matches!(args.fanout_role.as_str(), "combined" | "subscriber"))
+        && args.biscuit_delegate_handoff_role != "delegatee";
+    let attest_fanout_publisher =
+        mode == "fanout" && matches!(args.fanout_role.as_str(), "combined" | "publisher");
+    if attest_clients && let Some(profile) = args.password_map_profile.as_deref() {
+        credential_attestations.insert(
+            "clients".to_string(),
+            credential_attestation(profile, args.clients),
+        );
+    }
+    if attest_fanout_publisher
+        && let Some(profile) = args.fanout_publisher_password_map_profile.as_deref()
+    {
+        credential_attestations.insert(
+            "fanout_publisher".to_string(),
+            credential_attestation(profile, 1),
+        );
+    }
     serde_json::json!({
         "host": args.host,
         "port": args.port,
@@ -2460,8 +2548,13 @@ fn inputs_json(
         "biscuit_identity_binding": args.biscuit_identity_binding,
         "biscuit_client_id_fact": args.biscuit_client_id_fact,
         "biscuit_transform_mode": "in_process",
+        "credential_attestations": credential_attestations,
         "strict_multi_client_startup_provisioning": strict_multi_client_startup(args),
         "mode": mode,
+        "fanout_latency_clock": (mode == "fanout").then(|| serde_json::json!({
+            "source": FANOUT_LATENCY_CLOCK,
+            "payload_version": FANOUT_PAYLOAD_VERSION,
+        })),
         "fanout_topic": args.fanout_topic,
         "biscuit_attenuate": args.biscuit_attenuate,
         "biscuit_attenuate_denies": args.biscuit_attenuate_deny,
@@ -2974,28 +3067,43 @@ struct WorkerPublishPlan<'a> {
 }
 
 struct FanoutMessage {
-    sent: f64,
+    sent_monotonic_ns: u128,
     sequence_id: Option<usize>,
     phase: Option<usize>,
 }
 
 fn parse_fanout_message(payload: &[u8]) -> Option<FanoutMessage> {
-    let pos = payload.iter().position(|byte| *byte == b'|')?;
-    let sent = std::str::from_utf8(&payload[..pos])
+    let version_end = payload.iter().position(|byte| *byte == b'|')?;
+    if &payload[..version_end] != FANOUT_PAYLOAD_VERSION.as_bytes() {
+        return None;
+    }
+    let timestamp_start = version_end + 1;
+    let timestamp_end = payload
+        .iter()
+        .skip(timestamp_start)
+        .position(|byte| *byte == b'|')?
+        + timestamp_start;
+    let sent_monotonic_ns = std::str::from_utf8(&payload[timestamp_start..timestamp_end])
         .ok()?
-        .parse::<f64>()
+        .parse::<u128>()
         .ok()?;
-    let Some(sequence_end) = payload.iter().skip(pos + 1).position(|byte| *byte == b'|') else {
+    let sequence_start = timestamp_end + 1;
+    let Some(sequence_end_relative) = payload
+        .iter()
+        .skip(sequence_start)
+        .position(|byte| *byte == b'|')
+    else {
         return Some(FanoutMessage {
-            sent,
+            sent_monotonic_ns,
             sequence_id: None,
             phase: None,
         });
     };
-    let sequence_id = std::str::from_utf8(&payload[pos + 1..pos + 1 + sequence_end])
+    let sequence_end = sequence_start + sequence_end_relative;
+    let sequence_id = std::str::from_utf8(&payload[sequence_start..sequence_end])
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok());
-    let phase_start = pos + 1 + sequence_end + 1;
+    let phase_start = sequence_end + 1;
     let phase = payload
         .iter()
         .skip(phase_start)
@@ -3006,15 +3114,33 @@ fn parse_fanout_message(payload: &[u8]) -> Option<FanoutMessage> {
                 .and_then(|raw| raw.parse::<usize>().ok())
         });
     Some(FanoutMessage {
-        sent,
+        sent_monotonic_ns,
         sequence_id,
         phase,
     })
 }
 
+fn fanout_receive_latency_ms(
+    sent_monotonic_ns: u128,
+    received_monotonic_ns: u128,
+    maximum: Duration,
+) -> Result<f64> {
+    let elapsed_ns = received_monotonic_ns
+        .checked_sub(sent_monotonic_ns)
+        .ok_or_else(|| {
+            MqttHelperError::Message("fanout_receive_negative_clock_delta".to_string())
+        })?;
+    if elapsed_ns > maximum.as_nanos() {
+        return Err(MqttHelperError::Message(format!(
+            "fanout_receive_implausible_clock_delta:elapsed_ns={elapsed_ns},max_ns={}",
+            maximum.as_nanos()
+        )));
+    }
+    Ok(elapsed_ns as f64 / 1_000_000.0)
+}
+
 async fn collect_fanout_subscriber(
     mut subscriber: FanoutSubscriber,
-    start: Instant,
     expected_messages: usize,
     publishing_done: Arc<AtomicBool>,
     churn_receipts: Arc<AtomicUsize>,
@@ -3075,8 +3201,20 @@ async fn collect_fanout_subscriber(
                             last_sequence_phase = message.phase;
                         }
                     }
-                    let elapsed = (start.elapsed().as_secs_f64() - message.sent) * 1000.0;
-                    subscriber.result.receive_ms.push(elapsed.max(0.0));
+                    let now = match monotonic_raw_nanos_now() {
+                        Ok(value) => value,
+                        Err(err) => {
+                            subscriber.result.errors.push(err.to_string());
+                            continue;
+                        }
+                    };
+                    match fanout_receive_latency_ms(message.sent_monotonic_ns, now, drain_timeout) {
+                        Ok(elapsed_ms) => subscriber.result.receive_ms.push(elapsed_ms),
+                        Err(err) => {
+                            subscriber.result.errors.push(err.to_string());
+                            continue;
+                        }
+                    }
                     if let Some(phase) = message.phase {
                         *subscriber
                             .result
@@ -3433,7 +3571,6 @@ async fn wait_for_fanout_churn_receipts(
 
 async fn publish_fanout(
     args: &Args,
-    start: Instant,
     publisher: &AsyncClient,
     publisher_eventloop: &mut rumqttc::EventLoop,
     qos_distribution: Option<&QosDistribution>,
@@ -3464,9 +3601,17 @@ async fn publish_fanout(
             }
         }
         let publish_qos = qos_distribution.map_or(args.qos, QosDistribution::choose);
-        let sent = start.elapsed().as_secs_f64();
+        let sent_monotonic_ns = match monotonic_raw_nanos_now() {
+            Ok(value) => value,
+            Err(err) => {
+                errors.push(err.to_string());
+                break;
+            }
+        };
         let phase = churn_state.applied_events;
-        let mut payload = format!("{sent:.9}|{sequence_id}|{phase}|").into_bytes();
+        let mut payload =
+            format!("{FANOUT_PAYLOAD_VERSION}|{sent_monotonic_ns}|{sequence_id}|{phase}|")
+                .into_bytes();
         if args.message_size > payload.len() {
             payload.extend(vec![b'A'; args.message_size - payload.len()]);
         }
@@ -3492,7 +3637,6 @@ async fn publish_fanout(
 }
 
 fn spawn_fanout_collectors(
-    start: Instant,
     subscribers: Vec<FanoutSubscriber>,
     expected_messages: usize,
     publishing_done: &Arc<AtomicBool>,
@@ -3502,7 +3646,6 @@ fn spawn_fanout_collectors(
     for subscriber in subscribers {
         subscriber_tasks.push(tokio::spawn(collect_fanout_subscriber(
             subscriber,
-            start,
             expected_messages,
             Arc::clone(publishing_done),
             Arc::clone(churn_receipts),
@@ -3732,7 +3875,6 @@ async fn run_fanout(args: Args) -> Result<Output> {
     let churn_receipts = Arc::new(AtomicUsize::new(0));
     let subscriber_tasks = if fanout_ready {
         Some(spawn_fanout_collectors(
-            start,
             std::mem::take(&mut subscribers),
             args.messages,
             &publishing_done,
@@ -3744,7 +3886,6 @@ async fn run_fanout(args: Args) -> Result<Output> {
     let (fanout_publish_ms, fanout_publish_by_qos, churn_state) = if fanout_ready {
         publish_fanout(
             &args,
-            start,
             &publisher,
             &mut publisher_eventloop,
             qos_distribution.as_ref(),
@@ -3836,7 +3977,6 @@ async fn run_fanout_subscriber(args: Args) -> Result<Output> {
             vec![
                 collect_fanout_subscriber(
                     subscriber,
-                    start,
                     args.messages,
                     Arc::clone(&publishing_done),
                     Arc::new(AtomicUsize::new(0)),
@@ -3937,7 +4077,6 @@ async fn run_fanout_publisher(args: Args) -> Result<Output> {
             connect_fanout_publisher(&args, &fallback_password).await?;
         let published = publish_fanout(
             &args,
-            start,
             &publisher,
             &mut publisher_eventloop,
             qos_distribution.as_ref(),
@@ -4500,7 +4639,7 @@ async fn publish_control_and_validate(
     }
 }
 
-async fn run_attenuation_subscribe_denial_probe(
+async fn run_derived_token_subscribe_denial_probe(
     client: &AsyncClient,
     topic: &str,
     result: &mut WorkerResult,
@@ -4509,8 +4648,8 @@ async fn run_attenuation_subscribe_denial_probe(
         let notice = client.subscribe_tracked(topic, qos(1)?).await?;
         let suback = tokio::time::timeout(Duration::from_secs(10), notice.wait_async())
             .await
-            .map_err(|_| MqttHelperError::Message("attenuation_probe_timeout".to_string()))?
-            .map_err(|err| MqttHelperError::Message(format!("attenuation_probe_failed:{err}")))?;
+            .map_err(|_| MqttHelperError::Message("derived_token_probe_timeout".to_string()))?
+            .map_err(|err| MqttHelperError::Message(format!("derived_token_probe_failed:{err}")))?;
         let codes = suback
             .return_codes
             .into_iter()
@@ -4518,7 +4657,7 @@ async fn run_attenuation_subscribe_denial_probe(
             .collect::<Vec<_>>();
         if codes.is_empty() || codes.iter().any(|code| matches!(code, 0..=2)) {
             return Err(MqttHelperError::Message(format!(
-                "attenuation_probe_unexpected_allow:{codes:?}"
+                "derived_token_probe_unexpected_allow:{codes:?}"
             )));
         }
         Ok(())
@@ -4898,7 +5037,7 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
     )
     .await;
     if args.attenuation_probe_subscribe_denied {
-        run_attenuation_subscribe_denial_probe(&client, &topic, &mut result).await;
+        run_derived_token_subscribe_denial_probe(&client, &topic, &mut result).await;
     }
     wait_for_proactive_assertion_attempt(
         &args,
@@ -6423,6 +6562,82 @@ mod tests {
         let fanout_inputs = inputs_json(&fanout_args, "fanout", Some(&distribution), &[], None);
         assert_eq!(fanout_inputs["mode"], "fanout");
         assert_eq!(fanout_inputs["qos_distribution"][0]["qos"], 0);
+        assert_eq!(
+            fanout_inputs["fanout_latency_clock"],
+            serde_json::json!({
+                "source": "clock_monotonic_raw",
+                "payload_version": "v3",
+            })
+        );
+        assert!(control_inputs["fanout_latency_clock"].is_null());
+    }
+
+    #[test]
+    fn credential_attestations_follow_the_actual_fanout_role() {
+        let combined = Args::parse_from([
+            "mqtt-loadgen",
+            "--mode",
+            "fanout",
+            "--clients",
+            "3",
+            "--password-map-profile",
+            "subscriber-profile",
+            "--fanout-publisher-password-map-profile",
+            "publisher-profile",
+        ]);
+        let combined_inputs = inputs_json(&combined, "fanout", None, &[], None);
+        assert_eq!(
+            combined_inputs["credential_attestations"]["clients"]["profile"],
+            "subscriber-profile"
+        );
+        assert_eq!(
+            combined_inputs["credential_attestations"]["clients"]["validated_credentials"],
+            3
+        );
+        assert_eq!(
+            combined_inputs["credential_attestations"]["fanout_publisher"]["profile"],
+            "publisher-profile"
+        );
+        assert_eq!(
+            combined_inputs["credential_attestations"]["fanout_publisher"]["validated_credentials"],
+            1
+        );
+
+        let mut subscriber = combined.clone();
+        subscriber.fanout_role = "subscriber".to_string();
+        subscriber.clients = 1;
+        let subscriber_inputs = inputs_json(&subscriber, "fanout", None, &[], None);
+        assert_eq!(
+            subscriber_inputs["credential_attestations"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["clients"]
+        );
+
+        let mut publisher = combined;
+        publisher.fanout_role = "publisher".to_string();
+        let publisher_inputs = inputs_json(&publisher, "fanout", None, &[], None);
+        assert_eq!(
+            publisher_inputs["credential_attestations"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["fanout_publisher"]
+        );
+
+        let mut delegatee = publisher;
+        delegatee.mode = "publish".to_string();
+        delegatee.biscuit_delegate_handoff_role = "delegatee".to_string();
+        let delegatee_inputs = inputs_json(&delegatee, "publish", None, &[], None);
+        assert!(
+            delegatee_inputs["credential_attestations"]
+                .as_object()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -6801,7 +7016,7 @@ mod tests {
         ));
         fs::write(
             &path,
-            r#"{"version":1,"max_clients":2,"profiles":{"jwt":{"kind":"jwt","entries":{"client_1":{"token":"token-1","exp":2000000000},"fanout_publisher":{"token":"publisher","exp":2000000000}}}}}"#,
+            r#"{"version":2,"max_clients":2,"profile_semantics":{"jwt":{"token_kind":"jwt"}},"profiles":{"jwt":{"kind":"jwt","entries":{"client_1":{"token":"token-1","exp":2000000000},"fanout_publisher":{"token":"publisher","exp":2000000000}}}}}"#,
         )
         .unwrap();
 
@@ -6811,6 +7026,21 @@ mod tests {
         assert_eq!(client.bytes, b"token-1");
         assert_eq!(client.exp, Some(2_000_000_000));
         assert_eq!(map.profiles["jwt"]["fanout_publisher"].bytes, b"publisher");
+        assert_eq!(map.profile_semantics["jwt"]["token_kind"], "jwt");
+    }
+
+    #[test]
+    fn password_map_v1_requires_regeneration() {
+        let path = std::env::temp_dir().join(format!(
+            "mqtt-password-map-v1-{}-{}.json",
+            std::process::id(),
+            unix_ms_now()
+        ));
+        fs::write(&path, r#"{"version":1,"max_clients":1,"profiles":{}}"#).unwrap();
+
+        let error = load_password_map(&path, None).unwrap_err();
+        fs::remove_file(path).unwrap();
+        assert!(error.to_string().contains("regenerate tokens"));
     }
 
     #[test]
@@ -6822,7 +7052,7 @@ mod tests {
         ));
         fs::write(
             &path,
-            r#"{"version":1,"max_clients":2,"profiles":{"jwt":{"kind":"jwt","entries":{"client_1":{"token":"token-1","exp":2000000000}}},"biscuit":{"kind":"biscuit","entries":{"fanout_publisher":{"token":"publisher","exp":2000000001}}},"unused":{"kind":"unsupported","entries":{"client_1":{"token":"not-a-token"}}}}}"#,
+            r#"{"version":2,"max_clients":2,"profile_semantics":{},"profiles":{"jwt":{"kind":"jwt","entries":{"client_1":{"token":"token-1","exp":2000000000}}},"biscuit":{"kind":"biscuit","entries":{"fanout_publisher":{"token":"publisher","exp":2000000001}}},"unused":{"kind":"unsupported","entries":{"client_1":{"token":"not-a-token"}}}}}"#,
         )
         .unwrap();
 
@@ -6848,7 +7078,7 @@ mod tests {
         ));
         fs::write(
             &path,
-            r#"{"version":1,"max_clients":1,"profiles":{"invalid":{"kind":"unsupported","entries":{}}}}"#,
+            r#"{"version":2,"max_clients":1,"profile_semantics":{},"profiles":{"invalid":{"kind":"unsupported","entries":{}}}}"#,
         )
         .unwrap();
 
@@ -6861,19 +7091,19 @@ mod tests {
 
     #[test]
     fn parse_fanout_message_matches_publisher_format() {
-        let payload = format!("{:.9}|7|2|", 1.25).into_bytes();
-        let message = parse_fanout_message(&payload).unwrap();
-        assert!((message.sent - 1.25).abs() < 1e-9);
+        let payload = b"v3|1250000000|7|2|";
+        let message = parse_fanout_message(payload).unwrap();
+        assert_eq!(message.sent_monotonic_ns, 1_250_000_000);
         assert_eq!(message.sequence_id, Some(7));
         assert_eq!(message.phase, Some(2));
     }
 
     #[test]
     fn parse_fanout_message_accepts_size_padding() {
-        let mut payload = format!("{:.9}|3|", 0.5).into_bytes();
+        let mut payload = b"v3|500000000|3|".to_vec();
         payload.extend(vec![b'A'; 64]);
         let message = parse_fanout_message(&payload).unwrap();
-        assert!((message.sent - 0.5).abs() < 1e-9);
+        assert_eq!(message.sent_monotonic_ns, 500_000_000);
         assert_eq!(message.sequence_id, Some(3));
     }
 
@@ -6887,14 +7117,46 @@ mod tests {
 
     #[test]
     fn parse_fanout_message_rejects_unparseable_prefix() {
-        assert!(parse_fanout_message(b"not-a-number|5|").is_none());
+        assert!(parse_fanout_message(b"v3|not-a-number|5|").is_none());
     }
 
     #[test]
     fn parse_fanout_message_accepts_missing_sequence_id() {
-        let message = parse_fanout_message(b"0.5|").unwrap();
-        assert!((message.sent - 0.5).abs() < 1e-9);
+        let message = parse_fanout_message(b"v3|500000000|").unwrap();
+        assert_eq!(message.sent_monotonic_ns, 500_000_000);
         assert_eq!(message.sequence_id, None);
+    }
+
+    #[test]
+    fn parse_fanout_message_rejects_wall_clock_payload_version() {
+        assert!(parse_fanout_message(b"v2|500000000|3|0|").is_none());
+    }
+
+    #[test]
+    fn fanout_receive_latency_rejects_invalid_clock_deltas() {
+        assert_eq!(
+            fanout_receive_latency_ms(1_000_000, 2_500_000, Duration::from_secs(1)).unwrap(),
+            1.5
+        );
+        assert!(
+            fanout_receive_latency_ms(2, 1, Duration::from_secs(1))
+                .unwrap_err()
+                .to_string()
+                .contains("fanout_receive_negative_clock_delta")
+        );
+        assert!(
+            fanout_receive_latency_ms(0, 2_000_000_000, Duration::from_secs(1))
+                .unwrap_err()
+                .to_string()
+                .contains("fanout_receive_implausible_clock_delta")
+        );
+    }
+
+    #[test]
+    fn monotonic_raw_clock_does_not_move_backwards() {
+        let first = monotonic_raw_nanos_now().unwrap();
+        let second = monotonic_raw_nanos_now().unwrap();
+        assert!(second >= first);
     }
 
     #[test]

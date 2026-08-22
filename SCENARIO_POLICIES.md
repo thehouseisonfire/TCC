@@ -319,7 +319,6 @@ the authoritative access policy.
 | DYNAMIC-SECURITY-BASELINE | JWT | Dynamic Security | `dynamic-security.json` roles + groups | Allows |
 | DYNAMIC-SECURITY-CHURN | JWT | Dynamic Security | `dynamic-security.json`/`dynamic-security-churn.json` swap | Mixed (read-only) |
 | DYNAMIC-SECURITY-READ-FANOUT | JWT | Dynamic Security | fanout roles/ACLs enabled | Allows |
-| DYNAMIC-SECURITY-READ-FANOUT-CHURN | JWT | Dynamic Security | fanout ACLs change on churn | Mixed |
 | DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-JWT-{10,50,100} | JWT | Dynamic Security | `acl_read_full_authz=true`; churn after message 5 swaps to `dynamic-security-fanout-read-deny-unpinned.json` (subscribe kept, receive removed) | Existing subscribers denied on post-churn fan-out |
 | DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-BISCUIT-{10,50,100} | Biscuit | Dynamic Security | Same as JWT variant with Biscuit token path | Existing subscribers denied on post-churn fan-out |
 | DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-REVOKE-JWT/BISCUIT-{10,50,100} | JWT/Biscuit | Dynamic Security | `acl_read_full_authz=true`; control command removes the fan-out receive ACL during the run | Existing subscribers denied on post-control fan-out |

@@ -1,6 +1,7 @@
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -383,7 +384,7 @@ def test_result_contract_allows_only_expected_disable_disconnects() -> None:
         "allowed_error_prefixes": list(rs.EXPECTED_DISABLE_RECEIVE_ERROR_PREFIXES),
         "delivery_contract": {"phases": ["all", "none"]},
     }
-    result = {
+    result: dict[str, Any] = {
         "errors": ["receive_failed:Mqtt state: Connection closed by peer abruptly"],
         "publish": {"count": 6},
         "fanout_churn": {

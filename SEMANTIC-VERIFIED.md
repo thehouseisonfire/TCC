@@ -115,20 +115,22 @@ HTTP authorization round-trip, consistent across the HTTP family).
   256m limit while loading `benchmarks/password-map.json` (kernel
   `mem_cgroup_oom`, anon-rss ~260 MB); 7–15 subscribers missing readiness
   files. No result JSON. Rerun pending the loadgen memory decision.
-- **22 `DYNAMIC-SECURITY-READ-FANOUT-CHURN`**: runs successfully after the
+- **22 `DYNAMIC-SECURITY-READ-FANOUT-CHURN`**: this retired scenario ran successfully after the
   fixture fix (`subscriber_count: 1` + churn-snapshot rework), but its
   semantics were **not** verified: it uses `mosquitto_dynsec.conf`
   (expiry_only enforcement), where read-only ACL checks short-circuit on token
   expiry and never consult the dynsec policy, so the READ revocation in the
   churn state has no observable delivery effect (repeat 2 still delivered
   10/10). Strict READ-churn measurement is covered by the
-  `...ACL-READ-FANOUT-CHURN-*` family instead.
+  `...ACL-READ-FANOUT-CHURN-*` family instead. The legacy ID is no longer registered.
 
 ## Notes
 
-- Receive-latency values (2–30 s) are dominated by subscriber-vs-publisher
-  startup skew; they are not per-delivery costs. Publish-side latency is the
-  trustworthy signal (p50 0.04–0.8 ms, except HTTP ~455 ms).
+- Historical receive-latency values used incompatible process-local clock origins
+  under split-container topology and are not per-delivery costs. Current runs use
+  versioned `CLOCK_MONOTONIC_RAW` nanosecond send timestamps shared across the
+  publisher and subscriber processes. Split-role results attest the clock source
+  during merge and reject invalid or implausible deltas.
 - The plugin publishes `system_notification/{client_id}` JSON on REVOKE churn;
   the loadgen collector was counting these as fanout messages (zero-latency
   entries). Fixed via `parse_fanout_message` gate in `mqtt-loadgen.rs`;

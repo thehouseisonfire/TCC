@@ -95,6 +95,19 @@ def _aggregate_scalar(runs, key, source="loadgen"):
     return _aggregate_values(values)
 
 
+def _aggregate_nested_scalar(runs, *keys):
+    values = []
+    for run in runs:
+        payload: Any = run.get("loadgen", {})
+        for key in keys:
+            if not isinstance(payload, dict):
+                payload = None
+                break
+            payload = payload.get(key)
+        values.append(_safe_float(payload))
+    return _aggregate_values(values)
+
+
 def _aggregate_errors(runs):
     errors = []
     for run in runs:
@@ -183,6 +196,14 @@ def _build_summary(input_dir: str | Path):
             "token_len": data.get("token_len"),
             "tls": data.get("tls"),
             "parity": data.get("parity"),
+            "scenario_config": data.get("scenario_config"),
+            "credential_attestations": (
+                ((runs[0].get("loadgen") or {}).get("inputs") or {}).get(
+                    "credential_attestations"
+                )
+                if runs
+                else None
+            ),
             "loadgen": {
                 "throughput_mps": _aggregate_scalar(runs, "throughput_mps"),
                 "publish_throughput_mps": _aggregate_scalar(runs, "publish_throughput_mps"),
@@ -199,6 +220,9 @@ def _build_summary(input_dir: str | Path):
                 "delegation_len": _aggregate_metric(runs, "delegation_len"),
                 "attenuation": _aggregate_metric(runs, "attenuation"),
                 "attenuation_len": _aggregate_metric(runs, "attenuation_len"),
+                "http_rules_examined_per_request": _aggregate_nested_scalar(
+                    runs, "authz_stats", "rules_examined_per_request"
+                ),
             },
             "mqtt5_auth": mqtt5,
             "resources": _aggregate_resources(runs),
@@ -227,6 +251,12 @@ def _write_csv(summary, path):
         attenuation_len = loadgen.get("attenuation_len", {})
         mqtt5 = scenario.get("mqtt5_auth") or {}
         resources = scenario.get("resources", {})
+        scenario_config = scenario.get("scenario_config") or {}
+        credential_attestations = scenario.get("credential_attestations") or {}
+        client_credential = credential_attestations.get("clients") or {}
+        publisher_credential = credential_attestations.get("fanout_publisher") or {}
+        client_credential_semantic = client_credential.get("semantic") or {}
+        publisher_credential_semantic = publisher_credential.get("semantic") or {}
         token_metadata = scenario.get("token_metadata") or {}
         rows.append(
             {
@@ -237,6 +267,24 @@ def _write_csv(summary, path):
                 "jwt_default_grants_enabled": token_metadata.get("jwt_default_grants_enabled"),
                 "jwt_denies_schema_version": token_metadata.get("jwt_denies_schema_version"),
                 "tls_enabled": (scenario.get("tls") or {}).get("enabled"),
+                "workload_shape": scenario_config.get("workload_shape"),
+                "requested_clients": scenario_config.get("requested_clients"),
+                "effective_clients": scenario_config.get("clients"),
+                "requested_messages": scenario_config.get("requested_messages"),
+                "effective_messages": scenario_config.get("messages"),
+                "requested_qos": scenario_config.get("requested_qos"),
+                "effective_qos": scenario_config.get("qos"),
+                "client_credential_profile": client_credential.get("profile"),
+                "client_credential_complexity_level": client_credential_semantic.get(
+                    "complexity_level"
+                ),
+                "fanout_publisher_credential_profile": publisher_credential.get("profile"),
+                "fanout_publisher_credential_complexity_level": publisher_credential_semantic.get(
+                    "complexity_level"
+                ),
+                "http_rules_examined_per_request": (
+                    loadgen.get("http_rules_examined_per_request") or {}
+                ).get("avg"),
                 "throughput_avg": (loadgen.get("throughput_mps") or {}).get("avg"),
                 "publish_throughput_avg": (loadgen.get("publish_throughput_mps") or {}).get("avg"),
                 "receive_throughput_avg": (loadgen.get("receive_throughput_mps") or {}).get("avg"),

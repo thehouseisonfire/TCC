@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -326,6 +327,153 @@ def test_composability_delegated_datalog_scenarios_layer_runtime_delegation(
     assert scenario.get("biscuit_delegate", {}).get("handoff") is None
     assert scenario.get("biscuit_attenuate") is None
     assert scenario.get("token_refresh") is None
+    assert scenario["attenuation_probe_subscribe_denied"] is True
+
+
+def test_composability_result_requires_transform_and_credential_attestation() -> None:
+    scenario = _scenario_registry()["TOKEN-COMPOSABILITY-DELEGATED-DATALOG-MED-BISCUIT"]
+    scenario["id"] = "TOKEN-COMPOSABILITY-DELEGATED-DATALOG-MED-BISCUIT"
+    result: dict[str, Any] = {
+        "errors": [],
+        "publish": {"count": 25_000},
+        "delegation": {"count": 25},
+        "delegation_len": {"count": 25},
+        "authorization_probes": {"successes": 25, "failures": 0},
+        "inputs": {
+            "credential_attestations": {
+                "clients": {
+                    "profile": "biscuit_complex_med",
+                    "validated_credentials": 25,
+                    "semantic": {
+                        "token_kind": "biscuit",
+                        "complexity_axis": "datalog",
+                        "complexity_level": "med",
+                        "biscuit_blocks": 3,
+                        "rules": 6,
+                    },
+                }
+            }
+        },
+    }
+
+    rs._validate_result_contract(scenario, result, message_count=1000, client_count=25)
+
+    result["delegation"] = {"count": 24}
+    with pytest.raises(RuntimeError, match="delegation was applied"):
+        rs._validate_result_contract(scenario, result, message_count=1000, client_count=25)
+
+
+def test_fanout_credential_attestations_validate_distinct_role_profiles() -> None:
+    scenario = _scenario_registry()["STATIC-ACL-FANOUT-JWT"]
+    scenario["id"] = "STATIC-ACL-FANOUT-JWT"
+    scenario["credential_mode"] = "per_client"
+    scenario["password_map_profile"] = "subscriber-profile"
+    scenario["fanout_publisher_password_map_profile"] = "publisher-profile"
+    result: dict[str, Any] = {
+        "inputs": {
+            "credential_attestations": {
+                "clients": {
+                    "profile": "subscriber-profile",
+                    "semantic": None,
+                    "validated_credentials": 10,
+                },
+                "fanout_publisher": {
+                    "profile": "publisher-profile",
+                    "semantic": None,
+                    "validated_credentials": 1,
+                },
+            }
+        }
+    }
+
+    rs._validate_credential_attestations(scenario, result, client_count=10)
+
+    result["inputs"]["credential_attestations"]["fanout_publisher"]["profile"] = (
+        "subscriber-profile"
+    )
+    with pytest.raises(RuntimeError, match="fanout_publisher credential attestation"):
+        rs._validate_credential_attestations(scenario, result, client_count=10)
+
+    del result["inputs"]["credential_attestations"]["fanout_publisher"]
+    with pytest.raises(RuntimeError, match="credential attestation roles"):
+        rs._validate_credential_attestations(scenario, result, client_count=10)
+
+
+def test_http_complexity_result_requires_every_publish_to_use_selected_profile() -> None:
+    scenario = _scenario_registry()["HTTP-AUTHZ-COMPLEXITY-SIMPLE-JWT"]
+    scenario["id"] = "HTTP-AUTHZ-COMPLEXITY-SIMPLE-JWT"
+    result: dict[str, Any] = {
+        "errors": [],
+        "publish": {"count": 25_000},
+        "inputs": {
+            "credential_attestations": {
+                "clients": {
+                    "profile": "jwt",
+                    "semantic": None,
+                    "validated_credentials": 25,
+                }
+            }
+        },
+        "authz_stats": {
+            "requests": 25_000,
+            "policy_allows": 25_000,
+            "policy_denies": 0,
+            "injected_failures": 0,
+            "rules_examined": 50_000,
+            "profile_requests": {"simple": 25_000},
+        },
+    }
+
+    rs._validate_result_contract(scenario, result, message_count=1000, client_count=25)
+    assert result["authz_stats"]["rules_examined_per_request"] == 2
+
+    result["authz_stats"]["requests"] = 1
+    with pytest.raises(RuntimeError, match="HTTP profile contract failed"):
+        rs._validate_result_contract(scenario, result, message_count=1000, client_count=25)
+
+
+def test_legacy_dynamic_security_read_churn_id_is_not_registered() -> None:
+    assert "DYNAMIC-SECURITY-READ-FANOUT-CHURN" not in _scenario_registry()
+
+
+def test_workload_shape_preserves_each_unspecified_matrix_axis() -> None:
+    scenarios = _scenario_registry()
+    assert rs._scenario_workload_shape(scenarios["TOKEN-PUBLISH-STRESS-JWT"]) == "fixed"
+    assert rs._scenario_workload_shape(scenarios["TOKEN-BASELINE-JWT"]) == "matrix"
+    assert (
+        rs._scenario_workload_shape(
+            scenarios["DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-JWT-10"]
+        )
+        == "fixed-clients"
+    )
+    assert rs._scenario_workload_shape({"message_count": 25}) == "fixed-messages"
+
+
+@pytest.mark.parametrize(
+    ("scenario", "shape", "axes"),
+    (
+        ({}, "matrix", {"clients": "cli", "messages": "cli"}),
+        ({"client_count": 10}, "fixed-clients", {"clients": "scenario", "messages": "cli"}),
+        (
+            {"subscriber_count": 10},
+            "fixed-clients",
+            {"clients": "scenario", "messages": "cli"},
+        ),
+        ({"message_count": 25}, "fixed-messages", {"clients": "cli", "messages": "scenario"}),
+        (
+            {"client_count": 10, "message_count": 25},
+            "fixed",
+            {"clients": "scenario", "messages": "scenario"},
+        ),
+    ),
+)
+def test_workload_shape_and_axes_are_independent(
+    scenario: rs.ScenarioConfig,
+    shape: rs.WorkloadShape,
+    axes: dict[str, str],
+) -> None:
+    assert rs._scenario_workload_shape(scenario) == shape
+    assert rs._scenario_workload_axes(scenario) == axes
 
 
 @pytest.mark.parametrize(

@@ -18,6 +18,13 @@ pub struct Cli {
     #[arg(long)]
     pub scenarios: Option<String>,
 
+    #[arg(
+        long,
+        value_parser = ["all", "matrix", "fixed-clients", "fixed-messages", "fixed"],
+        default_value = "all"
+    )]
+    pub workload_shape: String,
+
     #[arg(long)]
     pub clients: Option<String>,
 
@@ -183,6 +190,8 @@ pub fn scenario_args(cli: &Cli) -> Vec<String> {
         args.push("--scenarios-arg".to_owned());
         args.push(scenarios.clone());
     }
+    args.push("--workload-shape".to_owned());
+    args.push(cli.workload_shape.clone());
     if let Some(clients) = &cli.clients {
         args.push("--clients".to_owned());
         args.push(clients.clone());
@@ -418,6 +427,8 @@ pub fn run(cli: &Cli) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
+
     use super::{
         Cli, benchmark_workdir, build_runtime_plan, compose_args, compose_files,
         detect_compose_command, repo_root, scenario_args,
@@ -470,6 +481,7 @@ mod tests {
             skip_build: false,
             skip_tokens: false,
             scenarios: Some("TOKEN-BASELINE-JWT".to_owned()),
+            workload_shape: "matrix".to_owned(),
             clients: Some("10".to_owned()),
             messages: Some("25".to_owned()),
             qos: Some("1".to_owned()),
@@ -493,6 +505,8 @@ mod tests {
             vec![
                 "--scenarios-arg".to_owned(),
                 "TOKEN-BASELINE-JWT".to_owned(),
+                "--workload-shape".to_owned(),
+                "matrix".to_owned(),
                 "--clients".to_owned(),
                 "10".to_owned(),
                 "--messages".to_owned(),
@@ -519,11 +533,21 @@ mod tests {
     }
 
     #[test]
+    fn workload_shape_accepts_partial_axis_bindings() {
+        for shape in ["matrix", "fixed-clients", "fixed-messages", "fixed"] {
+            let cli = Cli::try_parse_from(["run-benchmarks", "--workload-shape", shape])
+                .expect("supported workload shape");
+            assert_eq!(cli.workload_shape, shape);
+        }
+    }
+
+    #[test]
     fn runtime_plan_matches_previous_python_flow() {
         let cli = Cli {
             skip_build: true,
             skip_tokens: false,
             scenarios: Some("TOKEN-BASELINE-JWT".to_owned()),
+            workload_shape: "all".to_owned(),
             clients: None,
             messages: None,
             qos: None,
@@ -585,6 +609,8 @@ mod tests {
                 "benchmarks.run_scenarios".to_owned(),
                 "--scenarios-arg".to_owned(),
                 "TOKEN-BASELINE-JWT".to_owned(),
+                "--workload-shape".to_owned(),
+                "all".to_owned(),
                 "--tls".to_owned()
             ]
         );

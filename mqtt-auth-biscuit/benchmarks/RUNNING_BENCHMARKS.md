@@ -58,11 +58,23 @@ Current inventory rules:
 
 ## Credential Profiles
 
-`gen-tokens` writes a versioned `benchmarks/password-map.json` containing
+`gen-tokens` writes schema-v2 `benchmarks/password-map.json` containing
 per-client equivalents of the reusable JWT and Biscuit fixtures. Profile names
 match fixture semantics, including deny, fan-out, static-role, delegation,
 complexity, and strict identity-bound variants. Fan-out scenarios select
 subscriber and publisher profiles independently.
+
+Complex Datalog profiles also carry structural semantic metadata. The load
+generator reports the selected profile and validates the declared Datalog level
+for every client. Schema-v1 maps are rejected with an instruction to regenerate
+tokens so complexity runs cannot silently use unattested credentials.
+
+Loadgen result inputs expose `credential_attestations` by actual credential
+role. `clients` covers standard workers or fan-out subscribers, while
+`fanout_publisher` separately identifies the publisher profile. Combined and
+merged fan-out results contain both roles, including the number of credentials
+validated for each, so different subscriber and publisher profiles are not
+conflated.
 
 Every scenario declares one credential mode:
 
@@ -115,12 +127,17 @@ while the orchestration logic lives in Rust. The scenario harness it invokes
 remains `benchmarks.run_scenarios`.
 
 Supported wrapper pass-through flags are currently `--scenarios`, `--clients`,
-`--messages`, `--qos`, `--tls`, `--tls-insecure`, `--tls-ca-file`,
+`--messages`, `--qos`, `--workload-shape`, `--tls`, `--tls-insecure`, `--tls-ca-file`,
 `--token-issuer-no-default-roles`, `--token-issuer-no-default-grants`,
 `--biscuit-base64url`, `--token-refresh-codes`, `--client-topology`,
 `--client-memory`, and `--client-cpus`. Use the direct module entrypoint for
 lower-level runner options such as `--perf`, `--iperf3-*`, `--tcpdump-*`,
 or `--out`.
+
+`--workload-shape` accepts `matrix`, `fixed-clients`, `fixed-messages`, or
+`fixed` (and defaults to `all`). The partial shapes retain the CLI matrix level
+for the axis not supplied by the scenario definition; for example, a fan-out
+subscriber slice is `fixed-clients` and still varies `--messages`.
 
 ## Step 1: Build the Plugin
 
@@ -261,6 +278,10 @@ reuse the existing HTTP `simple` / `med` / `complex` authz profiles so the
 complexity axis is PDP rule evaluation rather than token structure. Like the
 token publish-stress family, they should be run as targeted slices instead of
 being mixed into client/message matrix sweeps.
+
+Successful runs require one external PDP decision for every publish, all
+decisions to use the selected profile, and zero policy denials or injected
+failures. Results include total rules examined and rules examined per request.
 
 ### Client-to-Client Delegation
 
@@ -956,6 +977,12 @@ orchestration under `container-per-client`: subscribers/delegatees are started
 first, the runner waits for structured readiness, then the publisher/delegator
 role is launched. Use `container-single` for broad matrix runs and
 `container-per-client` for topology-fidelity slices.
+
+Fan-out delivery latency is carried in the versioned payload using
+`CLOCK_MONOTONIC_RAW`, not wall-clock time or process-relative `Instant`
+origins. Split publisher/subscriber containers must run on the same Linux host
+without custom time-namespace offsets; the result merger verifies that every
+role attests the expected clock source and payload version.
 
 ### Synchronized Connect Bursts
 

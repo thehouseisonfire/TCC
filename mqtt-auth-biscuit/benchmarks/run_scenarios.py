@@ -769,16 +769,28 @@ def _authz_stats(
     reset: bool = False,
     ca_file: str | None = None,
     insecure: bool = False,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     with _http_client(ca_file, insecure) as client:
         url = authz_url.rstrip("/") + ("/stats/reset" if reset else "/stats")
         resp = client.post(url) if reset else client.get(url)
         resp.raise_for_status()
         payload = resp.json()
-    return {
+    stats: dict[str, Any] = {
         key: int(payload.get(key) or 0)
-        for key in ("requests", "injected_failures", "policy_allows", "policy_denies")
+        for key in (
+            "requests",
+            "injected_failures",
+            "policy_allows",
+            "policy_denies",
+            "rules_examined",
+        )
     }
+    profile_requests = payload.get("profile_requests")
+    stats["profile_requests"] = {
+        key: int(profile_requests.get(key) or 0)
+        for key in ("simple", "med", "complex", "custom")
+    } if isinstance(profile_requests, dict) else {}
+    return stats
 
 
 def _validated_authz_state_baseline(
@@ -1970,7 +1982,11 @@ def _merge_per_client_loadgen_results(
     )
     inputs = merged.get("inputs")
     if isinstance(inputs, dict):
-        merged["inputs"] = {**inputs, "clients": len(results)}
+        merged["inputs"] = {
+            **inputs,
+            "clients": len(results),
+            "credential_attestations": _merge_credential_attestations(results, errors),
+        }
     duration_s = max(wall_duration_s, 1e-9)
     publish_count = int(merged["publish"].get("count") or 0)
     receive_count = int(merged["receive"].get("count") or 0)
@@ -1986,6 +2002,48 @@ def _merge_per_client_loadgen_results(
         "aggregation": "merged_from_single_client_containers",
         "wall_duration_s": wall_duration_s,
     }
+    return merged
+
+
+def _merge_credential_attestations(
+    results: list[dict[str, Any]], errors: list[str]
+) -> dict[str, dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for result in results:
+        inputs = result.get("inputs")
+        attestations = inputs.get("credential_attestations") if isinstance(inputs, dict) else None
+        if attestations is None:
+            continue
+        if not isinstance(attestations, dict):
+            errors.append("credential_attestations_invalid")
+            continue
+        for role, candidate in attestations.items():
+            if role not in {"clients", "fanout_publisher"} or not isinstance(candidate, dict):
+                errors.append(f"credential_attestation_invalid:{role}")
+                continue
+            profile = candidate.get("profile")
+            validated = candidate.get("validated_credentials")
+            if (
+                not isinstance(profile, str)
+                or not profile
+                or not isinstance(validated, int)
+                or validated <= 0
+            ):
+                errors.append(f"credential_attestation_invalid:{role}")
+                continue
+            existing = merged.get(role)
+            if existing is None:
+                merged[role] = dict(candidate)
+                continue
+            if (
+                existing.get("profile") != profile
+                or existing.get("semantic") != candidate.get("semantic")
+            ):
+                errors.append(f"credential_attestation_mismatch:{role}")
+                continue
+            existing["validated_credentials"] = (
+                int(existing.get("validated_credentials") or 0) + validated
+            )
     return merged
 
 
@@ -2073,6 +2131,43 @@ def _expected_qos_distribution_counts(
     return {qos: count * publisher_count for qos, count in per_publisher.items()}
 
 
+def _validate_credential_attestations(
+    scenario: ScenarioConfig, result: dict[str, Any], *, client_count: int
+) -> None:
+    if scenario.get("credential_mode") != "per_client":
+        return
+    scenario_id = scenario["id"]
+    inputs = result.get("inputs")
+    attestations = inputs.get("credential_attestations") if isinstance(inputs, dict) else None
+    if not isinstance(attestations, dict):
+        raise RuntimeError(f"{scenario_id}: credential attestations missing")
+
+    expected_roles = {
+        "clients": (scenario.get("password_map_profile"), client_count),
+    }
+    if scenario.get("traffic_pattern") == "fanout":
+        expected_roles["fanout_publisher"] = (
+            scenario.get("fanout_publisher_password_map_profile"),
+            1,
+        )
+    if set(attestations) != set(expected_roles):
+        raise RuntimeError(
+            f"{scenario_id}: credential attestation roles do not match "
+            f"expected={sorted(expected_roles)} actual={sorted(attestations)}"
+        )
+    for role, (expected_profile, expected_count) in expected_roles.items():
+        attestation = attestations.get(role)
+        if (
+            not isinstance(attestation, dict)
+            or attestation.get("profile") != expected_profile
+            or int(attestation.get("validated_credentials") or 0) != expected_count
+        ):
+            raise RuntimeError(
+                f"{scenario_id}: {role} credential attestation does not match "
+                f"profile={expected_profile!r} count={expected_count}"
+            )
+
+
 def _validate_result_contract(
     scenario: ScenarioConfig,
     result: dict[str, Any],
@@ -2086,6 +2181,8 @@ def _validate_result_contract(
     unexpected_errors = [error for error in errors if not error.startswith(allowed_prefixes)]
     if unexpected_errors:
         raise RuntimeError(f"{scenario_id}: loadgen errors: {', '.join(unexpected_errors[:5])}")
+
+    _validate_credential_attestations(scenario, result, client_count=client_count)
 
     if scenario.get("mqtt5_auth") is not None:
         _validate_mqtt5_auth_result(scenario_id, result)
@@ -2125,6 +2222,37 @@ def _validate_result_contract(
         if not any(error.startswith("publish_failed:") for error in errors):
             raise RuntimeError(f"{scenario_id}: expected a workload-visible publish failure")
 
+    if scenario.get("complexity_axis") == "http_profile":
+        stats_object = result.get("authz_stats")
+        stats = cast(dict[str, Any], stats_object) if isinstance(stats_object, dict) else {}
+        profile = scenario.get("complexity_level")
+        profile_requests = stats.get("profile_requests")
+        requests = int(stats.get("requests") or 0)
+        allows = int(stats.get("policy_allows") or 0)
+        denies = int(stats.get("policy_denies") or 0)
+        failures = int(stats.get("injected_failures") or 0)
+        rules_examined = int(stats.get("rules_examined") or 0)
+        active_profile_requests = (
+            int(profile_requests.get(str(profile)) or 0)
+            if isinstance(profile_requests, dict)
+            else 0
+        )
+        if (
+            requests != expected_publish_count
+            or allows != expected_publish_count
+            or active_profile_requests != expected_publish_count
+            or denies != 0
+            or failures != 0
+            or rules_examined < expected_publish_count
+        ):
+            raise RuntimeError(
+                f"{scenario_id}: HTTP profile contract failed: requests={requests}, "
+                f"allows={allows}, profile_requests={active_profile_requests}, "
+                f"denies={denies}, failures={failures}, rules_examined={rules_examined}, "
+                f"expected={expected_publish_count}"
+            )
+        stats["rules_examined_per_request"] = rules_examined / requests
+
     if scenario.get("qos") == 2 and scenario.get("qos_distribution") is None:
         qos2 = result.get("publish_qos_2")
         qos2_count = int(qos2.get("count") or 0) if isinstance(qos2, dict) else 0
@@ -2160,6 +2288,44 @@ def _validate_result_contract(
             raise RuntimeError(
                 f"{scenario_id}: attenuation denial probes passed "
                 f"{successes}/{client_count} with {failures} failures"
+            )
+
+    transform_field = None
+    if scenario.get("biscuit_attenuate"):
+        transform_field = "attenuation"
+    elif scenario.get("biscuit_delegate"):
+        transform_field = "delegation"
+    if transform_field is not None:
+        transform = result.get(transform_field)
+        lengths = result.get(f"{transform_field}_len")
+        transform_count = int(transform.get("count") or 0) if isinstance(transform, dict) else 0
+        length_count = int(lengths.get("count") or 0) if isinstance(lengths, dict) else 0
+        if transform_count != client_count or length_count != client_count:
+            raise RuntimeError(
+                f"{scenario_id}: {transform_field} was applied to "
+                f"{transform_count}/{client_count} clients with {length_count} length samples"
+            )
+
+    if scenario.get("complexity_axis") == "datalog":
+        inputs = result.get("inputs")
+        attestations = inputs.get("credential_attestations") if isinstance(inputs, dict) else None
+        attestation = attestations.get("clients") if isinstance(attestations, dict) else None
+        semantic = attestation.get("semantic") if isinstance(attestation, dict) else None
+        expected_profile = scenario.get("password_map_profile")
+        if (
+            not isinstance(attestation, dict)
+            or attestation.get("profile") != expected_profile
+            or int(attestation.get("validated_credentials") or 0) != client_count
+            or not isinstance(semantic, dict)
+            or semantic.get("token_kind") != "biscuit"
+            or semantic.get("complexity_axis") != "datalog"
+            or semantic.get("complexity_level") != scenario.get("complexity_level")
+            or int(semantic.get("biscuit_blocks") or 0) <= 0
+            or int(semantic.get("rules") or 0) <= 0
+        ):
+            raise RuntimeError(
+                f"{scenario_id}: credential attestation does not match "
+                f"profile={expected_profile!r} level={scenario.get('complexity_level')!r}"
             )
 
     if scenario.get("control_response_topic"):
@@ -2247,7 +2413,38 @@ def _merge_fanout_role_loadgen_results(
     messages: int,
 ) -> dict[str, Any]:
     merged = _merge_per_client_loadgen_results([publisher, *subscribers], wall_duration_s)
+    expected_clock = {"source": "clock_monotonic_raw", "payload_version": "v3"}
+    clock_attestations = [
+        result.get("inputs", {}).get("fanout_latency_clock")
+        for result in [publisher, *subscribers]
+    ]
+    if any(attestation != expected_clock for attestation in clock_attestations):
+        cast(list[str], merged.setdefault("errors", [])).append(
+            "fanout_latency_clock_attestation_mismatch"
+        )
     subscriber_count = len(subscribers)
+    merged_inputs = merged.get("inputs")
+    merged_attestations = (
+        merged_inputs.get("credential_attestations") if isinstance(merged_inputs, dict) else None
+    )
+    source_attestations = [
+        result.get("inputs", {}).get("credential_attestations")
+        for result in [publisher, *subscribers]
+    ]
+    if any(bool(attestations) for attestations in source_attestations):
+        expected_credential_counts = {"clients": subscriber_count, "fanout_publisher": 1}
+        for role, expected_count in expected_credential_counts.items():
+            attestation = (
+                merged_attestations.get(role) if isinstance(merged_attestations, dict) else None
+            )
+            if not isinstance(attestation, dict):
+                cast(list[str], merged.setdefault("errors", [])).append(
+                    f"credential_attestation_missing:{role}"
+                )
+            elif int(attestation.get("validated_credentials") or 0) != expected_count:
+                cast(list[str], merged.setdefault("errors", [])).append(
+                    f"credential_attestation_count_mismatch:{role}"
+                )
     received_count = int(merged.get("receive", {}).get("count") or 0)
     expected = messages * subscriber_count
     merged["received_messages"] = {"count": received_count, "expected": expected}
@@ -3232,6 +3429,35 @@ def _effective_scenario_client_count(scenario: ScenarioConfig, default_clients: 
     return int(scenario.get("client_count", scenario.get("subscriber_count", default_clients)))
 
 
+WorkloadShape = Literal["matrix", "fixed-clients", "fixed-messages", "fixed"]
+
+
+def _scenario_workload_shape(scenario: ScenarioConfig) -> WorkloadShape:
+    """Describe which workload axes are supplied by the scenario definition.
+
+    Fan-out ``subscriber_count`` fixes the client axis, but does not fix the
+    independent message axis. Keeping the axes separate prevents partially
+    specified scenarios from silently dropping matrix levels.
+    """
+    clients_fixed = "client_count" in scenario or "subscriber_count" in scenario
+    messages_fixed = "message_count" in scenario
+    if clients_fixed and messages_fixed:
+        return "fixed"
+    if clients_fixed:
+        return "fixed-clients"
+    if messages_fixed:
+        return "fixed-messages"
+    return "matrix"
+
+
+def _scenario_workload_axes(scenario: ScenarioConfig) -> dict[str, Literal["scenario", "cli"]]:
+    shape = _scenario_workload_shape(scenario)
+    return {
+        "clients": "scenario" if shape in {"fixed-clients", "fixed"} else "cli",
+        "messages": "scenario" if shape in {"fixed-messages", "fixed"} else "cli",
+    }
+
+
 def _effective_scenario_message_count(
     scenario: ScenarioConfig,
     default_messages: int,
@@ -3270,7 +3496,7 @@ def _apply_result_contracts(scenarios: dict[str, ScenarioConfig]) -> dict[str, S
             else:
                 raise ValueError(f"{scenario_id}: unknown fan-out churn kind {kind!r}")
             scenario["delivery_contract"] = {"phases": phases}
-            scenario.pop("fanout_churn_phase_delivery", None)
+            cast(dict[str, Any], scenario).pop("fanout_churn_phase_delivery", None)
             continue
         expectation: Literal["all", "none"] = (
             "none" if "-DENY-" in scenario_id else "all"
@@ -5244,6 +5470,7 @@ def _build_available_scenarios(
                 "topic": "sensors/{client_id}/temp",
                 "op": "publish",
             },
+            "attenuation_probe_subscribe_denied": True,
         },
         "TOKEN-COMPOSABILITY-DELEGATED-DATALOG-MED-BISCUIT": {
             "mosquitto_conf": "./mosquitto.conf",
@@ -5262,6 +5489,7 @@ def _build_available_scenarios(
                 "topic": "sensors/{client_id}/temp",
                 "op": "publish",
             },
+            "attenuation_probe_subscribe_denied": True,
         },
         "TOKEN-COMPLEXITY-DATALOG-HIGH-BISCUIT": {
             "mosquitto_conf": "./mosquitto.conf",
@@ -5303,6 +5531,7 @@ def _build_available_scenarios(
                 "topic": "sensors/{client_id}/temp",
                 "op": "publish",
             },
+            "attenuation_probe_subscribe_denied": True,
         },
         "TOKEN-COMPOSABILITY-DELEGATED-DATALOG-HIGH-BISCUIT": {
             "mosquitto_conf": "./mosquitto.conf",
@@ -5321,6 +5550,7 @@ def _build_available_scenarios(
                 "topic": "sensors/{client_id}/temp",
                 "op": "publish",
             },
+            "attenuation_probe_subscribe_denied": True,
         },
         **authorizer_template_scenarios,
         **_static_acl_scenarios(tokens),
@@ -6170,6 +6400,14 @@ def main(
     qos: int = 1,
     qos_distribution: str | None = None,
     scenarios_arg: str | None = None,
+    workload_shape: str = typer.Option(
+        "all",
+        "--workload-shape",
+        help=(
+            "Select all scenarios or one workload binding: matrix, fixed-clients, "
+            "fixed-messages, or fixed."
+        ),
+    ),
     token_issuer_no_default_roles: bool = False,
     token_issuer_no_default_grants: bool = False,
     token_refresh_codes: str | None = typer.Option(None, envvar="TOKEN_REFRESH_CODES"),
@@ -6227,6 +6465,14 @@ def main(
 ):
     if not isinstance(log_level, str):
         log_level = "INFO"
+    if not isinstance(workload_shape, str):
+        workload_shape = "all"
+    valid_workload_shapes = {"all", "matrix", "fixed-clients", "fixed-messages", "fixed"}
+    if workload_shape not in valid_workload_shapes:
+        raise typer.BadParameter(
+            "workload_shape must be one of: all, matrix, fixed-clients, "
+            "fixed-messages, fixed"
+        )
     setup_logging(log_level)
     iperf3_enabled = _coerce_bool_arg(iperf3_enabled, True)
     perf_enabled = _coerce_bool_arg(perf_enabled, False)
@@ -6352,6 +6598,8 @@ def main(
             _require_requested_scenario_fixtures(scenario_id, tokens)
             if scenario_id in available_scenarios:
                 scenario = available_scenarios[scenario_id].copy()
+                if workload_shape != "all" and _scenario_workload_shape(scenario) != workload_shape:
+                    continue
                 scenario["id"] = scenario_id
                 scenarios.append(
                     cast(
@@ -6701,6 +6949,9 @@ def main(
                 messages,
                 effective_clients=effective_client_count,
             )
+            scenario_qos = int(s.get("qos", qos))
+            scenario_qos_distribution = s.get("qos_distribution", qos_distribution)
+            scenario_workload_shape = _scenario_workload_shape(s)
             if scenario_messages > configured_messages:
                 logger.info(
                     "%s requires at least %d messages per client for thresholded behavior; "
@@ -6740,10 +6991,16 @@ def main(
                 "scenario_config": {
                     **scenario_semantics,
                     "clients": effective_client_count,
+                    "requested_clients": clients,
                     "client_count": s.get("client_count"),
                     "messages": scenario_messages,
-                    "qos": qos,
-                    "qos_distribution": qos_distribution,
+                    "requested_messages": messages,
+                    "workload_shape": scenario_workload_shape,
+                    "workload_axes": _scenario_workload_axes(s),
+                    "qos": scenario_qos,
+                    "requested_qos": qos,
+                    "qos_distribution": scenario_qos_distribution,
+                    "requested_qos_distribution": qos_distribution,
                     "token_issuer_no_default_roles": token_issuer_no_default_roles,
                     "token_issuer_no_default_grants": token_issuer_no_default_grants,
                     "proactive_refresh": s.get("proactive_refresh", False),
@@ -6909,8 +7166,6 @@ def main(
                     else:
                         token_refresh = s.get("token_refresh")
                         proactive_refresh = bool(s.get("proactive_refresh", False))
-                        scenario_qos = int(s.get("qos", qos))
-                        scenario_qos_distribution = s.get("qos_distribution", qos_distribution)
                         credential_mode = cast(
                             CredentialMode,
                             s.get("credential_mode", "shared"),

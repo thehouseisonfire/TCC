@@ -219,7 +219,11 @@ def test_fanout_validation_rejects_partial_subscriber_initialization(
 
 def test_fanout_validation_accepts_valid_churn_result() -> None:
     rs._validate_result_contract(
-        {"id": "SQLITE-RBAC-CHURN-JWT", "traffic_pattern": "fanout", "delivery_contract": {"steady": "all"}},
+        {
+            "id": "SQLITE-RBAC-CHURN-JWT",
+            "traffic_pattern": "fanout",
+            "delivery_contract": {"steady": "all"},
+        },
         {
             "errors": [],
             "publish": {"count": 10},
@@ -1246,8 +1250,21 @@ def test_fanout_readiness_wait_times_out_for_missing_subscribers(tmp_path) -> No
 
 
 def test_fanout_role_merge_recomputes_receive_expectations_and_churn() -> None:
+    clock = {"source": "clock_monotonic_raw", "payload_version": "v3"}
     publisher = {
-        "inputs": {"mode": "fanout", "clients": 2, "fanout_role": "publisher"},
+        "inputs": {
+            "mode": "fanout",
+            "clients": 2,
+            "fanout_role": "publisher",
+            "fanout_latency_clock": clock,
+            "credential_attestations": {
+                "fanout_publisher": {
+                    "profile": "publisher-profile",
+                    "semantic": None,
+                    "validated_credentials": 1,
+                }
+            },
+        },
         "publish": {"count": 4},
         "receive": {"count": 0},
         "raw_publish_ms": [1.0, 2.0, 3.0, 4.0],
@@ -1262,7 +1279,19 @@ def test_fanout_role_merge_recomputes_receive_expectations_and_churn() -> None:
         "errors": [],
     }
     subscriber = {
-        "inputs": {"mode": "fanout", "clients": 1, "fanout_role": "subscriber"},
+        "inputs": {
+            "mode": "fanout",
+            "clients": 1,
+            "fanout_role": "subscriber",
+            "fanout_latency_clock": clock,
+            "credential_attestations": {
+                "clients": {
+                    "profile": "subscriber-profile",
+                    "semantic": None,
+                    "validated_credentials": 1,
+                }
+            },
+        },
         "publish": {"count": 0},
         "receive": {"count": 3},
         "raw_publish_ms": [],
@@ -1293,6 +1322,70 @@ def test_fanout_role_merge_recomputes_receive_expectations_and_churn() -> None:
         {"phase": 1, "expected_deliveries": 4, "received_deliveries": 2},
     ]
     assert merged["topology"]["fanout_roles"] == {"publishers": 1, "subscribers": 2}
+    assert merged["inputs"]["credential_attestations"] == {
+        "clients": {
+            "profile": "subscriber-profile",
+            "semantic": None,
+            "validated_credentials": 2,
+        },
+        "fanout_publisher": {
+            "profile": "publisher-profile",
+            "semantic": None,
+            "validated_credentials": 1,
+        },
+    }
+    assert merged["errors"] == []
+
+
+def test_fanout_role_merge_rejects_inconsistent_latency_clock() -> None:
+    def result(role: str, clock: dict[str, str] | None) -> dict[str, object]:
+        return {
+            "inputs": {
+                "mode": "fanout",
+                "fanout_role": role,
+                "fanout_latency_clock": clock,
+            },
+            "publish": {"count": 0},
+            "receive": {"count": 0},
+            "raw_metrics": {"publish": [], "receive": []},
+            "errors": [],
+        }
+
+    merged = rs._merge_fanout_role_loadgen_results(
+        publisher=result(
+            "publisher", {"source": "clock_monotonic_raw", "payload_version": "v3"}
+        ),
+        subscribers=[result("subscriber", None)],
+        wall_duration_s=1.0,
+        scenario_id="FANOUT",
+        run_index=0,
+        messages=1,
+    )
+
+    assert "fanout_latency_clock_attestation_mismatch" in merged["errors"]
+
+
+def test_credential_attestation_merge_rejects_same_role_profile_mismatch() -> None:
+    errors: list[str] = []
+    results = [
+        {
+            "inputs": {
+                "credential_attestations": {
+                    "clients": {
+                        "profile": profile,
+                        "semantic": None,
+                        "validated_credentials": 1,
+                    }
+                }
+            }
+        }
+        for profile in ("profile-a", "profile-b")
+    ]
+
+    merged = rs._merge_credential_attestations(results, errors)
+
+    assert merged["clients"]["profile"] == "profile-a"
+    assert errors == ["credential_attestation_mismatch:clients"]
 
 
 def test_container_per_client_cleans_up_siblings_on_failure(monkeypatch) -> None:

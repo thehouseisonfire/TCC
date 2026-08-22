@@ -8,6 +8,11 @@ Use [`TESTING.md`](TESTING.md) for the phased semantic-verification and
 suspicious-result review procedure, and
 [`SEMANTIC-VERIFIED.md`](SEMANTIC-VERIFIED.md) for recorded verification status.
 
+Terminology: *Parts* are the execution matrices defined in this document;
+*Phases* are verification stages in [`TESTING.md`](TESTING.md). The two
+numbering schemes are unrelated: `TESTING.md` Phase 2 is an infrastructure
+preflight, not Part 2 of this plan.
+
 ## Overview
 
 The benchmark suite currently has **440 scenarios** (220 base + 220 TLS variants) across

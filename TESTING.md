@@ -6,6 +6,10 @@ reviewing every result for semantic errors or suspicious measurements.
 matrix and commands. [`SEMANTIC-VERIFIED.md`](SEMANTIC-VERIFIED.md) records what
 has actually been verified.
 
+Terminology: *Phases* are verification stages in this document; *Parts* are the
+execution matrices defined in [`RUN.md`](RUN.md). Phases 6 and 7 execute
+Part 1 and Part 2, respectively; the two numbering schemes are unrelated.
+
 The process deliberately separates three questions:
 
 1. Does the scenario definition describe the intended experiment?

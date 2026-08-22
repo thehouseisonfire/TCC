@@ -1,137 +1,158 @@
-# SEMANTIC-VERIFIED.md
+# Benchmark semantic verification status
 
-Status of the Part 1 fanout smoke re-run: **22 of 25 scenarios succeeded and had
-their semantics verified against their declared design.**
+This file records semantic-verification evidence for the benchmark suite. It is
+not the execution plan: [`RUN.md`](RUN.md) is canonical for the current scenario
+count, workload matrices, commands, and time estimates.
 
-## Run Parameters
+“Passed” below means that the observed workload and policy outcome matched the
+scenario contract. A process exiting successfully is not, by itself, semantic
+verification. Historical smoke runs performed before the current result
+contracts are identified separately and must not be treated as completed
+benchmark datasets.
 
-- Command template:
-  `./scripts/run-benchmarks --scenarios <NAME> --clients 10 --messages 10 --client-topology container-per-client --client-memory 256m --skip-build --skip-tokens`
-- Executed one scenario at a time; each validated on exit code, loadgen
-  `errors == []` (except the CONTROL-DISABLE kick signature), publish count,
-  receive counts, and `fanout_churn` metadata (`triggered`, `applied_events`,
-  `cache_validity_signal`, pre/post buckets).
+## Current suite status
 
-## Verified Scenarios (22)
+- The suite contains **440 scenarios**: 220 base scenarios and 220 TLS variants.
+- Part 1 contains **3,174 planned runs**. It varies only workload axes that a
+  scenario does not define itself.
+- Part 2 is the **32-scenario parameter sweep**, comprising 3,456 planned runs
+  across client count, message count, QoS, token-issuer configuration, and
+  repetitions. The 17 fixed-workload stress scenarios are separate targeted
+  slices and are intentionally excluded from this sweep.
+- The complete Part 1 and Part 2 matrices have **not** been run and semantically
+  verified. Earlier minimal executions established startup and basic workload
+  viability only.
+- TLS scenarios still require a TLS-capable execution environment and a complete
+  run before their results can be relied upon.
 
-### DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-{BISCUIT|JWT}-{100|50|10} (5)
+## Validation enforced by the current harness
 
-Design: strict ACL_READ; single allow→deny policy swap at message 5;
-post-churn deliveries denied; `cache_validity_signal=true`; no errors.
+The runner and load generator now reject several classes of silent semantic
+failure:
 
-| Scenario | pre | post | result |
-|---|---|---|---|
-| `...CHURN-BISCUIT-100` | 500/500 | 0/500 | pass |
-| `...CHURN-BISCUIT-50` | 250/250 | 0/250 | pass |
-| `...CHURN-JWT-10` | 50/50 | 0/50 | pass |
-| `...CHURN-JWT-100` | 500/500 | 0/500 | pass |
-| `...CHURN-JWT-50` | 250/250 | 0/250 | pass |
+- Scenario results record requested and effective client, message, QoS, and QoS
+  distribution values, plus whether each workload axis came from the scenario or
+  the command line.
+- Per-client credential profiles are selected explicitly. Credential
+  attestations identify the client and fanout-publisher roles independently and
+  validate declared Biscuit Datalog tiers.
+- Normal publish workloads require the expected successful publish count.
+  Explicit QoS 2 and mixed-QoS scenarios also require the expected per-QoS
+  counts; mixed schedules are deterministic.
+- Fanout scenarios carry an executable `delivery_contract`. Churn scenarios
+  validate exact per-phase deliveries, applied event counts, sequence
+  continuity, and required control responses or policy notifications.
+- Dynamic Security control commands are correlated with their response-topic
+  replies; missing and error responses fail the run.
+- HTTP complexity scenarios require one external PDP request and allow for every
+  expected publish, all requests on the selected profile, no policy denials or
+  injected failures, and recorded rule-examination work.
+- HTTP failure injection is deterministic and is checked against both backend
+  counters and workload-visible publish failures.
+- Biscuit attenuation/delegation fails if the derived credential is unchanged.
+  Restrictive transformations execute a denial probe where the scenario contract
+  requires one.
+- Fanout latency payloads use versioned `CLOCK_MONOTONIC_RAW` timestamps. Split
+  client roles attest the clock source, and merges reject negative, incompatible,
+  or implausible samples.
+- Netem MTU setup failures are fatal rather than silently producing an
+  unmodified network workload.
 
-All: `triggered=true`, `applied_events=1`, `post_churn_delivery_ratio=0.0`,
-`cache_validity_signal=true`, publish 10/10, errors 0.
+These checks establish that the declared path was exercised to the extent stated
+by each scenario contract. They do not replace the need to execute the full
+matrix after semantic or architectural changes.
 
-### DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-DISABLE-{BISCUIT|JWT}-{10|100|50} (6)
+## Strict fanout and churn verification
 
-Design: runtime `disableClient` at message 5; plugin kicks live sessions,
-producing exactly one `receive_failed` per subscriber; post-churn 0.
+A targeted Part 1 rerun exercised 25 fanout/control candidates with 10 messages,
+container-per-client topology, and explicit result inspection. Of those
+candidates, **24 currently registered scenarios have targeted run evidence whose
+observed outcomes matched their declared designs**. Some of that evidence
+predates the latest executable result contracts, so it is evidence for the
+recorded configurations rather than proof that the scenarios have been rerun
+under every current validation check. The remaining legacy scenario was retired
+because its claimed policy effect was not observable on its configured
+authorization path.
 
-| Scenario | errors | pre | post |
-|---|---|---|---|
-| `...DISABLE-BISCUIT-10` | 10 `receive_failed` | 50/50 | 0/50 |
-| `...DISABLE-BISCUIT-100` | 100 `receive_failed` | 500/500 | 0/500 |
-| `...DISABLE-BISCUIT-50` | 50 `receive_failed` | 250/250 | 0/250 |
-| `...DISABLE-JWT-10` | 10 `receive_failed` | 50/50 | 0/50 |
-| `...DISABLE-JWT-100` | 100 `receive_failed` | 500/500 | 0/500 |
-| `...DISABLE-JWT-50` | 50 `receive_failed` | 250/250 | 0/250 |
+### Dynamic Security strict ACL-read churn
 
-All: `triggered=true`, `applied_events=1`, `cache_validity_signal=true`,
-publish 10/10.
+Verified scenarios:
 
-### DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-REVOKE-{BISCUIT|JWT}-{10|50} (4)
+- `DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-{BISCUIT|JWT}-{10|50|100}`
 
-Design: runtime `removeRoleACL` at message 5; sessions remain connected;
-post-churn deliveries denied; no errors.
+Contract: five pre-churn messages are delivered to every subscriber; one
+allow-to-deny policy change is applied; the remaining five messages produce no
+subscriber deliveries. Each run published 10 messages, applied one churn event,
+matched its pre/post delivery contract, and reported no unexpected errors.
 
-| Scenario | pre | post | result |
-|---|---|---|---|
-| `...REVOKE-BISCUIT-10` | 50/50 | 0/50 | pass |
-| `...REVOKE-BISCUIT-50` | 250/250 | 0/250 | pass |
-| `...REVOKE-JWT-10` | 50/50 | 0/50 | pass |
-| `...REVOKE-JWT-50` | 250/250 | 0/250 | pass |
+### Dynamic Security client disable
 
-All: `triggered=true`, `applied_events=1`, `cache_validity_signal=true`,
-publish 10/10, errors 0. Rerun after the collector fix (non-fanout payloads are
-no longer counted): receive counts equal pre-churn exactly, zero-latency
-placeholder entries eliminated (`min_ms > 0`).
+Verified scenarios:
 
-### DYNAMIC-SECURITY-ANONYMOUS-BASELINE (1)
+- `DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-DISABLE-{BISCUIT|JWT}-{10|50|100}`
 
-Design: fanout with anonymous subscribers/publisher via dynsec `anonymousGroup`;
-no churn; all deliveries allowed.
+Contract: five pre-control messages are delivered to every subscriber; a
+`disableClient` command then terminates the subscriber sessions; no post-control
+deliveries occur. The expected receive-failure signature is one kicked session
+per subscriber and is part of the contract rather than an ignored error.
 
-Verified: 10 published → 100 received (10 × 10), `fanout_churn.enabled=false`,
-errors 0. Runs after `mosquitto_anon.conf` fix (dynsec URL pointed at a file
-that is never mounted in the container).
+### Dynamic Security ACL revoke
 
-### DYNAMIC-SECURITY-BASELINE (1)
+Verified scenarios:
 
-Design: publish-only baseline; no subscriber; no control.
+- `DYNAMIC-SECURITY-ACL-READ-FANOUT-CONTROL-REVOKE-{BISCUIT|JWT}-{10|50|100}`
 
-Verified: 100 published (10 clients × 10 messages), 0 received, no control
-events, errors 0.
+Contract: five pre-control messages are delivered to every subscriber; one
+`removeRoleACL` command revokes `publishClientReceive`; sessions remain
+connected; no post-control deliveries occur. The 100-subscriber variants
+initially exhausted a 256 MiB load-generator limit while eagerly loading the
+password map. Password-map profiles now load through a streaming selector, and
+both variants passed after that fix.
 
-### DYNAMIC-SECURITY-CHURN (1)
+### Dynamic Security baseline cases
 
-Design: publish-only with runtime-control barrier; quota 1 message per client,
-control injected once after 10 total pre-control publishes, then first
-post-control publish denied per client (loop breaks).
+- `DYNAMIC-SECURITY-ANONYMOUS-BASELINE`: anonymous fanout delivered all 10
+  messages to all 10 subscribers after correcting the mounted DynSec fixture.
+- `DYNAMIC-SECURITY-BASELINE`: 10 clients each completed 10 publish operations;
+  the scenario has no subscriber or control workload.
+- `DYNAMIC-SECURITY-CHURN`: the runtime-control barrier admitted exactly one
+  pre-control publish per client, applied one policy update, and observed one
+  post-control denial per client.
+- `DYNAMIC-SECURITY-READ-FANOUT`: the single subscriber received all 10 fanout
+  messages with no churn enabled.
 
-Verified: publish 10, control count 1, `policy_denial_count=10`,
-`expiry_denial_count=0`, errors 0.
+### HTTP strict ACL-read allow
 
-### DYNAMIC-SECURITY-READ-FANOUT (1)
+Verified scenarios:
 
-Design: fanout with a single subscriber; no churn.
+- `HTTP-ACL-READ-FANOUT-STRICT-COMPLEX-ALLOW-BISCUIT-10`
+- `HTTP-ACL-READ-FANOUT-STRICT-COMPLEX-ALLOW-JWT-10`
+- `HTTP-ACL-READ-FANOUT-STRICT-COMPLEX-ALLOW-PARITY-BISCUIT-10`
 
-Verified: 10 published → 10 received, `fanout_churn.enabled=false`, errors 0.
+Each published 10 messages and delivered all 100 expected subscriber copies with
+no churn and no unexpected errors. Performance values from these smoke runs are
+not retained here as semantic evidence.
 
-### HTTP-ACL-READ-FANOUT-STRICT-COMPLEX-ALLOW-{BISCUIT|JWT|PARITY-BISCUIT}-10 (3)
+## Retired invalid scenario
 
-Design: strict HTTP ACL allow; fanout with 10 subscribers; no churn.
+`DYNAMIC-SECURITY-READ-FANOUT-CHURN` is no longer registered. It used
+`mosquitto_dynsec.conf` with expiry-only ACL-read enforcement, so read checks
+short-circuited on token expiry and did not consult the Dynamic Security policy.
+The configured read revocation therefore had no observable effect: delivery
+continued after churn. Strict read-churn coverage is provided by the
+`DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-*` family.
 
-| Scenario | published | received | result |
-|---|---|---|---|
-| `...ALLOW-BISCUIT-10` | 10 | 100/100 | pass |
-| `...ALLOW-JWT-10` | 10 | 100/100 | pass |
-| `...ALLOW-PARITY-BISCUIT-10` | 10 | 100/100 | pass |
+## Known interpretation boundaries
 
-All: `fanout_churn.enabled=false`, errors 0. Publish p50 ≈ 455 ms (per-publish
-HTTP authorization round-trip, consistent across the HTTP family).
-
-## Excluded Scenarios (3)
-
-- **13 `...CONTROL-REVOKE-BISCUIT-100`** and **16 `...CONTROL-REVOKE-JWT-100`**:
-  failed before data collection — loadgen containers were OOM-killed at the
-  256m limit while loading `benchmarks/password-map.json` (kernel
-  `mem_cgroup_oom`, anon-rss ~260 MB); 7–15 subscribers missing readiness
-  files. No result JSON. Rerun pending the loadgen memory decision.
-- **22 `DYNAMIC-SECURITY-READ-FANOUT-CHURN`**: this retired scenario ran successfully after the
-  fixture fix (`subscriber_count: 1` + churn-snapshot rework), but its
-  semantics were **not** verified: it uses `mosquitto_dynsec.conf`
-  (expiry_only enforcement), where read-only ACL checks short-circuit on token
-  expiry and never consult the dynsec policy, so the READ revocation in the
-  churn state has no observable delivery effect (repeat 2 still delivered
-  10/10). Strict READ-churn measurement is covered by the
-  `...ACL-READ-FANOUT-CHURN-*` family instead. The legacy ID is no longer registered.
-
-## Notes
-
-- Historical receive-latency values used incompatible process-local clock origins
-  under split-container topology and are not per-delivery costs. Current runs use
-  versioned `CLOCK_MONOTONIC_RAW` nanosecond send timestamps shared across the
-  publisher and subscriber processes. Split-role results attest the clock source
-  during merge and reject invalid or implausible deltas.
-- The plugin publishes `system_notification/{client_id}` JSON on REVOKE churn;
-  the loadgen collector was counting these as fanout messages (zero-latency
-  entries). Fixed via `parse_fanout_message` gate in `mqtt-loadgen.rs`;
-  REVOKE scenarios 12/14/15/17 rerun with clean metrics.
+- `BASELINE-NO-AUTH` pins QoS 0 and `TOKEN-QOS2-{JWT|BISCUIT}` pins QoS 2.
+  They remain in Part 2 for other sweep dimensions but are not QoS sweeps.
+- Fixed-workload stress and lifecycle/control scenarios intentionally define
+  their own client or message axes and must be run as targeted slices described
+  in `RUN.md`.
+- Removed `acl_read_cost_per_subscriber_ms` values must not be used. They were
+  derived from an invalid interpretation of cross-process timing. Current
+  fanout scaling uses publish-side timing and validated delivery counts; receive
+  latency is retained only with the current clock-provenance contract.
+- Local result files are evidence for the recorded configuration only. They do
+  not imply that another QoS, topology, issuer mode, TLS mode, or workload axis
+  has been verified.

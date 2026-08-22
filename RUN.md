@@ -4,6 +4,10 @@ This document describes how to execute the complete MQTT authorization benchmark
 suite for the TCC2 project. It covers every scenario, exercises every parameter
 lever, and produces a reproducible dataset for analysis.
 
+Use [`TESTING.md`](TESTING.md) for the phased semantic-verification and
+suspicious-result review procedure, and
+[`SEMANTIC-VERIFIED.md`](SEMANTIC-VERIFIED.md) for recorded verification status.
+
 ## Overview
 
 The benchmark suite currently has **440 scenarios** (220 base + 220 TLS variants) across
@@ -404,31 +408,40 @@ Each directory contains:
 
 ## Runtime Estimates
 
-| Component | Per-invocation time | Invocations | Subtotal |
-|-----------|-------------------|-------------|----------|
-| Part 1 (428 scenarios, 10 clients, 10 msgs) | ~4–8 h | 3 | ~12–24 h |
-| Part 1 (428 scenarios, 200 clients, 10 msgs) | ~8–16 h | 3 | ~24–48 h |
-| Part 1 (428 scenarios, 10 clients, 100 msgs) | ~6–12 h | 3 | ~18–36 h |
-| Part 1 (428 scenarios, 200 clients, 100 msgs) | ~12–24 h | 3 | ~36–72 h |
-| Part 2 (32 scenarios per invocation) | ~1–3 h | 108 | ~108–324 h |
+The workload-shape split means Part 1 is no longer four invocations of every
+scenario. Matrix scenarios run for all four client/message combinations,
+partially fixed scenarios run only over their free axis, and fully fixed
+scenarios run once per repetition.
 
-**Conservative total: 9–14 days continuous execution.** Plan for overnight and
-weekend runs. Consider splitting across multiple machines if available.
+| Component | Planned scenario-runs | Estimated time |
+|-----------|----------------------:|---------------:|
+| Part 1 | 3,174 | ~3–5 days |
+| Part 2 | 3,456 | ~4–7 days |
+| **Total** | **6,630** | **~7–12 days** |
+
+These are planning estimates, not performance results. Plan for overnight and
+weekend runs and preserve each invocation's output separately.
 
 ## Verifying Completeness
 
 After all runs, count result files:
 
 ```bash
-# Part 1: expect 428 JSON files per run
+# Part 1: each directory contains only its workload-shape group. Across all
+# Part 1 directories, expect 3,174 non-summary scenario JSON files.
+total=0
 for d in mqtt-auth-biscuit/benchmarks/results-p1-*/; do
-  count=$(ls "$d"/*.json 2>/dev/null | grep -v summary | wc -l)
+  count=$(find "$d" -maxdepth 1 -type f -name '*.json' \
+    ! -name 'summary.json' | wc -l)
   echo "$d: $count scenarios"
+  total=$((total + count))
 done
+echo "Part 1 total: $total / 3174"
 
 # Part 2: expect 32 JSON files per sweep run
 for d in mqtt-auth-biscuit/benchmarks/results-p2-*/; do
-  count=$(ls "$d"/*.json 2>/dev/null | grep -v summary | wc -l)
+  count=$(find "$d" -maxdepth 1 -type f -name '*.json' \
+    ! -name 'summary.json' | wc -l)
   echo "$d: $count scenarios"
 done
 ```

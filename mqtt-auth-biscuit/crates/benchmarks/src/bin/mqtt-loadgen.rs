@@ -554,6 +554,8 @@ struct CredentialIssuance {
     exp: i64,
     requested_ttl_seconds: u64,
     token_sha256: String,
+    no_default_roles: bool,
+    no_default_grants: bool,
 }
 
 #[derive(Debug, Default)]
@@ -569,6 +571,7 @@ struct WorkerResult {
     proactive_refresh_attempt_unix_ms: Vec<u128>,
     expiry_denial_count: usize,
     policy_denial_count: usize,
+    runtime_control_applied_after_successful_publishes: Option<usize>,
     delegation_ms: Option<f64>,
     delegation_len: Option<f64>,
     attenuation_ms: Option<f64>,
@@ -625,6 +628,7 @@ struct StandardMetrics {
     expiry_denial_count: usize,
     policy_denial_count: usize,
     runtime_control_connect_ms: Option<f64>,
+    runtime_control_applied_after_successful_publishes: Option<usize>,
     delegation: Vec<f64>,
     delegation_len: Vec<f64>,
     delegation_handoff_publish: Vec<f64>,
@@ -1671,6 +1675,8 @@ async fn fetch_token(args: &Args, kind: &str, client_id: &str, topic: &str) -> R
             exp,
             requested_ttl_seconds,
             token_sha256,
+            no_default_roles: args.token_issuer_no_default_roles,
+            no_default_grants: args.token_issuer_no_default_grants,
         }),
     })
 }
@@ -5234,6 +5240,7 @@ fn standard_metrics(
         expiry_denial_count,
         policy_denial_count,
         runtime_control_connect_ms: None,
+        runtime_control_applied_after_successful_publishes: None,
         delegation,
         delegation_len,
         delegation_handoff_publish: handoff_publish_ms,
@@ -5259,6 +5266,8 @@ fn standard_metrics(
 
 fn merge_runtime_control_result(metrics: &mut StandardMetrics, result: WorkerResult) {
     metrics.runtime_control_connect_ms = result.connect_ms;
+    metrics.runtime_control_applied_after_successful_publishes =
+        result.runtime_control_applied_after_successful_publishes;
     metrics.control.extend(result.control_ms);
     metrics.control_response.extend(result.control_response_ms);
     metrics.control_response_successes += result.control_response_successes;
@@ -5310,6 +5319,8 @@ fn standard_output(
         "proactive_refresh_attempt_unix_ms": metrics.proactive_refresh_attempt_unix_ms.clone(),
         "policy_denial_count": metrics.policy_denial_count,
         "runtime_control_connect_ms": metrics.runtime_control_connect_ms,
+        "runtime_control_applied_after_successful_publishes": metrics
+            .runtime_control_applied_after_successful_publishes,
         "delegation": metrics.delegation.clone(),
         "delegation_len": metrics.delegation_len.clone(),
         "delegation_handoff_publish": metrics.delegation_handoff_publish.clone(),
@@ -5499,6 +5510,10 @@ async fn spawn_runtime_control(
                 &mut result,
             )
             .await;
+            if result.errors.is_empty() {
+                result.runtime_control_applied_after_successful_publishes =
+                    Some(state.successful_publishes.load(Ordering::Acquire));
+            }
         } else {
             let successful_publishes = state.successful_publishes.load(Ordering::Acquire);
             result.errors.push(format!(
@@ -5638,6 +5653,7 @@ fn empty_standard_metrics() -> StandardMetrics {
         expiry_denial_count: 0,
         policy_denial_count: 0,
         runtime_control_connect_ms: None,
+        runtime_control_applied_after_successful_publishes: None,
         delegation: Vec::new(),
         delegation_len: Vec::new(),
         delegation_handoff_publish: Vec::new(),
@@ -5971,6 +5987,7 @@ mod tests {
             expiry_denial_count: 0,
             policy_denial_count: 0,
             runtime_control_connect_ms: None,
+            runtime_control_applied_after_successful_publishes: None,
             delegation: Vec::new(),
             delegation_len: Vec::new(),
             delegation_handoff_publish: Vec::new(),
@@ -6209,6 +6226,7 @@ mod tests {
             &mut metrics,
             WorkerResult {
                 connect_ms: Some(99.0),
+                runtime_control_applied_after_successful_publishes: Some(12),
                 control_ms: vec![3.0],
                 errors: vec!["controller-warning".to_string()],
                 ..WorkerResult::default()
@@ -6217,6 +6235,10 @@ mod tests {
 
         assert_eq!(metrics.connect, vec![1.0, 2.0]);
         assert_eq!(metrics.runtime_control_connect_ms, Some(99.0));
+        assert_eq!(
+            metrics.runtime_control_applied_after_successful_publishes,
+            Some(12)
+        );
         assert_eq!(metrics.control, vec![3.0]);
         assert_eq!(metrics.errors, vec!["controller-warning"]);
     }

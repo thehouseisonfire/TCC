@@ -97,6 +97,7 @@ struct CredentialSemantic {
     facts: usize,
     rules: usize,
     checks: usize,
+    chain_depth: usize,
 }
 
 fn encoded_biscuit(token: &Biscuit) -> String {
@@ -1110,6 +1111,32 @@ fn main() {
 
     let profile_semantics = BTreeMap::from([
         (
+            "biscuit_5",
+            CredentialSemantic {
+                token_kind: "biscuit",
+                complexity_axis: "chain_length",
+                complexity_level: "med",
+                biscuit_blocks: BISCUIT_BLOCKS_MEDIUM,
+                facts: 0,
+                rules: 0,
+                checks: 0,
+                chain_depth: BISCUIT_BLOCKS_MEDIUM,
+            },
+        ),
+        (
+            "biscuit_25",
+            CredentialSemantic {
+                token_kind: "biscuit",
+                complexity_axis: "chain_length",
+                complexity_level: "high",
+                biscuit_blocks: BISCUIT_BLOCKS_LARGE,
+                facts: 0,
+                rules: 0,
+                checks: 0,
+                chain_depth: BISCUIT_BLOCKS_LARGE,
+            },
+        ),
+        (
             "biscuit_complex_low",
             CredentialSemantic {
                 token_kind: "biscuit",
@@ -1119,6 +1146,7 @@ fn main() {
                 facts: 8,
                 rules: 3,
                 checks: 0,
+                chain_depth: 0,
             },
         ),
         (
@@ -1131,6 +1159,7 @@ fn main() {
                 facts: 14,
                 rules: 6,
                 checks: 1,
+                chain_depth: 0,
             },
         ),
         (
@@ -1143,6 +1172,7 @@ fn main() {
                 facts: 21,
                 rules: 10,
                 checks: 2,
+                chain_depth: 0,
             },
         ),
     ]);

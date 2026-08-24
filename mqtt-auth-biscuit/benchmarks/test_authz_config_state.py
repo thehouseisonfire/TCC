@@ -271,6 +271,31 @@ def test_effective_scenario_message_count_reserves_runtime_control_denial_publis
     assert rs._effective_scenario_message_count(scenario, 5, effective_clients=2) == 6
 
 
+def test_dynamic_security_churn_contract_allows_completions_after_application_snapshot() -> None:
+    scenario: rs.ScenarioConfig = {
+        "id": "DYNAMIC-SECURITY-CHURN",
+        "runtime_control_after_messages": 10,
+        "runtime_control_expect_denial": True,
+    }
+    result: dict[str, Any] = {
+        "errors": [],
+        "publish": {"count": 12},
+        "policy_denial_count": 3,
+        "raw_metrics": {
+            "runtime_control_applied_after_successful_publishes": 11,
+        },
+    }
+    rs._validate_result_contract(scenario, result, message_count=10, client_count=3)
+
+    result["raw_metrics"]["runtime_control_applied_after_successful_publishes"] = 13
+    with pytest.raises(RuntimeError, match="churn phase contract failed"):
+        rs._validate_result_contract(scenario, result, message_count=10, client_count=3)
+
+    result["raw_metrics"]["runtime_control_applied_after_successful_publishes"] = 9
+    with pytest.raises(RuntimeError, match="churn phase contract failed"):
+        rs._validate_result_contract(scenario, result, message_count=10, client_count=3)
+
+
 def test_result_contract_requires_enabled_churn_to_trigger() -> None:
     with pytest.raises(RuntimeError, match="fanout churn did not trigger"):
         rs._validate_result_contract(
@@ -413,7 +438,54 @@ def test_result_contract_allows_only_expected_disable_disconnects() -> None:
 def test_mqtt5_result_contract_validates_auth_without_publish_metrics() -> None:
     rs._validate_result_contract(
         {"id": "TOKEN-MQTT5-REAUTH-JWT", "mqtt5_auth": {"kind": "jwt"}},
-        {"connect_ok": True, "connect_ms": 1.0, "reauth_ok": True, "reauth_ms": 2.0},
+        {
+            "connect_ok": True,
+            "connect_ms": 1.0,
+            "reauth_ok": True,
+            "reauth_ms": 2.0,
+            "token1_sha256": "1" * 64,
+            "token2_sha256": "2" * 64,
+            "pre_reauth_publish_ok": True,
+            "post_reauth_publish_ok": True,
+            "post_reauth_old_topic_denied": True,
+            "credential_attestation": {
+                "source": "issuer",
+                "token_kind": "jwt",
+                "client_id": "client_auth",
+                "token1_ttl_seconds": 180,
+                "token2_ttl_seconds": 300,
+                "token1_topic": "before",
+                "token2_topic": "after",
+            },
+        },
+        message_count=10,
+        client_count=10,
+    )
+
+
+def test_mqtt5_result_contract_accepts_static_tokens_without_issuer_metadata() -> None:
+    rs._validate_result_contract(
+        {"id": "CUSTOM-MQTT5-AUTH", "mqtt5_auth": {"token1": "one", "token2": "two"}},
+        {
+            "connect_ok": True,
+            "connect_ms": 1.0,
+            "reauth_ok": True,
+            "reauth_ms": 2.0,
+            "token1_sha256": "1" * 64,
+            "token2_sha256": "2" * 64,
+            "pre_reauth_publish_ok": True,
+            "post_reauth_publish_ok": True,
+            "post_reauth_old_topic_denied": True,
+            "credential_attestation": {
+                "source": "static",
+                "token_kind": None,
+                "client_id": "client_auth",
+                "token1_ttl_seconds": 0,
+                "token2_ttl_seconds": 0,
+                "token1_topic": "before",
+                "token2_topic": "after",
+            },
+        },
         message_count=10,
         client_count=10,
     )
@@ -433,6 +505,60 @@ def test_mqtt5_result_contract_rejects_failed_reauthentication() -> None:
             message_count=10,
             client_count=10,
         )
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "delay_ms"),
+    (("HTTP-LATENCY-200MS-JWT", 200), ("HTTP-LATENCY-1000MS-JWT", 1000)),
+)
+def test_http_latency_contract_requires_exact_backend_work(
+    scenario_id: str, delay_ms: int
+) -> None:
+    scenario: rs.ScenarioConfig = {
+        "id": scenario_id,
+        "http_expected_delay_ms": delay_ms,
+    }
+    result: dict[str, Any] = {
+        "errors": [],
+        "publish": {"count": 6},
+        "authz_stats": {
+            "requests": 6,
+            "policy_allows": 6,
+            "policy_denies": 0,
+            "injected_failures": 0,
+            "profile_requests": {"simple": 6},
+            "configured_delay_ms": delay_ms,
+            "configured_profile": "simple",
+            "configured_fail_mode": "none",
+        },
+    }
+    rs._validate_result_contract(scenario, result, message_count=3, client_count=2)
+    result["authz_stats"]["requests"] = 1
+    with pytest.raises(RuntimeError, match="HTTP latency contract failed"):
+        rs._validate_result_contract(scenario, result, message_count=3, client_count=2)
+
+
+def test_hybrid_fallback_contract_requires_every_external_failure() -> None:
+    scenario: rs.ScenarioConfig = {
+        "id": "HYBRID-FALLBACK-AUTHZ-DOWN-JWT",
+        "hybrid_fallback_required": True,
+    }
+    result: dict[str, Any] = {
+        "errors": [],
+        "publish": {"count": 4},
+        "authz_stats": {
+            "requests": 4,
+            "injected_failures": 4,
+            "policy_allows": 0,
+            "policy_denies": 0,
+            "configured_fail_mode": "always",
+        },
+    }
+    rs._validate_result_contract(scenario, result, message_count=2, client_count=2)
+    assert result["fallback_attestation"]["successful_fallbacks"] == 4
+    result["authz_stats"]["injected_failures"] = 0
+    with pytest.raises(RuntimeError, match="hybrid fallback contract failed"):
+        rs._validate_result_contract(scenario, result, message_count=2, client_count=2)
 
 
 def test_effective_mosquitto_runtime_conf_materializes_plugin_backed_config() -> None:

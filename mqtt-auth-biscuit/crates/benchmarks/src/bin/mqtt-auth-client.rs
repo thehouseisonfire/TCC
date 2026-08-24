@@ -1,8 +1,10 @@
 use bytes::Bytes;
 use clap::Parser;
 use gen_tokens::mqtt_helpers::{ClientSpec, Result, connect, decode_token_arg, print_json};
+use rumqttc::mqttbytes::QoS;
 use rumqttc::mqttbytes::v5::AuthProperties;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Parser)]
@@ -29,6 +31,10 @@ struct Args {
     tls_insecure: bool,
     #[arg(long, default_value = "INFO")]
     log_level: String,
+    #[arg(long)]
+    token1_topic: String,
+    #[arg(long)]
+    token2_topic: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -44,6 +50,39 @@ struct Output {
     token2_bytes: usize,
     reauth_ok: bool,
     reauth_error: Option<String>,
+    token1_sha256: String,
+    token2_sha256: String,
+    pre_reauth_publish_ok: bool,
+    post_reauth_publish_ok: bool,
+    post_reauth_old_topic_denied: bool,
+}
+
+async fn publish_probe(
+    client: &rumqttc::AsyncClient,
+    eventloop: &mut rumqttc::EventLoop,
+    topic: &str,
+) -> std::result::Result<(), String> {
+    let notice = client
+        .publish_tracked(
+            topic,
+            QoS::AtLeastOnce,
+            false,
+            b"mqtt5-auth-probe".as_slice(),
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+    let wait = async {
+        loop {
+            eventloop.poll().await.map_err(|err| err.to_string())?;
+        }
+        #[allow(unreachable_code)]
+        Ok::<(), String>(())
+    };
+    tokio::select! {
+        result = notice.wait_completion_async() => result.map_err(|err| err.to_string()),
+        result = wait => result,
+        () = tokio::time::sleep(Duration::from_secs(10)) => Err("publish_probe_timeout".into()),
+    }
 }
 
 #[tokio::main]
@@ -64,6 +103,9 @@ async fn main() -> Result<()> {
         auth_data: Some(token1.clone()),
     };
     let (client, mut eventloop, connect_report) = connect(&spec).await?;
+    let pre_reauth_publish_ok = publish_probe(&client, &mut eventloop, &args.token1_topic)
+        .await
+        .is_ok();
 
     tokio::time::sleep(Duration::from_secs_f64(args.sleep)).await;
     let props = AuthProperties {
@@ -88,6 +130,20 @@ async fn main() -> Result<()> {
         () = tokio::time::sleep(Duration::from_secs(10)) => Err("reauth_timeout".to_string()),
     };
     let reauth_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let post_reauth_publish_ok = if reauth.is_ok() {
+        publish_probe(&client, &mut eventloop, &args.token2_topic)
+            .await
+            .is_ok()
+    } else {
+        false
+    };
+    let post_reauth_old_topic_denied = if post_reauth_publish_ok {
+        publish_probe(&client, &mut eventloop, &args.token1_topic)
+            .await
+            .is_err()
+    } else {
+        false
+    };
     let _ = client.disconnect().await;
 
     print_json(&Output {
@@ -102,5 +158,10 @@ async fn main() -> Result<()> {
         token2_bytes: token2.len(),
         reauth_ok: reauth.is_ok(),
         reauth_error: reauth.err(),
+        token1_sha256: hex::encode(Sha256::digest(&token1)),
+        token2_sha256: hex::encode(Sha256::digest(&token2)),
+        pre_reauth_publish_ok,
+        post_reauth_publish_ok,
+        post_reauth_old_topic_denied,
     })
 }

@@ -305,6 +305,23 @@ impl AuthzStats {
     }
 }
 
+fn stats_snapshot(state: &AppState) -> serde_json::Value {
+    let mut snapshot = state.stats.snapshot();
+    let config = state.config.load();
+    if let Some(object) = snapshot.as_object_mut() {
+        object.insert("configured_delay_ms".into(), config.delay_ms.into());
+        object.insert(
+            "configured_fail_mode".into(),
+            serde_json::to_value(&config.fail_mode).expect("fail mode is serializable"),
+        );
+        object.insert(
+            "configured_profile".into(),
+            serde_json::to_value(&config.authz_profile).expect("profile is serializable"),
+        );
+    }
+    snapshot
+}
+
 impl Clone for AppState {
     fn clone(&self) -> Self {
         Self {
@@ -781,11 +798,11 @@ async fn handle(
             Ok(json_response(StatusCode::OK, &body))
         }
 
-        (Method::GET, "/stats") => Ok(json_response(StatusCode::OK, &state.stats.snapshot())),
+        (Method::GET, "/stats") => Ok(json_response(StatusCode::OK, &stats_snapshot(&state))),
 
         (Method::POST, "/stats/reset") => {
             state.stats.reset();
-            Ok(json_response(StatusCode::OK, &state.stats.snapshot()))
+            Ok(json_response(StatusCode::OK, &stats_snapshot(&state)))
         }
 
         (Method::POST, "/config") => {

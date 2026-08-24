@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -381,6 +381,33 @@ def _issuance_record(client_id: str, fingerprint: str, issued_at: int = 100) -> 
         "requested_ttl_seconds": 30,
         "token_sha256": fingerprint,
     }
+
+
+def test_part2_inventory_is_registered_unique_and_axis_aware() -> None:
+    scenarios = _scenario_registry()
+    rs._validate_part2_sweep_inventory(scenarios)
+    selected = [
+        scenario_id
+        for cohort in rs.PART2_SWEEP_COHORTS.values()
+        for scenario_id in cohort
+    ]
+    assert len(selected) == 32
+    assert len(set(selected)) == len(selected)
+    assert scenarios["TOKEN-ISSUER-BASELINE-JWT"]["credential_mode"] == "issuer"
+    assert scenarios["TOKEN-ISSUER-BASELINE-BISCUIT"]["credential_mode"] == "issuer"
+
+
+def test_part2_inventory_rejects_missing_and_misclassified_scenarios() -> None:
+    scenarios = _scenario_registry()
+    missing = dict(scenarios)
+    missing.pop("TOKEN-ATTENUATION-COMBINED-BISCUIT")
+    with pytest.raises(ValueError, match="not registered"):
+        rs._validate_part2_sweep_inventory(missing)
+
+    fixed_matrix = {name: dict(scenario) for name, scenario in scenarios.items()}
+    fixed_matrix["TOKEN-BASELINE-JWT"]["qos"] = 1
+    with pytest.raises(ValueError, match="fixed sweep axis"):
+        rs._validate_part2_sweep_inventory(cast(dict[str, rs.ScenarioConfig], fixed_matrix))
 
 
 def test_reconnect_contract_requires_issuer_and_broker_attestations() -> None:

@@ -713,7 +713,7 @@ def test_resolve_mqtt5_auth_tokens_uses_static_tokens_when_present() -> None:
         "mqtt5_auth": {"token1": "token-one", "token2": "token-two"},
     }
 
-    token1, token2 = rs._resolve_mqtt5_auth_tokens(
+    token1, token2, metadata = rs._resolve_mqtt5_auth_tokens(
         "TOKEN-MQTT5-REAUTH-JWT",
         scenario,
         "http://issuer",
@@ -723,6 +723,8 @@ def test_resolve_mqtt5_auth_tokens_uses_static_tokens_when_present() -> None:
 
     assert token1 == "token-one"
     assert token2 == "token-two"
+    assert metadata["source"] == "static"
+    assert metadata["token1_topic"] != metadata["token2_topic"]
 
 
 def test_resolve_mqtt5_auth_tokens_mints_fresh_runtime_tokens(monkeypatch) -> None:
@@ -737,7 +739,7 @@ def test_resolve_mqtt5_auth_tokens_mints_fresh_runtime_tokens(monkeypatch) -> No
         token2_ttl_seconds: int,
         ca_file: str | None,
         insecure: bool,
-    ) -> tuple[str, str]:
+    ) -> tuple[str, str, dict[str, object]]:
         captured.update(
             {
                 "scenario_id": scenario_id,
@@ -749,7 +751,19 @@ def test_resolve_mqtt5_auth_tokens_mints_fresh_runtime_tokens(monkeypatch) -> No
                 "insecure": insecure,
             }
         )
-        return ("fresh-token-1", "fresh-token-2")
+        return (
+            "fresh-token-1",
+            "fresh-token-2",
+            {
+                "source": "issuer",
+                "token_kind": token_kind,
+                "client_id": "client_auth",
+                "token1_ttl_seconds": token1_ttl_seconds,
+                "token2_ttl_seconds": token2_ttl_seconds,
+                "token1_topic": "before",
+                "token2_topic": "after",
+            },
+        )
 
     monkeypatch.setattr(rs, "_issue_mqtt5_auth_tokens", fake_issue)
     scenario: rs.ScenarioConfig = {
@@ -761,7 +775,7 @@ def test_resolve_mqtt5_auth_tokens_mints_fresh_runtime_tokens(monkeypatch) -> No
         },
     }
 
-    token1, token2 = rs._resolve_mqtt5_auth_tokens(
+    token1, token2, metadata = rs._resolve_mqtt5_auth_tokens(
         "TOKEN-MQTT5-REAUTH-BISCUIT",
         scenario,
         "https://issuer",
@@ -770,6 +784,7 @@ def test_resolve_mqtt5_auth_tokens_mints_fresh_runtime_tokens(monkeypatch) -> No
     )
 
     assert (token1, token2) == ("fresh-token-1", "fresh-token-2")
+    assert metadata["token_kind"] == "biscuit"
     assert captured == {
         "scenario_id": "TOKEN-MQTT5-REAUTH-BISCUIT",
         "token_kind": "biscuit",
@@ -1870,6 +1885,7 @@ def test_container_per_client_runtime_control_uses_one_coordinated_controller(
     assert result["control"]["count"] == 1
     assert result["policy_denial_count"] == 2
     assert result["runtime_control"]["local_quotas"] == [2, 2]
+    assert result["runtime_control"]["applied_after_successful_publishes"] == 4
 
 
 def test_runtime_control_quotas_preserve_exact_aggregate_threshold() -> None:

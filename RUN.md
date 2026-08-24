@@ -15,14 +15,14 @@ preflight, not Part 2 of this plan.
 
 ## Overview
 
-The benchmark suite currently has **440 scenarios** (220 base + 220 TLS variants) across
+The benchmark suite currently has **444 scenarios** (222 base + 222 TLS variants) across
 multiple functional categories. The run plan has two parts:
 
 | Part | What | Runs | Est. time |
 |------|------|------|-----------|
-| 1 | All 440 scenarios, varying every non-fixed workload axis, × 3 runs | 3,174 | ~3–5 days |
-| 2 | 32 scenarios × 3 clients × 2 messages × 3 QoS × 2 token issuer × 3 runs | 3,456 | ~4–7 days |
-| **Total** | | **6,630** | **~7–12 days** |
+| 1 | All 444 scenarios, varying every non-fixed workload axis, × 3 runs | 3,222 | ~3–5 days |
+| 2 | Axis-aware representative cohorts × 3 runs | 1,530 | ~2–4 days |
+| **Total** | | **4,752** | **~5–9 days** |
 
 ## Research Dimensions
 
@@ -37,18 +37,20 @@ Every lever below is pulled at least twice across the full plan.
 | Client count | 10, 200 | 10, 50, 200 | `--clients` |
 | Message volume | 10, 100 | 10, 100 | `--messages` |
 | QoS | 1 (default) | 0, 1, 2 | `--qos` |
-| Token issuer | Default | Default, Stripped | `--token-issuer-no-default-roles` |
+| Token issuer | Default | Default, Stripped | issuer cohort with roles/grants controls |
 
 Part 1 runs every scenario three times and varies each workload axis that the
 scenario does not define itself. Thus an ordinary scenario uses the full 2×2
 client/message matrix, a fan-out scenario with a fixed subscriber slice still
 uses both message levels, and a fully fixed stress workload runs once per
-repetition. Part 2 deepens the sweep on 32 representative scenarios by adding a
-third client level, all three QoS levels, and token issuer configuration.
+repetition. Part 2 deepens representative workloads only along axes that change
+their effective execution. Issuer configuration uses a dedicated issuer-backed
+cohort rather than being recorded against fixture credentials.
 
 ## Sweep Scenarios (Part 2)
 
-32 scenarios, 2 per category where applicable:
+The executable `PART2_SWEEP_COHORTS` inventory is the source of truth. It contains
+32 registered scenarios partitioned by their effective workload axes:
 
 | # | Category | Scenario 1 | Scenario 2 |
 |---|----------|------------|------------|
@@ -62,12 +64,13 @@ third client level, all three QoS levels, and token issuer configuration.
 | 8 | Hybrid fallback | `HYBRID-FALLBACK-AUTHZ-DOWN-JWT` | — |
 | 9 | Token complexity chain | `TOKEN-COMPLEXITY-CHAIN-5-BISCUIT` | `TOKEN-COMPLEXITY-CHAIN-25-BISCUIT` |
 | 10 | Token complexity datalog | `TOKEN-COMPLEXITY-DATALOG-MED-BISCUIT` | `TOKEN-COMPLEXITY-DATALOG-HIGH-BISCUIT` |
-| 11 | Token attenuation | `TOKEN-ATTENUATION-CLIENT-BISCUIT` | `TOKEN-ATTENUATION-DENY-BISCUIT` |
+| 11 | Token attenuation | `TOKEN-ATTENUATION-COMBINED-BISCUIT` | `TOKEN-ATTENUATION-SUBSCRIBE-DENY-BISCUIT` |
 | 12 | Network MTU | `NETWORK-MTU-200-JWT` | `NETWORK-MTU-1500-JWT` |
 | 13 | MQTT5 reauth | `TOKEN-MQTT5-REAUTH-JWT` | `TOKEN-MQTT5-REAUTH-BISCUIT` |
 | 14 | Token deny | `TOKEN-DENY-READ-JWT` | `TOKEN-ATTENUATED-DENY-BISCUIT` |
 | 15 | QoS | `TOKEN-QOS2-JWT` | `TOKEN-QOS2-BISCUIT` |
 | 16 | Thundering herd | `TOKEN-THUNDERING-HERD-JWT` | `TOKEN-THUNDERING-HERD-BISCUIT` |
+| 17 | Issuer-backed baseline | `TOKEN-ISSUER-BASELINE-JWT` | `TOKEN-ISSUER-BASELINE-BISCUIT` |
 
 The following fixed-workload scenarios are intentionally excluded from Part 2
 because they hard-code their own client/message counts and would not participate
@@ -109,13 +112,13 @@ blur the point of the experiment:
 
 Run those as targeted slices with their scenario-defined workload shape.
 
-Two Part 2 scenarios remain in the sweep but do not vary on the QoS axis:
+Part 2 omits axes that do not affect a scenario:
 
-- `BASELINE-NO-AUTH` pins `qos=0`
-- `TOKEN-QOS2-{JWT,BISCUIT}` pin `qos=2`
+- `BASELINE-NO-AUTH` and `TOKEN-QOS2-{JWT,BISCUIT}` omit the QoS loop.
+- `TOKEN-DENY-READ-JWT` and `TOKEN-ATTENUATED-DENY-BISCUIT` omit client and QoS loops.
+- `TOKEN-MQTT5-REAUTH-{JWT,BISCUIT}` run once per repetition.
 
-Include them in Part 2 for client/message and token-issuer coverage, but do not
-interpret their results as a QoS sweep.
+The dedicated issuer cohort is the only cohort with a default/stripped issuance axis.
 
 ## Prerequisites
 
@@ -268,27 +271,21 @@ done
 Every result records both requested and effective clients, messages, and QoS,
 plus whether each workload axis came from the CLI matrix or the scenario.
 
-### Step 3: Part 2 — Parameter sweep (32 scenarios × 36 combos × 3 runs)
+### Step 3: Part 2 — Axis-aware parameter sweep (1,530 runs)
 
-Define the sweep scenarios:
+Load the validated executable cohorts:
 
 ```bash
-SWEEP_SCENARIOS="BASELINE-NO-AUTH,\
-TOKEN-BASELINE-JWT,TOKEN-BASELINE-BISCUIT,\
-STATIC-ACL-PUBLISH-JWT,STATIC-ACL-PUBLISH-BISCUIT,\
-DYNAMIC-SECURITY-BASELINE,DYNAMIC-SECURITY-CHURN,\
-HTTP-PROFILE-SIMPLE-JWT,HTTP-PROFILE-SIMPLE-BISCUIT,\
-HTTP-PROFILE-COMPLEX-JWT,HTTP-PROFILE-COMPLEX-BISCUIT,\
-HTTP-LATENCY-200MS-JWT,HTTP-LATENCY-1000MS-JWT,\
-HYBRID-FALLBACK-AUTHZ-DOWN-JWT,\
-TOKEN-COMPLEXITY-CHAIN-5-BISCUIT,TOKEN-COMPLEXITY-CHAIN-25-BISCUIT,\
-TOKEN-COMPLEXITY-DATALOG-MED-BISCUIT,TOKEN-COMPLEXITY-DATALOG-HIGH-BISCUIT,\
-TOKEN-ATTENUATION-CLIENT-BISCUIT,TOKEN-ATTENUATION-DENY-BISCUIT,\
-NETWORK-MTU-200-JWT,NETWORK-MTU-1500-JWT,\
-TOKEN-MQTT5-REAUTH-JWT,TOKEN-MQTT5-REAUTH-BISCUIT,\
-TOKEN-DENY-READ-JWT,TOKEN-ATTENUATED-DENY-BISCUIT,\
-TOKEN-QOS2-JWT,TOKEN-QOS2-BISCUIT,\
-TOKEN-THUNDERING-HERD-JWT,TOKEN-THUNDERING-HERD-BISCUIT"
+readarray -t PART2_COHORTS < <(cd mqtt-auth-biscuit && uv run --locked python -c '
+from benchmarks.run_scenarios import PART2_SWEEP_COHORTS
+for name in ("matrix", "fixed_qos", "fixed_clients_qos", "reauth", "issuer"):
+    print(",".join(PART2_SWEEP_COHORTS[name]))
+')
+MATRIX_SCENARIOS=${PART2_COHORTS[0]}
+FIXED_QOS_SCENARIOS=${PART2_COHORTS[1]}
+FIXED_CLIENTS_QOS_SCENARIOS=${PART2_COHORTS[2]}
+REAUTH_SCENARIOS=${PART2_COHORTS[3]}
+ISSUER_SCENARIOS=${PART2_COHORTS[4]}
 ```
 
 Run the fixed-workload stress scenarios separately with explicit targeted
@@ -340,43 +337,50 @@ SQLITE-RBAC-CHURN-JWT,SQLITE-RBAC-CHURN-BISCUIT \
   --skip-tokens
 ```
 
-Run the full sweep (3 clients × 2 messages × 3 QoS × 2 token issuer × 3 runs
-= 108 iterations, 3,456 scenario runs total):
+Run each cohort only across its effective axes. The ordinary cohorts contribute
+1,314 runs and the issuer-backed default/stripped cohort contributes 216 runs:
 
 ```bash
-for clients in 10 50 200; do
-  for messages in 10 100; do
-    for qos in 0 1 2; do
-      for stripped in 0 1; do
-        for run in 1 2 3; do
-          echo "=== Part 2: c=$clients m=$messages qos=$qos stripped=$stripped run=$run ==="
-          if [ "$stripped" -eq 1 ]; then
-            ./scripts/run-benchmarks \
-              --scenarios "$SWEEP_SCENARIOS" \
-              --clients "$clients" \
-              --messages "$messages" \
-              --qos "$qos" \
-              --client-topology container-per-client \
-              --client-memory 96m \
-              --token-issuer-no-default-roles \
-              --skip-build \
-              --skip-tokens
-          else
-            ./scripts/run-benchmarks \
-              --scenarios "$SWEEP_SCENARIOS" \
-              --clients "$clients" \
-              --messages "$messages" \
-              --qos "$qos" \
-              --client-topology container-per-client \
-              --client-memory 96m \
-              --skip-build \
-              --skip-tokens
-          fi
-          mv mqtt-auth-biscuit/benchmarks/results \
-             mqtt-auth-biscuit/benchmarks/results-p2-c${clients}-m${messages}-q${qos}-s${stripped}-r${run}
-        done
+run_p2() {
+  label=$1 scenarios=$2 clients=$3 messages=$4 qos=$5
+  shift 5
+  ./scripts/run-benchmarks --scenarios "$scenarios" --clients "$clients" \
+    --messages "$messages" --qos "$qos" --client-topology container-per-client \
+    --client-memory 96m --skip-build --skip-tokens "$@"
+  mv mqtt-auth-biscuit/benchmarks/results "mqtt-auth-biscuit/benchmarks/results-p2-${label}"
+}
+
+for run in 1 2 3; do
+  for clients in 10 50 200; do
+    for messages in 10 100; do
+      for qos in 0 1 2; do
+        run_p2 "matrix-c${clients}-m${messages}-q${qos}-r${run}" \
+          "$MATRIX_SCENARIOS" "$clients" "$messages" "$qos"
       done
+      run_p2 "fixed-qos-c${clients}-m${messages}-r${run}" \
+        "$FIXED_QOS_SCENARIOS" "$clients" "$messages" 1
     done
+  done
+  for messages in 10 100; do
+    run_p2 "fixed-clients-qos-m${messages}-r${run}" \
+      "$FIXED_CLIENTS_QOS_SCENARIOS" 10 "$messages" 1
+  done
+  run_p2 "reauth-r${run}" "$REAUTH_SCENARIOS" 1 1 1
+
+  for kind in JWT BISCUIT; do
+    scenario="TOKEN-ISSUER-BASELINE-${kind}"
+    for clients in 10 50 200; do for messages in 10 100; do for qos in 0 1 2; do
+      run_p2 "issuer-${kind}-default-c${clients}-m${messages}-q${qos}-r${run}" \
+        "$scenario" "$clients" "$messages" "$qos"
+      if [ "$kind" = JWT ]; then
+        run_p2 "issuer-${kind}-stripped-c${clients}-m${messages}-q${qos}-r${run}" \
+          "$scenario" "$clients" "$messages" "$qos" \
+          --token-issuer-no-default-roles --token-issuer-no-default-grants
+      else
+        run_p2 "issuer-${kind}-stripped-c${clients}-m${messages}-q${qos}-r${run}" \
+          "$scenario" "$clients" "$messages" "$qos" --token-issuer-no-default-grants
+      fi
+    done; done; done
   done
 done
 ```
@@ -420,9 +424,9 @@ scenarios run once per repetition.
 
 | Component | Planned scenario-runs | Estimated time |
 |-----------|----------------------:|---------------:|
-| Part 1 | 3,174 | ~3–5 days |
-| Part 2 | 3,456 | ~4–7 days |
-| **Total** | **6,630** | **~7–12 days** |
+| Part 1 | 3,222 | ~3–5 days |
+| Part 2 | 1,530 | ~2–4 days |
+| **Total** | **4,752** | **~5–9 days** |
 
 These are planning estimates, not performance results. Plan for overnight and
 weekend runs and preserve each invocation's output separately.

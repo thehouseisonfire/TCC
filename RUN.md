@@ -437,7 +437,7 @@ After all runs, count result files:
 
 ```bash
 # Part 1: each directory contains only its workload-shape group. Across all
-# Part 1 directories, expect 3,174 non-summary scenario JSON files.
+# Part 1 directories, expect 3,222 non-summary scenario JSON files.
 total=0
 for d in mqtt-auth-biscuit/benchmarks/results-p1-*/; do
   count=$(find "$d" -maxdepth 1 -type f -name '*.json' \

@@ -39,6 +39,7 @@ const DEFAULT_BISCUIT_SK_HEX: &str =
 const MAX_BODY_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct JwtIssueRequest {
     client_id: Option<String>,
     subject: Option<String>,
@@ -105,14 +106,29 @@ fn non_empty_owned(value: Option<String>) -> Option<String> {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BiscuitIssueRequest {
     client_id: Option<String>,
     topic: Option<String>,
     identity_fact_predicate: Option<String>,
     identity_fact_value: Option<String>,
     roles: Option<Vec<String>>,
+    grants: Option<Vec<JwtGrant>>,
     denies: Option<Vec<JwtGrant>>,
     ttl_seconds: Option<i64>,
+    /// Accepted for compatibility with callers that apply issuer flags globally.
+    /// Biscuit issuance has no implicit default roles, so this is a no-op.
+    #[serde(rename = "no_default_roles")]
+    _no_default_roles: Option<bool>,
+    no_default_grants: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct AppliedAuthority {
+    default_roles_applied: bool,
+    default_grants_applied: bool,
+    explicit_roles: usize,
+    explicit_grants: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -121,6 +137,7 @@ struct TokenResponse {
     exp: i64,
     issued_at: i64,
     alg: String,
+    authority: AppliedAuthority,
 }
 
 /// Binary token response for MQTT transport (raw Protobuf, no `Base64URL`)
@@ -133,6 +150,7 @@ struct BinaryTokenResponse {
     alg: String,
     /// Size of the raw binary data in bytes
     size_bytes: usize,
+    authority: AppliedAuthority,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -342,6 +360,14 @@ fn build_jwt_claims(req: JwtIssueRequest, cfg: &IssuerConfig, now: i64) -> JwtCl
 }
 
 fn handle_jwt(req: JwtIssueRequest, cfg: &IssuerConfig) -> Result<TokenResponse, String> {
+    let no_default_roles = req.no_default_roles.unwrap_or(cfg.jwt_no_default_roles);
+    let no_default_grants = req.no_default_grants.unwrap_or(cfg.jwt_no_default_grants);
+    let authority = AppliedAuthority {
+        default_roles_applied: !no_default_roles && req.roles.is_none(),
+        default_grants_applied: !no_default_grants && req.grants.is_none(),
+        explicit_roles: req.roles.as_ref().map_or(0, Vec::len),
+        explicit_grants: req.grants.as_ref().map_or(0, Vec::len),
+    };
     let now = Utc::now().timestamp();
     let claims = build_jwt_claims(req, cfg, now);
     let exp = claims.exp;
@@ -353,6 +379,7 @@ fn handle_jwt(req: JwtIssueRequest, cfg: &IssuerConfig) -> Result<TokenResponse,
         exp,
         issued_at: now,
         alg: cfg.jwt_alg_label.clone(),
+        authority,
     })
 }
 
@@ -369,18 +396,37 @@ fn build_biscuit_core(
     let client_id = req.client_id.as_deref().unwrap_or("client_1");
     let default_topic = format!("sensors/{client_id}/temp");
     let topic = req.topic.as_deref().unwrap_or(&default_topic);
-
-    let topic = escape_datalog_str(topic);
-    let publish_fact = format!("right(\"publish\", \"{topic}\")");
-    let subscribe_fact = format!("right(\"subscribe\", \"{topic}\")");
     let expires_fact = format!("expires_at({exp})");
     let mut builder = Biscuit::builder()
-        .fact(publish_fact.as_str())
-        .map_err(|e| IssueError::internal(format!("biscuit fact publish: {e}")))?
-        .fact(subscribe_fact.as_str())
-        .map_err(|e| IssueError::internal(format!("biscuit fact subscribe: {e}")))?
         .fact(expires_fact.as_str())
         .map_err(|e| IssueError::internal(format!("biscuit fact expires_at: {e}")))?;
+
+    let default_grants;
+    let grants = if let Some(grants) = req.grants.as_ref() {
+        grants.as_slice()
+    } else if req.no_default_grants.unwrap_or(false) {
+        &[]
+    } else {
+        default_grants = vec![
+            JwtGrant {
+                op: "publish".to_string(),
+                res: topic.to_string(),
+            },
+            JwtGrant {
+                op: "subscribe".to_string(),
+                res: topic.to_string(),
+            },
+        ];
+        default_grants.as_slice()
+    };
+    for grant in grants {
+        let op = escape_datalog_str(&grant.op);
+        let res = escape_datalog_str(&grant.res);
+        let right = format!("right(\"{op}\", \"{res}\")");
+        builder = builder
+            .fact(right.as_str())
+            .map_err(|e| IssueError::internal(format!("biscuit fact right: {e}")))?;
+    }
 
     match (
         req.identity_fact_predicate.as_deref(),
@@ -463,6 +509,12 @@ fn handle_biscuit(
     req: &BiscuitIssueRequest,
     cfg: &IssuerConfig,
 ) -> Result<TokenResponse, IssueError> {
+    let authority = AppliedAuthority {
+        default_roles_applied: false,
+        default_grants_applied: req.grants.is_none() && !req.no_default_grants.unwrap_or(false),
+        explicit_roles: req.roles.as_ref().map_or(0, Vec::len),
+        explicit_grants: req.grants.as_ref().map_or(0, Vec::len),
+    };
     let (bytes, exp, now) = build_biscuit_core(req, cfg)?;
     let token = general_purpose::URL_SAFE_NO_PAD.encode(&bytes);
 
@@ -471,6 +523,7 @@ fn handle_biscuit(
         exp,
         issued_at: now,
         alg: "Biscuit".to_string(),
+        authority,
     })
 }
 
@@ -480,6 +533,12 @@ fn handle_biscuit_binary(
     req: &BiscuitIssueRequest,
     cfg: &IssuerConfig,
 ) -> Result<BinaryTokenResponse, IssueError> {
+    let authority = AppliedAuthority {
+        default_roles_applied: false,
+        default_grants_applied: req.grants.is_none() && !req.no_default_grants.unwrap_or(false),
+        explicit_roles: req.roles.as_ref().map_or(0, Vec::len),
+        explicit_grants: req.grants.as_ref().map_or(0, Vec::len),
+    };
     let (bytes, exp, now) = build_biscuit_core(req, cfg)?;
 
     // Return raw binary data (base64-encoded for JSON transport, but represents raw Protobuf)
@@ -492,6 +551,7 @@ fn handle_biscuit_binary(
         issued_at: now,
         alg: "Biscuit".to_string(),
         size_bytes,
+        authority,
     })
 }
 
@@ -716,6 +776,15 @@ mod tests {
             .expect("identity query should succeed")
     }
 
+    fn biscuit_rights(biscuit: &Biscuit) -> Vec<(String, String)> {
+        let mut authorizer = AuthorizerBuilder::new()
+            .build(biscuit)
+            .expect("authorizer should build");
+        authorizer
+            .query_all("data($op, $res) <- right($op, $res)")
+            .expect("right query should succeed")
+    }
+
     fn issue_status(path: &str, body: &serde_json::Value, cfg: &IssuerConfig) -> StatusCode {
         let bytes = serde_json::to_vec(body).expect("body should serialize");
         let err = issue_request(path, &bytes, cfg).expect_err("request should fail");
@@ -807,8 +876,11 @@ mod tests {
                 identity_fact_predicate: Some("client_id".to_string()),
                 identity_fact_value: Some("client_7".to_string()),
                 roles: None,
+                grants: None,
                 denies: None,
                 ttl_seconds: Some(60),
+                _no_default_roles: None,
+                no_default_grants: None,
             },
             &cfg,
         )
@@ -829,8 +901,11 @@ mod tests {
                 identity_fact_predicate: Some("client_id".to_string()),
                 identity_fact_value: None,
                 roles: None,
+                grants: None,
                 denies: None,
                 ttl_seconds: Some(60),
+                _no_default_roles: None,
+                no_default_grants: None,
             },
             &cfg,
         )
@@ -928,8 +1003,11 @@ mod tests {
                 identity_fact_predicate: None,
                 identity_fact_value: None,
                 roles: None,
+                grants: None,
                 denies: None,
                 ttl_seconds: Some(60),
+                _no_default_roles: None,
+                no_default_grants: None,
             },
             &cfg,
         )
@@ -937,5 +1015,94 @@ mod tests {
         let biscuit = parse_biscuit(&bytes, &cfg);
         let identities = biscuit_identity_values(&biscuit, "client_id");
         assert!(identities.is_empty());
+        assert_eq!(biscuit_rights(&biscuit).len(), 2);
+    }
+
+    #[test]
+    fn biscuit_stripped_defaults_uses_only_explicit_grants() {
+        let cfg = test_cfg();
+        let (bytes, _, _) = build_biscuit_core(
+            &BiscuitIssueRequest {
+                client_id: Some("client_1".to_string()),
+                topic: None,
+                identity_fact_predicate: None,
+                identity_fact_value: None,
+                roles: None,
+                grants: Some(vec![JwtGrant {
+                    op: "publish".to_string(),
+                    res: "explicit/topic".to_string(),
+                }]),
+                denies: None,
+                ttl_seconds: Some(60),
+                _no_default_roles: None,
+                no_default_grants: Some(true),
+            },
+            &cfg,
+        )
+        .expect("stripped Biscuit should be issued");
+        assert_eq!(
+            biscuit_rights(&parse_biscuit(&bytes, &cfg)),
+            vec![("publish".to_string(), "explicit/topic".to_string())]
+        );
+    }
+
+    #[test]
+    fn issuer_rejects_unknown_authority_flags() {
+        let cfg = test_cfg();
+        assert_eq!(
+            issue_status(
+                "/biscuit",
+                &serde_json::json!({"client_id": "client_1", "unknown_flag": true}),
+                &cfg,
+            ),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn biscuit_accepts_global_no_default_roles_flag() {
+        let cfg = test_cfg();
+        let body = serde_json::to_vec(&serde_json::json!({
+            "client_id": "client_1",
+            "no_default_roles": true,
+            "no_default_grants": true,
+            "grants": [
+                {"op": "publish", "res": "sensors/client_1/temp"},
+                {"op": "subscribe", "res": "sensors/client_1/temp"}
+            ]
+        }))
+        .expect("body should serialize");
+        assert!(issue_request("/biscuit/binary", &body, &cfg).is_ok());
+    }
+
+    #[test]
+    fn biscuit_default_grants_preserve_datalog_sensitive_topic_characters() {
+        let cfg = test_cfg();
+        let topic = "sensors/quoted\"/back\\slash";
+        let (bytes, _, _) = build_biscuit_core(
+            &BiscuitIssueRequest {
+                client_id: Some("client_1".to_string()),
+                topic: Some(topic.to_string()),
+                identity_fact_predicate: None,
+                identity_fact_value: None,
+                roles: None,
+                grants: None,
+                denies: None,
+                ttl_seconds: Some(60),
+                _no_default_roles: Some(true),
+                no_default_grants: None,
+            },
+            &cfg,
+        )
+        .expect("Biscuit should be issued");
+        let mut rights = biscuit_rights(&parse_biscuit(&bytes, &cfg));
+        rights.sort();
+        assert_eq!(
+            rights,
+            vec![
+                ("publish".to_string(), topic.to_string()),
+                ("subscribe".to_string(), topic.to_string()),
+            ]
+        );
     }
 }

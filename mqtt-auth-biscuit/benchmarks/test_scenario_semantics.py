@@ -386,11 +386,7 @@ def _issuance_record(client_id: str, fingerprint: str, issued_at: int = 100) -> 
 def test_part2_inventory_is_registered_unique_and_axis_aware() -> None:
     scenarios = _scenario_registry()
     rs._validate_part2_sweep_inventory(scenarios)
-    selected = [
-        scenario_id
-        for cohort in rs.PART2_SWEEP_COHORTS.values()
-        for scenario_id in cohort
-    ]
+    selected = [scenario_id for cohort in rs.PART2_SWEEP_COHORTS.values() for scenario_id in cohort]
     assert len(selected) == 32
     assert len(set(selected)) == len(selected)
     assert scenarios["TOKEN-ISSUER-BASELINE-JWT"]["credential_mode"] == "issuer"
@@ -410,12 +406,46 @@ def test_part2_inventory_rejects_missing_and_misclassified_scenarios() -> None:
         rs._validate_part2_sweep_inventory(cast(dict[str, rs.ScenarioConfig], fixed_matrix))
 
 
+@pytest.mark.parametrize("qos", (0, 1, 2))
+def test_result_contract_validates_effective_cli_qos(qos: int) -> None:
+    scenario: rs.ScenarioConfig = {"id": "CLI-QOS", "topic": "test"}
+    expected = 6
+    result = {
+        "errors": [],
+        "publish": {"count": expected},
+        "qos_distribution_actual": {
+            f"qos_{value}_count": expected if value == qos else 0 for value in range(3)
+        },
+        **{
+            f"publish_qos_{value}": {"count": expected if value == qos else 0} for value in range(3)
+        },
+    }
+    rs._validate_result_contract(
+        scenario, result, message_count=3, client_count=2, effective_qos=qos
+    )
+    cast(dict[str, object], result[f"publish_qos_{qos}"])["count"] = 0
+    with pytest.raises(RuntimeError, match="effective QoS"):
+        rs._validate_result_contract(
+            scenario, result, message_count=3, client_count=2, effective_qos=qos
+        )
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "level"),
+    (
+        ("TOKEN-COMPLEXITY-DATALOG-LOW-BISCUIT", "low"),
+        ("TOKEN-COMPLEXITY-DATALOG-MED-BISCUIT", "med"),
+        ("TOKEN-COMPLEXITY-DATALOG-HIGH-BISCUIT", "high"),
+    ),
+)
+def test_ordinary_datalog_scenarios_have_attested_levels(scenario_id: str, level: str) -> None:
+    assert _scenario_registry()[scenario_id]["complexity_level"] == level
+
+
 def test_reconnect_contract_requires_issuer_and_broker_attestations() -> None:
     scenario = _scenario_registry()["TOKEN-PUBLISH-STRESS-RECONNECT-JWT"]
     scenario["id"] = "TOKEN-PUBLISH-STRESS-RECONNECT-JWT"
-    records = [
-        _issuance_record(f"client_{index}", f"{index:064x}") for index in range(1, 26)
-    ]
+    records = [_issuance_record(f"client_{index}", f"{index:064x}") for index in range(1, 26)]
     result = {
         "errors": [],
         "publish": {"count": 25_000},
@@ -540,9 +570,7 @@ def test_workload_shape_preserves_each_unspecified_matrix_axis() -> None:
     assert rs._scenario_workload_shape(scenarios["TOKEN-PUBLISH-STRESS-JWT"]) == "fixed"
     assert rs._scenario_workload_shape(scenarios["TOKEN-BASELINE-JWT"]) == "matrix"
     assert (
-        rs._scenario_workload_shape(
-            scenarios["DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-JWT-10"]
-        )
+        rs._scenario_workload_shape(scenarios["DYNAMIC-SECURITY-ACL-READ-FANOUT-CHURN-JWT-10"])
         == "fixed-clients"
     )
     assert rs._scenario_workload_shape({"message_count": 25}) == "fixed-messages"

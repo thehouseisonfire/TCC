@@ -144,7 +144,7 @@ Goal: establish exactly what will be tested before starting Docker workloads.
    cd ..
    ```
 
-   Expected total: 440 scenarios, comprising 220 base scenarios and 220 TLS
+   Expected total: 444 scenarios, comprising 222 base scenarios and 222 TLS
    variants. Stop if this differs from `RUN.md`; reconcile the registry and
    documentation before testing.
 
@@ -152,7 +152,7 @@ Goal: establish exactly what will be tested before starting Docker workloads.
    that inventory must eventually have either verified run evidence or a written
    blocking reason.
 
-Exit gate: repository state, tool versions, and the 440-scenario inventory are
+Exit gate: repository state, tool versions, and the 444-scenario inventory are
 recorded and internally consistent.
 
 ## Phase 1 — Static semantic and contract checks
@@ -209,23 +209,22 @@ metrics path cannot be mistaken for valid measurements.
    cd ..
    ```
 
-2. Confirm Docker readiness, broker health checks, token issuer, HTTP PDP,
-   Prometheus/resource collection, and packet-capture permissions.
+2. Run the canonical executable preflight from the repository root:
 
-3. Exercise one small representative scenario for each backend and mechanism:
+   ```bash
+   ./scripts/run-phase2-preflight
+   ```
 
-   - no authentication;
-   - JWT and Biscuit token authorization;
-   - Static ACL;
-   - Dynamic Security;
-   - HTTP;
-   - SQLite;
-   - Hybrid;
-   - TLS versions of the same paths.
+   The checked inventory covers no authentication, JWT, Biscuit, Static ACL,
+   Dynamic Security, HTTP, SQLite, Hybrid, TLS variants of every backend path,
+   denial, fanout, policy churn, QoS 2, MQTT 5 reauthentication, MTU 200/1500,
+   resource collection, and injected HTTP/Hybrid failures. Its source of truth is
+   `benchmarks.phase2_preflight`; do not substitute an operator-selected subset.
 
-4. Include at least one expected denial, one fanout delivery, one policy change,
-   one QoS 2 publish, one reconnect/reauthentication path, and one netem MTU
-   scenario.
+3. Preserve `benchmarks/results/phase2-preflight/evidence.json` with the batch
+   evidence. The command fails if a required result, resource snapshot, or MTU
+   packet analysis is absent. Existing results can be rechecked with
+   `./scripts/run-phase2-preflight --verify-only`.
 
 For each preflight result, verify that the recorded configuration names the
 expected broker configuration, policy source, authorization profile, topology,
@@ -242,7 +241,7 @@ numerically plausible metrics, and injected failure cases fail visibly.
 
 ## Phase 3 — One-run semantic coverage of every base scenario
 
-Goal: execute all 220 non-TLS scenarios once at the smallest workload that still
+Goal: execute all 222 non-TLS scenarios once at the smallest workload that still
 triggers their complete behavior.
 
 Use the workload-shape grouping from `RUN.md`. Matrix scenarios may use 10
@@ -309,13 +308,13 @@ is semantically accepted only when all applicable checks below pass.
 - MQTT 5 AUTH scenarios report successful initial AUTH and reauthentication with
   both timing samples present.
 
-Exit gate: all 220 base scenarios have one accepted semantic run, or appear in a
+Exit gate: all 222 base scenarios have one accepted semantic run, or appear in a
 blocking-issues list with owner, evidence, and required fix. Update
 `SEMANTIC-VERIFIED.md` only with accepted evidence.
 
 ## Phase 4 — TLS parity coverage
 
-Goal: verify all 220 TLS variants rather than assuming that base-scenario
+Goal: verify all 222 TLS variants rather than assuming that base-scenario
 semantics survive the transport change.
 
 1. Generate or provision the documented certificates and verify hostname, CA,
@@ -334,7 +333,7 @@ Review/fix gate: review each TLS/base pair immediately after the TLS run. Fix or
 block the pair before moving to the next scenario; do not defer parity and
 number review until all TLS variants finish.
 
-Exit gate: all 440 inventory entries have at least one accepted semantic run.
+Exit gate: all 444 inventory entries have at least one accepted semantic run.
 
 ## Phase 5 — Targeted fixed-workload and lifecycle slices
 
@@ -365,7 +364,7 @@ unresolved path ambiguity.
 
 ## Phase 6 — Part 1 full baseline matrix
 
-Goal: produce the complete 3,174-run baseline dataset.
+Goal: produce the complete 3,222-run baseline dataset.
 
 Execute Step 2 of `RUN.md` exactly, including workload-shape grouping and the
 host-topology exception for reauthentication storms. Validate each output
@@ -386,13 +385,13 @@ throttling, memory pressure/OOM events, broker reconnects, policy-server delay,
 packet loss, packet-capture overhead, and host contention. Rerun the entire
 three-repetition cell after fixing an environmental cause.
 
-Exit gate: 3,174 scenario JSON files are present, contract-valid, attributable to
+Exit gate: 3,222 scenario JSON files are present, contract-valid, attributable to
 their intended cells, and either free of unexplained anomalies or accompanied by
 an explicit exclusion record.
 
 ## Phase 7 — Part 2 parameter sweep
 
-Goal: execute and verify all 3,456 scenario runs in the 32-scenario sweep.
+Goal: execute and verify all 1,530 scenario runs in the axis-aware Part 2 sweep.
 
 Execute Step 3 of `RUN.md`: three client levels × two message levels × three QoS
 levels × two issuer configurations × three repetitions. Remember that
@@ -415,13 +414,13 @@ the end of each sweep cell. Resolve or block that cell before changing clients,
 messages, QoS, or issuer configuration.
 
 Exit gate: all 108 sweep invocations contain 32 reviewed scenario results, for
-3,456 contract-valid scenario runs in total.
+1,530 contract-valid scenario runs in total.
 
 ## Phase 8 — Final completeness and sign-off
 
 Goal: produce an auditable statement of exactly what can be used in analysis.
 
-1. Count results as described in `RUN.md`: 3,174 Part 1 scenario runs and 3,456
+1. Count results as described in `RUN.md`: 3,222 Part 1 scenario runs and 1,530
    Part 2 scenario runs.
 2. Compare result scenario IDs against the frozen Phase 0 inventory and the
    expected matrix cells. Detect missing, duplicate, stale, and extra files.

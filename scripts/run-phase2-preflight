@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/../mqtt-auth-biscuit"
+exec uv run --locked python -m benchmarks.phase2_preflight "$@"

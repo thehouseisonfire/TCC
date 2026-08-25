@@ -24,6 +24,61 @@ from benchmarks.packet_analysis import (
 )
 
 
+def test_canonical_connection_combines_both_directions() -> None:
+    from benchmarks.packet_analysis import _canonical_connection
+
+    outbound = _canonical_connection("10.0.0.2", 49152, "10.0.0.1", 1883)
+    inbound = _canonical_connection("10.0.0.1", 1883, "10.0.0.2", 49152)
+
+    assert outbound == inbound
+
+
+def test_canonical_connection_distinguishes_client_connections() -> None:
+    from benchmarks.packet_analysis import _canonical_connection
+
+    connections = {
+        _canonical_connection("10.0.0.2", 49152, "10.0.0.1", 1883),
+        _canonical_connection("10.0.0.2", 49153, "10.0.0.1", 1883),
+        _canonical_connection("10.0.0.3", 49152, "10.0.0.1", 1883),
+    }
+
+    assert len(connections) == 3
+
+
+def test_workload_interval_coverage_counts_only_packets_inside_each_run() -> None:
+    from benchmarks.packet_analysis import _workload_interval_coverage
+
+    coverage = _workload_interval_coverage(
+        mqtt_times=[0.5, 1.1, 1.5, 2.1, 3.2],
+        payload_times=[1.5, 3.2],
+        client_events=[
+            (0.5, "readiness"),
+            (1.1, "client-a"),
+            (1.2, "client-a"),
+            (1.5, "client-b"),
+            (3.2, "client-a"),
+        ],
+        intervals=[(1.0, 2.0), (3.0, 4.0)],
+    )
+
+    assert coverage == [
+        {
+            "started_at": 1.0,
+            "finished_at": 2.0,
+            "mqtt_packets": 2,
+            "mqtt_payload_packets": 1,
+            "mqtt_client_ips": 2,
+        },
+        {
+            "started_at": 3.0,
+            "finished_at": 4.0,
+            "mqtt_packets": 1,
+            "mqtt_payload_packets": 1,
+            "mqtt_client_ips": 1,
+        },
+    ]
+
+
 def test_stream_metrics_stream_id():
     """Test StreamMetrics stream_id property."""
     stream = StreamMetrics(

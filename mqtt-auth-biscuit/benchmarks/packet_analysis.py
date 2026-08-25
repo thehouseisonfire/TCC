@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import socket
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -44,8 +45,16 @@ class PacketMetrics:
     retransmission_count: int = 0
     tcp_packets: int = 0
     ip_packets: int = 0
+    mqtt_tcp_packets: int = 0
+    mqtt_payload_packets: int = 0
+    max_ip_packet_bytes: int = 0
+    max_tcp_payload_bytes: int = 0
     packet_times: list[float] = field(default_factory=list)
+    mqtt_packet_times: list[float] = field(default_factory=list)
+    mqtt_payload_times: list[float] = field(default_factory=list)
+    mqtt_client_events: list[tuple[float, str]] = field(default_factory=list)
     tcp_streams: dict[str, StreamMetrics] = field(default_factory=dict)
+    mqtt_connections: set[tuple[tuple[str, int], tuple[str, int]]] = field(default_factory=set)
 
 
 @dataclass
@@ -82,6 +91,45 @@ class TokenSizeCorrelation:
 def _ip_to_str(ip: bytes) -> str:
     """Convert IP address bytes to string."""
     return socket.inet_ntoa(ip)
+
+
+def _canonical_connection(
+    src_ip: str, src_port: int, dst_ip: str, dst_port: int
+) -> tuple[tuple[str, int], tuple[str, int]]:
+    """Return a direction-independent key for one TCP connection."""
+    endpoints = sorted(((src_ip, src_port), (dst_ip, dst_port)))
+    return endpoints[0], endpoints[1]
+
+
+def _workload_interval_coverage(
+    mqtt_times: list[float],
+    payload_times: list[float],
+    client_events: list[tuple[float, str]],
+    intervals: list[tuple[float, float]],
+) -> list[dict[str, float | int]]:
+    """Count captured MQTT traffic occurring inside each measured interval."""
+    mqtt_times = sorted(mqtt_times)
+    payload_times = sorted(payload_times)
+    coverage = []
+    for started_at, finished_at in intervals:
+        coverage.append(
+            {
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "mqtt_packets": bisect_right(mqtt_times, finished_at)
+                - bisect_left(mqtt_times, started_at),
+                "mqtt_payload_packets": bisect_right(payload_times, finished_at)
+                - bisect_left(payload_times, started_at),
+                "mqtt_client_ips": len(
+                    {
+                        client_ip
+                        for timestamp, client_ip in client_events
+                        if started_at <= timestamp <= finished_at
+                    }
+                ),
+            }
+        )
+    return coverage
 
 
 def parse_pcap_with_dpkt(pcap_path: str | Path) -> PacketMetrics:
@@ -127,6 +175,7 @@ def parse_pcap_with_dpkt(pcap_path: str | Path) -> PacketMetrics:
 
             ip = eth.data
             metrics.ip_packets += 1
+            metrics.max_ip_packet_bytes = max(metrics.max_ip_packet_bytes, int(ip.len))
 
             # Get IP header length (actual bytes, not just 20)
             ip_header_len = ip.hl * 4
@@ -137,12 +186,26 @@ def parse_pcap_with_dpkt(pcap_path: str | Path) -> PacketMetrics:
 
             tcp = ip.data
             metrics.tcp_packets += 1
+            if tcp.sport not in {1883, 8883} and tcp.dport not in {1883, 8883}:
+                continue
+            metrics.mqtt_tcp_packets += 1
+            metrics.mqtt_packet_times.append(timestamp)
+            if tcp.dport in {1883, 8883}:
+                metrics.mqtt_client_events.append((timestamp, _ip_to_str(ip.src)))
+            tcp_payload_len = len(tcp.data)
+            if tcp_payload_len:
+                metrics.mqtt_payload_packets += 1
+                metrics.mqtt_payload_times.append(timestamp)
+                metrics.max_tcp_payload_bytes = max(metrics.max_tcp_payload_bytes, tcp_payload_len)
 
             # Extract addresses and ports
             src_ip = _ip_to_str(ip.src)
             dst_ip = _ip_to_str(ip.dst)
             src_port = tcp.sport
             dst_port = tcp.dport
+            metrics.mqtt_connections.add(
+                _canonical_connection(src_ip, src_port, dst_ip, dst_port)
+            )
 
             # Create stream identifier
             stream_key = f"{src_ip}:{src_port}-{dst_ip}:{dst_port}"
@@ -331,6 +394,7 @@ def analyze_pcap(
     pcap_path: str | Path,
     mtu: int = 1500,
     token_len: int = 0,
+    workload_intervals: list[tuple[float, float]] | None = None,
 ) -> dict[str, Any]:
     """Complete pcap analysis with all metrics.
 
@@ -373,6 +437,13 @@ def analyze_pcap(
             "retransmissions": stream.retransmissions,
         }
 
+    interval_coverage = _workload_interval_coverage(
+        metrics.mqtt_packet_times,
+        metrics.mqtt_payload_times,
+        metrics.mqtt_client_events,
+        workload_intervals or [],
+    )
+
     return {
         "pcap_file": str(pcap_path),
         "metrics": {
@@ -382,9 +453,18 @@ def analyze_pcap(
             "retransmission_count": metrics.retransmission_count,
             "tcp_packets": metrics.tcp_packets,
             "ip_packets": metrics.ip_packets,
+            "mqtt_tcp_packets": metrics.mqtt_tcp_packets,
+            "mqtt_payload_packets": metrics.mqtt_payload_packets,
+            "mqtt_streams": len(metrics.tcp_streams),
+            "mqtt_connections": len(metrics.mqtt_connections),
+            "max_ip_packet_bytes": metrics.max_ip_packet_bytes,
+            "max_tcp_payload_bytes": metrics.max_tcp_payload_bytes,
+            "capture_start": min(metrics.packet_times) if metrics.packet_times else None,
+            "capture_end": max(metrics.packet_times) if metrics.packet_times else None,
         },
         "inter_packet_deltas_ms": deltas,
         "tcp_streams": streams_data,
+        "workload_interval_coverage": interval_coverage,
         "fragmentation_stats": {
             "fragments_detected": frag_stats.fragments_detected,
             "fragmented_packets": frag_stats.fragmented_packets,

@@ -12,18 +12,20 @@ benchmark datasets.
 
 ## Current suite status
 
-- The suite contains **440 scenarios**: 220 base scenarios and 220 TLS variants.
-- Part 1 contains **3,174 planned runs**. It varies only workload axes that a
+- The suite contains **444 scenarios**: 222 base scenarios and 222 TLS variants.
+- Part 1 contains **3,222 planned runs**. It varies only workload axes that a
   scenario does not define itself.
-- Part 2 is the **32-scenario parameter sweep**, comprising 3,456 planned runs
-  across client count, message count, QoS, token-issuer configuration, and
-  repetitions. The 17 fixed-workload stress scenarios are separate targeted
-  slices and are intentionally excluded from this sweep.
+- Part 2 is the **axis-aware 32-scenario sweep**, comprising **1,530 planned
+  runs** across client count, message count, effective QoS, token-issuer
+  configuration, and repetitions. Fixed-axis cohorts are run only over axes they
+  do not define themselves.
 - The complete Part 1 and Part 2 matrices have **not** been run and semantically
   verified. Earlier minimal executions established startup and basic workload
   viability only.
 - TLS scenarios still require a TLS-capable execution environment and a complete
   run before their results can be relied upon.
+- Earlier 440-scenario / 3,456-run records describe the superseded pre-issuer
+  architecture and are historical evidence only.
 
 ## Validation enforced by the current harness
 

@@ -660,12 +660,40 @@ def test_main_normalizes_output_directory_strings(
     monkeypatch.setattr(
         rs,
         "analyze_pcap",
-        lambda *_args, **_kwargs: {"metrics": {"tcp_packets": 1}},
+        lambda *_args, **_kwargs: {
+            "metrics": {
+                "mqtt_tcp_packets": 100,
+                "mqtt_streams": 50,
+                "mqtt_connections": 50,
+                "max_ip_packet_bytes": 1200,
+                "capture_start": 0.0,
+                "capture_end": 9_999_999_999.0,
+            },
+            "workload_interval_coverage": [
+                {
+                    "mqtt_packets": 100,
+                    "mqtt_payload_packets": 50,
+                    "mqtt_client_ips": 50,
+                }
+            ],
+        },
     )
     monkeypatch.setattr(
         rs,
         "_run_loadgen",
-        lambda **_kwargs: {"errors": [], "publish": {"count": 1000}, "receive": {}},
+        lambda **_kwargs: {
+            "errors": [],
+            "publish": {"count": 1000},
+            "publish_qos_0": {"count": 0},
+            "publish_qos_1": {"count": 1000},
+            "publish_qos_2": {"count": 0},
+            "qos_distribution_actual": {
+                "qos_0_count": 0,
+                "qos_1_count": 1000,
+                "qos_2_count": 0,
+            },
+            "receive": {},
+        },
     )
 
     def fake_profile(
@@ -692,6 +720,7 @@ def test_main_normalizes_output_directory_strings(
         tcpdump_enabled=True,
         tcpdump_analyze=True,
         tcpdump_output_dir=str(tcpdump_output_dir),
+        client_topology="container-per-client",
     )
 
     compose_extra_env = captured["compose_extra_env"]
@@ -1367,9 +1396,7 @@ def test_fanout_role_merge_rejects_inconsistent_latency_clock() -> None:
         }
 
     merged = rs._merge_fanout_role_loadgen_results(
-        publisher=result(
-            "publisher", {"source": "clock_monotonic_raw", "payload_version": "v3"}
-        ),
+        publisher=result("publisher", {"source": "clock_monotonic_raw", "payload_version": "v3"}),
         subscribers=[result("subscriber", None)],
         wall_duration_s=1.0,
         scenario_id="FANOUT",

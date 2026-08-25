@@ -200,12 +200,18 @@ STRICT_FANOUT_PARITY_POLICY_SOURCES = frozenset({"http", "hybrid"})
 # of maintaining a second, easily-stale list.
 PART2_SWEEP_COHORTS: dict[str, tuple[str, ...]] = {
     "matrix": (
-        "TOKEN-BASELINE-JWT", "TOKEN-BASELINE-BISCUIT",
-        "STATIC-ACL-PUBLISH-JWT", "STATIC-ACL-PUBLISH-BISCUIT",
-        "DYNAMIC-SECURITY-BASELINE", "DYNAMIC-SECURITY-CHURN",
-        "HTTP-PROFILE-SIMPLE-JWT", "HTTP-PROFILE-SIMPLE-BISCUIT",
-        "HTTP-PROFILE-COMPLEX-JWT", "HTTP-PROFILE-COMPLEX-BISCUIT",
-        "HTTP-LATENCY-200MS-JWT", "HTTP-LATENCY-1000MS-JWT",
+        "TOKEN-BASELINE-JWT",
+        "TOKEN-BASELINE-BISCUIT",
+        "STATIC-ACL-PUBLISH-JWT",
+        "STATIC-ACL-PUBLISH-BISCUIT",
+        "DYNAMIC-SECURITY-BASELINE",
+        "DYNAMIC-SECURITY-CHURN",
+        "HTTP-PROFILE-SIMPLE-JWT",
+        "HTTP-PROFILE-SIMPLE-BISCUIT",
+        "HTTP-PROFILE-COMPLEX-JWT",
+        "HTTP-PROFILE-COMPLEX-BISCUIT",
+        "HTTP-LATENCY-200MS-JWT",
+        "HTTP-LATENCY-1000MS-JWT",
         "HYBRID-FALLBACK-AUTHZ-DOWN-JWT",
         "TOKEN-COMPLEXITY-CHAIN-5-BISCUIT",
         "TOKEN-COMPLEXITY-CHAIN-25-BISCUIT",
@@ -213,8 +219,10 @@ PART2_SWEEP_COHORTS: dict[str, tuple[str, ...]] = {
         "TOKEN-COMPLEXITY-DATALOG-HIGH-BISCUIT",
         "TOKEN-ATTENUATION-COMBINED-BISCUIT",
         "TOKEN-ATTENUATION-SUBSCRIBE-DENY-BISCUIT",
-        "NETWORK-MTU-200-JWT", "NETWORK-MTU-1500-JWT",
-        "TOKEN-THUNDERING-HERD-JWT", "TOKEN-THUNDERING-HERD-BISCUIT",
+        "NETWORK-MTU-200-JWT",
+        "NETWORK-MTU-1500-JWT",
+        "TOKEN-THUNDERING-HERD-JWT",
+        "TOKEN-THUNDERING-HERD-BISCUIT",
     ),
     "fixed_qos": ("BASELINE-NO-AUTH", "TOKEN-QOS2-JWT", "TOKEN-QOS2-BISCUIT"),
     "fixed_clients_qos": ("TOKEN-DENY-READ-JWT", "TOKEN-ATTENUATED-DENY-BISCUIT"),
@@ -688,26 +696,32 @@ def _issue_mqtt5_auth_tokens(
             }
 
         token1 = _issue_token(
-                token_issuer_base,
-                "/jwt",
-                jwt_payload(token1_ttl_seconds, token1_topic),
-                ca_file=ca_file,
-                insecure=insecure,
-            )
+            token_issuer_base,
+            "/jwt",
+            jwt_payload(token1_ttl_seconds, token1_topic),
+            ca_file=ca_file,
+            insecure=insecure,
+        )
         token2 = _issue_token(
-                token_issuer_base,
-                "/jwt",
-                jwt_payload(token2_ttl_seconds, token2_topic),
-                ca_file=ca_file,
-                insecure=insecure,
-            )
-        return token1, token2, {
-            "source": "issuer",
-            "token_kind": token_kind, "client_id": client_id,
-            "token1_ttl_seconds": token1_ttl_seconds,
-            "token2_ttl_seconds": token2_ttl_seconds,
-            "token1_topic": token1_topic, "token2_topic": token2_topic,
-        }
+            token_issuer_base,
+            "/jwt",
+            jwt_payload(token2_ttl_seconds, token2_topic),
+            ca_file=ca_file,
+            insecure=insecure,
+        )
+        return (
+            token1,
+            token2,
+            {
+                "source": "issuer",
+                "token_kind": token_kind,
+                "client_id": client_id,
+                "token1_ttl_seconds": token1_ttl_seconds,
+                "token2_ttl_seconds": token2_ttl_seconds,
+                "token1_topic": token1_topic,
+                "token2_topic": token2_topic,
+            },
+        )
 
     def biscuit_payload(ttl_seconds: int, topic: str) -> dict[str, Any]:
         return {
@@ -717,26 +731,32 @@ def _issue_mqtt5_auth_tokens(
         }
 
     token1 = _issue_token(
-            token_issuer_base,
-            "/biscuit",
-            biscuit_payload(token1_ttl_seconds, token1_topic),
-            ca_file=ca_file,
-            insecure=insecure,
-        )
+        token_issuer_base,
+        "/biscuit",
+        biscuit_payload(token1_ttl_seconds, token1_topic),
+        ca_file=ca_file,
+        insecure=insecure,
+    )
     token2 = _issue_token(
-            token_issuer_base,
-            "/biscuit",
-            biscuit_payload(token2_ttl_seconds, token2_topic),
-            ca_file=ca_file,
-            insecure=insecure,
-        )
-    return token1, token2, {
-        "source": "issuer",
-        "token_kind": token_kind, "client_id": client_id,
-        "token1_ttl_seconds": token1_ttl_seconds,
-        "token2_ttl_seconds": token2_ttl_seconds,
-        "token1_topic": token1_topic, "token2_topic": token2_topic,
-    }
+        token_issuer_base,
+        "/biscuit",
+        biscuit_payload(token2_ttl_seconds, token2_topic),
+        ca_file=ca_file,
+        insecure=insecure,
+    )
+    return (
+        token1,
+        token2,
+        {
+            "source": "issuer",
+            "token_kind": token_kind,
+            "client_id": client_id,
+            "token1_ttl_seconds": token1_ttl_seconds,
+            "token2_ttl_seconds": token2_ttl_seconds,
+            "token1_topic": token1_topic,
+            "token2_topic": token2_topic,
+        },
+    )
 
 
 def _resolve_mqtt5_auth_tokens(
@@ -756,14 +776,19 @@ def _resolve_mqtt5_auth_tokens(
     if token1 and token2:
         token1_topic = str(mqtt5_cfg.get("token1_topic") or "mqtt5/auth/before")
         token2_topic = str(mqtt5_cfg.get("token2_topic") or "mqtt5/auth/after")
-        return token1, token2, {
-            "source": "static",
-            "token_kind": mqtt5_cfg.get("kind"),
-            "client_id": "client_auth",
-            "token1_ttl_seconds": int(mqtt5_cfg.get("token1_ttl_seconds", 0)),
-            "token2_ttl_seconds": int(mqtt5_cfg.get("token2_ttl_seconds", 0)),
-            "token1_topic": token1_topic, "token2_topic": token2_topic,
-        }
+        return (
+            token1,
+            token2,
+            {
+                "source": "static",
+                "token_kind": mqtt5_cfg.get("kind"),
+                "client_id": "client_auth",
+                "token1_ttl_seconds": int(mqtt5_cfg.get("token1_ttl_seconds", 0)),
+                "token2_ttl_seconds": int(mqtt5_cfg.get("token2_ttl_seconds", 0)),
+                "token1_topic": token1_topic,
+                "token2_topic": token2_topic,
+            },
+        )
 
     token_kind = cast(ScenarioTokenKind | None, mqtt5_cfg.get("kind")) or _scenario_token_kind(
         scenario_id, scenario
@@ -899,10 +924,11 @@ def _authz_stats(
         )
     }
     profile_requests = payload.get("profile_requests")
-    stats["profile_requests"] = {
-        key: int(profile_requests.get(key) or 0)
-        for key in ("simple", "med", "complex", "custom")
-    } if isinstance(profile_requests, dict) else {}
+    stats["profile_requests"] = (
+        {key: int(profile_requests.get(key) or 0) for key in ("simple", "med", "complex", "custom")}
+        if isinstance(profile_requests, dict)
+        else {}
+    )
     stats["configured_delay_ms"] = int(payload.get("configured_delay_ms") or 0)
     stats["configured_fail_mode"] = str(payload.get("configured_fail_mode") or "none")
     stats["configured_profile"] = str(payload.get("configured_profile") or "custom")
@@ -1488,9 +1514,7 @@ def _run_loadgen(
     if fanout_churn_settle_ms > 0:
         cmd.extend(["--fanout-churn-settle-ms", str(fanout_churn_settle_ms)])
     if fanout_churn_phase_delivery:
-        cmd.extend(
-            ["--fanout-churn-phase-delivery", ",".join(fanout_churn_phase_delivery)]
-        )
+        cmd.extend(["--fanout-churn-phase-delivery", ",".join(fanout_churn_phase_delivery)])
     if fanout_churn_dynamic_security_source:
         cmd.extend(
             [
@@ -2157,9 +2181,8 @@ def _merge_credential_attestations(
             if existing is None:
                 merged[role] = dict(candidate)
                 continue
-            if (
-                existing.get("profile") != profile
-                or existing.get("semantic") != candidate.get("semantic")
+            if existing.get("profile") != profile or existing.get("semantic") != candidate.get(
+                "semantic"
             ):
                 errors.append(f"credential_attestation_mismatch:{role}")
                 continue
@@ -2383,6 +2406,8 @@ def _validate_issuer_credential_issuance(
                 is not bool(scenario.get("token_issuer_no_default_roles"))
                 or record.get("no_default_grants")
                 is not bool(scenario.get("token_issuer_no_default_grants"))
+                or int(record.get("explicit_grants") or 0)
+                != (2 if scenario.get("token_issuer_no_default_grants") else 0)
             )
         ):
             raise RuntimeError(f"{scenario_id}: invalid credential issuance attestation")
@@ -2445,6 +2470,8 @@ def _validate_result_contract(
     *,
     message_count: int,
     client_count: int,
+    effective_qos: int | None = None,
+    effective_qos_distribution: str | None = None,
 ) -> None:
     scenario_id = scenario["id"]
     errors = [str(error) for error in result.get("errors", [])]
@@ -2535,9 +2562,7 @@ def _validate_result_contract(
         stats = cast(dict[str, Any], stats_object) if isinstance(stats_object, dict) else {}
         profile_requests = stats.get("profile_requests")
         active_profile_requests = (
-            int(profile_requests.get("simple") or 0)
-            if isinstance(profile_requests, dict)
-            else 0
+            int(profile_requests.get("simple") or 0) if isinstance(profile_requests, dict) else 0
         )
         if (
             int(stats.get("requests") or 0) != expected_publish_count
@@ -2570,16 +2595,30 @@ def _validate_result_contract(
             "successful_fallbacks": expected_publish_count,
         }
 
-    pinned_qos = scenario.get("qos")
-    if pinned_qos in {1, 2} and scenario.get("qos_distribution") is None:
-        qos_summary = result.get(f"publish_qos_{pinned_qos}")
-        qos_count = int(qos_summary.get("count") or 0) if isinstance(qos_summary, dict) else 0
-        if qos_count != expected_publish_count:
-            raise RuntimeError(
-                f"{scenario_id}: QoS {pinned_qos} path handled "
-                f"{qos_count}/{expected_publish_count} publishes"
-            )
-    if distribution := scenario.get("qos_distribution"):
+    selected_qos = scenario.get("qos") if effective_qos is None else effective_qos
+    if effective_qos is not None and selected_qos not in {0, 1, 2}:
+        raise RuntimeError(f"{scenario_id}: invalid effective QoS {selected_qos!r}")
+    selected_distribution = (
+        scenario.get("qos_distribution")
+        if effective_qos_distribution is None
+        else effective_qos_distribution
+    )
+    if effective_qos is not None and selected_distribution is None:
+        actual_object = result.get("qos_distribution_actual")
+        if not isinstance(actual_object, dict):
+            raise RuntimeError(f"{scenario_id}: effective QoS metrics missing")
+        for qos_value in (0, 1, 2):
+            expected_qos_count = expected_publish_count if qos_value == selected_qos else 0
+            summary = result.get(f"publish_qos_{qos_value}")
+            summary_count = int(summary.get("count") or 0) if isinstance(summary, dict) else 0
+            actual_count = int(actual_object.get(f"qos_{qos_value}_count") or 0)
+            if summary_count != expected_qos_count or actual_count != expected_qos_count:
+                raise RuntimeError(
+                    f"{scenario_id}: effective QoS {selected_qos} mismatch for bucket "
+                    f"{qos_value}: summary={summary_count}, actual={actual_count}, "
+                    f"expected={expected_qos_count}"
+                )
+    if distribution := selected_distribution:
         publisher_count = 1 if scenario.get("traffic_pattern") == "fanout" else client_count
         expected_qos = _expected_qos_distribution_counts(
             distribution,
@@ -2630,9 +2669,7 @@ def _validate_result_contract(
     if handoff:
         handoff_publish = result.get("delegation_handoff_publish")
         handoff_count = (
-            int(handoff_publish.get("count") or 0)
-            if isinstance(handoff_publish, dict)
-            else 0
+            int(handoff_publish.get("count") or 0) if isinstance(handoff_publish, dict) else 0
         )
         topology = result.get("topology")
         topology_handoff = (
@@ -2686,8 +2723,7 @@ def _validate_result_contract(
             or int(semantic.get("biscuit_blocks") or 0) != expected_depth
         ):
             raise RuntimeError(
-                f"{scenario_id}: credential attestation does not prove chain depth "
-                f"{expected_depth}"
+                f"{scenario_id}: credential attestation does not prove chain depth {expected_depth}"
             )
 
     if scenario.get("control_response_topic"):
@@ -2806,8 +2842,7 @@ def _merge_fanout_role_loadgen_results(
     merged = _merge_per_client_loadgen_results([publisher, *subscribers], wall_duration_s)
     expected_clock = {"source": "clock_monotonic_raw", "payload_version": "v3"}
     clock_attestations = [
-        result.get("inputs", {}).get("fanout_latency_clock")
-        for result in [publisher, *subscribers]
+        result.get("inputs", {}).get("fanout_latency_clock") for result in [publisher, *subscribers]
     ]
     if any(attestation != expected_clock for attestation in clock_attestations):
         cast(list[str], merged.setdefault("errors", [])).append(
@@ -3890,9 +3925,7 @@ def _apply_result_contracts(scenarios: dict[str, ScenarioConfig]) -> dict[str, S
             scenario["delivery_contract"] = {"phases": phases}
             cast(dict[str, Any], scenario).pop("fanout_churn_phase_delivery", None)
             continue
-        expectation: Literal["all", "none"] = (
-            "none" if "-DENY-" in scenario_id else "all"
-        )
+        expectation: Literal["all", "none"] = "none" if "-DENY-" in scenario_id else "all"
         scenario["delivery_contract"] = {"steady": expectation}
     return scenarios
 
@@ -5838,6 +5871,7 @@ def _build_available_scenarios(
             "netem": {"clear": True},
             "message_size": 0,
             "complexity_axis": "datalog",
+            "complexity_level": "low",
         },
         "TOKEN-DATALOG-STRESS-LOW-BISCUIT": {
             "mosquitto_conf": "./mosquitto.conf",
@@ -5861,6 +5895,7 @@ def _build_available_scenarios(
             "netem": {"clear": True},
             "message_size": 0,
             "complexity_axis": "datalog",
+            "complexity_level": "med",
         },
         "TOKEN-DATALOG-STRESS-MED-BISCUIT": {
             "mosquitto_conf": "./mosquitto.conf",
@@ -5930,6 +5965,7 @@ def _build_available_scenarios(
             "netem": {"clear": True},
             "message_size": 0,
             "complexity_axis": "datalog",
+            "complexity_level": "high",
         },
         "TOKEN-DATALOG-STRESS-HIGH-BISCUIT": {
             "mosquitto_conf": "./mosquitto.conf",
@@ -6917,8 +6953,7 @@ def main(
     valid_workload_shapes = {"all", "matrix", "fixed-clients", "fixed-messages", "fixed"}
     if workload_shape not in valid_workload_shapes:
         raise typer.BadParameter(
-            "workload_shape must be one of: all, matrix, fixed-clients, "
-            "fixed-messages, fixed"
+            "workload_shape must be one of: all, matrix, fixed-clients, fixed-messages, fixed"
         )
     setup_logging(log_level)
     iperf3_enabled = _coerce_bool_arg(iperf3_enabled, True)
@@ -7390,6 +7425,16 @@ def main(
                 if s.get("reauth_storm") and reauth_storm_clients is not None
                 else _effective_scenario_client_count(s, clients)
             )
+            if (
+                isinstance(s.get("netem"), dict)
+                and "mtu" in cast(dict[str, Any], s["netem"])
+                and effective_client_count > 1
+                and client_topology_mode != "container-per-client"
+            ):
+                raise RuntimeError(
+                    f"{s['id']}: multi-client MTU capture requires container-per-client "
+                    "topology for client-correlated packet evidence"
+                )
             configured_messages = int(s.get("message_count", messages))
             scenario_messages = _effective_scenario_message_count(
                 s,
@@ -7640,9 +7685,7 @@ def main(
                             if strict_startup_provisioning is not None
                             else None
                         )
-                        attest_broker_auth = (
-                            s.get("complexity_axis") == "publish_authz_reconnect"
-                        )
+                        attest_broker_auth = s.get("complexity_axis") == "publish_authz_reconnect"
                         broker_auth_before = (
                             _broker_auth_counters(
                                 compose_files=compose_files,
@@ -7652,6 +7695,7 @@ def main(
                             if attest_broker_auth
                             else {}
                         )
+                        workload_started_at = time.time()
                         res = _run_loadgen(
                             tokens=tokens,
                             host=loadgen_mqtt_host,
@@ -7883,6 +7927,10 @@ def main(
                                 "fanout_publisher_password_map_profile"
                             ),
                         )
+                        res["workload_interval"] = {
+                            "started_at": workload_started_at,
+                            "finished_at": time.time(),
+                        }
                         if attest_broker_auth:
                             broker_auth_after = _broker_auth_counters(
                                 compose_files=compose_files,
@@ -7906,6 +7954,8 @@ def main(
                         res,
                         message_count=scenario_messages,
                         client_count=effective_client_count,
+                        effective_qos=scenario_qos,
+                        effective_qos_distribution=scenario_qos_distribution,
                     )
                     if s.get("proactive_refresh_assert_continuity"):
                         if not res.get("session_continuity_ok"):
@@ -8013,16 +8063,61 @@ def main(
                     mtu = netem_config.get("mtu", 1500) if netem_config else 1500
                     token_length = len(s.get("password", "")) if s.get("password") else 0
 
-                    packet_analysis_result = analyze_pcap(str(pcap_file), mtu, token_length)
+                    workload_intervals = [
+                        run.get("loadgen", {}).get("workload_interval")
+                        for run in out_payload["runs"]
+                        if isinstance(run, dict) and isinstance(run.get("loadgen"), dict)
+                    ]
+                    validated_intervals = [
+                        (float(interval["started_at"]), float(interval["finished_at"]))
+                        for interval in workload_intervals
+                        if isinstance(interval, dict)
+                        and interval.get("started_at") is not None
+                        and interval.get("finished_at") is not None
+                    ]
+                    if len(validated_intervals) != len(out_payload["runs"]):
+                        raise RuntimeError(f"{s['id']}: measured workload intervals are missing")
+                    packet_analysis_result = analyze_pcap(
+                        str(pcap_file),
+                        mtu,
+                        token_length,
+                        workload_intervals=validated_intervals,
+                    )
                     packet_analysis_result["enabled"] = True
                     packet_analysis_result["pcap_file"] = str(pcap_file)
                     packet_analysis_result["effective_mtu"] = effective_mtu
                     metrics = packet_analysis_result.get("metrics")
                     if (
                         not isinstance(metrics, dict)
-                        or int(metrics.get("tcp_packets") or 0) <= 0
+                        or int(metrics.get("mqtt_tcp_packets") or 0) <= 0
                     ):
                         raise RuntimeError(f"{s['id']}: capture contains no MQTT TCP traffic")
+                    max_ip_packet = int(metrics.get("max_ip_packet_bytes") or 0)
+                    asserted_mtu = int(effective_mtu or 0)
+                    if max_ip_packet <= 0 or asserted_mtu <= 0 or max_ip_packet > asserted_mtu:
+                        raise RuntimeError(
+                            f"{s['id']}: observed IP packet size {max_ip_packet} exceeds "
+                            f"effective MTU {effective_mtu}"
+                        )
+                    if metrics.get("capture_start") is None or metrics.get("capture_end") is None:
+                        raise RuntimeError(f"{s['id']}: capture interval is missing")
+                    coverage = packet_analysis_result.get("workload_interval_coverage")
+                    if (
+                        not isinstance(coverage, list)
+                        or len(coverage) != len(validated_intervals)
+                        or any(
+                            not isinstance(interval, dict)
+                            or int(interval.get("mqtt_packets") or 0) <= 0
+                            or int(interval.get("mqtt_payload_packets") or 0) <= 0
+                            or int(interval.get("mqtt_client_ips") or 0)
+                            < effective_client_count
+                            for interval in coverage
+                        )
+                    ):
+                        raise RuntimeError(
+                            f"{s['id']}: packet capture lacks MQTT workload traffic "
+                            "for one or more measured intervals"
+                        )
 
                     # Log summary
                     summary = format_packet_summary(packet_analysis_result)

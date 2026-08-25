@@ -556,6 +556,7 @@ struct CredentialIssuance {
     token_sha256: String,
     no_default_roles: bool,
     no_default_grants: bool,
+    explicit_grants: usize,
 }
 
 #[derive(Debug, Default)]
@@ -1567,6 +1568,13 @@ async fn fetch_token(args: &Args, kind: &str, client_id: &str, topic: &str) -> R
         }
         if args.token_issuer_no_default_grants {
             object.insert("no_default_grants".to_string(), Value::Bool(true));
+            object.insert(
+                "grants".to_string(),
+                serde_json::json!([
+                    {"op": "publish", "res": topic},
+                    {"op": "subscribe", "res": topic}
+                ]),
+            );
         }
         match kind {
             "jwt" if args.jwt_identity_binding == "strict" => {
@@ -1664,6 +1672,35 @@ async fn fetch_token(args: &Args, kind: &str, client_id: &str, topic: &str) -> R
             .to_vec()
     };
     let token_sha256 = hex::encode(Sha256::digest(&bytes));
+    let authority = body
+        .get("authority")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            MqttHelperError::Message("token issuer response missing authority".to_string())
+        })?;
+    let default_roles_applied = authority
+        .get("default_roles_applied")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            MqttHelperError::Message(
+                "token issuer authority missing default_roles_applied".to_string(),
+            )
+        })?;
+    let default_grants_applied = authority
+        .get("default_grants_applied")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            MqttHelperError::Message(
+                "token issuer authority missing default_grants_applied".to_string(),
+            )
+        })?;
+    let explicit_grants = authority
+        .get("explicit_grants")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| {
+            MqttHelperError::Message("token issuer authority missing explicit_grants".to_string())
+        })?;
     Ok(IssuedToken {
         bytes,
         exp: Some(exp),
@@ -1675,8 +1712,13 @@ async fn fetch_token(args: &Args, kind: &str, client_id: &str, topic: &str) -> R
             exp,
             requested_ttl_seconds,
             token_sha256,
-            no_default_roles: args.token_issuer_no_default_roles,
-            no_default_grants: args.token_issuer_no_default_grants,
+            no_default_roles: if kind == "jwt" {
+                !default_roles_applied
+            } else {
+                args.token_issuer_no_default_roles
+            },
+            no_default_grants: !default_grants_applied,
+            explicit_grants,
         }),
     })
 }

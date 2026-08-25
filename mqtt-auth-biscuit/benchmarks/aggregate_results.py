@@ -198,9 +198,7 @@ def _build_summary(input_dir: str | Path):
             "parity": data.get("parity"),
             "scenario_config": data.get("scenario_config"),
             "credential_attestations": (
-                ((runs[0].get("loadgen") or {}).get("inputs") or {}).get(
-                    "credential_attestations"
-                )
+                ((runs[0].get("loadgen") or {}).get("inputs") or {}).get("credential_attestations")
                 if runs
                 else None
             ),

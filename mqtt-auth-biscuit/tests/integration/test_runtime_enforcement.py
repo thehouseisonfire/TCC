@@ -1223,23 +1223,24 @@ def test_runtime_enhanced_auth_entrypoint_over_tcp_and_tls(
 
     topic = f"sensors/runtime-enforcement/enhanced/runtime-semantics/{unique_suffix}"
     client_id = f"runtime-enforcement-enhanced-runtime-semantics-{token_kind}-{unique_suffix}"
-    grants = [{"op": "publish", "res": topic}, {"op": "subscribe", "res": topic}]
+    token1_topic = f"{topic}/before"
+    token2_topic = f"{topic}/after"
 
     token1 = _issue_token(
         issuer,
         token_kind=token_kind,
         client_id=client_id,
-        topic=topic,
+        topic=token1_topic,
         ttl_seconds=180,
-        grants=grants,
+        grants=[{"op": "publish", "res": token1_topic}, {"op": "subscribe", "res": token1_topic}],
     )
     token2 = _issue_token(
         issuer,
         token_kind=token_kind,
         client_id=client_id,
-        topic=topic,
+        topic=token2_topic,
         ttl_seconds=300,
-        grants=grants,
+        grants=[{"op": "publish", "res": token2_topic}, {"op": "subscribe", "res": token2_topic}],
     )
 
     cmd = [
@@ -1257,6 +1258,10 @@ def test_runtime_enhanced_auth_entrypoint_over_tcp_and_tls(
         _auth_cli_token(token1),
         "--token2",
         _auth_cli_token(token2),
+        "--token1-topic",
+        token1_topic,
+        "--token2-topic",
+        token2_topic,
         "--sleep",
         "0.2",
     ]

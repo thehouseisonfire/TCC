@@ -8109,8 +8109,7 @@ def main(
                             not isinstance(interval, dict)
                             or int(interval.get("mqtt_packets") or 0) <= 0
                             or int(interval.get("mqtt_payload_packets") or 0) <= 0
-                            or int(interval.get("mqtt_client_ips") or 0)
-                            < effective_client_count
+                            or int(interval.get("mqtt_client_ips") or 0) < effective_client_count
                             for interval in coverage
                         )
                     ):

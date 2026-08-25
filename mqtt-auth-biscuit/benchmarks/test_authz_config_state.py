@@ -511,9 +511,7 @@ def test_mqtt5_result_contract_rejects_failed_reauthentication() -> None:
     ("scenario_id", "delay_ms"),
     (("HTTP-LATENCY-200MS-JWT", 200), ("HTTP-LATENCY-1000MS-JWT", 1000)),
 )
-def test_http_latency_contract_requires_exact_backend_work(
-    scenario_id: str, delay_ms: int
-) -> None:
+def test_http_latency_contract_requires_exact_backend_work(scenario_id: str, delay_ms: int) -> None:
     scenario: rs.ScenarioConfig = {
         "id": scenario_id,
         "http_expected_delay_ms": delay_ms,

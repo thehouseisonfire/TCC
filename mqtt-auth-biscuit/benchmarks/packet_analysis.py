@@ -203,9 +203,7 @@ def parse_pcap_with_dpkt(pcap_path: str | Path) -> PacketMetrics:
             dst_ip = _ip_to_str(ip.dst)
             src_port = tcp.sport
             dst_port = tcp.dport
-            metrics.mqtt_connections.add(
-                _canonical_connection(src_ip, src_port, dst_ip, dst_port)
-            )
+            metrics.mqtt_connections.add(_canonical_connection(src_ip, src_port, dst_ip, dst_port))
 
             # Create stream identifier
             stream_key = f"{src_ip}:{src_port}-{dst_ip}:{dst_port}"

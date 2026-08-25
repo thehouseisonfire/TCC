@@ -40,7 +40,9 @@ def test_dynsec_control_families_use_generated_profiles_with_matching_principals
         == "fanout_control_allow"
     )
     assert (
-        scenarios["CONTROL-ENFORCEMENT-ACL-READ-NOTIFY-BISCUIT"]["dynamic_security_generated_profile"]
+        scenarios["CONTROL-ENFORCEMENT-ACL-READ-NOTIFY-BISCUIT"][
+            "dynamic_security_generated_profile"
+        ]
         == "fanout_control_allow"
     )
     assert (

@@ -3,10 +3,29 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, cast
+
+from benchmarks.run_scenarios import (
+    ScenarioConfig,
+    _build_available_scenarios,
+    _effective_scenario_client_count,
+    _effective_scenario_message_count,
+    _expand_tls_matrix,
+    _infer_acl_read_enforcement,
+    _infer_policy_source,
+    _read_tokens,
+    _resolve_compose_path,
+    _scenario_workload_axes,
+    _scenario_workload_shape,
+    _validate_broker_path_contract,
+    _validate_resource_interval,
+    _validate_result_contract,
+)
 
 BASE_SCENARIOS = (
     "BASELINE-NO-AUTH",
@@ -81,21 +100,130 @@ def _run(output: Path, scenarios: tuple[str, ...], *, tls: bool) -> None:
     subprocess.run(command, cwd=Path(__file__).parents[1], check=True)
 
 
+def _scenario_registry() -> dict[str, ScenarioConfig]:
+    repo_root = Path(__file__).parents[1]
+    tokens = _read_tokens(str(repo_root / "benchmarks/tokens.json"))
+    return cast(
+        dict[str, ScenarioConfig],
+        _expand_tls_matrix(
+            _build_available_scenarios(
+                tokens,
+                token_issuer_no_default_roles=False,
+                token_issuer_no_default_grants=False,
+            )
+        ),
+    )
+
+
 def _verify(output: Path, scenarios: tuple[str, ...]) -> list[dict[str, object]]:
+    registry = _scenario_registry()
     evidence = []
     for scenario in scenarios:
         path = output / f"{scenario}.json"
         if not path.is_file():
             raise RuntimeError(f"missing preflight result: {path}")
         result = json.loads(path.read_text())
+        if result.get("result_schema_version") != 2:
+            raise RuntimeError(f"{scenario}: unsupported or missing result schema version")
+        if result.get("scenario") != scenario:
+            raise RuntimeError(f"{scenario}: result scenario identity mismatch")
+        expected = cast(ScenarioConfig, dict(registry[scenario]))
+        expected["id"] = scenario
+        expected_clients = _effective_scenario_client_count(expected, 2)
+        expected_messages = _effective_scenario_message_count(
+            expected, 10, effective_clients=expected_clients
+        )
+        expected_qos = int(expected.get("qos", 1))
+        expected_distribution = expected.get("qos_distribution")
+        expected_tls = bool(expected.get("tls"))
+        tls = result.get("tls")
+        if (
+            not isinstance(tls, dict)
+            or tls.get("enabled") is not expected_tls
+            or tls.get("purpose") != "transport_encryption"
+            or tls.get("certificate_validation_tested") is not False
+            or expected_tls
+            and tls.get("insecure") is not True
+        ):
+            raise RuntimeError(f"{scenario}: TLS semantics mismatch: {tls}")
+        config = result.get("scenario_config")
+        if not isinstance(config, dict):
+            raise RuntimeError(f"{scenario}: scenario configuration provenance missing")
+        expected_config = {
+            "clients": expected_clients,
+            "messages": expected_messages,
+            "qos": expected_qos,
+            "qos_distribution": expected_distribution,
+            "workload_shape": _scenario_workload_shape(expected),
+            "workload_axes": _scenario_workload_axes(expected),
+            "credential_mode": expected.get("credential_mode"),
+            "traffic_pattern": expected.get("traffic_pattern"),
+            "policy_source": expected.get("policy_source") or _infer_policy_source(expected),
+            "acl_read_enforcement": _infer_acl_read_enforcement(expected),
+        }
+        for key, expected_value in expected_config.items():
+            if config.get(key) != expected_value:
+                raise RuntimeError(
+                    f"{scenario}: scenario_config.{key}={config.get(key)!r}, "
+                    f"expected {expected_value!r}"
+                )
+        topology = config.get("client_topology")
+        if not isinstance(topology, dict) or topology.get("mode") != "container-per-client":
+            raise RuntimeError(f"{scenario}: wrong client topology")
+        broker = result.get("broker_config_attestation")
+        if not isinstance(broker, dict) or broker.get("validated") is not True:
+            raise RuntimeError(f"{scenario}: broker configuration attestation missing")
+        if broker.get("expected_sha256") != broker.get("container_sha256"):
+            raise RuntimeError(f"{scenario}: mounted broker configuration hash mismatch")
+        effective_path = broker.get("effective_path")
+        if not isinstance(effective_path, str):
+            raise RuntimeError(f"{scenario}: effective broker configuration path missing")
+        current_hash = hashlib.sha256(
+            _resolve_compose_path(effective_path).read_bytes()
+        ).hexdigest()
+        if current_hash != broker.get("expected_sha256"):
+            raise RuntimeError(f"{scenario}: result was produced from a stale broker fixture")
         runs = result.get("runs")
-        if not isinstance(runs, list) or not runs:
+        if not isinstance(runs, list) or len(runs) != int(expected.get("repeat", 1)):
             raise RuntimeError(f"{scenario}: missing measured runs")
-        if not all(isinstance(run.get("resources"), dict) for run in runs):
-            raise RuntimeError(f"{scenario}: missing resource evidence")
+        checks = ["identity", "configuration", "topology", "tls", "broker_config"]
+        for run_index, run in enumerate(runs):
+            if not isinstance(run, dict):
+                raise RuntimeError(f"{scenario}: invalid run payload")
+            loadgen = run.get("loadgen")
+            resources = run.get("resources")
+            if not isinstance(loadgen, dict) or not isinstance(resources, dict):
+                raise RuntimeError(f"{scenario}: loadgen/resource evidence missing")
+            _validate_broker_path_contract(
+                cast(Any, expected), loadgen, broker, client_count=expected_clients
+            )
+            _validate_result_contract(
+                cast(Any, expected),
+                loadgen,
+                message_count=expected_messages,
+                client_count=expected_clients,
+                effective_qos=expected_qos,
+                effective_qos_distribution=cast(str | None, expected_distribution),
+            )
+            _validate_resource_interval(resources, scenario_id=scenario, run_index=run_index)
+            checks.extend(["broker_path", "result_contract", "resource_interval"])
         if scenario.startswith("NETWORK-MTU-"):
             _packet_metrics(result, scenario)
-        evidence.append({"scenario": scenario, "result": str(path), "validated": True})
+            checks.append("packet_analysis")
+        evidence.append(
+            {
+                "scenario": scenario,
+                "result": str(path),
+                "validated": True,
+                "checks": sorted(set(checks)),
+                "effective_workload": {
+                    "clients": expected_clients,
+                    "messages": expected_messages,
+                    "qos": expected_qos,
+                },
+                "policy_mode": broker.get("policy_mode"),
+            }
+        )
     return evidence
 
 

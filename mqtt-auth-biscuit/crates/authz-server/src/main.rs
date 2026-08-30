@@ -314,6 +314,7 @@ fn stats_snapshot(state: &AppState) -> serde_json::Value {
             "configured_fail_mode".into(),
             serde_json::to_value(&config.fail_mode).expect("fail mode is serializable"),
         );
+        object.insert("configured_fail_rate".into(), config.fail_rate.into());
         object.insert(
             "configured_profile".into(),
             serde_json::to_value(&config.authz_profile).expect("profile is serializable"),

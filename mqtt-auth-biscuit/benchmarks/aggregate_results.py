@@ -125,28 +125,28 @@ def _aggregate_errors(runs):
     }
 
 
-def _extract_prom_value(snap, metric):
-    try:
-        results = snap["prometheus"][metric]["data"]["result"]
-        if not results:
-            return None
-        return _safe_float(results[0]["value"][1])
-    except KeyError, IndexError, TypeError:
-        return None
-
-
 def _aggregate_resources(runs):
-    cpu_vals = []
-    mem_vals = []
+    cpu_usage_seconds = []
+    memory_peak_bytes = []
+    memory_mean_bytes = []
+    sample_counts = []
+    unavailable = 0
     for run in runs:
-        snap = run.get("resources")
-        if not isinstance(snap, dict):
+        resource = run.get("resources")
+        if not isinstance(resource, dict) or resource.get("available") is not True:
+            unavailable += 1
             continue
-        cpu_vals.append(_extract_prom_value(snap, "cpu"))
-        mem_vals.append(_extract_prom_value(snap, "memory"))
+        memory = resource.get("memory_working_set_bytes") or {}
+        cpu_usage_seconds.append(_safe_float(resource.get("cpu_usage_seconds")))
+        memory_peak_bytes.append(_safe_float(memory.get("max")))
+        memory_mean_bytes.append(_safe_float(memory.get("mean")))
+        sample_counts.append(_safe_float(memory.get("samples")))
     return {
-        "cpu": _aggregate_values(cpu_vals),
-        "memory": _aggregate_values(mem_vals),
+        "cpu_usage_seconds": _aggregate_values(cpu_usage_seconds),
+        "memory_peak_bytes": _aggregate_values(memory_peak_bytes),
+        "memory_mean_bytes": _aggregate_values(memory_mean_bytes),
+        "memory_sample_count": _aggregate_values(sample_counts),
+        "unavailable_runs": unavailable,
     }
 
 
@@ -183,6 +183,8 @@ def _build_summary(input_dir: str | Path):
         data = _load_scenario(path)
         if not isinstance(data, dict):
             continue
+        if data.get("result_schema_version") != 2:
+            raise ValueError(f"{path}: unsupported benchmark result schema")
         if "runs" not in data or not isinstance(data.get("runs"), list):
             continue
         runs = data.get("runs", [])
@@ -229,6 +231,7 @@ def _build_summary(input_dir: str | Path):
         scenario_summaries.append(summary)
 
     return {
+        "result_schema_version": 2,
         "generated_at": datetime.now(UTC).isoformat(),
         "input_dir": str(input_path),
         "scenario_count": len(scenario_summaries),
@@ -314,8 +317,11 @@ def _write_csv(summary, path):
                 "attenuation_count_total": attenuation.get("count_total"),
                 "attenuation_len_p50_avg": (attenuation_len.get("p50_ms") or {}).get("avg"),
                 "errors_total": (scenario.get("errors") or {}).get("total"),
-                "cpu_avg": (resources.get("cpu") or {}).get("avg"),
-                "memory_avg": (resources.get("memory") or {}).get("avg"),
+                "cpu_usage_seconds_avg": (resources.get("cpu_usage_seconds") or {}).get("avg"),
+                "memory_peak_bytes_avg": (resources.get("memory_peak_bytes") or {}).get("avg"),
+                "memory_mean_bytes_avg": (resources.get("memory_mean_bytes") or {}).get("avg"),
+                "memory_sample_count_avg": (resources.get("memory_sample_count") or {}).get("avg"),
+                "resource_unavailable_runs": resources.get("unavailable_runs"),
                 "mqtt5_connect_p50": (mqtt5.get("connect") or {}).get("p50_ms"),
                 "mqtt5_connect_p95": (mqtt5.get("connect") or {}).get("p95_ms"),
                 "mqtt5_connect_p99": (mqtt5.get("connect") or {}).get("p99_ms"),

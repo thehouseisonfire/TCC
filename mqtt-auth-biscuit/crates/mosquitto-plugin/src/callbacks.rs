@@ -46,6 +46,14 @@ pub extern "C" fn basic_auth_callback(
             state.config.policy.mode,
             state.config.allow_anonymous_no_token,
         ) {
+            if state.config.policy.mode == PolicyMode::DynamicSecurity
+                && state.config.allow_anonymous_no_token
+            {
+                state
+                    .auth_metrics
+                    .anonymous_deferrals
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             MOSQ_ERR_PLUGIN_DEFER
         } else {
             MOSQ_ERR_AUTH
@@ -58,6 +66,14 @@ pub extern "C" fn basic_auth_callback(
             state.config.policy.mode,
             state.config.allow_anonymous_no_token,
         ) {
+            if state.config.policy.mode == PolicyMode::DynamicSecurity
+                && state.config.allow_anonymous_no_token
+            {
+                state
+                    .auth_metrics
+                    .anonymous_deferrals
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             MOSQ_ERR_PLUGIN_DEFER
         } else {
             MOSQ_ERR_AUTH
@@ -118,24 +134,15 @@ pub extern "C" fn basic_auth_callback(
             let session_username = mosq_client_username_string(evt.client);
             bind_session_username(state, &client_id, session_username.as_deref());
             state.auth_metrics.successes.fetch_add(1, Ordering::Relaxed);
-            if state.config.benchmark_diagnostics {
-                state.auth_metrics.log_snapshot(&state.cache);
-            }
             MOSQ_ERR_SUCCESS
         }
         Err(AuthError::Expired) => {
             state.auth_metrics.failures.fetch_add(1, Ordering::Relaxed);
-            if state.config.benchmark_diagnostics {
-                state.auth_metrics.log_snapshot(&state.cache);
-            }
             log_debug("Authentication rejected: token expired");
             MOSQ_ERR_AUTH
         }
         Err(AuthError::Invalid(msg)) => {
             state.auth_metrics.failures.fetch_add(1, Ordering::Relaxed);
-            if state.config.benchmark_diagnostics {
-                state.auth_metrics.log_snapshot(&state.cache);
-            }
             log_debug(&format!("Authentication rejected: {msg}"));
             MOSQ_ERR_AUTH
         }
@@ -257,9 +264,6 @@ pub extern "C" fn acl_check_callback(
     let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
 
     let cached_token = state.cache.get(&client_id);
-    if state.config.benchmark_diagnostics {
-        state.auth_metrics.observe_cache(&state.cache);
-    }
     if let Some(token_type) = cached_token {
         if is_acl_read_only(evt.access) && !state.config.acl_read_full_authz {
             match check_token_expiry(&token_type) {
@@ -292,7 +296,9 @@ pub extern "C" fn acl_check_callback(
             http_max_response_bytes: state.config.policy.http_max_response_bytes,
         };
 
-        match check_authorization(&token_type, params) {
+        let outcome = check_authorization(&token_type, params);
+        state.authz_metrics.observe(outcome);
+        match outcome {
             AuthzOutcome::Allowed => {
                 if topic.starts_with("$CONTROL/") && (evt.access & MOSQ_ACL_WRITE) != 0 {
                     apply_dynamic_security_control_enforcement(
@@ -332,6 +338,7 @@ pub extern "C" fn acl_check_callback(
             let allowed = policy
                 .check(username.as_deref(), Some(&client_id), &topic, evt.access)
                 .unwrap_or(false);
+            state.authz_metrics.observe_anonymous(allowed);
             if allowed {
                 MOSQ_ERR_SUCCESS
             } else {
@@ -473,7 +480,9 @@ pub extern "C" fn control_callback(
             http_max_response_bytes: state.config.policy.http_max_response_bytes,
         };
 
-        match check_authorization(&token_type, params) {
+        let outcome = check_authorization(&token_type, params);
+        state.authz_metrics.observe(outcome);
+        match outcome {
             AuthzOutcome::Allowed => {
                 log_debug(&format!(
                     "Control authorized: client={client_id} topic={topic}"

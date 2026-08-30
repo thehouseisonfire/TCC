@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from benchmarks.phase2_preflight import _run, _verify, _verify_mtu_pair
+from benchmarks.phase2_preflight import _packet_metrics, _run, _verify, _verify_mtu_pair
 
 
 def test_preflight_uses_client_correlatable_topology(
@@ -45,13 +45,11 @@ def test_mtu_verification_reads_packet_analysis_result(tmp_path: Path) -> None:
     _write_mtu_result(tmp_path, 200, 148)
     _write_mtu_result(tmp_path, 1500, 512)
 
-    evidence = _verify(
-        tmp_path,
-        ("NETWORK-MTU-200-JWT", "NETWORK-MTU-1500-JWT"),
-    )
+    result = json.loads((tmp_path / "NETWORK-MTU-200-JWT.json").read_text())
+    metrics = _packet_metrics(result, "NETWORK-MTU-200-JWT")
     pair = _verify_mtu_pair(tmp_path)
 
-    assert len(evidence) == 2
+    assert metrics["max_tcp_payload_bytes"] == 148
     assert pair["max_tcp_payload_mtu_200"] == 148
     assert pair["max_tcp_payload_mtu_1500"] == 512
 
@@ -76,4 +74,12 @@ def test_mtu_verification_rejects_missing_or_failed_analysis(
     (tmp_path / "NETWORK-MTU-200-JWT.json").write_text(json.dumps(result))
 
     with pytest.raises(RuntimeError, match="packet"):
-        _verify(tmp_path, ("NETWORK-MTU-200-JWT",))
+        _packet_metrics(result, "NETWORK-MTU-200-JWT")
+
+
+def test_preflight_rejects_result_with_wrong_scenario_identity(tmp_path: Path) -> None:
+    result = {"result_schema_version": 2, "scenario": "TOKEN-BASELINE-JWT"}
+    (tmp_path / "BASELINE-NO-AUTH.json").write_text(json.dumps(result))
+
+    with pytest.raises(RuntimeError, match="identity mismatch"):
+        _verify(tmp_path, ("BASELINE-NO-AUTH",))

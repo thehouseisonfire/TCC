@@ -708,6 +708,11 @@ Optional TLS flags:
 - `--tls-ca-file <path>`: custom CA bundle (default: `docker/tls/ca.pem`)
 - `--tls-insecure`: disable certificate verification for local testing (obviously not recommended for production)
 
+The canonical Phase 2 preflight deliberately uses `--tls-insecure`. Its `-TLS`
+scenarios validate encrypted transport and TLS endpoint wiring, not certificate
+chain, hostname, expiry, or trust-store validation. Those properties are outside
+the benchmark scenario contract.
+
 Prometheus continues to scrape cAdvisor over HTTP on the private Compose
 network. cAdvisor is not exposed through a TLS endpoint in this configuration;
 only Prometheus's externally accessed query API uses TLS.

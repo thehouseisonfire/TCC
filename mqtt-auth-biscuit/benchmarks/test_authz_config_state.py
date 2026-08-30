@@ -1,11 +1,56 @@
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from benchmarks import run_scenarios as rs
+
+
+def test_broker_diagnostic_snapshot_queries_current_atomic_counters(monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_run(command, **kwargs):  # noqa: ANN001
+        captured["command"] = command
+        captured["input"] = kwargs["input"]
+        return SimpleNamespace(
+            stdout=json.dumps(
+                {
+                    "authentication": {
+                        "attempts": 4,
+                        "successes": 4,
+                        "cache_hits": 20,
+                        "cache_misses": 2,
+                    },
+                    "authorization": {"policy_mode": "TokenOnly", "checks": 40},
+                }
+            )
+        )
+
+    monkeypatch.setattr(rs.subprocess, "run", fake_run)
+    snapshot = rs._broker_diagnostic_snapshot(
+        compose_files=["docker/docker-compose.yml"],
+        compose_project_name="phase2",
+        extra_env={},
+    )
+
+    assert captured["command"][-8:] == [
+        "exec",
+        "-T",
+        "mosquitto",
+        "nc",
+        "-w",
+        "2",
+        "127.0.0.1",
+        str(rs.BENCHMARK_DIAGNOSTICS_PORT),
+    ]
+    assert captured["input"] == "snapshot\n"
+    assert snapshot["authentication"]["attempts"] == 4
+    assert snapshot["authentication"]["cache_hits"] == 20
+    assert snapshot["authentication"]["cache_misses"] == 2
+    assert snapshot["authorization"]["checks"] == 40
 
 
 class _FakeResponse:
@@ -262,6 +307,17 @@ def test_effective_scenario_message_count_crosses_fanout_churn_threshold() -> No
     assert rs._effective_scenario_message_count(scenario, 5, effective_clients=5) == 6
 
 
+def test_effective_scenario_message_count_covers_every_periodic_churn_event() -> None:
+    scenario: rs.ScenarioConfig = {
+        "fanout_churn_kind": "sqlite_toggle_read",
+        "fanout_churn_after_messages": 4,
+        "fanout_churn_interval_messages": 4,
+        "fanout_churn_max_events": 4,
+    }
+
+    assert rs._effective_scenario_message_count(scenario, 10, effective_clients=50) == 17
+
+
 def test_effective_scenario_message_count_reserves_runtime_control_denial_publish() -> None:
     scenario: rs.ScenarioConfig = {
         "runtime_control_after_messages": 10,
@@ -271,7 +327,7 @@ def test_effective_scenario_message_count_reserves_runtime_control_denial_publis
     assert rs._effective_scenario_message_count(scenario, 5, effective_clients=2) == 6
 
 
-def test_dynamic_security_churn_contract_allows_completions_after_application_snapshot() -> None:
+def test_dynamic_security_churn_contract_requires_exact_application_snapshot() -> None:
     scenario: rs.ScenarioConfig = {
         "id": "DYNAMIC-SECURITY-CHURN",
         "runtime_control_after_messages": 10,
@@ -279,7 +335,7 @@ def test_dynamic_security_churn_contract_allows_completions_after_application_sn
     }
     result: dict[str, Any] = {
         "errors": [],
-        "publish": {"count": 12},
+        "publish": {"count": 11},
         "policy_denial_count": 3,
         "raw_metrics": {
             "runtime_control_applied_after_successful_publishes": 11,
@@ -287,10 +343,11 @@ def test_dynamic_security_churn_contract_allows_completions_after_application_sn
     }
     rs._validate_result_contract(scenario, result, message_count=10, client_count=3)
 
-    result["raw_metrics"]["runtime_control_applied_after_successful_publishes"] = 13
+    result["publish"]["count"] = 12
     with pytest.raises(RuntimeError, match="churn phase contract failed"):
         rs._validate_result_contract(scenario, result, message_count=10, client_count=3)
 
+    result["publish"]["count"] = 11
     result["raw_metrics"]["runtime_control_applied_after_successful_publishes"] = 9
     with pytest.raises(RuntimeError, match="churn phase contract failed"):
         rs._validate_result_contract(scenario, result, message_count=10, client_count=3)
@@ -333,11 +390,13 @@ def test_result_contract_requires_zero_delivery_in_deny_phase() -> None:
                     "enabled": True,
                     "triggered": True,
                     "applied_events": 1,
+                    "control_count": 1,
                     "phases": [
-                        {"expected_deliveries": 50, "received_deliveries": 50},
-                        {"expected_deliveries": 10, "received_deliveries": 10},
+                        {"expected_deliveries": 50, "received_deliveries": 50, "duration_ms": 1},
+                        {"expected_deliveries": 10, "received_deliveries": 10, "duration_ms": 1},
                     ],
                 },
+                "control": {"count": 1},
             },
             message_count=6,
             client_count=10,
@@ -354,29 +413,30 @@ def test_result_contract_requires_every_standard_worker_to_finish() -> None:
         )
 
 
-def test_result_contract_validates_only_toggle_phases_exercised_by_short_run() -> None:
-    rs._validate_result_contract(
-        {
-            "id": "SQLITE-RBAC-CHURN-JWT",
-            "traffic_pattern": "fanout",
-            "delivery_contract": {"phases": ["all", "none", "all", "none", "all"]},
-        },
-        {
-            "errors": [],
-            "publish": {"count": 5},
-            "fanout_churn": {
-                "enabled": True,
-                "triggered": True,
-                "applied_events": 1,
-                "phases": [
-                    {"expected_deliveries": 40, "received_deliveries": 40},
-                    {"expected_deliveries": 10, "received_deliveries": 0},
-                ],
+def test_result_contract_rejects_incomplete_toggle_sequence() -> None:
+    with pytest.raises(RuntimeError, match="phase metadata is incomplete"):
+        rs._validate_result_contract(
+            {
+                "id": "SQLITE-RBAC-CHURN-JWT",
+                "traffic_pattern": "fanout",
+                "delivery_contract": {"phases": ["all", "none", "all", "none", "all"]},
             },
-        },
-        message_count=5,
-        client_count=10,
-    )
+            {
+                "errors": [],
+                "publish": {"count": 5},
+                "fanout_churn": {
+                    "enabled": True,
+                    "triggered": True,
+                    "applied_events": 1,
+                    "phases": [
+                        {"expected_deliveries": 40, "received_deliveries": 40},
+                        {"expected_deliveries": 10, "received_deliveries": 0},
+                    ],
+                },
+            },
+            message_count=5,
+            client_count=10,
+        )
 
 
 def test_result_contract_rejects_missing_phase_after_applied_churn() -> None:
@@ -416,11 +476,13 @@ def test_result_contract_allows_only_expected_disable_disconnects() -> None:
             "enabled": True,
             "triggered": True,
             "applied_events": 1,
+            "control_count": 1,
             "phases": [
-                {"expected_deliveries": 50, "received_deliveries": 50},
-                {"expected_deliveries": 10, "received_deliveries": 0},
+                {"expected_deliveries": 50, "received_deliveries": 50, "duration_ms": 1},
+                {"expected_deliveries": 10, "received_deliveries": 0, "duration_ms": 1},
             ],
         },
+        "control": {"count": 1},
     }
     rs._validate_result_contract(scenario, result, message_count=6, client_count=10)
 
@@ -557,6 +619,144 @@ def test_hybrid_fallback_contract_requires_every_external_failure() -> None:
     result["authz_stats"]["injected_failures"] = 0
     with pytest.raises(RuntimeError, match="hybrid fallback contract failed"):
         rs._validate_result_contract(scenario, result, message_count=2, client_count=2)
+
+
+def test_http_failure_contract_requires_complete_attempted_workload() -> None:
+    scenario: rs.ScenarioConfig = {
+        "id": "HTTP-FAILURE-INJECTION-200MS-5PCT-JWT",
+        "http_failure_rate": 0.05,
+        "allowed_error_prefixes": ["publish_failed:"],
+    }
+    result: dict[str, Any] = {
+        "errors": ["publish_failed:NotAuthorized"] * 5,
+        "publish": {"count": 95},
+        "publish_qos_0": {"count": 0},
+        "publish_qos_1": {"count": 95},
+        "publish_qos_2": {"count": 0},
+        "qos_distribution_actual": {
+            "qos_0_count": 0,
+            "qos_1_count": 95,
+            "qos_2_count": 0,
+        },
+        "publish_outcomes": {
+            "attempted": 100,
+            "succeeded": 95,
+            "failed": 5,
+            "attempted_by_qos": {"qos_0": 0, "qos_1": 100, "qos_2": 0},
+            "failed_by_qos": {"qos_0": 0, "qos_1": 5, "qos_2": 0},
+        },
+        "authz_stats": {
+            "requests": 100,
+            "injected_failures": 5,
+            "policy_allows": 95,
+            "policy_denies": 0,
+            "configured_fail_mode": "rate",
+            "configured_fail_rate": 0.05,
+        },
+    }
+    rs._validate_result_contract(
+        scenario, result, message_count=50, client_count=2, effective_qos=1
+    )
+
+    result["authz_stats"]["requests"] = 80
+    with pytest.raises(RuntimeError, match="HTTP failure workload contract failed"):
+        rs._validate_result_contract(
+            scenario, result, message_count=50, client_count=2, effective_qos=1
+        )
+
+
+def test_result_contract_rejects_incomplete_publish_outcome_qos_accounting() -> None:
+    scenario: rs.ScenarioConfig = {"id": "TOKEN-BASELINE-JWT"}
+    result: dict[str, Any] = {
+        "errors": [],
+        "publish": {"count": 2},
+        "qos_distribution_actual": {
+            "qos_0_count": 0,
+            "qos_1_count": 2,
+            "qos_2_count": 0,
+        },
+        "publish_outcomes": {
+            "attempted": 3,
+            "succeeded": 2,
+            "failed": 1,
+            "attempted_by_qos": {"qos_0": 0, "qos_1": 2, "qos_2": 0},
+            "failed_by_qos": {"qos_0": 0, "qos_1": 1, "qos_2": 0},
+        },
+    }
+
+    with pytest.raises(RuntimeError, match="inconsistent publish outcome QoS accounting"):
+        rs._validate_result_contract(scenario, result, message_count=2, client_count=1)
+
+
+def test_broker_path_contract_rejects_wrong_authorization_mode() -> None:
+    scenario: rs.ScenarioConfig = {"id": "TOKEN-BASELINE-JWT"}
+    result: dict[str, Any] = {
+        "broker_auth_delta": {
+            "attempts": 1,
+            "successes": 1,
+            "failures": 0,
+            "jwt_validations": 1,
+        },
+        "broker_authz_delta": {"policy_mode": "TokenOnly", "checks": 1},
+    }
+    attestation = {
+        "validated": True,
+        "plugin_enabled": True,
+        "policy_mode": "token",
+        "benchmark_diagnostics": True,
+        "benchmark_diagnostics_transport": "loopback_tcp_snapshot",
+        "benchmark_diagnostics_port": rs.BENCHMARK_DIAGNOSTICS_PORT,
+    }
+
+    rs._validate_broker_path_contract(scenario, result, attestation, client_count=2)
+
+    result["broker_authz_delta"]["policy_mode"] = "StaticAcl"
+    with pytest.raises(RuntimeError, match="authorization path contract failed"):
+        rs._validate_broker_path_contract(scenario, result, attestation, client_count=2)
+
+
+def test_broker_path_contract_validates_anonymous_dynamic_security_defer() -> None:
+    scenario: rs.ScenarioConfig = {
+        "id": "DYNAMIC-SECURITY-ANONYMOUS-BASELINE",
+        "username": "",
+        "password": "",
+        "traffic_pattern": "fanout",
+    }
+    result: dict[str, Any] = {
+        "broker_auth_delta": {
+            "attempts": 3,
+            "successes": 0,
+            "failures": 0,
+            "anonymous_deferrals": 3,
+            "jwt_validations": 0,
+            "biscuit_validations": 0,
+        },
+        "broker_authz_delta": {
+            "policy_mode": "DynamicSecurity",
+            "checks": 0,
+            "allows": 0,
+            "denies": 0,
+            "expired": 0,
+            "anonymous_checks": 22,
+            "anonymous_allows": 22,
+            "anonymous_denies": 0,
+        },
+    }
+    attestation = {
+        "validated": True,
+        "plugin_enabled": True,
+        "policy_mode": "dynamic_security",
+        "allow_anonymous_no_token": True,
+        "benchmark_diagnostics": True,
+        "benchmark_diagnostics_transport": "loopback_tcp_snapshot",
+        "benchmark_diagnostics_port": rs.BENCHMARK_DIAGNOSTICS_PORT,
+    }
+
+    rs._validate_broker_path_contract(scenario, result, attestation, client_count=2)
+
+    result["broker_authz_delta"]["anonymous_checks"] = 0
+    with pytest.raises(RuntimeError, match="anonymous Dynamic Security path contract failed"):
+        rs._validate_broker_path_contract(scenario, result, attestation, client_count=2)
 
 
 def test_effective_mosquitto_runtime_conf_materializes_plugin_backed_config() -> None:

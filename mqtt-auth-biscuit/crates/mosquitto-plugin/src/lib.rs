@@ -13,9 +13,12 @@ use std::collections::HashSet;
 #[cfg(any(test, kani))]
 use std::ffi::c_char;
 use std::ffi::{CString, c_int, c_void};
+use std::io::{BufRead, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
 use std::ptr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 mod auth;
@@ -211,7 +214,9 @@ pub struct PluginState {
     config: PluginConfig,
     sqlite_policy: Option<SqlitePolicy>,
     dynamic_security_policy: Option<DynamicSecurityPolicy>,
-    auth_metrics: AuthMetrics,
+    auth_metrics: Arc<AuthMetrics>,
+    authz_metrics: Arc<AuthzMetrics>,
+    _diagnostics_server: Option<BenchmarkDiagnosticsServer>,
 }
 
 #[derive(Default)]
@@ -219,30 +224,118 @@ struct AuthMetrics {
     attempts: AtomicU64,
     successes: AtomicU64,
     failures: AtomicU64,
+    anonymous_deferrals: AtomicU64,
     jwt_validations: AtomicU64,
     biscuit_validations: AtomicU64,
-    cache_observations: AtomicU64,
 }
 
-impl AuthMetrics {
-    fn log_snapshot(&self, cache: &SessionCache<String, TokenType>) {
-        let cache = cache.stats();
-        log_info(&format!(
-            "BENCHMARK_AUTH_COUNTERS attempts={} successes={} failures={} jwt_validations={} biscuit_validations={} cache_hits={} cache_misses={}",
-            self.attempts.load(Ordering::Relaxed),
-            self.successes.load(Ordering::Relaxed),
-            self.failures.load(Ordering::Relaxed),
-            self.jwt_validations.load(Ordering::Relaxed),
-            self.biscuit_validations.load(Ordering::Relaxed),
-            cache.hits,
-            cache.misses,
-        ));
+#[derive(Default)]
+struct AuthzMetrics {
+    checks: AtomicU64,
+    allows: AtomicU64,
+    denies: AtomicU64,
+    expired: AtomicU64,
+    anonymous_checks: AtomicU64,
+    anonymous_allows: AtomicU64,
+    anonymous_denies: AtomicU64,
+}
+
+impl AuthzMetrics {
+    fn observe(&self, outcome: crate::authz::AuthzOutcome) {
+        self.checks.fetch_add(1, Ordering::Relaxed);
+        match outcome {
+            crate::authz::AuthzOutcome::Allowed => &self.allows,
+            crate::authz::AuthzOutcome::Denied => &self.denies,
+            crate::authz::AuthzOutcome::Expired => &self.expired,
+        }
+        .fetch_add(1, Ordering::Relaxed);
     }
 
-    fn observe_cache(&self, cache: &SessionCache<String, TokenType>) {
-        let observations = self.cache_observations.fetch_add(1, Ordering::Relaxed) + 1;
-        if observations == 1 || observations.is_multiple_of(1000) {
-            self.log_snapshot(cache);
+    fn observe_anonymous(&self, allowed: bool) {
+        self.anonymous_checks.fetch_add(1, Ordering::Relaxed);
+        if allowed {
+            self.anonymous_allows.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.anonymous_denies.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+const BENCHMARK_DIAGNOSTICS_PORT: u16 = 18_083;
+
+struct BenchmarkDiagnosticsServer {
+    shutdown: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl BenchmarkDiagnosticsServer {
+    fn start(
+        auth: Arc<AuthMetrics>,
+        authz: Arc<AuthzMetrics>,
+        cache: Arc<SessionCache<String, TokenType>>,
+        policy_mode: PolicyMode,
+    ) -> std::io::Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", BENCHMARK_DIAGNOSTICS_PORT))?;
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let thread_shutdown = Arc::clone(&shutdown);
+        let thread = thread::Builder::new()
+            .name("mqtt-auth-benchmark-diagnostics".to_string())
+            .spawn(move || {
+                for connection in listener.incoming() {
+                    if thread_shutdown.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let Ok(mut stream) = connection else {
+                        continue;
+                    };
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                    let mut command = String::new();
+                    if BufReader::new(&stream).read_line(&mut command).is_err()
+                        || command.trim() != "snapshot"
+                    {
+                        continue;
+                    }
+                    let cache_stats = cache.stats();
+                    let payload = json!({
+                        "authentication": {
+                            "attempts": auth.attempts.load(Ordering::Acquire),
+                            "successes": auth.successes.load(Ordering::Acquire),
+                            "failures": auth.failures.load(Ordering::Acquire),
+                            "anonymous_deferrals": auth
+                                .anonymous_deferrals
+                                .load(Ordering::Acquire),
+                            "jwt_validations": auth.jwt_validations.load(Ordering::Acquire),
+                            "biscuit_validations": auth.biscuit_validations.load(Ordering::Acquire),
+                            "cache_hits": cache_stats.hits,
+                            "cache_misses": cache_stats.misses,
+                        },
+                        "authorization": {
+                            "policy_mode": format!("{policy_mode:?}"),
+                            "checks": authz.checks.load(Ordering::Acquire),
+                            "allows": authz.allows.load(Ordering::Acquire),
+                            "denies": authz.denies.load(Ordering::Acquire),
+                            "expired": authz.expired.load(Ordering::Acquire),
+                            "anonymous_checks": authz.anonymous_checks.load(Ordering::Acquire),
+                            "anonymous_allows": authz.anonymous_allows.load(Ordering::Acquire),
+                            "anonymous_denies": authz.anonymous_denies.load(Ordering::Acquire),
+                        },
+                    });
+                    let _ = writeln!(stream, "{payload}");
+                }
+            })?;
+        Ok(Self {
+            shutdown,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for BenchmarkDiagnosticsServer {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        let _ = TcpStream::connect(("127.0.0.1", BENCHMARK_DIAGNOSTICS_PORT));
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
         }
     }
 }
@@ -579,17 +672,40 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
             );
         }
 
+        let auth_metrics = Arc::new(AuthMetrics::default());
+        let authz_metrics = Arc::new(AuthzMetrics::default());
+        let cache = Arc::new(SessionCache::new(1000));
+        let diagnostics_server = if config.benchmark_diagnostics {
+            match BenchmarkDiagnosticsServer::start(
+                Arc::clone(&auth_metrics),
+                Arc::clone(&authz_metrics),
+                Arc::clone(&cache),
+                config.policy.mode,
+            ) {
+                Ok(server) => Some(server),
+                Err(err) => {
+                    log_info(&format!(
+                        "Benchmark diagnostics server failed to start: {err}"
+                    ));
+                    return MOSQ_ERR_INVAL;
+                }
+            }
+        } else {
+            None
+        };
         let state = Box::new(PluginState {
             auth_engine: Arc::new(AuthEngine::new(
                 config.jwt.decoding_key.clone(),
                 config.jwt.validation.clone(),
             )),
-            cache: Arc::new(SessionCache::new(1000)),
+            cache,
             session_index: Mutex::new(SessionIndex::default()),
             config,
             sqlite_policy,
             dynamic_security_policy,
-            auth_metrics: AuthMetrics::default(),
+            auth_metrics,
+            authz_metrics,
+            _diagnostics_server: diagnostics_server,
         });
         *userdata = Box::into_raw(state).cast::<c_void>();
 

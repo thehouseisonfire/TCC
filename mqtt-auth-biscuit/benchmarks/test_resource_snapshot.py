@@ -141,6 +141,114 @@ def test_validate_resource_snapshot_rejects_empty_vectors() -> None:
         _validate_resource_snapshot(snap, scenario_id="UNIT-TEST", run_index=0)
 
 
+def test_resource_interval_uses_bracketing_counter_delta_and_interval_memory(
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    monkeypatch.setattr(rs, "_compose_service_container_id", lambda *_args, **_kwargs: "abc123")
+    monkeypatch.setattr(rs.time, "time", lambda: 101.0)
+    monkeypatch.setattr(rs.time, "sleep", lambda _seconds: None)
+
+    def fake_range_query(_base, query, start, end, _ca, _insecure):  # noqa: ANN001
+        assert start == 98.0
+        assert end == 101.25
+        if "timestamp" in query:
+            values = (
+                [[98.0, "97.75"], [99.0, "98.75"], [101.25, "101"]]
+                if "cpu_usage" in query
+                else [
+                    [98.0, "97.75"],
+                    [99.0, "98.75"],
+                    [100.0, "99.75"],
+                    [101.25, "101"],
+                ]
+            )
+        else:
+            values = (
+                [[98.0, "10"], [99.0, "11"], [101.25, "14.5"]]
+                if "cpu_usage" in query
+                else [[98.0, "90"], [99.0, "100"], [100.0, "130"], [101.25, "110"]]
+            )
+        return {"status": "success", "data": {"result": [{"values": values}]}}
+
+    monkeypatch.setattr(rs, "_prom_range_query", fake_range_query)
+    resource = rs._resource_interval(
+        "http://prometheus",
+        None,
+        False,
+        workload_started_at=100.0,
+        workload_finished_at=100.0,
+    )
+
+    assert resource["available"] is True
+    assert resource["cpu_usage_seconds"] == 3.5
+    assert resource["sampled_interval"] == {"started_at": 98.75, "finished_at": 101.0}
+    assert resource["memory_working_set_bytes"] == {
+        "min": 100.0,
+        "max": 130.0,
+        "mean": pytest.approx(340.0 / 3.0),
+        "samples": 3,
+    }
+    rs._validate_resource_interval(resource, scenario_id="UNIT-TEST", run_index=0)
+
+
+def test_resource_interval_rejects_post_finish_evaluation_of_stale_scrape(
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    monkeypatch.setattr(rs, "_compose_service_container_id", lambda *_args, **_kwargs: "abc123")
+    monkeypatch.setattr(rs.time, "time", lambda: 101.0)
+    monkeypatch.setattr(rs.time, "sleep", lambda _seconds: None)
+
+    def fake_range_query(_base, query, _start, _end, _ca, _insecure):  # noqa: ANN001
+        values = (
+            [[98.0, "99"], [100.0, "99"], [101.25, "99"]]
+            if "timestamp" in query
+            else [[98.0, "10"], [100.0, "10"], [101.25, "10"]]
+        )
+        return {"status": "success", "data": {"result": [{"values": values}]}}
+
+    monkeypatch.setattr(rs, "_prom_range_query", fake_range_query)
+    resource = rs._resource_interval(
+        "http://prometheus",
+        None,
+        False,
+        workload_started_at=100.0,
+        workload_finished_at=100.5,
+    )
+
+    assert resource["available"] is False
+    assert resource["reason"] == "workload_interval_not_bracketed_by_prometheus_samples"
+    assert resource["sample_counts"] == {"cpu": 1, "memory": 1}
+
+
+def test_validate_resource_interval_rejects_unbracketed_evidence() -> None:
+    with pytest.raises(RuntimeError, match="interval evidence unavailable"):
+        rs._validate_resource_interval(
+            {"available": False, "reason": "interval evidence unavailable"},
+            scenario_id="UNIT-TEST",
+            run_index=0,
+        )
+
+
+def test_validate_resource_interval_rejects_evaluation_only_bracketing() -> None:
+    with pytest.raises(RuntimeError, match="Resource interval validation failed"):
+        rs._validate_resource_interval(
+            {
+                "available": True,
+                "workload_interval": {"started_at": 100.0, "finished_at": 101.0},
+                "sampled_interval": {"started_at": 99.0, "finished_at": 100.5},
+                "cpu_usage_seconds": 1.0,
+                "memory_working_set_bytes": {
+                    "min": 100.0,
+                    "mean": 100.0,
+                    "max": 100.0,
+                    "samples": 1,
+                },
+            },
+            scenario_id="UNIT-TEST",
+            run_index=0,
+        )
+
+
 def test_resource_snapshot_collects_non_empty_cpu_and_memory(resource_stack: str) -> None:
     snap = _wait_for_non_empty_snapshot(compose_project_name=resource_stack)
     cpu = snap["prometheus"]["cpu"]["data"]["result"]

@@ -71,7 +71,9 @@ fn mock_plugin_state() -> *mut PluginState {
         config,
         sqlite_policy: None,
         dynamic_security_policy: None,
-        auth_metrics: AuthMetrics::default(),
+        auth_metrics: Arc::new(AuthMetrics::default()),
+        authz_metrics: Arc::new(AuthzMetrics::default()),
+        _diagnostics_server: None,
     });
 
     Box::into_raw(state)

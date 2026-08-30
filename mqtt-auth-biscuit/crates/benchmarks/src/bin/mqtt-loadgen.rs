@@ -261,6 +261,11 @@ struct Args {
     qos_distribution: Option<String>,
     #[arg(long, env = "MQTT_MESSAGE_SIZE", default_value_t = 0)]
     message_size: usize,
+    /// Continue the configured workload after a failed publish. The benchmark
+    /// runner enables this only for scenarios whose result contract expects
+    /// workload-visible publish failures.
+    #[arg(long, env = "MQTT_CONTINUE_AFTER_PUBLISH_FAILURE")]
+    continue_after_publish_failure: bool,
     #[arg(long)]
     sync_connect: bool,
     #[arg(long, env = "MQTT_SYNC_CONNECT_BARRIER_URL")]
@@ -525,6 +530,7 @@ struct Output {
     publish_qos_0: Summary,
     publish_qos_1: Summary,
     publish_qos_2: Summary,
+    publish_outcomes: Value,
     qos_distribution_actual: Value,
     receive: Summary,
     control: Summary,
@@ -581,6 +587,8 @@ struct WorkerResult {
     authorization_probe_failures: usize,
     publish_ms: Vec<f64>,
     publish_by_qos: [Vec<f64>; 3],
+    publish_attempts_by_qos: [usize; 3],
+    publish_failures_by_qos: [usize; 3],
     receive_ms: Vec<f64>,
     receive_by_churn_phase: BTreeMap<usize, usize>,
     control_ms: Vec<f64>,
@@ -641,6 +649,8 @@ struct StandardMetrics {
     publish_qos_0: Vec<f64>,
     publish_qos_1: Vec<f64>,
     publish_qos_2: Vec<f64>,
+    publish_attempts_by_qos: [usize; 3],
+    publish_failures_by_qos: [usize; 3],
     receive: Vec<f64>,
     control: Vec<f64>,
     control_response: Vec<f64>,
@@ -682,6 +692,8 @@ struct HandoffPayload {
 struct FanoutChurnState {
     triggered: bool,
     applied_events: usize,
+    control_ms: Vec<f64>,
+    phase_duration_ms: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -2575,9 +2587,6 @@ async fn apply_fanout_churn(
     if let Err(err) = result {
         return Some(format!("fanout_churn_failed:{err}"));
     }
-    if args.fanout_churn_settle_ms > 0 {
-        tokio::time::sleep(Duration::from_millis(args.fanout_churn_settle_ms)).await;
-    }
     None
 }
 
@@ -2733,6 +2742,8 @@ fn fanout_churn_json(
                         "phase": phase,
                         "expected_deliveries": published * args.clients,
                         "received_deliveries": received.get(phase).copied().unwrap_or(0),
+                        "duration_ms": state
+                            .and_then(|state| state.phase_duration_ms.get(phase).copied()),
                     })
                 })
                 .collect(),
@@ -2748,6 +2759,7 @@ fn fanout_churn_json(
         "settle_ms": if mode == "fanout" { Some(args.fanout_churn_settle_ms) } else { None },
         "triggered": if mode == "fanout" { Some(triggered) } else { None },
         "applied_events": if mode == "fanout" { Some(applied_events) } else { None },
+        "control_count": if mode == "fanout" { state.map_or(0, |state| state.control_ms.len()) } else { 0 },
         "phases": phases,
     })
 }
@@ -3157,9 +3169,56 @@ struct FanoutOutputParts<'a> {
     runtime: FanoutRuntime,
     fanout_publish_ms: Vec<f64>,
     fanout_publish_by_qos: &'a [Vec<f64>; 3],
+    publish_outcomes: FanoutPublishOutcomes,
     churn_state: &'a FanoutChurnState,
     phase_events: Option<usize>,
     metrics: &'a FanoutMetrics,
+}
+
+#[derive(Clone, Copy, Default)]
+struct FanoutPublishOutcomes {
+    attempted_by_qos: [usize; 3],
+    failed_by_qos: [usize; 3],
+}
+
+impl FanoutPublishOutcomes {
+    fn record_attempt(&mut self, qos: u8) {
+        if let Some(attempts) = self.attempted_by_qos.get_mut(usize::from(qos)) {
+            *attempts += 1;
+        }
+    }
+
+    fn record_failure(&mut self, qos: u8) {
+        if let Some(failures) = self.failed_by_qos.get_mut(usize::from(qos)) {
+            *failures += 1;
+        }
+    }
+
+    fn to_json(self, succeeded: usize) -> Value {
+        serde_json::json!({
+            "attempted": self.attempted_by_qos.iter().sum::<usize>(),
+            "succeeded": succeeded,
+            "failed": self.failed_by_qos.iter().sum::<usize>(),
+            "attempted_by_qos": {
+                "qos_0": self.attempted_by_qos[0],
+                "qos_1": self.attempted_by_qos[1],
+                "qos_2": self.attempted_by_qos[2],
+            },
+            "failed_by_qos": {
+                "qos_0": self.failed_by_qos[0],
+                "qos_1": self.failed_by_qos[1],
+                "qos_2": self.failed_by_qos[2],
+            },
+        })
+    }
+}
+
+#[derive(Default)]
+struct FanoutPublishResult {
+    publish_ms: Vec<f64>,
+    publish_by_qos: [Vec<f64>; 3],
+    outcomes: FanoutPublishOutcomes,
+    churn_state: FanoutChurnState,
 }
 
 struct WorkerPublishPlan<'a> {
@@ -3680,10 +3739,12 @@ async fn publish_fanout(
     qos_distribution: Option<&QosDistribution>,
     errors: &mut Vec<String>,
     churn_receipts: Option<FanoutChurnReceiptSource<'_>>,
-) -> (Vec<f64>, [Vec<f64>; 3], FanoutChurnState) {
+) -> FanoutPublishResult {
     let mut fanout_publish_ms = Vec::new();
     let mut fanout_publish_by_qos: [Vec<f64>; 3] = Default::default();
+    let mut publish_outcomes = FanoutPublishOutcomes::default();
     let mut churn_state = FanoutChurnState::default();
+    let mut phase_started = Instant::now();
     for sequence_id in 0..args.messages {
         if should_apply_churn(args, sequence_id, &churn_state) {
             if let Some(receipts) = churn_receipts.as_ref()
@@ -3697,11 +3758,22 @@ async fn publish_fanout(
             {
                 errors.push(format!("fanout_churn_receipt_timeout:expected={expected}"));
             }
+            churn_state
+                .phase_duration_ms
+                .push(phase_started.elapsed().as_secs_f64() * 1000.0);
+            let control_started = Instant::now();
             if let Some(err) = apply_fanout_churn(args, publisher, publisher_eventloop).await {
                 errors.push(err);
             } else {
+                churn_state
+                    .control_ms
+                    .push(control_started.elapsed().as_secs_f64() * 1000.0);
+                if args.fanout_churn_settle_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(args.fanout_churn_settle_ms)).await;
+                }
                 churn_state.triggered = true;
                 churn_state.applied_events += 1;
+                phase_started = Instant::now();
             }
         }
         let publish_qos = qos_distribution.map_or(args.qos, QosDistribution::choose);
@@ -3719,6 +3791,7 @@ async fn publish_fanout(
         if args.message_size > payload.len() {
             payload.extend(vec![b'A'; args.message_size - payload.len()]);
         }
+        publish_outcomes.record_attempt(publish_qos);
         match publish_and_wait(
             publisher,
             publisher_eventloop,
@@ -3734,10 +3807,21 @@ async fn publish_fanout(
                     bucket.push(ms);
                 }
             }
-            Err(err) => errors.push(format!("fanout_publish_failed:{err}")),
+            Err(err) => {
+                publish_outcomes.record_failure(publish_qos);
+                errors.push(format!("fanout_publish_failed:{err}"));
+            }
         }
     }
-    (fanout_publish_ms, fanout_publish_by_qos, churn_state)
+    churn_state
+        .phase_duration_ms
+        .push(phase_started.elapsed().as_secs_f64() * 1000.0);
+    FanoutPublishResult {
+        publish_ms: fanout_publish_ms,
+        publish_by_qos: fanout_publish_by_qos,
+        outcomes: publish_outcomes,
+        churn_state,
+    }
 }
 
 fn spawn_fanout_collectors(
@@ -3870,7 +3954,7 @@ fn fanout_output(args: &Args, parts: FanoutOutputParts<'_>) -> Output {
         "publish_qos_1": parts.fanout_publish_by_qos[1].clone(),
         "publish_qos_2": parts.fanout_publish_by_qos[2].clone(),
         "receive": metrics.receive.clone(),
-        "control": [],
+        "control": parts.churn_state.control_ms.clone(),
         "control_response": [],
         "control_injection_delay": [],
         "sync_connect_barrier_wait": [],
@@ -3908,13 +3992,16 @@ fn fanout_output(args: &Args, parts: FanoutOutputParts<'_>) -> Output {
         publish_qos_0: summarize(&parts.fanout_publish_by_qos[0]),
         publish_qos_1: summarize(&parts.fanout_publish_by_qos[1]),
         publish_qos_2: summarize(&parts.fanout_publish_by_qos[2]),
+        publish_outcomes: parts
+            .publish_outcomes
+            .to_json(parts.fanout_publish_ms.len()),
         qos_distribution_actual: serde_json::json!({
             "qos_0_count": parts.fanout_publish_by_qos[0].len(),
             "qos_1_count": parts.fanout_publish_by_qos[1].len(),
             "qos_2_count": parts.fanout_publish_by_qos[2].len(),
         }),
         receive: summarize(&metrics.receive),
-        control: Summary::default(),
+        control: summarize(&parts.churn_state.control_ms),
         control_response: Summary::default(),
         control_responses: serde_json::json!({"enabled": false}),
         control_effect: serde_json::json!({
@@ -3988,7 +4075,7 @@ async fn run_fanout(args: Args) -> Result<Output> {
     } else {
         None
     };
-    let (fanout_publish_ms, fanout_publish_by_qos, churn_state) = if fanout_ready {
+    let published = if fanout_ready {
         publish_fanout(
             &args,
             &publisher,
@@ -3999,8 +4086,14 @@ async fn run_fanout(args: Args) -> Result<Output> {
         )
         .await
     } else {
-        (Vec::new(), Default::default(), FanoutChurnState::default())
+        FanoutPublishResult::default()
     };
+    let FanoutPublishResult {
+        publish_ms: fanout_publish_ms,
+        publish_by_qos: fanout_publish_by_qos,
+        outcomes: publish_outcomes,
+        churn_state,
+    } = published;
     publishing_done.store(true, Ordering::Release);
     let _ = publisher.disconnect().await;
     let mut results = if let Some(subscriber_tasks) = subscriber_tasks {
@@ -4026,6 +4119,7 @@ async fn run_fanout(args: Args) -> Result<Output> {
             runtime,
             fanout_publish_ms,
             fanout_publish_by_qos: &fanout_publish_by_qos,
+            publish_outcomes,
             churn_state: &churn_state,
             phase_events: None,
             metrics: &metrics,
@@ -4119,6 +4213,7 @@ async fn run_fanout_subscriber(args: Args) -> Result<Output> {
     }
     let fanout_publish_by_qos: [Vec<f64>; 3] = Default::default();
     let fanout_publish_ms = Vec::new();
+    let publish_outcomes = FanoutPublishOutcomes::default();
     let churn_state = FanoutChurnState::default();
     let metrics = fanout_metrics(
         &results,
@@ -4134,6 +4229,7 @@ async fn run_fanout_subscriber(args: Args) -> Result<Output> {
             runtime,
             fanout_publish_ms,
             fanout_publish_by_qos: &fanout_publish_by_qos,
+            publish_outcomes,
             churn_state: &churn_state,
             phase_events,
             metrics: &metrics,
@@ -4174,10 +4270,7 @@ async fn run_fanout_publisher(args: Args) -> Result<Output> {
     let fallback_password = decode_token_arg(&args.password)?;
     let qos_distribution = QosDistribution::parse(args.qos_distribution.as_deref())?;
     let token_refresh_codes = parse_token_refresh_codes(args.token_refresh_codes.as_deref())?;
-    let mut fanout_publish_ms = Vec::new();
-    let mut fanout_publish_by_qos: [Vec<f64>; 3] = Default::default();
-    let mut churn_state = FanoutChurnState::default();
-    if ready {
+    let published = if ready {
         let (publisher, mut publisher_eventloop) =
             connect_fanout_publisher(&args, &fallback_password).await?;
         let published = publish_fanout(
@@ -4189,17 +4282,26 @@ async fn run_fanout_publisher(args: Args) -> Result<Output> {
             Some(FanoutChurnReceiptSource::Files(&churn_receipt_paths)),
         )
         .await;
-        fanout_publish_ms = published.0;
-        fanout_publish_by_qos = published.1;
-        churn_state = published.2;
         let _ = publisher.disconnect().await;
-        if let Err(err) = write_fanout_done(&ready_dir, churn_state.applied_events, &runtime.errors)
-        {
+        if let Err(err) = write_fanout_done(
+            &ready_dir,
+            published.churn_state.applied_events,
+            &runtime.errors,
+        ) {
             runtime
                 .errors
                 .push(format!("fanout_done_write_failed:{err}"));
         }
-    }
+        published
+    } else {
+        FanoutPublishResult::default()
+    };
+    let FanoutPublishResult {
+        publish_ms: fanout_publish_ms,
+        publish_by_qos: fanout_publish_by_qos,
+        outcomes: publish_outcomes,
+        churn_state,
+    } = published;
 
     let duration_s = start.elapsed().as_secs_f64().max(1e-9);
     let metrics = fanout_metrics(
@@ -4216,6 +4318,7 @@ async fn run_fanout_publisher(args: Args) -> Result<Output> {
             runtime,
             fanout_publish_ms,
             fanout_publish_by_qos: &fanout_publish_by_qos,
+            publish_outcomes,
             churn_state: &churn_state,
             phase_events: None,
             metrics: &metrics,
@@ -4814,6 +4917,12 @@ async fn run_publish_mode(
         let publish_qos = plan
             .qos_distribution
             .map_or(args.qos, QosDistribution::choose);
+        if let Some(attempts) = result
+            .publish_attempts_by_qos
+            .get_mut(usize::from(publish_qos))
+        {
+            *attempts += 1;
+        }
         match publish_tracked_and_wait(client, plan.topic, plan.data_payload.to_vec(), publish_qos)
             .await
         {
@@ -4855,6 +4964,12 @@ async fn run_publish_mode(
                 }
             }
             Err(err) => {
+                if let Some(failures) = result
+                    .publish_failures_by_qos
+                    .get_mut(usize::from(publish_qos))
+                {
+                    *failures += 1;
+                }
                 if args.runtime_control_expect_denial
                     && (runtime_control.is_some_and(|state| state.applied.load(Ordering::Acquire))
                         || external_policy_applied)
@@ -4864,7 +4979,9 @@ async fn run_publish_mode(
                 } else {
                     result.errors.push(format!("publish_failed:{err}"));
                 }
-                break;
+                if !args.continue_after_publish_failure {
+                    break;
+                }
             }
         }
         since_control += 1;
@@ -5237,6 +5354,14 @@ fn standard_metrics(
         .iter()
         .flat_map(|r| r.publish_by_qos[2].clone())
         .collect();
+    let mut publish_attempts_by_qos = [0usize; 3];
+    let mut publish_failures_by_qos = [0usize; 3];
+    for result in &results {
+        for qos_value in 0..3 {
+            publish_attempts_by_qos[qos_value] += result.publish_attempts_by_qos[qos_value];
+            publish_failures_by_qos[qos_value] += result.publish_failures_by_qos[qos_value];
+        }
+    }
     let receive: Vec<_> = results.iter().flat_map(|r| r.receive_ms.clone()).collect();
     let control = results.iter().flat_map(|r| r.control_ms.clone()).collect();
     let control_response = results
@@ -5294,6 +5419,8 @@ fn standard_metrics(
         publish_qos_0,
         publish_qos_1,
         publish_qos_2,
+        publish_attempts_by_qos,
+        publish_failures_by_qos,
         receive,
         control,
         control_response,
@@ -5418,6 +5545,21 @@ fn standard_output(
         publish_qos_0: summarize(&metrics.publish_qos_0),
         publish_qos_1: summarize(&metrics.publish_qos_1),
         publish_qos_2: summarize(&metrics.publish_qos_2),
+        publish_outcomes: serde_json::json!({
+            "attempted": metrics.publish_attempts_by_qos.iter().sum::<usize>(),
+            "succeeded": metrics.publish.len(),
+            "failed": metrics.publish_failures_by_qos.iter().sum::<usize>(),
+            "attempted_by_qos": {
+                "qos_0": metrics.publish_attempts_by_qos[0],
+                "qos_1": metrics.publish_attempts_by_qos[1],
+                "qos_2": metrics.publish_attempts_by_qos[2],
+            },
+            "failed_by_qos": {
+                "qos_0": metrics.publish_failures_by_qos[0],
+                "qos_1": metrics.publish_failures_by_qos[1],
+                "qos_2": metrics.publish_failures_by_qos[2],
+            },
+        }),
         qos_distribution_actual: serde_json::json!({
             "qos_0_count": metrics.publish_qos_0.len(),
             "qos_1_count": metrics.publish_qos_1.len(),
@@ -5707,6 +5849,8 @@ fn empty_standard_metrics() -> StandardMetrics {
         publish_qos_0: Vec::new(),
         publish_qos_1: Vec::new(),
         publish_qos_2: Vec::new(),
+        publish_attempts_by_qos: [0; 3],
+        publish_failures_by_qos: [0; 3],
         receive: Vec::new(),
         control: Vec::new(),
         control_response: Vec::new(),
@@ -5973,6 +6117,13 @@ mod tests {
             publish_qos_0: Summary::default(),
             publish_qos_1: Summary::default(),
             publish_qos_2: Summary::default(),
+            publish_outcomes: serde_json::json!({
+                "attempted": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "attempted_by_qos": {"qos_0": 0, "qos_1": 0, "qos_2": 0},
+                "failed_by_qos": {"qos_0": 0, "qos_1": 0, "qos_2": 0},
+            }),
             qos_distribution_actual: serde_json::json!({
                 "qos_0_count": 0,
                 "qos_1_count": 0,
@@ -6041,6 +6192,8 @@ mod tests {
             publish_qos_0: Vec::new(),
             publish_qos_1: Vec::new(),
             publish_qos_2: Vec::new(),
+            publish_attempts_by_qos: [0; 3],
+            publish_failures_by_qos: [0; 3],
             receive: Vec::new(),
             control: Vec::new(),
             control_response: Vec::new(),
@@ -6644,6 +6797,7 @@ mod tests {
                 "proactive_refresh_len",
                 "proactive_refresh_successes",
                 "publish",
+                "publish_outcomes",
                 "publish_qos_0",
                 "publish_qos_1",
                 "publish_qos_2",
@@ -6661,6 +6815,26 @@ mod tests {
                 "token_refresh",
                 "token_refresh_len",
             ]
+        );
+    }
+
+    #[test]
+    fn fanout_publish_outcomes_include_failed_attempts_by_qos() {
+        let mut outcomes = FanoutPublishOutcomes::default();
+        outcomes.record_attempt(0);
+        outcomes.record_attempt(1);
+        outcomes.record_failure(1);
+        outcomes.record_attempt(2);
+
+        assert_eq!(
+            outcomes.to_json(2),
+            serde_json::json!({
+                "attempted": 3,
+                "succeeded": 2,
+                "failed": 1,
+                "attempted_by_qos": {"qos_0": 1, "qos_1": 1, "qos_2": 1},
+                "failed_by_qos": {"qos_0": 0, "qos_1": 1, "qos_2": 0},
+            })
         );
     }
 

@@ -221,6 +221,11 @@ metrics path cannot be mistaken for valid measurements.
    resource collection, and injected HTTP/Hybrid failures. Its source of truth is
    `benchmarks.phase2_preflight`; do not substitute an operator-selected subset.
 
+   Phase 2 TLS scenarios prove encrypted MQTT and backend transport paths. They
+   intentionally use `--tls-insecure`: certificate-chain, hostname, expiry, and
+   trust-store validation are outside this benchmark preflight and must not be
+   inferred from a passing `-TLS` result.
+
 3. Preserve `benchmarks/results/phase2-preflight/evidence.json` with the batch
    evidence. The command fails if a required result, resource snapshot, or MTU
    packet analysis is absent. Existing results can be rechecked with

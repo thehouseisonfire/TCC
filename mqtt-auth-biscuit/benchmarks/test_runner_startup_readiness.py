@@ -656,6 +656,25 @@ def test_main_normalizes_output_directory_strings(
     monkeypatch.setattr(rs, "_validate_dynamic_security_alignment", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(rs, "_resource_snapshot", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(rs, "_validate_resource_snapshot", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        rs,
+        "_broker_config_attestation",
+        lambda **_kwargs: {
+            "validated": True,
+            "plugin_enabled": False,
+            "policy_mode": "none",
+            "requested_sha256": "a" * 64,
+            "effective_sha256": "b" * 64,
+            "container_sha256": "b" * 64,
+        },
+    )
+    monkeypatch.setattr(rs, "_validate_broker_path_contract", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        rs,
+        "_resource_interval",
+        lambda *_args, **_kwargs: {"available": False, "reason": "test fixture"},
+    )
+    monkeypatch.setattr(rs, "_validate_resource_interval", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(rs, "_read_effective_mtu", lambda **_kwargs: 1200)
     monkeypatch.setattr(
         rs,
@@ -1319,6 +1338,7 @@ def test_fanout_role_merge_recomputes_receive_expectations_and_churn() -> None:
             "after_messages": 2,
             "triggered": True,
             "applied_events": 1,
+            "phases": [{"duration_ms": 10.0}, {"duration_ms": 20.0}],
         },
         "errors": [],
     }
@@ -1362,8 +1382,18 @@ def test_fanout_role_merge_recomputes_receive_expectations_and_churn() -> None:
 
     assert merged["received_messages"] == {"count": 6, "expected": 8}
     assert merged["fanout_churn"]["phases"] == [
-        {"phase": 0, "expected_deliveries": 4, "received_deliveries": 4},
-        {"phase": 1, "expected_deliveries": 4, "received_deliveries": 2},
+        {
+            "phase": 0,
+            "expected_deliveries": 4,
+            "received_deliveries": 4,
+            "duration_ms": 10.0,
+        },
+        {
+            "phase": 1,
+            "expected_deliveries": 4,
+            "received_deliveries": 2,
+            "duration_ms": 20.0,
+        },
     ]
     assert merged["topology"]["fanout_roles"] == {"publishers": 1, "subscribers": 2}
     assert merged["inputs"]["credential_attestations"] == {

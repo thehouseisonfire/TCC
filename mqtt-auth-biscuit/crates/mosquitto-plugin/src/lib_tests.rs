@@ -16,6 +16,75 @@ AQEBAQEBAQEBAQEBAQEBAQEBAQGhRANCAARv8DuUkkHOHa3UNRnmlg4KhbQaaaBc\n\
 MoEDqivOFZTKFjxPdTpVvwHcU/bAsMfu54tAxv99JaluIoK5ic73HBRK\n\
 -----END PRIVATE KEY-----\n";
 
+fn read_diagnostic_snapshot() -> serde_json::Value {
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", BENCHMARK_DIAGNOSTICS_PORT))
+        .expect("diagnostics server should accept connections");
+    std::io::Write::write_all(&mut stream, b"snapshot\n").expect("snapshot command should write");
+    let mut response = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(stream), &mut response)
+        .expect("snapshot response should read");
+    serde_json::from_str(&response).expect("snapshot response should be JSON")
+}
+
+#[test]
+fn benchmark_diagnostics_snapshots_advance_between_runs() {
+    let auth = Arc::new(AuthMetrics::default());
+    let authz = Arc::new(AuthzMetrics::default());
+    let cache = Arc::new(SessionCache::new(10));
+    let _server = BenchmarkDiagnosticsServer::start(
+        Arc::clone(&auth),
+        Arc::clone(&authz),
+        Arc::clone(&cache),
+        PolicyMode::TokenOnly,
+    )
+    .expect("diagnostics server should start");
+
+    let before = read_diagnostic_snapshot();
+    auth.attempts.fetch_add(2, Ordering::Relaxed);
+    auth.successes.fetch_add(2, Ordering::Relaxed);
+    auth.jwt_validations.fetch_add(2, Ordering::Relaxed);
+    authz.checks.fetch_add(20, Ordering::Relaxed);
+    authz.allows.fetch_add(20, Ordering::Relaxed);
+    assert!(cache.get(&"missing".to_string()).is_none());
+    let after_first_run = read_diagnostic_snapshot();
+    auth.attempts.fetch_add(2, Ordering::Relaxed);
+    auth.successes.fetch_add(2, Ordering::Relaxed);
+    auth.jwt_validations.fetch_add(2, Ordering::Relaxed);
+    authz.checks.fetch_add(20, Ordering::Relaxed);
+    authz.allows.fetch_add(20, Ordering::Relaxed);
+    cache.insert(
+        "present".to_string(),
+        TokenType::Jwt {
+            raw: "fixture".to_string(),
+            claims: Claims {
+                sub: "fixture".to_string(),
+                exp: 2_000_000_000,
+                iss: None,
+                aud: None,
+                client_id: None,
+                roles: None,
+                grants: None,
+                denies: None,
+            },
+        },
+        Duration::from_secs(60),
+    );
+    assert!(cache.get(&"present".to_string()).is_some());
+    let after_second_run = read_diagnostic_snapshot();
+
+    assert_eq!(before["authentication"]["attempts"], 0);
+    assert_eq!(after_first_run["authentication"]["attempts"], 2);
+    assert_eq!(after_second_run["authentication"]["attempts"], 4);
+    assert_eq!(after_first_run["authorization"]["checks"], 20);
+    assert_eq!(after_second_run["authorization"]["checks"], 40);
+    assert_eq!(after_first_run["authentication"]["cache_misses"], 1);
+    assert_eq!(after_second_run["authentication"]["cache_hits"], 1);
+    assert_eq!(
+        after_second_run["authorization"]["policy_mode"],
+        "TokenOnly"
+    );
+}
+
 #[derive(Clone, Copy, Debug)]
 enum AuthPath {
     Basic,
@@ -513,6 +582,82 @@ fn basic_auth_callback_handles_null_password() {
     );
     assert_eq!(rc, MOSQ_ERR_AUTH);
 
+    teardown_plugin(userdata);
+}
+
+#[test]
+fn anonymous_dynamic_security_authentication_records_defer_path() {
+    let (userdata, _identifier) = setup_plugin_with_config();
+    enable_dynamic_security_anonymous_mode(userdata);
+    let mut evt = MosquittoEvtBasicAuth {
+        future: ptr::null_mut(),
+        client: ptr::null_mut(),
+        username: ptr::null_mut(),
+        password: ptr::null_mut(),
+        extra: MosquittoEvtBasicAuthFuture {
+            future2: [ptr::null_mut(); 4],
+        },
+    };
+
+    let rc = basic_auth_callback(
+        MOSQ_EVT_BASIC_AUTH,
+        (&raw mut evt).cast::<c_void>(),
+        userdata,
+    );
+    let state = unsafe { plugin_state(userdata) };
+
+    assert_eq!(rc, MOSQ_ERR_PLUGIN_DEFER);
+    assert_eq!(state.auth_metrics.attempts.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        state
+            .auth_metrics
+            .anonymous_deferrals
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(state.auth_metrics.successes.load(Ordering::Relaxed), 0);
+    teardown_plugin(userdata);
+}
+
+#[test]
+fn anonymous_dynamic_security_authorization_records_policy_decision() {
+    let (userdata, _identifier) = setup_plugin_with_config();
+    enable_dynamic_security_anonymous_mode(userdata);
+    let topic = CString::new("public/announce").unwrap();
+    let mut evt = MosquittoEvtAclCheck {
+        future: ptr::null_mut(),
+        client: std::ptr::dangling_mut::<c_void>(),
+        topic: topic.as_ptr(),
+        payload: ptr::null(),
+        properties: ptr::null_mut(),
+        access: MOSQ_ACL_WRITE,
+        payloadlen: 0,
+        qos: 1,
+        retain: false,
+        future2: [ptr::null_mut(); 4],
+    };
+
+    let rc = acl_check_callback(
+        MOSQ_EVT_ACL_CHECK,
+        (&raw mut evt).cast::<c_void>(),
+        userdata,
+    );
+    let state = unsafe { plugin_state(userdata) };
+
+    assert_eq!(rc, MOSQ_ERR_SUCCESS);
+    assert_eq!(state.authz_metrics.checks.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        state.authz_metrics.anonymous_checks.load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        state.authz_metrics.anonymous_allows.load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        state.authz_metrics.anonymous_denies.load(Ordering::Relaxed),
+        0
+    );
     teardown_plugin(userdata);
 }
 

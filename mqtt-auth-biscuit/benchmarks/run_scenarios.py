@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import os
@@ -527,15 +528,82 @@ def _compose_cmd(
     return cmd
 
 
-def _broker_auth_counters(
+BENCHMARK_DIAGNOSTICS_PORT = 18_083
+
+
+def _broker_diagnostic_snapshot(
     *,
     compose_files: list[str] | None,
     compose_project_name: str | None,
     extra_env: dict[str, str],
-) -> dict[str, int]:
+) -> dict[str, Any]:
     completed = subprocess.run(
         _compose_cmd(
-            ["logs", "--no-color", "mosquitto"],
+            [
+                "exec",
+                "-T",
+                "mosquitto",
+                "nc",
+                "-w",
+                "2",
+                "127.0.0.1",
+                str(BENCHMARK_DIAGNOSTICS_PORT),
+            ],
+            compose_files=compose_files,
+            compose_project_name=compose_project_name,
+        ),
+        cwd=REPO_ROOT,
+        env={**os.environ, **extra_env},
+        input="snapshot\n",
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid broker diagnostic snapshot: {completed.stdout!r}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"invalid broker diagnostic snapshot payload: {payload!r}")
+    return cast(dict[str, Any], payload)
+
+
+def _counter_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
+    return {key: value - int(before.get(key, 0)) for key, value in after.items()}
+
+
+def _authz_counter_delta(
+    before: dict[str, int | str], after: dict[str, int | str]
+) -> dict[str, int | str]:
+    delta: dict[str, int | str] = {"policy_mode": str(after.get("policy_mode", ""))}
+    for key in (
+        "checks",
+        "allows",
+        "denies",
+        "expired",
+        "anonymous_checks",
+        "anonymous_allows",
+        "anonymous_denies",
+    ):
+        delta[key] = int(after.get(key, 0)) - int(before.get(key, 0))
+    return delta
+
+
+def _broker_config_attestation(
+    *,
+    requested_path: str,
+    effective_path: str,
+    compose_files: list[str],
+    compose_project_name: str | None,
+    extra_env: dict[str, str],
+) -> dict[str, Any]:
+    """Attest the exact Mosquitto configuration mounted in the running container."""
+    host_path = _resolve_compose_path(effective_path)
+    content = host_path.read_bytes()
+    expected_sha256 = hashlib.sha256(content).hexdigest()
+    completed = subprocess.run(
+        _compose_cmd(
+            ["exec", "-T", "mosquitto", "sha256sum", "/mosquitto/config/mosquitto.conf"],
             compose_files=compose_files,
             compose_project_name=compose_project_name,
         ),
@@ -545,20 +613,40 @@ def _broker_auth_counters(
         text=True,
         check=True,
     )
-    marker = "BENCHMARK_AUTH_COUNTERS "
-    lines = [line.split(marker, 1)[1] for line in completed.stdout.splitlines() if marker in line]
-    if not lines:
-        return {}
-    counters: dict[str, int] = {}
-    for field in lines[-1].split():
-        key, separator, value = field.partition("=")
-        if separator:
-            counters[key] = int(value)
-    return counters
-
-
-def _counter_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
-    return {key: value - int(before.get(key, 0)) for key, value in after.items()}
+    observed_sha256 = completed.stdout.split(maxsplit=1)[0].strip()
+    if observed_sha256 != expected_sha256:
+        raise RuntimeError(
+            "running Mosquitto configuration hash does not match the requested fixture: "
+            f"expected={expected_sha256} observed={observed_sha256}"
+        )
+    text = content.decode("utf-8")
+    directives: dict[str, list[str]] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, _, value = line.partition(" ")
+        directives.setdefault(key, []).append(value.strip())
+    policy_values = directives.get("plugin_opt_policy_mode", [])
+    return {
+        "validated": True,
+        "requested_path": requested_path,
+        "effective_path": effective_path,
+        "expected_sha256": expected_sha256,
+        "container_sha256": observed_sha256,
+        "listeners": directives.get("listener", []),
+        "plugin_enabled": bool(directives.get("plugin")),
+        "policy_mode": policy_values[-1] if policy_values else "none",
+        "acl_read_full_authz": (directives.get("plugin_opt_acl_read_full_authz", ["false"])[-1]),
+        "allow_anonymous_no_token": (
+            directives.get("plugin_opt_allow_anonymous_no_token", ["false"])[-1] == "true"
+        ),
+        "benchmark_diagnostics": (
+            directives.get("plugin_opt_benchmark_diagnostics", ["false"])[-1] == "true"
+        ),
+        "benchmark_diagnostics_transport": "loopback_tcp_snapshot",
+        "benchmark_diagnostics_port": BENCHMARK_DIAGNOSTICS_PORT,
+    }
 
 
 def _compose_service_container_id(
@@ -931,6 +1019,7 @@ def _authz_stats(
     )
     stats["configured_delay_ms"] = int(payload.get("configured_delay_ms") or 0)
     stats["configured_fail_mode"] = str(payload.get("configured_fail_mode") or "none")
+    stats["configured_fail_rate"] = float(payload.get("configured_fail_rate") or 0.0)
     stats["configured_profile"] = str(payload.get("configured_profile") or "custom")
     return stats
 
@@ -1049,6 +1138,79 @@ def _prom_query(base_url: str, query: str, ca_file: str | None, insecure: bool):
         )
         resp.raise_for_status()
         return resp.json()
+
+
+def _prom_range_query(
+    base_url: str,
+    query: str,
+    start: float,
+    end: float,
+    ca_file: str | None,
+    insecure: bool,
+) -> dict[str, Any]:
+    verify: bool | str = True
+    if insecure:
+        verify = False
+    elif ca_file:
+        verify = ca_file
+    with httpx.Client(verify=verify, timeout=10.0) as client:
+        resp = client.get(
+            base_url.rstrip("/") + "/api/v1/query_range",
+            # Prometheus accepts sub-second query_range steps as numeric seconds;
+            # duration strings only support integer units in the v1 API parser.
+            params={"query": query, "start": start, "end": end, "step": "0.25"},
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    if payload.get("status") != "success":
+        raise RuntimeError(f"Prometheus range query failed: {payload}")
+    return cast(dict[str, Any], payload)
+
+
+def _range_values(payload: dict[str, Any], metric: str) -> list[tuple[float, float]]:
+    data = payload.get("data")
+    results = data.get("result") if isinstance(data, dict) else None
+    if not isinstance(results, list) or len(results) != 1:
+        raise RuntimeError(f"{metric}: expected exactly one Prometheus range series")
+    values = results[0].get("values") if isinstance(results[0], dict) else None
+    if not isinstance(values, list):
+        raise RuntimeError(f"{metric}: Prometheus range samples missing")
+    parsed: list[tuple[float, float]] = []
+    for sample in values:
+        if not isinstance(sample, list) or len(sample) != 2:
+            raise RuntimeError(f"{metric}: invalid Prometheus range sample")
+        parsed.append((float(sample[0]), float(sample[1])))
+    return parsed
+
+
+def _range_values_with_scrape_timestamps(
+    values_payload: dict[str, Any],
+    timestamps_payload: dict[str, Any],
+    metric: str,
+) -> list[tuple[float, float, float]]:
+    """Return unique (scrape timestamp, value, evaluation timestamp) samples."""
+    values = _range_values(values_payload, metric)
+    timestamps = _range_values(timestamps_payload, f"{metric} scrape timestamps")
+    timestamps_by_evaluation = dict(timestamps)
+    if len(timestamps_by_evaluation) != len(timestamps) or {
+        evaluation for evaluation, _value in values
+    } != set(timestamps_by_evaluation):
+        raise RuntimeError(f"{metric}: Prometheus value/timestamp evaluations do not align")
+
+    unique: list[tuple[float, float, float]] = []
+    values_by_scrape: dict[float, float] = {}
+    for evaluation_timestamp, value in values:
+        scrape_timestamp = timestamps_by_evaluation[evaluation_timestamp]
+        previous = values_by_scrape.get(scrape_timestamp)
+        if previous is not None:
+            if previous != value:
+                raise RuntimeError(
+                    f"{metric}: values changed without a new Prometheus source sample"
+                )
+            continue
+        values_by_scrape[scrape_timestamp] = value
+        unique.append((scrape_timestamp, value, evaluation_timestamp))
+    return unique
 
 
 def _python_subprocess_env(extra_env: dict[str, str] | None = None) -> dict[str, str]:
@@ -1208,6 +1370,168 @@ def _validate_resource_snapshot(
         )
 
 
+def _resource_interval(
+    base_url: str,
+    ca_file: str | None,
+    insecure: bool,
+    *,
+    workload_started_at: float,
+    workload_finished_at: float,
+    compose_files: list[str] | None = None,
+    compose_project_name: str | None = None,
+) -> dict[str, Any]:
+    container_id = _compose_service_container_id(
+        "mosquitto",
+        compose_files=compose_files,
+        compose_project_name=compose_project_name,
+    )
+    query_start = workload_started_at - 2.0
+    query_end = max(time.time(), workload_finished_at + 1.25)
+    if query_end > time.time():
+        time.sleep(query_end - time.time())
+    cpu_selector = f'container_cpu_usage_seconds_total{{id=~".*{container_id}.*"}}'
+    memory_selector = f'container_memory_working_set_bytes{{id=~".*{container_id}.*"}}'
+    cpu_payload = _prom_range_query(
+        base_url,
+        f"sum({cpu_selector})",
+        query_start,
+        query_end,
+        ca_file,
+        insecure,
+    )
+    cpu_timestamps_payload = _prom_range_query(
+        base_url,
+        f"max(timestamp({cpu_selector}))",
+        query_start,
+        query_end,
+        ca_file,
+        insecure,
+    )
+    memory_payload = _prom_range_query(
+        base_url,
+        f"max({memory_selector})",
+        query_start,
+        query_end,
+        ca_file,
+        insecure,
+    )
+    memory_timestamps_payload = _prom_range_query(
+        base_url,
+        f"max(timestamp({memory_selector}))",
+        query_start,
+        query_end,
+        ca_file,
+        insecure,
+    )
+    cpu_samples = _range_values_with_scrape_timestamps(cpu_payload, cpu_timestamps_payload, "cpu")
+    memory_samples = _range_values_with_scrape_timestamps(
+        memory_payload, memory_timestamps_payload, "memory"
+    )
+    cpu_before = [sample for sample in cpu_samples if sample[0] <= workload_started_at]
+    cpu_after = [sample for sample in cpu_samples if sample[0] >= workload_finished_at]
+    memory_covered = [
+        sample
+        for sample in memory_samples
+        if (cpu_before[-1][0] if cpu_before else workload_started_at)
+        <= sample[0]
+        <= (cpu_after[0][0] if cpu_after else workload_finished_at)
+    ]
+    if not cpu_before or not cpu_after or not memory_covered:
+        return {
+            "available": False,
+            "reason": "workload_interval_not_bracketed_by_prometheus_samples",
+            "workload_interval": {
+                "started_at": workload_started_at,
+                "finished_at": workload_finished_at,
+            },
+            "sample_counts": {"cpu": len(cpu_samples), "memory": len(memory_samples)},
+        }
+    start_sample = cpu_before[-1]
+    end_sample = cpu_after[0]
+    cpu_delta = end_sample[1] - start_sample[1]
+    memory_values = [sample[1] for sample in memory_covered]
+    return {
+        "available": True,
+        "collection": "prometheus_range",
+        "workload_interval": {
+            "started_at": workload_started_at,
+            "finished_at": workload_finished_at,
+        },
+        "sampled_interval": {"started_at": start_sample[0], "finished_at": end_sample[0]},
+        "coverage": {
+            "before_start_seconds": workload_started_at - start_sample[0],
+            "after_finish_seconds": end_sample[0] - workload_finished_at,
+        },
+        "cpu_usage_seconds": cpu_delta,
+        "memory_working_set_bytes": {
+            "min": min(memory_values),
+            "max": max(memory_values),
+            "mean": sum(memory_values) / len(memory_values),
+            "samples": len(memory_values),
+        },
+        "raw_samples": {
+            "cpu": [
+                {
+                    "scraped_at": scrape_timestamp,
+                    "evaluated_at": evaluation_timestamp,
+                    "value": value,
+                }
+                for scrape_timestamp, value, evaluation_timestamp in cpu_samples
+            ],
+            "memory": [
+                {
+                    "scraped_at": scrape_timestamp,
+                    "evaluated_at": evaluation_timestamp,
+                    "value": value,
+                }
+                for scrape_timestamp, value, evaluation_timestamp in memory_samples
+            ],
+        },
+    }
+
+
+def _validate_resource_interval(
+    resource: dict[str, Any], *, scenario_id: str, run_index: int
+) -> None:
+    if resource.get("available") is not True:
+        raise RuntimeError(
+            f"Resource interval validation failed for {scenario_id} run {run_index + 1}: "
+            f"{resource.get('reason') or 'interval evidence unavailable'}"
+        )
+    cpu = resource.get("cpu_usage_seconds")
+    memory = resource.get("memory_working_set_bytes")
+    workload_interval = resource.get("workload_interval")
+    sampled_interval = resource.get("sampled_interval")
+    interval_bounds: tuple[float, float, float, float] | None = None
+    if isinstance(workload_interval, dict) and isinstance(sampled_interval, dict):
+        try:
+            interval_bounds = (
+                float(sampled_interval["started_at"]),
+                float(workload_interval["started_at"]),
+                float(workload_interval["finished_at"]),
+                float(sampled_interval["finished_at"]),
+            )
+        except KeyError, TypeError, ValueError:
+            interval_bounds = None
+    if (
+        isinstance(cpu, bool)
+        or not isinstance(cpu, int | float)
+        or not math.isfinite(float(cpu))
+        or float(cpu) < 0
+        or interval_bounds is None
+        or not all(math.isfinite(bound) for bound in interval_bounds)
+        or interval_bounds != tuple(sorted(interval_bounds))
+        or not isinstance(memory, dict)
+        or int(memory.get("samples") or 0) <= 0
+        or float(memory.get("min") or 0) <= 0
+        or float(memory.get("min") or 0) > float(memory.get("mean") or 0)
+        or float(memory.get("mean") or 0) > float(memory.get("max") or 0)
+    ):
+        raise RuntimeError(
+            f"Resource interval validation failed for {scenario_id} run {run_index + 1}: {resource}"
+        )
+
+
 def _wait_for_non_empty_resource_snapshot(
     base_url: str,
     ca_file: str | None,
@@ -1299,6 +1623,7 @@ def _run_loadgen(
     biscuit_delegate_handoff_retain: bool | None,
     biscuit_delegate_handoff_ready_timeout_seconds: int | None,
     attenuation_probe_subscribe_denied: bool = False,
+    http_failure_rate: float | None = None,
     password_map_path: str | None = None,
     password_map_profile: str | None = None,
     fanout_publisher_password_map_profile: str | None = None,
@@ -1361,6 +1686,8 @@ def _run_loadgen(
     ]
     if qos_distribution:
         cmd.extend(["--qos-distribution", qos_distribution])
+    if http_failure_rate is not None:
+        cmd.append("--continue-after-publish-failure")
     if sync_connect:
         cmd.append("--sync-connect")
     if mode:
@@ -2114,6 +2441,31 @@ def _merge_per_client_loadgen_results(
             issuance_records.extend(records)
     merged["credential_issuance"] = issuance_records
     merged["qos_distribution_actual"] = _sum_count_object(results, "qos_distribution_actual")
+    attempted_by_qos = {f"qos_{qos}": 0 for qos in range(3)}
+    failed_by_qos = {f"qos_{qos}": 0 for qos in range(3)}
+    attempted = succeeded = failed = 0
+    for result in results:
+        outcomes = result.get("publish_outcomes")
+        if not isinstance(outcomes, dict):
+            continue
+        attempted += int(outcomes.get("attempted") or 0)
+        succeeded += int(outcomes.get("succeeded") or 0)
+        failed += int(outcomes.get("failed") or 0)
+        for target, field in (
+            (attempted_by_qos, "attempted_by_qos"),
+            (failed_by_qos, "failed_by_qos"),
+        ):
+            source = outcomes.get(field)
+            if isinstance(source, dict):
+                for key in target:
+                    target[key] += int(source.get(key) or 0)
+    merged["publish_outcomes"] = {
+        "attempted": attempted,
+        "succeeded": succeeded,
+        "failed": failed,
+        "attempted_by_qos": attempted_by_qos,
+        "failed_by_qos": failed_by_qos,
+    }
     merged["received_messages"] = _sum_count_object(results, "received_messages")
     for field in (
         "proactive_refresh_attempts",
@@ -2296,6 +2648,87 @@ def _validate_external_policy_activity(
     if requests <= 0:
         raise RuntimeError(
             f"{scenario_id}: external policy backend handled no authorization requests"
+        )
+
+
+def _validate_broker_path_contract(
+    scenario: ScenarioConfig,
+    result: dict[str, Any],
+    attestation: dict[str, Any],
+    *,
+    client_count: int,
+) -> None:
+    if not attestation.get("validated"):
+        raise RuntimeError(f"{scenario['id']}: broker configuration attestation missing")
+    if not attestation.get("plugin_enabled"):
+        return
+    if (
+        attestation.get("benchmark_diagnostics") is not True
+        or attestation.get("benchmark_diagnostics_transport") != "loopback_tcp_snapshot"
+        or int(attestation.get("benchmark_diagnostics_port") or 0) != BENCHMARK_DIAGNOSTICS_PORT
+    ):
+        raise RuntimeError(f"{scenario['id']}: broker diagnostics attestation missing")
+    if scenario.get("mqtt5_auth") is not None:
+        # Enhanced-auth replacement has its own credential/path contract.
+        return
+    auth = result.get("broker_auth_delta")
+    authz = result.get("broker_authz_delta")
+    if not isinstance(auth, dict) or not isinstance(authz, dict):
+        raise RuntimeError(
+            f"{scenario['id']}: broker authentication/authorization counters missing"
+        )
+    expected_mode = str(attestation.get("policy_mode") or "")
+    observed_mode = str(authz.get("policy_mode") or "")
+    normalized_modes = {
+        "token": "TokenOnly",
+        "static_acl": "StaticAcl",
+        "dynamic_security": "DynamicSecurity",
+        "http": "Http",
+        "sqlite": "Sqlite",
+        "hybrid": "Hybrid",
+    }
+    if observed_mode != normalized_modes.get(expected_mode):
+        raise RuntimeError(
+            f"{scenario['id']}: broker authorization path contract failed: {authz}, "
+            f"attested_policy_mode={expected_mode!r}"
+        )
+    anonymous_dynamic_security = (
+        expected_mode == "dynamic_security"
+        and attestation.get("allow_anonymous_no_token") is True
+        and not scenario.get("username")
+        and not scenario.get("password")
+    )
+    if anonymous_dynamic_security:
+        attempts = int(auth.get("attempts") or 0)
+        deferrals = int(auth.get("anonymous_deferrals") or 0)
+        anonymous_checks = int(authz.get("anonymous_checks") or 0)
+        anonymous_allows = int(authz.get("anonymous_allows") or 0)
+        if (
+            attempts <= 0
+            or deferrals != attempts
+            or int(auth.get("successes") or 0) != 0
+            or int(auth.get("failures") or 0) != 0
+            or anonymous_checks <= 0
+            or anonymous_allows != anonymous_checks
+            or int(authz.get("anonymous_denies") or 0) != 0
+            or int(authz.get("checks") or 0) != 0
+        ):
+            raise RuntimeError(
+                f"{scenario['id']}: anonymous Dynamic Security path contract failed: "
+                f"auth={auth}, authz={authz}"
+            )
+        return
+    if int(auth.get("attempts") or 0) <= 0 or int(auth.get("successes") or 0) <= 0:
+        raise RuntimeError(f"{scenario['id']}: broker authentication path contract failed: {auth}")
+    token_kind = _scenario_token_kind(scenario["id"], scenario)
+    if token_kind is None and scenario.get("password_map_profile") == "jwt":
+        token_kind = "jwt"
+    if token_kind is not None and int(auth.get(f"{token_kind}_validations") or 0) <= 0:
+        raise RuntimeError(f"{scenario['id']}: {token_kind} validation counter is zero")
+    if int(authz.get("checks") or 0) <= 0:
+        raise RuntimeError(
+            f"{scenario['id']}: broker authorization path contract failed: {authz}, "
+            f"attested_policy_mode={expected_mode!r}"
         )
 
 
@@ -2499,6 +2932,56 @@ def _validate_result_contract(
         else message_count * client_count
     )
     http_failure_rate = scenario.get("http_failure_rate")
+    outcomes_object = result.get("publish_outcomes")
+    outcomes = cast(dict[str, Any], outcomes_object) if isinstance(outcomes_object, dict) else {}
+    attempted_count = int(outcomes.get("attempted") or publish_count)
+    failed_count = int(outcomes.get("failed") or 0)
+    succeeded_count = int(outcomes.get("succeeded") or publish_count)
+    if attempted_count != succeeded_count + failed_count or succeeded_count != publish_count:
+        raise RuntimeError(f"{scenario_id}: inconsistent publish outcome accounting: {outcomes}")
+    if isinstance(outcomes_object, dict):
+        attempted_by_qos_object = outcomes.get("attempted_by_qos")
+        failed_by_qos_object = outcomes.get("failed_by_qos")
+        succeeded_by_qos_object = result.get("qos_distribution_actual")
+        if not all(
+            isinstance(value, dict)
+            for value in (
+                attempted_by_qos_object,
+                failed_by_qos_object,
+                succeeded_by_qos_object,
+            )
+        ):
+            raise RuntimeError(
+                f"{scenario_id}: publish outcome QoS accounting is missing: {outcomes}"
+            )
+        attempted_by_qos_map = cast(dict[str, Any], attempted_by_qos_object)
+        failed_by_qos_map = cast(dict[str, Any], failed_by_qos_object)
+        succeeded_by_qos_map = cast(dict[str, Any], succeeded_by_qos_object)
+        attempted_qos_counts = [
+            int(attempted_by_qos_map.get(f"qos_{qos}") or 0) for qos in range(3)
+        ]
+        failed_qos_counts = [int(failed_by_qos_map.get(f"qos_{qos}") or 0) for qos in range(3)]
+        succeeded_qos_counts = [
+            int(succeeded_by_qos_map.get(f"qos_{qos}_count") or 0) for qos in range(3)
+        ]
+        if (
+            sum(attempted_qos_counts) != attempted_count
+            or sum(failed_qos_counts) != failed_count
+            or sum(succeeded_qos_counts) != succeeded_count
+            or any(
+                attempted != succeeded + failed
+                for attempted, succeeded, failed in zip(
+                    attempted_qos_counts,
+                    succeeded_qos_counts,
+                    failed_qos_counts,
+                    strict=True,
+                )
+            )
+        ):
+            raise RuntimeError(
+                f"{scenario_id}: inconsistent publish outcome QoS accounting: "
+                f"outcomes={outcomes}, succeeded_by_qos={succeeded_by_qos_map}"
+            )
     if (
         publish_count != expected_publish_count
         and not scenario.get("control_mode")
@@ -2515,15 +2998,37 @@ def _validate_result_contract(
             raise RuntimeError(f"{scenario_id}: authz failure statistics missing")
         requests = int(stats.get("requests") or 0)
         failures = int(stats.get("injected_failures") or 0)
-        expected_failures = math.floor(requests * float(http_failure_rate) + 1e-12)
-        if failures <= 0 or failures != expected_failures:
-            raise RuntimeError(
-                f"{scenario_id}: injected {failures}/{expected_failures} expected HTTP failures"
+        allows = int(stats.get("policy_allows") or 0)
+        denies = int(stats.get("policy_denies") or 0)
+        expected_failures = math.floor(expected_publish_count * float(http_failure_rate) + 1e-12)
+        publish_errors = [error for error in errors if error.startswith("publish_failed:")]
+        if (
+            requests != expected_publish_count
+            or failures <= 0
+            or failures != expected_failures
+            or allows != expected_publish_count - expected_failures
+            or denies != 0
+            or stats.get("configured_fail_mode") != "rate"
+            or not math.isclose(
+                float(stats.get("configured_fail_rate") or 0.0),
+                float(http_failure_rate),
+                rel_tol=0.0,
+                abs_tol=1e-12,
             )
-        if publish_count >= expected_publish_count:
-            raise RuntimeError(f"{scenario_id}: HTTP failures had no observable publish impact")
-        if not any(error.startswith("publish_failed:") for error in errors):
-            raise RuntimeError(f"{scenario_id}: expected a workload-visible publish failure")
+            or attempted_count != expected_publish_count
+            or failed_count != expected_failures
+            or publish_count != expected_publish_count - expected_failures
+            or len(publish_errors) != expected_failures
+        ):
+            raise RuntimeError(
+                f"{scenario_id}: HTTP failure workload contract failed: requests={requests}, "
+                f"attempted={attempted_count}, succeeded={publish_count}, failed={failed_count}, "
+                f"backend_failures={failures}, errors={len(publish_errors)}, "
+                f"policy_allows={allows}, policy_denies={denies}, "
+                f"fail_mode={stats.get('configured_fail_mode')}, "
+                f"fail_rate={stats.get('configured_fail_rate')}, "
+                f"expected_attempts={expected_publish_count}, expected_failures={expected_failures}"
+            )
 
     if scenario.get("complexity_axis") == "http_profile":
         stats_object = result.get("authz_stats")
@@ -2612,10 +3117,20 @@ def _validate_result_contract(
             summary = result.get(f"publish_qos_{qos_value}")
             summary_count = int(summary.get("count") or 0) if isinstance(summary, dict) else 0
             actual_count = int(actual_object.get(f"qos_{qos_value}_count") or 0)
-            if summary_count != expected_qos_count or actual_count != expected_qos_count:
+            failed_by_qos = outcomes.get("failed_by_qos")
+            failed_qos_count = (
+                int(failed_by_qos.get(f"qos_{qos_value}") or 0)
+                if isinstance(failed_by_qos, dict)
+                else 0
+            )
+            if (
+                summary_count != actual_count
+                or summary_count + failed_qos_count != expected_qos_count
+            ):
                 raise RuntimeError(
                     f"{scenario_id}: effective QoS {selected_qos} mismatch for bucket "
                     f"{qos_value}: summary={summary_count}, actual={actual_count}, "
+                    f"failed={failed_qos_count}, "
                     f"expected={expected_qos_count}"
                 )
     if distribution := selected_distribution:
@@ -2757,7 +3272,7 @@ def _validate_result_contract(
         if (
             not isinstance(applied_after, int)
             or applied_after < configured_threshold
-            or publish_count < applied_after
+            or publish_count != applied_after
             or int(result.get("policy_denial_count") or 0) != client_count
             or isinstance(runtime_control, dict)
             and (
@@ -2808,11 +3323,17 @@ def _validate_result_contract(
         raise RuntimeError(f"{scenario_id}: fanout churn did not trigger")
     phases = churn.get("phases")
     applied_events = int(churn.get("applied_events") or 0)
+    expected_events = int(scenario.get("fanout_churn_max_events", 1))
     required_phase_count = applied_events + 1
+    control = result.get("control")
+    control_count = int(control.get("count") or 0) if isinstance(control, dict) else 0
     if (
-        not isinstance(phases, list)
+        applied_events != expected_events
+        or int(churn.get("control_count") or 0) != expected_events
+        or control_count != expected_events
+        or not isinstance(phases, list)
         or len(phases) != required_phase_count
-        or len(phases) > len(phase_expectations)
+        or len(phases) != len(phase_expectations)
     ):
         raise RuntimeError(f"{scenario_id}: fanout churn phase metadata is incomplete")
     for index, (phase, expectation) in enumerate(zip(phases, phase_expectations, strict=False)):
@@ -2820,6 +3341,14 @@ def _validate_result_contract(
             raise RuntimeError(f"{scenario_id}: invalid fanout churn phase {index}")
         expected = int(phase.get("expected_deliveries") or 0)
         received = int(phase.get("received_deliveries") or 0)
+        duration_ms = phase.get("duration_ms")
+        if (
+            isinstance(duration_ms, bool)
+            or not isinstance(duration_ms, int | float)
+            or not math.isfinite(float(duration_ms))
+            or float(duration_ms) < 0
+        ):
+            raise RuntimeError(f"{scenario_id}: churn phase {index} duration is invalid")
         if expectation == "all" and received != expected:
             raise RuntimeError(
                 f"{scenario_id}: churn phase {index} received {received}/{expected} deliveries"
@@ -2885,6 +3414,7 @@ def _merge_fanout_role_loadgen_results(
         churn = dict(publisher_churn)
         enabled = bool(churn.get("enabled"))
         if enabled:
+            publisher_phases = churn.get("phases")
             after = int(churn.get("after_messages") or 0)
             interval = int(churn.get("interval_messages") or 0)
             applied = int(churn.get("applied_events") or 0)
@@ -2914,6 +3444,13 @@ def _merge_fanout_role_loadgen_results(
                     "phase": index,
                     "expected_deliveries": publishes * subscriber_count,
                     "received_deliveries": received_by_phase[index],
+                    "duration_ms": (
+                        publisher_phases[index].get("duration_ms")
+                        if isinstance(publisher_phases, list)
+                        and index < len(publisher_phases)
+                        and isinstance(publisher_phases[index], dict)
+                        else None
+                    ),
                 }
                 for index, publishes in enumerate(phase_publishes)
             ]
@@ -3895,7 +4432,10 @@ def _effective_scenario_message_count(
     minimum = int(scenario.get("control_after_messages", 0))
     fanout_churn_after = int(scenario.get("fanout_churn_after_messages", 0))
     if scenario.get("fanout_churn_kind") and fanout_churn_after > 0:
-        minimum = max(minimum, fanout_churn_after + 1)
+        interval = int(scenario.get("fanout_churn_interval_messages", 0))
+        max_events = int(scenario.get("fanout_churn_max_events", 1))
+        last_event = fanout_churn_after + interval * max(max_events - 1, 0)
+        minimum = max(minimum, last_event + 1)
     runtime_control_after = int(scenario.get("runtime_control_after_messages", 0))
     if runtime_control_after > 0 and effective_clients is not None:
         post_control_publishes = 1 if scenario.get("runtime_control_expect_denial") else 0
@@ -4367,6 +4907,7 @@ def _render_mosquitto_runtime_conf(
         if not line.strip().startswith("plugin_opt_jwt_identity_binding ")
         and not line.strip().startswith("plugin_opt_biscuit_identity_binding ")
         and not line.strip().startswith("plugin_opt_biscuit_client_id_fact ")
+        and not line.strip().startswith("plugin_opt_benchmark_diagnostics ")
     ]
     insertion_indices = [
         idx
@@ -4382,6 +4923,7 @@ def _render_mosquitto_runtime_conf(
         f"plugin_opt_jwt_identity_binding {jwt_identity_binding}",
         f"plugin_opt_biscuit_identity_binding {biscuit_identity_binding}",
         f"plugin_opt_biscuit_client_id_fact {biscuit_client_id_fact}",
+        "plugin_opt_benchmark_diagnostics true",
     ]
     return "\n".join(filtered_lines) + "\n"
 
@@ -7278,6 +7820,13 @@ def main(
                     compose_files=compose_files,
                 )
                 raise RuntimeError(f"mosquitto startup failed: {exc}\n{diagnostics}") from exc
+            broker_config_attestation = _broker_config_attestation(
+                requested_path=mosq_conf,
+                effective_path=runtime_mosq_conf,
+                compose_files=compose_files,
+                compose_project_name=compose_project_name,
+                extra_env=extra_env,
+            )
             _compose_checked(
                 ["up", "--build", "--no-deps", "-d", *namespace_services],
                 extra_env=extra_env,
@@ -7453,6 +8002,7 @@ def main(
                     configured_messages,
                 )
             out_payload: dict[str, Any] = {
+                "result_schema_version": 2,
                 "scenario": s["id"],
                 "token_len": token_len,
                 "token_schema": token_schema,
@@ -7465,6 +8015,8 @@ def main(
                     "enabled": scenario_tls,
                     "ca_file": scenario_tls_ca,
                     "insecure": tls_insecure,
+                    "purpose": "transport_encryption",
+                    "certificate_validation_tested": False,
                 },
                 "parity": {
                     "token_issuer_no_default_roles": token_issuer_no_default_roles,
@@ -7551,6 +8103,7 @@ def main(
                         ),
                     },
                 },
+                "broker_config_attestation": broker_config_attestation,
                 "fanout_metrics": {
                     "subscriber_count": (
                         effective_client_count if s.get("traffic_pattern") == "fanout" else None
@@ -7644,6 +8197,17 @@ def main(
                         )
                     mqtt5_cfg = s.get("mqtt5_auth")
                     scenario_clients = effective_client_count
+                    attest_broker_auth = bool(broker_config_attestation["plugin_enabled"])
+                    broker_diagnostics_before = (
+                        _broker_diagnostic_snapshot(
+                            compose_files=compose_files,
+                            compose_project_name=compose_project_name,
+                            extra_env=extra_env,
+                        )
+                        if attest_broker_auth
+                        else {}
+                    )
+                    workload_started_at = time.time()
                     if mqtt5_cfg is not None:
                         token1, token2, credential_metadata = _resolve_mqtt5_auth_tokens(
                             s["id"],
@@ -7685,17 +8249,6 @@ def main(
                             if strict_startup_provisioning is not None
                             else None
                         )
-                        attest_broker_auth = s.get("complexity_axis") == "publish_authz_reconnect"
-                        broker_auth_before = (
-                            _broker_auth_counters(
-                                compose_files=compose_files,
-                                compose_project_name=compose_project_name,
-                                extra_env=extra_env,
-                            )
-                            if attest_broker_auth
-                            else {}
-                        )
-                        workload_started_at = time.time()
                         res = _run_loadgen(
                             tokens=tokens,
                             host=loadgen_mqtt_host,
@@ -7712,6 +8265,7 @@ def main(
                             qos=scenario_qos,
                             qos_distribution=scenario_qos_distribution,
                             message_size=int(s.get("message_size", 0)),
+                            http_failure_rate=s.get("http_failure_rate"),
                             sync_connect=bool(s.get("sync_connect", False)),
                             token_issuer_url=(
                                 loadgen_token_issuer_base
@@ -7927,19 +8481,36 @@ def main(
                                 "fanout_publisher_password_map_profile"
                             ),
                         )
-                        res["workload_interval"] = {
-                            "started_at": workload_started_at,
-                            "finished_at": time.time(),
-                        }
-                        if attest_broker_auth:
-                            broker_auth_after = _broker_auth_counters(
-                                compose_files=compose_files,
-                                compose_project_name=compose_project_name,
-                                extra_env=extra_env,
-                            )
-                            res["broker_auth_delta"] = _counter_delta(
-                                broker_auth_before, broker_auth_after
-                            )
+                    res["workload_interval"] = {
+                        "started_at": workload_started_at,
+                        "finished_at": time.time(),
+                    }
+                    if attest_broker_auth:
+                        broker_diagnostics_after = _broker_diagnostic_snapshot(
+                            compose_files=compose_files,
+                            compose_project_name=compose_project_name,
+                            extra_env=extra_env,
+                        )
+                        broker_auth_before = cast(
+                            dict[str, int], broker_diagnostics_before.get("authentication", {})
+                        )
+                        broker_auth_after = cast(
+                            dict[str, int], broker_diagnostics_after.get("authentication", {})
+                        )
+                        res["broker_auth_delta"] = _counter_delta(
+                            broker_auth_before, broker_auth_after
+                        )
+                        broker_authz_before = cast(
+                            dict[str, int | str],
+                            broker_diagnostics_before.get("authorization", {}),
+                        )
+                        broker_authz_after = cast(
+                            dict[str, int | str],
+                            broker_diagnostics_after.get("authorization", {}),
+                        )
+                        res["broker_authz_delta"] = _authz_counter_delta(
+                            broker_authz_before, broker_authz_after
+                        )
                     if uses_http_authz:
                         res["authz_stats"] = _authz_stats(
                             authz_base,
@@ -7949,6 +8520,12 @@ def main(
                         _validate_external_policy_activity(s["id"], res["authz_stats"])
                     if broker_restart is not None:
                         res["broker_restart"] = dict(broker_restart)
+                    _validate_broker_path_contract(
+                        s,
+                        res,
+                        broker_config_attestation,
+                        client_count=effective_client_count,
+                    )
                     _validate_result_contract(
                         s,
                         res,
@@ -7974,16 +8551,17 @@ def main(
                         )
                 finally:
                     pass
-                # Small delay to ensure container metrics are available after loadgen
-                time.sleep(2)
-                snap = _resource_snapshot(
+                interval = cast(dict[str, Any], res["workload_interval"])
+                snap = _resource_interval(
                     prom_base,
                     scenario_tls_ca,
                     tls_insecure,
+                    workload_started_at=float(interval["started_at"]),
+                    workload_finished_at=float(interval["finished_at"]),
                     compose_files=compose_files,
                     compose_project_name=compose_project_name,
                 )
-                _validate_resource_snapshot(snap, scenario_id=s["id"], run_index=idx)
+                _validate_resource_interval(snap, scenario_id=s["id"], run_index=idx)
 
                 # Run perf profiling if enabled and scenario matches filter
                 perf_result: dict[str, Any] = {"enabled": False}

@@ -1,4 +1,4 @@
-use super::mosquitto_abi::{MosquittoEvtAclCheck, MosquittoEvtControl, MosquittoEvtMessage};
+use super::mosquitto_abi::MosquittoEvtControl;
 #[cfg(test)]
 use std::ffi::c_int;
 use std::ffi::{CStr, c_char, c_void};
@@ -27,20 +27,6 @@ pub fn bytes_from_payload_len(payloadlen: c_int) -> Option<usize> {
 }
 
 pub const fn control_payload_bytes(evt: &MosquittoEvtControl) -> &[u8] {
-    if evt.payload.is_null() || evt.payloadlen == 0 {
-        return &[];
-    }
-    unsafe { bytes_from_c_void(evt.payload, evt.payloadlen as usize) }
-}
-
-pub const fn message_payload_bytes(evt: &MosquittoEvtMessage) -> &[u8] {
-    if evt.payload.is_null() || evt.payloadlen == 0 {
-        return &[];
-    }
-    unsafe { bytes_from_c_void(evt.payload, evt.payloadlen as usize) }
-}
-
-pub const fn acl_payload_bytes(evt: &MosquittoEvtAclCheck) -> &[u8] {
     if evt.payload.is_null() || evt.payloadlen == 0 {
         return &[];
     }

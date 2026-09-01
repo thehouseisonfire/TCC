@@ -68,6 +68,8 @@ fn mock_plugin_state() -> *mut PluginState {
         )),
         cache: Arc::new(SessionCache::new(10)),
         session_index: Mutex::new(SessionIndex::default()),
+        deferred_control_disconnects: Mutex::new(DeferredControlDisconnects::default()),
+        deferred_control_disconnect_pending: AtomicBool::new(false),
         config,
         sqlite_policy: None,
         dynamic_security_policy: None,

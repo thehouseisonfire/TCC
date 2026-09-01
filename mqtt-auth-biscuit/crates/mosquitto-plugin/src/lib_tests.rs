@@ -200,7 +200,7 @@ fn run_enhanced_auth(userdata: *mut c_void, token: &[u8]) -> c_int {
     )
 }
 
-fn setup_plugin_with_config() -> (*mut c_void, MosquittoPluginId) {
+fn initialize_plugin_with_config() -> (c_int, *mut c_void, MosquittoPluginId) {
     let jwt_pub_pem = format!("{}/../../docker/jwt_public.pem", env!("CARGO_MANIFEST_DIR"));
     let biscuit_root_key_file = format!(
         "{}/../../docker/biscuit_public.key",
@@ -243,10 +243,60 @@ fn setup_plugin_with_config() -> (*mut c_void, MosquittoPluginId) {
             c_int::try_from(opts.len()).expect("opts len fits c_int"),
         )
     };
+    (rc, userdata, identifier)
+}
+
+fn setup_plugin_with_config() -> (*mut c_void, MosquittoPluginId) {
+    let (rc, userdata, identifier) = initialize_plugin_with_config();
     assert_eq!(rc, MOSQ_ERR_SUCCESS);
     assert!(!userdata.is_null());
-
     (userdata, identifier)
+}
+
+#[test]
+fn plugin_init_rolls_back_registered_callbacks_before_freeing_userdata() {
+    reset_callback_registration_state(Some(MOSQ_EVT_TICK), None);
+
+    let (rc, userdata, _identifier) = initialize_plugin_with_config();
+
+    assert_eq!(rc, MOSQ_ERR_INVAL);
+    assert!(userdata.is_null());
+    let (registered, unregistered) = callback_registration_state_snapshot();
+    assert_eq!(
+        registered,
+        vec![
+            MOSQ_EVT_BASIC_AUTH,
+            MOSQ_EVT_ACL_CHECK,
+            MOSQ_EVT_EXT_AUTH_START,
+            MOSQ_EVT_EXT_AUTH_CONTINUE,
+            MOSQ_EVT_MESSAGE,
+            MOSQ_EVT_MESSAGE_OUT,
+        ]
+    );
+    assert_eq!(
+        unregistered,
+        registered.iter().rev().copied().collect::<Vec<_>>()
+    );
+
+    reset_callback_registration_state(None, None);
+}
+
+#[test]
+fn plugin_init_retains_userdata_if_callback_rollback_fails() {
+    reset_callback_registration_state(Some(MOSQ_EVT_TICK), Some(MOSQ_EVT_MESSAGE));
+
+    let (rc, userdata, _identifier) = initialize_plugin_with_config();
+
+    assert_eq!(rc, MOSQ_ERR_INVAL);
+    assert!(!userdata.is_null());
+    let (_, unregistered) = callback_registration_state_snapshot();
+    assert!(unregistered.contains(&MOSQ_EVT_MESSAGE));
+
+    // Mosquitto calls plugin cleanup during unload after an init failure. The
+    // retained pointer follows that ownership path instead of being freed while
+    // a callback can still reference it.
+    teardown_plugin(userdata);
+    reset_callback_registration_state(None, None);
 }
 
 fn teardown_plugin(userdata: *mut c_void) {
@@ -1485,7 +1535,7 @@ fn message_callback_handles_valid_pointers() {
 }
 
 #[test]
-fn message_callback_applies_dynamic_security_disable_client_control_payload() {
+fn message_callback_does_not_apply_dynamic_security_control_payload() {
     reset_kick_client_call();
     let (userdata, _identifier) = setup_plugin_with_config();
     let dynsec_path = enable_dynamic_security_control_mode(userdata);
@@ -1510,13 +1560,51 @@ fn message_callback_applies_dynamic_security_disable_client_control_payload() {
     let rc = message_callback(MOSQ_EVT_MESSAGE, (&raw mut evt).cast::<c_void>(), userdata);
     assert_eq!(rc, MOSQ_ERR_SUCCESS);
     let kick = kick_client_call_snapshot();
-    assert_eq!(kick.count, 1);
-    assert_eq!(kick.last_client_id.as_deref(), Some("test_client"));
+    assert_eq!(kick.count, 0);
 
     let state = unsafe { plugin_state(userdata) };
-    assert!(state.cache.get(&"test_client".to_string()).is_none());
+    assert!(state.cache.get(&"test_client".to_string()).is_some());
     let _ = fs::remove_file(dynsec_path);
     teardown_plugin(userdata);
+}
+
+#[test]
+fn dynamic_security_control_response_preserves_command_correlations() {
+    let payload = br#"{"commands":[{"command":"disableClient","username":"test_user","correlationData":"one"},{"command":"removeRoleACL","correlationData":"two"}]}"#;
+    let response = dynamic_security_control_response(payload, &[]);
+    let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+    let responses = value["responses"].as_array().unwrap();
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[0]["command"], "disableClient");
+    assert_eq!(responses[0]["correlationData"], "one");
+    assert_eq!(responses[1]["command"], "removeRoleACL");
+    assert_eq!(responses[1]["correlationData"], "two");
+}
+
+#[test]
+fn dynamic_security_control_response_reports_application_error() {
+    let response = dynamic_security_control_response(
+        br#"{"commands":[{"command":"disableClient","correlationData":"one"}]}"#,
+        &[Some("policy update failed".to_string())],
+    );
+    let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(value["responses"][0]["error"], "policy update failed");
+}
+
+#[test]
+fn dynamic_security_control_response_reports_errors_per_command() {
+    let response = dynamic_security_control_response(
+        br#"{"commands":[{"command":"removeGroupClient","correlationData":"one"},{"command":"listRoles","correlationData":"two"}]}"#,
+        &[None, Some("unsupported command: listRoles".to_string())],
+    );
+    let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert!(value["responses"][0].get("error").is_none());
+    assert_eq!(value["responses"][0]["correlationData"], "one");
+    assert_eq!(
+        value["responses"][1]["error"],
+        "unsupported command: listRoles"
+    );
+    assert_eq!(value["responses"][1]["correlationData"], "two");
 }
 
 #[test]
@@ -1621,7 +1709,7 @@ fn control_callback_handles_valid_pointers() {
 }
 
 #[test]
-fn control_callback_disable_client_kicks_target_and_evicts_cache() {
+fn control_callback_disable_client_defers_self_target_cache_eviction() {
     reset_kick_client_call();
     let (userdata, _identifier) = setup_plugin_with_config();
     let dynsec_path = enable_dynamic_security_control_mode(userdata);
@@ -1647,12 +1735,10 @@ fn control_callback_disable_client_kicks_target_and_evicts_cache() {
     assert_eq!(rc, MOSQ_ERR_SUCCESS);
 
     let kick = kick_client_call_snapshot();
-    assert_eq!(kick.count, 1);
-    assert_eq!(kick.last_client_id.as_deref(), Some("test_client"));
-    assert_eq!(kick.last_with_will, Some(false));
+    assert_eq!(kick.count, 0);
 
     let state = unsafe { plugin_state(userdata) };
-    assert!(state.cache.get(&"test_client".to_string()).is_none());
+    assert!(state.cache.get(&"test_client".to_string()).is_some());
     let policy = state
         .dynamic_security_policy
         .as_ref()
@@ -1791,15 +1877,15 @@ fn control_callback_remove_role_acl_publishes_notification_without_kick() {
     assert_eq!(kick.count, 0);
 
     let publish = broker_publish_call_snapshot();
-    assert_eq!(publish.count, 1);
+    assert_eq!(publish.count, 2);
     assert_eq!(publish.last_client_id.as_deref(), Some("test_client"));
     assert_eq!(
         publish.last_topic.as_deref(),
-        Some("system_notification/test_client")
+        Some("$CONTROL/dynamic-security/v1/response")
     );
     let payload_text = publish.last_payload.unwrap_or_default();
     assert!(payload_text.contains("\"command\":\"removeRoleACL\""));
-    assert!(payload_text.contains("\"topic\":\"fanout/broadcast\""));
+    assert!(payload_text.contains("\"responses\""));
 
     let state = unsafe { plugin_state(userdata) };
     assert!(state.cache.get(&"test_client".to_string()).is_some());
@@ -1869,7 +1955,7 @@ fn control_callback_group_membership_churn_publishes_notify_without_kick() {
     let kick = kick_client_call_snapshot();
     assert_eq!(kick.count, 0);
     let publish = broker_publish_call_snapshot();
-    assert_eq!(publish.count, 0);
+    assert_eq!(publish.count, 1);
 
     let state = unsafe { plugin_state(userdata) };
     assert!(state.cache.get(&"test_client".to_string()).is_some());
@@ -1914,15 +2000,15 @@ fn control_callback_group_membership_churn_publishes_notify_without_kick() {
     let kick = kick_client_call_snapshot();
     assert_eq!(kick.count, 0);
     let publish = broker_publish_call_snapshot();
-    assert_eq!(publish.count, 1);
+    assert_eq!(publish.count, 3);
     assert_eq!(publish.last_client_id.as_deref(), Some("test_client"));
     assert_eq!(
         publish.last_topic.as_deref(),
-        Some("system_notification/test_client")
+        Some("$CONTROL/dynamic-security/v1/response")
     );
     let payload_text = publish.last_payload.unwrap_or_default();
     assert!(payload_text.contains("\"command\":\"removeGroupClient\""));
-    assert!(payload_text.contains("\"topic\":\"fanout/broadcast\""));
+    assert!(payload_text.contains("\"responses\""));
     let state = unsafe { plugin_state(userdata) };
     assert!(state.cache.get(&"test_client".to_string()).is_some());
     let policy = state
@@ -2023,7 +2109,7 @@ fn control_callback_add_group_client_updates_existing_priority_without_side_effe
     let kick = kick_client_call_snapshot();
     assert_eq!(kick.count, 0);
     let publish = broker_publish_call_snapshot();
-    assert_eq!(publish.count, 0);
+    assert_eq!(publish.count, 2);
 
     let raw = fs::read_to_string(&dynsec_path).expect("dynsec config should be readable");
     let root: serde_json::Value = serde_json::from_str(&raw).expect("dynsec config should parse");
@@ -2104,17 +2190,14 @@ fn control_callback_persist_failure_keeps_transport_success_and_applies_runtime_
     let kick = kick_client_call_snapshot();
     assert_eq!(kick.count, 0);
     let publish = broker_publish_call_snapshot();
-    assert_eq!(publish.count, 1);
+    assert_eq!(publish.count, 2);
     assert_eq!(publish.last_client_id.as_deref(), Some("test_client"));
     assert_eq!(
         publish.last_topic.as_deref(),
-        Some("system_notification/test_client")
+        Some("$CONTROL/dynamic-security/v1/response")
     );
     let payload_text = publish.last_payload.unwrap_or_default();
-    assert!(payload_text.contains("\"event\":\"control_persist_warning\""));
-    assert!(payload_text.contains("\"durable\":false"));
-    assert!(payload_text.contains("\"topic\":\"$CONTROL/dynamic-security/v1\""));
-    assert!(payload_text.contains("dynsec config read failed"));
+    assert!(payload_text.contains("\"command\":\"addGroupClient\""));
 
     let state = unsafe { plugin_state(userdata) };
     assert!(state.cache.get(&"test_client".to_string()).is_some());
@@ -2138,7 +2221,96 @@ fn control_callback_persist_failure_keeps_transport_success_and_applies_runtime_
 }
 
 #[test]
-fn control_callback_self_disable_publishes_persist_warning_before_kick() {
+fn message_out_callback_has_lock_free_inactive_path() {
+    let (userdata, _identifier) = setup_plugin_with_config();
+    let state = unsafe { plugin_state(userdata) };
+    assert!(!has_deferred_control_disconnect(state));
+
+    let mut outgoing_evt = MosquittoEvtMessage {
+        future: ptr::null_mut(),
+        client: std::ptr::dangling_mut::<c_void>(),
+        topic: ptr::null_mut(),
+        payload: ptr::null_mut(),
+        properties: ptr::null_mut(),
+        reason_string: ptr::null_mut(),
+        payloadlen: 0,
+        qos: 0,
+        reason_code: 0,
+        retain: false,
+        future2: [ptr::null_mut(); 4],
+    };
+    assert_eq!(
+        message_out_callback(
+            MOSQ_EVT_MESSAGE_OUT,
+            (&raw mut outgoing_evt).cast::<c_void>(),
+            userdata,
+        ),
+        MOSQ_ERR_SUCCESS
+    );
+
+    assert!(defer_control_disconnect_until_response(
+        state,
+        "test_client",
+        br#"{"responses":[]}"#,
+    ));
+    assert!(has_deferred_control_disconnect(state));
+    assert_eq!(
+        message_out_callback(
+            MOSQ_EVT_MESSAGE_OUT,
+            (&raw mut outgoing_evt).cast::<c_void>(),
+            userdata,
+        ),
+        MOSQ_ERR_INVAL
+    );
+    cancel_deferred_control_disconnect(state, "test_client");
+    assert!(!has_deferred_control_disconnect(state));
+
+    teardown_plugin(userdata);
+}
+
+#[test]
+fn tick_callback_has_lock_free_inactive_path() {
+    let (userdata, _identifier) = setup_plugin_with_config();
+    let state = unsafe { plugin_state(userdata) };
+    assert!(!has_deferred_control_disconnect(state));
+
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = state
+            .deferred_control_disconnects
+            .lock()
+            .expect("deferred disconnect lock should initially be available");
+        panic!("poison deferred disconnect lock");
+    }));
+    assert!(state.deferred_control_disconnects.is_poisoned());
+
+    let mut tick_evt = MosquittoEvtTick {
+        future: ptr::null_mut(),
+        now_ns: 0,
+        next_ms: 0,
+        now_s: 0,
+        next_s: 0,
+        future2: [ptr::null_mut(); 4],
+    };
+    reset_debug_logs();
+    assert_eq!(
+        tick_callback(
+            MOSQ_EVT_TICK,
+            (&raw mut tick_evt).cast::<c_void>(),
+            userdata,
+        ),
+        MOSQ_ERR_SUCCESS
+    );
+    assert!(
+        debug_logs_snapshot()
+            .iter()
+            .all(|entry| !entry.contains("Deferred control disconnect drain skipped"))
+    );
+
+    teardown_plugin(userdata);
+}
+
+#[test]
+fn control_callback_self_disable_waits_for_response_outbound_dispatch_before_kick() {
     reset_kick_client_call();
     reset_broker_publish_call();
     reset_control_action_log();
@@ -2148,6 +2320,7 @@ fn control_callback_self_disable_publishes_persist_warning_before_kick() {
 
     let state = unsafe { plugin_state_mut(userdata) };
     state.config.control_notify_topic_prefix = "system_notification".to_string();
+    state.config.acl_read_full_authz = true;
     replace_dynsec_file_with_directory(&dynsec_path);
 
     let topic = CString::new("$CONTROL/dynamic-security/v1").unwrap();
@@ -2170,11 +2343,112 @@ fn control_callback_self_disable_publishes_persist_warning_before_kick() {
     assert_eq!(rc, MOSQ_ERR_SUCCESS);
 
     let publish = broker_publish_call_snapshot();
-    assert_eq!(publish.count, 1);
+    assert_eq!(publish.count, 2);
     assert_eq!(publish.last_client_id.as_deref(), Some("test_client"));
     let payload_text = publish.last_payload.unwrap_or_default();
-    assert!(payload_text.contains("\"event\":\"control_persist_warning\""));
+    assert!(payload_text.contains("\"command\":\"disableClient\""));
 
+    let kick = kick_client_call_snapshot();
+    assert_eq!(kick.count, 0);
+
+    let mut tick_evt = MosquittoEvtTick {
+        future: ptr::null_mut(),
+        now_ns: 0,
+        next_ms: 0,
+        now_s: 0,
+        next_s: 0,
+        future2: [ptr::null_mut(); 4],
+    };
+    assert_eq!(
+        tick_callback(
+            MOSQ_EVT_TICK,
+            (&raw mut tick_evt).cast::<c_void>(),
+            userdata,
+        ),
+        MOSQ_ERR_SUCCESS
+    );
+    assert_eq!(kick_client_call_snapshot().count, 0);
+
+    let response_topic = CString::new(DYNAMIC_SECURITY_CONTROL_RESPONSE_TOPIC).unwrap();
+    let mut acl_evt = MosquittoEvtAclCheck {
+        future: ptr::null_mut(),
+        client: std::ptr::dangling_mut::<c_void>(),
+        topic: response_topic.as_ptr(),
+        payload: ptr::null(),
+        properties: ptr::null_mut(),
+        access: MOSQ_ACL_READ,
+        payloadlen: 0,
+        qos: 0,
+        retain: false,
+        future2: [ptr::null_mut(); 4],
+    };
+    assert_eq!(
+        acl_check_callback(
+            MOSQ_EVT_ACL_CHECK,
+            (&raw mut acl_evt).cast::<c_void>(),
+            userdata,
+        ),
+        MOSQ_ERR_SUCCESS
+    );
+
+    let mut outgoing_evt = MosquittoEvtMessage {
+        future: ptr::null_mut(),
+        client: std::ptr::dangling_mut::<c_void>(),
+        topic: response_topic.as_ptr().cast_mut(),
+        payload: ptr::null_mut(),
+        properties: ptr::null_mut(),
+        reason_string: ptr::null_mut(),
+        payloadlen: 0,
+        qos: 0,
+        reason_code: 0,
+        retain: false,
+        future2: [ptr::null_mut(); 4],
+    };
+
+    let unrelated_payload =
+        br#"{"responses":[{"command":"listRoles","correlationData":"earlier"}]}"#;
+    outgoing_evt.payload = unrelated_payload.as_ptr().cast::<c_void>().cast_mut();
+    outgoing_evt.payloadlen =
+        u32::try_from(unrelated_payload.len()).expect("unrelated response length fits u32");
+    assert_eq!(
+        message_out_callback(
+            MOSQ_EVT_MESSAGE_OUT,
+            (&raw mut outgoing_evt).cast::<c_void>(),
+            userdata,
+        ),
+        MOSQ_ERR_SUCCESS
+    );
+    assert_eq!(
+        tick_callback(
+            MOSQ_EVT_TICK,
+            (&raw mut tick_evt).cast::<c_void>(),
+            userdata,
+        ),
+        MOSQ_ERR_SUCCESS
+    );
+    assert_eq!(kick_client_call_snapshot().count, 0);
+
+    outgoing_evt.payload = payload_text.as_ptr().cast::<c_void>().cast_mut();
+    outgoing_evt.payloadlen =
+        u32::try_from(payload_text.len()).expect("control response length fits u32");
+    assert_eq!(
+        message_out_callback(
+            MOSQ_EVT_MESSAGE_OUT,
+            (&raw mut outgoing_evt).cast::<c_void>(),
+            userdata,
+        ),
+        MOSQ_ERR_SUCCESS
+    );
+    assert_eq!(kick_client_call_snapshot().count, 0);
+
+    assert_eq!(
+        tick_callback(
+            MOSQ_EVT_TICK,
+            (&raw mut tick_evt).cast::<c_void>(),
+            userdata,
+        ),
+        MOSQ_ERR_SUCCESS
+    );
     let kick = kick_client_call_snapshot();
     assert_eq!(kick.count, 1);
     assert_eq!(kick.last_client_id.as_deref(), Some("test_client"));
@@ -2183,6 +2457,9 @@ fn control_callback_self_disable_publishes_persist_warning_before_kick() {
     assert_eq!(
         actions,
         vec![
+            TestControlAction::Publish {
+                client_id: Some("test_client".to_string()),
+            },
             TestControlAction::Publish {
                 client_id: Some("test_client".to_string()),
             },

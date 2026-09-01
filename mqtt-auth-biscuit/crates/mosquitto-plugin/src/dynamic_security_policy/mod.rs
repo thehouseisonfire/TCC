@@ -174,11 +174,23 @@ impl DynamicSecurityPolicy {
         // normal throughput/latency measurements.
         let _control_guard = lock_mutex(&self.control_apply_lock, "control")?;
         let state = self.load_state_for_control_payload()?;
-        let draft = self.build_control_mutation_draft(state, &parsed.commands)?;
+        let command_errors = parsed
+            .commands
+            .iter()
+            .map(ControlCommand::handling_error)
+            .collect::<Vec<_>>();
+        let handled_commands = parsed
+            .commands
+            .iter()
+            .zip(&command_errors)
+            .filter_map(|(command, error)| error.is_none().then_some(command.clone()))
+            .collect::<Vec<_>>();
+        let draft = self.build_control_mutation_draft(state, &handled_commands)?;
         let retry_persist_mutations =
-            self.collect_retry_persist_mutations(&parsed.commands, &draft)?;
+            self.collect_retry_persist_mutations(&handled_commands, &draft)?;
 
         let mut targets = self.commit_control_mutation_draft(draft, None)?;
+        targets.command_errors = command_errors;
         self.flush_retry_persist_mutations(retry_persist_mutations, &mut targets);
         Ok(targets)
     }
@@ -512,6 +524,7 @@ impl DynamicSecurityPolicy {
             kick_usernames,
             notify_events,
             persist_warning,
+            command_errors: Vec::new(),
         })
     }
 

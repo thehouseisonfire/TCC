@@ -4,7 +4,9 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
+from typing import Any
 
 import httpx
 import typer
@@ -101,6 +103,62 @@ def _health_check(name: str, base_url: str, ca_file: str | None, insecure: bool)
         raise SystemExit(f"{name} health check returned non-JSON body") from exc
 
 
+def _issue_token(
+    token_issuer_base: str,
+    endpoint: str,
+    payload: dict[str, Any],
+    *,
+    ca_file: str | None,
+    insecure: bool,
+) -> str:
+    with _http_client(ca_file, insecure) as client:
+        response = client.post(f"{token_issuer_base}{endpoint}", json=payload)
+        response.raise_for_status()
+    token = response.json().get("token")
+    if not isinstance(token, str) or not token:
+        raise RuntimeError(f"token issuer returned invalid token payload for {endpoint}")
+    return token
+
+
+def _issue_mqtt5_auth_tokens(
+    token_issuer_base: str,
+    *,
+    ca_file: str | None,
+    insecure: bool,
+) -> tuple[str, str, str, str, str]:
+    client_id = f"smoke-mqtt5-auth-{uuid.uuid4().hex[:12]}"
+    token1_topic = f"sensors/{client_id}/before"
+    token2_topic = f"sensors/{client_id}/after"
+
+    def jwt_payload(ttl_seconds: int, topic: str) -> dict[str, Any]:
+        return {
+            "client_id": client_id,
+            "ttl_seconds": ttl_seconds,
+            "grants": [
+                {"op": "publish", "res": topic},
+                {"op": "subscribe", "res": topic},
+            ],
+            "no_default_roles": True,
+            "no_default_grants": True,
+        }
+
+    token1 = _issue_token(
+        token_issuer_base,
+        "/jwt",
+        jwt_payload(180, token1_topic),
+        ca_file=ca_file,
+        insecure=insecure,
+    )
+    token2 = _issue_token(
+        token_issuer_base,
+        "/jwt",
+        jwt_payload(300, token2_topic),
+        ca_file=ca_file,
+        insecure=insecure,
+    )
+    return client_id, token1, token2, token1_topic, token2_topic
+
+
 def _run_loadgen(
     username: str,
     password: str,
@@ -151,8 +209,11 @@ def _run_loadgen(
 def _run_mqtt5_auth(
     host: str,
     port: int,
+    client_id: str,
     token1: str,
     token2: str,
+    token1_topic: str,
+    token2_topic: str,
     tls_enabled: bool,
     tls_ca_file: str | None,
     tls_insecure: bool,
@@ -164,12 +225,18 @@ def _run_mqtt5_auth(
         host,
         "--port",
         str(port),
+        "--client-id",
+        client_id,
         "--auth-method",
         "token",
         "--token1",
         token1,
         "--token2",
         token2,
+        "--token1-topic",
+        token1_topic,
+        "--token2-topic",
+        token2_topic,
     ]
     if tls_enabled:
         cmd.append("--tls")
@@ -275,11 +342,19 @@ def main(
     )
 
     if not skip_mqtt5_auth:
+        client_id, token1, token2, token1_topic, token2_topic = _issue_mqtt5_auth_tokens(
+            issuer_base,
+            ca_file=tls_ca,
+            insecure=tls_insecure,
+        )
         results["mqtt5_auth"] = _run_mqtt5_auth(
             mqtt_host,
             mqtt_port,
-            str(tokens_data["jwt"]),
-            str(tokens_data["jwt"]),
+            client_id,
+            token1,
+            token2,
+            token1_topic,
+            token2_topic,
             tls,
             tls_ca,
             tls_insecure,

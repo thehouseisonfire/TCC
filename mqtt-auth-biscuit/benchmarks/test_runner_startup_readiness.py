@@ -1948,3 +1948,122 @@ def test_container_per_client_runtime_control_uses_one_coordinated_controller(
 def test_runtime_control_quotas_preserve_exact_aggregate_threshold() -> None:
     assert rs._runtime_control_quotas(clients=3, after_messages=2) == [1, 1, 0]
     assert sum(rs._runtime_control_quotas(clients=4, after_messages=11)) == 11
+
+
+def test_smoke_mqtt5_auth_command_includes_distinct_topics(monkeypatch) -> None:
+    from benchmarks import smoke_test as st
+
+    captured: dict[str, object] = {}
+
+    def fake_check_output(cmd, **kwargs):  # noqa: ANN001
+        captured["cmd"] = cmd
+        captured["cwd"] = kwargs.get("cwd")
+        captured["env"] = kwargs.get("env")
+        return json.dumps({"connect_ok": True})
+
+    monkeypatch.setattr(st.subprocess, "check_output", fake_check_output)
+
+    result = st._run_mqtt5_auth(
+        "localhost",
+        1883,
+        "smoke-mqtt5-auth-abc123",
+        "token-one",
+        "token-two",
+        "sensors/smoke-mqtt5-auth-abc123/before",
+        "sensors/smoke-mqtt5-auth-abc123/after",
+        False,
+        None,
+        False,
+    )
+
+    assert result == {"connect_ok": True}
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list)
+    assert "--token1" in cmd
+    assert cmd[cmd.index("--client-id") + 1] == "smoke-mqtt5-auth-abc123"
+    assert cmd[cmd.index("--token1") + 1] == "token-one"
+    assert "--token2" in cmd
+    assert cmd[cmd.index("--token2") + 1] == "token-two"
+    assert "--token1-topic" in cmd
+    assert cmd[cmd.index("--token1-topic") + 1] == "sensors/smoke-mqtt5-auth-abc123/before"
+    assert "--token2-topic" in cmd
+    assert cmd[cmd.index("--token2-topic") + 1] == "sensors/smoke-mqtt5-auth-abc123/after"
+    assert captured["cwd"] == st.REPO_ROOT
+    assert isinstance(captured["env"], dict)
+
+
+def test_smoke_mqtt5_auth_tls_flags_propagate(monkeypatch) -> None:
+    from benchmarks import smoke_test as st
+
+    captured: dict[str, object] = {}
+
+    def fake_check_output(cmd, **kwargs):  # noqa: ANN001
+        captured["cmd"] = cmd
+        return json.dumps({})
+
+    monkeypatch.setattr(st.subprocess, "check_output", fake_check_output)
+
+    st._run_mqtt5_auth(
+        "localhost",
+        8883,
+        "smoke-mqtt5-auth-tls",
+        "t1",
+        "t2",
+        "sensors/c/before",
+        "sensors/c/after",
+        True,
+        "docker/tls/ca.pem",
+        True,
+    )
+
+    cmd = captured["cmd"]
+    assert isinstance(cmd, list)
+    assert "--tls" in cmd
+    assert "--tls-ca-file" in cmd
+    assert cmd[cmd.index("--tls-ca-file") + 1] == "docker/tls/ca.pem"
+    assert "--tls-insecure" in cmd
+
+
+def test_smoke_issue_mqtt5_auth_tokens_mints_distinct_authorized_topics(monkeypatch) -> None:
+    from benchmarks import smoke_test as st
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_issue_token(base, endpoint, payload, *, ca_file, insecure):  # noqa: ANN001
+        calls.append(
+            {
+                "base": base,
+                "endpoint": endpoint,
+                "payload": payload,
+                "ca_file": ca_file,
+                "insecure": insecure,
+            }
+        )
+        topic = payload["grants"][0]["res"] if "grants" in payload else payload["topic"]
+        return f"issued-for-{topic}"
+
+    monkeypatch.setattr(st, "_issue_token", fake_issue_token)
+    monkeypatch.setattr(st.uuid, "uuid4", lambda: type("U", (), {"hex": "abc123def4567890"})())
+
+    client_id, token1, token2, topic1, topic2 = st._issue_mqtt5_auth_tokens(
+        "http://localhost:8082", ca_file=None, insecure=False
+    )
+
+    assert client_id == "smoke-mqtt5-auth-abc123def456"
+    assert topic1 == "sensors/smoke-mqtt5-auth-abc123def456/before"
+    assert topic2 == "sensors/smoke-mqtt5-auth-abc123def456/after"
+    assert topic1 != topic2
+    assert token1 == f"issued-for-{topic1}"
+    assert token2 == f"issued-for-{topic2}"
+    assert len(calls) == 2
+    assert calls[0]["endpoint"] == "/jwt"
+    assert calls[1]["endpoint"] == "/jwt"
+    payload0 = calls[0]["payload"]
+    payload1 = calls[1]["payload"]
+    assert isinstance(payload0, dict) and isinstance(payload1, dict)
+    assert payload0["client_id"] == "smoke-mqtt5-auth-abc123def456"
+    assert payload1["client_id"] == "smoke-mqtt5-auth-abc123def456"
+    assert payload0["grants"][0]["res"] == topic1
+    assert payload1["grants"][0]["res"] == topic2
+    assert payload0["ttl_seconds"] == 180
+    assert payload1["ttl_seconds"] == 300

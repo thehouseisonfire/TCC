@@ -9,7 +9,7 @@ use crate::dynamic_security_policy::{
 use crate::policy::PolicyMode;
 use crate::sqlite_policy::SqlitePolicy;
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 #[cfg(any(test, kani))]
 use std::ffi::c_char;
 use std::ffi::{CString, c_int, c_void};
@@ -89,13 +89,15 @@ mod mosquitto_ffi;
 #[cfg(test)]
 use auth_runtime::{is_acl_read_only, normalize_username, should_defer_no_token_basic_auth};
 use callbacks::{
-    acl_check_callback, basic_auth_callback, control_callback, ext_auth_continue_callback,
-    ext_auth_start_callback, message_callback,
+    acl_check_callback, basic_auth_callback, control_callback, disconnect_callback,
+    ext_auth_continue_callback, ext_auth_start_callback, message_callback, message_out_callback,
+    tick_callback,
 };
 use mosquitto_ffi::mosquitto_abi::{
     MOSQ_ACL_CONTROL, MOSQ_ERR_INVAL, MOSQ_ERR_SUCCESS, MOSQ_EVT_ACL_CHECK, MOSQ_EVT_BASIC_AUTH,
-    MOSQ_EVT_CONTROL, MOSQ_EVT_EXT_AUTH_CONTINUE, MOSQ_EVT_EXT_AUTH_START, MOSQ_EVT_MESSAGE,
-    MosqFuncGenericCallback, MosquittoOpt, MosquittoPluginId,
+    MOSQ_EVT_CONTROL, MOSQ_EVT_DISCONNECT, MOSQ_EVT_EXT_AUTH_CONTINUE, MOSQ_EVT_EXT_AUTH_START,
+    MOSQ_EVT_MESSAGE, MOSQ_EVT_MESSAGE_OUT, MOSQ_EVT_TICK, MosqFuncGenericCallback, MosquittoOpt,
+    MosquittoPluginId,
 };
 #[cfg(test)]
 use mosquitto_ffi::mosquitto_abi::{MOSQ_ACL_READ, MOSQ_ACL_SUBSCRIBE, MOSQ_ACL_WRITE};
@@ -103,11 +105,12 @@ use mosquitto_ffi::mosquitto_abi::{MOSQ_ACL_READ, MOSQ_ACL_SUBSCRIBE, MOSQ_ACL_W
 use mosquitto_ffi::mosquitto_abi::{
     MOSQ_ERR_ACL_DENIED, MOSQ_ERR_AUTH, MOSQ_ERR_PLUGIN_DEFER, MosquittoEvtAclCheck,
     MosquittoEvtBasicAuth, MosquittoEvtBasicAuthFuture, MosquittoEvtControl,
-    MosquittoEvtExtendedAuth, MosquittoEvtMessage,
+    MosquittoEvtExtendedAuth, MosquittoEvtMessage, MosquittoEvtTick,
 };
 use mosquitto_ffi::mosquitto_runtime::{
     broker_publish_copy_raw, kick_client_by_clientid_raw, log_debug, log_info,
 };
+use serde_json::Value;
 mod session;
 use session::{
     SessionIndex, plugin_state, remove_session_username, session_client_ids_for_username,
@@ -132,17 +135,100 @@ unsafe extern "C" {
         event_data: *const c_void,
         userdata: *mut c_void,
     ) -> c_int;
+    fn mosquitto_callback_unregister(
+        identifier: *mut MosquittoPluginId,
+        event: c_int,
+        cb_func: MosqFuncGenericCallback,
+        event_data: *const c_void,
+    ) -> c_int;
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct TestCallbackRegistrationState {
+    fail_registration_event: Option<c_int>,
+    fail_unregistration_event: Option<c_int>,
+    successful_registrations: Vec<c_int>,
+    unregister_attempts: Vec<c_int>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CALLBACK_REGISTRATION_STATE: std::cell::RefCell<TestCallbackRegistrationState> =
+        std::cell::RefCell::new(TestCallbackRegistrationState::default());
+}
+
+#[cfg(test)]
+fn reset_callback_registration_state(
+    fail_registration_event: Option<c_int>,
+    fail_unregistration_event: Option<c_int>,
+) {
+    TEST_CALLBACK_REGISTRATION_STATE.with(|state| {
+        *state.borrow_mut() = TestCallbackRegistrationState {
+            fail_registration_event,
+            fail_unregistration_event,
+            ..TestCallbackRegistrationState::default()
+        };
+    });
+}
+
+#[cfg(test)]
+fn callback_registration_state_snapshot() -> (Vec<c_int>, Vec<c_int>) {
+    TEST_CALLBACK_REGISTRATION_STATE.with(|state| {
+        let state = state.borrow();
+        (
+            state.successful_registrations.clone(),
+            state.unregister_attempts.clone(),
+        )
+    })
 }
 
 #[cfg(any(test, miri, kani))]
 #[unsafe(no_mangle)]
 pub extern "C" fn mosquitto_callback_register(
     _identifier: *mut MosquittoPluginId,
-    _event: c_int,
+    event: c_int,
     _cb_func: MosqFuncGenericCallback,
     _event_data: *const c_void,
     _userdata: *mut c_void,
 ) -> c_int {
+    #[cfg(test)]
+    {
+        TEST_CALLBACK_REGISTRATION_STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            if state.fail_registration_event == Some(event) {
+                MOSQ_ERR_INVAL
+            } else {
+                state.successful_registrations.push(event);
+                MOSQ_ERR_SUCCESS
+            }
+        })
+    }
+    #[cfg(not(test))]
+    MOSQ_ERR_SUCCESS
+}
+
+#[cfg(any(test, miri, kani))]
+#[unsafe(no_mangle)]
+pub extern "C" fn mosquitto_callback_unregister(
+    _identifier: *mut MosquittoPluginId,
+    event: c_int,
+    _cb_func: MosqFuncGenericCallback,
+    _event_data: *const c_void,
+) -> c_int {
+    #[cfg(test)]
+    {
+        TEST_CALLBACK_REGISTRATION_STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.unregister_attempts.push(event);
+            if state.fail_unregistration_event == Some(event) {
+                MOSQ_ERR_INVAL
+            } else {
+                MOSQ_ERR_SUCCESS
+            }
+        })
+    }
+    #[cfg(not(test))]
     MOSQ_ERR_SUCCESS
 }
 
@@ -211,12 +297,106 @@ pub struct PluginState {
     auth_engine: Arc<AuthEngine>,
     cache: Arc<SessionCache<String, TokenType>>,
     session_index: Mutex<SessionIndex>,
+    deferred_control_disconnects: Mutex<DeferredControlDisconnects>,
+    deferred_control_disconnect_pending: AtomicBool,
     config: PluginConfig,
     sqlite_policy: Option<SqlitePolicy>,
     dynamic_security_policy: Option<DynamicSecurityPolicy>,
     auth_metrics: Arc<AuthMetrics>,
     authz_metrics: Arc<AuthzMetrics>,
     _diagnostics_server: Option<BenchmarkDiagnosticsServer>,
+}
+
+const DYNAMIC_SECURITY_CONTROL_RESPONSE_TOPIC: &str = "$CONTROL/dynamic-security/v1/response";
+
+#[derive(Default)]
+struct DeferredControlDisconnects {
+    awaiting_response_dispatch: HashMap<String, Vec<u8>>,
+    response_dispatched: HashSet<String>,
+}
+
+fn defer_control_disconnect_until_response(
+    state: &PluginState,
+    client_id: &str,
+    response_payload: &[u8],
+) -> bool {
+    let Ok(mut deferred) = state.deferred_control_disconnects.lock() else {
+        log_debug("Control disconnect could not be deferred: lock poisoned");
+        return false;
+    };
+    deferred.response_dispatched.remove(client_id);
+    deferred
+        .awaiting_response_dispatch
+        .insert(client_id.to_string(), response_payload.to_vec());
+    state
+        .deferred_control_disconnect_pending
+        .store(true, Ordering::Release);
+    true
+}
+
+fn cancel_deferred_control_disconnect(state: &PluginState, client_id: &str) {
+    if let Ok(mut deferred) = state.deferred_control_disconnects.lock() {
+        deferred.awaiting_response_dispatch.remove(client_id);
+        deferred.response_dispatched.remove(client_id);
+        state.deferred_control_disconnect_pending.store(
+            !deferred.awaiting_response_dispatch.is_empty()
+                || !deferred.response_dispatched.is_empty(),
+            Ordering::Release,
+        );
+    } else {
+        log_debug("Deferred control disconnect cancellation skipped: lock poisoned");
+    }
+}
+
+fn has_deferred_control_disconnect(state: &PluginState) -> bool {
+    state
+        .deferred_control_disconnect_pending
+        .load(Ordering::Acquire)
+}
+
+fn is_pending_control_response(state: &PluginState, client_id: &str, topic: &str) -> bool {
+    if topic != DYNAMIC_SECURITY_CONTROL_RESPONSE_TOPIC {
+        return false;
+    }
+    state
+        .deferred_control_disconnects
+        .lock()
+        .is_ok_and(|deferred| {
+            deferred.awaiting_response_dispatch.contains_key(client_id)
+                || deferred.response_dispatched.contains(client_id)
+        })
+}
+
+fn mark_control_response_dispatched(state: &PluginState, client_id: &str, response_payload: &[u8]) {
+    let Ok(mut deferred) = state.deferred_control_disconnects.lock() else {
+        log_debug("Deferred control disconnect dispatch skipped: lock poisoned");
+        return;
+    };
+    if deferred
+        .awaiting_response_dispatch
+        .get(client_id)
+        .is_some_and(|expected| expected.as_slice() == response_payload)
+    {
+        deferred.awaiting_response_dispatch.remove(client_id);
+        deferred.response_dispatched.insert(client_id.to_string());
+        log_debug(&format!(
+            "Control response reached outbound dispatch: client={client_id}"
+        ));
+    }
+}
+
+fn take_dispatched_control_disconnects(state: &PluginState) -> Vec<String> {
+    let Ok(mut deferred) = state.deferred_control_disconnects.lock() else {
+        log_debug("Deferred control disconnect drain skipped: lock poisoned");
+        return Vec::new();
+    };
+    let mut client_ids = deferred.response_dispatched.drain().collect::<Vec<_>>();
+    state.deferred_control_disconnect_pending.store(
+        !deferred.awaiting_response_dispatch.is_empty(),
+        Ordering::Release,
+    );
+    client_ids.sort_unstable();
+    client_ids
 }
 
 #[derive(Default)]
@@ -340,18 +520,23 @@ impl Drop for BenchmarkDiagnosticsServer {
     }
 }
 
+struct DynamicSecurityControlEnforcement {
+    kick_targets: Vec<String>,
+    command_errors: Vec<Option<String>>,
+}
+
 fn apply_dynamic_security_control_enforcement(
     state: &PluginState,
     client_id: &str,
     username: Option<&str>,
     topic: &str,
     payload: &[u8],
-) {
-    if state.config.policy.mode != PolicyMode::DynamicSecurity
-        || topic != "$CONTROL/dynamic-security/v1"
-        || payload.is_empty()
-    {
-        return;
+) -> Result<DynamicSecurityControlEnforcement, String> {
+    if state.config.policy.mode != PolicyMode::DynamicSecurity {
+        return Err("dynamic security control is unavailable outside dynamic-security mode".into());
+    }
+    if topic != "$CONTROL/dynamic-security/v1" || payload.is_empty() {
+        return Err("invalid dynamic security control request".into());
     }
 
     let client_id_key = client_id.to_string();
@@ -359,7 +544,7 @@ fn apply_dynamic_security_control_enforcement(
         log_debug(&format!(
             "Control command skipped: missing cached session for client={client_id}"
         ));
-        return;
+        return Err(format!("missing cached session for client={client_id}"));
     };
 
     let params = AuthzParams {
@@ -384,11 +569,11 @@ fn apply_dynamic_security_control_enforcement(
         log_debug(&format!(
             "Control command skipped: authorization denied for client={client_id} topic={topic}"
         ));
-        return;
+        return Err(format!("authorization denied for client={client_id}"));
     }
 
     let Some(policy) = state.dynamic_security_policy.as_ref() else {
-        return;
+        return Err("dynamic security policy is not configured".to_string());
     };
     match policy.apply_control_payload(payload) {
         Ok(ControlEnforcementTargets {
@@ -396,6 +581,7 @@ fn apply_dynamic_security_control_enforcement(
             kick_usernames,
             notify_events,
             persist_warning,
+            command_errors,
         }) => {
             let mut kick_targets: HashSet<String> = kick_client_ids.into_iter().collect();
             for username in kick_usernames {
@@ -411,31 +597,83 @@ fn apply_dynamic_security_control_enforcement(
                 ));
             }
 
-            for affected_client in kick_targets {
-                let evicted = state.cache.remove(&affected_client);
-                let session_binding_removed = remove_session_username(state, &affected_client);
-                log_debug(&format!(
-                    "Control enforcement target: client={affected_client} cache_evicted={evicted} session_binding_removed={session_binding_removed}"
-                ));
-                if evicted {
-                    disconnect_control_enforcement_client(&affected_client);
-                } else {
-                    log_debug(&format!(
-                        "Control enforcement kick skipped: client={affected_client} not present in live session cache"
-                    ));
-                }
-            }
-
             for notify_event in notify_events {
                 publish_control_notify_event(state, &notify_event);
             }
+            let mut kick_targets = kick_targets.into_iter().collect::<Vec<_>>();
+            kick_targets.sort_unstable();
+            Ok(DynamicSecurityControlEnforcement {
+                kick_targets,
+                command_errors,
+            })
         }
         Err(err) => {
             log_debug(&format!(
                 "Control command processing failed: client={client_id} topic={topic} error={err}"
             ));
+            Err(err.to_string())
         }
     }
+}
+
+fn apply_dynamic_security_control_disconnects(state: &PluginState, kick_targets: Vec<String>) {
+    for affected_client in kick_targets {
+        let evicted = state.cache.remove(&affected_client);
+        let session_binding_removed = remove_session_username(state, &affected_client);
+        log_debug(&format!(
+            "Control enforcement target: client={affected_client} cache_evicted={evicted} session_binding_removed={session_binding_removed}"
+        ));
+        if evicted {
+            disconnect_control_enforcement_client(&affected_client);
+        } else {
+            log_debug(&format!(
+                "Control enforcement kick skipped: client={affected_client} not present in live session cache"
+            ));
+        }
+    }
+}
+
+fn dynamic_security_control_response(payload: &[u8], command_errors: &[Option<String>]) -> String {
+    let commands: Vec<Value> = serde_json::from_slice::<Value>(payload)
+        .ok()
+        .and_then(|value| value.get("commands").and_then(Value::as_array).cloned())
+        .unwrap_or_default();
+    let responses = commands
+        .iter()
+        .enumerate()
+        .map(|(index, command)| {
+            let mut response = serde_json::Map::new();
+            response.insert(
+                "command".to_string(),
+                command
+                    .get("command")
+                    .cloned()
+                    .unwrap_or_else(|| Value::String("Unknown command".to_string())),
+            );
+            if let Some(correlation) = command.get("correlationData") {
+                response.insert("correlationData".to_string(), correlation.clone());
+            }
+            if let Some(error) = command_errors.get(index).and_then(Option::as_deref) {
+                response.insert("error".to_string(), Value::String(error.to_string()));
+            }
+            Value::Object(response)
+        })
+        .collect::<Vec<_>>();
+    json!({"responses": responses}).to_string()
+}
+
+fn dynamic_security_control_command_errors(payload: &[u8], error: &str) -> Vec<Option<String>> {
+    serde_json::from_slice::<Value>(payload)
+        .ok()
+        .and_then(|value| value.get("commands").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
+        .iter()
+        .map(|_| Some(error.to_string()))
+        .collect()
+}
+
+fn publish_dynamic_security_control_response(client_id: &str, response: &str) -> bool {
+    publish_control_notification(client_id, DYNAMIC_SECURITY_CONTROL_RESPONSE_TOPIC, response)
 }
 
 fn disconnect_expired_acl_client(client_id: &str) {
@@ -543,16 +781,16 @@ fn publish_control_persist_warning(
     publish_control_notification(client_id, &notification_topic, &payload);
 }
 
-fn publish_control_notification(client_id: &str, topic: &str, payload: &str) {
+fn publish_control_notification(client_id: &str, topic: &str, payload: &str) -> bool {
     let Ok(client_id_cstr) = CString::new(client_id) else {
         log_debug(&format!(
             "Control notify skipped: invalid client id '{client_id}'"
         ));
-        return;
+        return false;
     };
     let Ok(topic_cstr) = CString::new(topic) else {
         log_debug(&format!("Control notify skipped: invalid topic '{topic}'"));
-        return;
+        return false;
     };
     let payload_bytes = payload.as_bytes();
     let Ok(payload_len) = c_int::try_from(payload_bytes.len()) else {
@@ -560,7 +798,7 @@ fn publish_control_notification(client_id: &str, topic: &str, payload: &str) {
             "Control notify skipped: payload too large ({} bytes)",
             payload_bytes.len()
         ));
-        return;
+        return false;
     };
     let rc = broker_publish_copy_raw(
         client_id_cstr.as_ptr(),
@@ -580,6 +818,7 @@ fn publish_control_notification(client_id: &str, topic: &str, payload: &str) {
             "Control notify publish failed: client={client_id} topic={topic} rc={rc}"
         ));
     }
+    rc == MOSQ_ERR_SUCCESS
 }
 
 #[unsafe(no_mangle)]
@@ -700,6 +939,8 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
             )),
             cache,
             session_index: Mutex::new(SessionIndex::default()),
+            deferred_control_disconnects: Mutex::new(DeferredControlDisconnects::default()),
+            deferred_control_disconnect_pending: AtomicBool::new(false),
             config,
             sqlite_policy,
             dynamic_security_policy,
@@ -709,50 +950,90 @@ pub unsafe extern "C" fn mosquitto_plugin_init(
         });
         *userdata = Box::into_raw(state).cast::<c_void>();
 
-        mosquitto_callback_register(
-            identifier,
-            MOSQ_EVT_BASIC_AUTH,
-            basic_auth_callback,
-            ptr::null(),
-            *userdata,
-        );
-        mosquitto_callback_register(
-            identifier,
-            MOSQ_EVT_ACL_CHECK,
-            acl_check_callback,
-            ptr::null(),
-            *userdata,
-        );
-
-        mosquitto_callback_register(
-            identifier,
-            MOSQ_EVT_EXT_AUTH_START,
-            ext_auth_start_callback,
-            ptr::null(),
-            *userdata,
-        );
-        mosquitto_callback_register(
-            identifier,
-            MOSQ_EVT_EXT_AUTH_CONTINUE,
-            ext_auth_continue_callback,
-            ptr::null(),
-            *userdata,
-        );
-
-        mosquitto_callback_register(
-            identifier,
-            MOSQ_EVT_MESSAGE,
-            message_callback,
-            ptr::null(),
-            *userdata,
-        );
-        mosquitto_callback_register(
-            identifier,
-            MOSQ_EVT_CONTROL,
-            control_callback,
-            ptr::null(),
-            *userdata,
-        );
+        let registrations = [
+            (
+                MOSQ_EVT_BASIC_AUTH,
+                basic_auth_callback as MosqFuncGenericCallback,
+                ptr::null(),
+            ),
+            (
+                MOSQ_EVT_ACL_CHECK,
+                acl_check_callback as MosqFuncGenericCallback,
+                ptr::null(),
+            ),
+            (
+                MOSQ_EVT_EXT_AUTH_START,
+                ext_auth_start_callback as MosqFuncGenericCallback,
+                ptr::null(),
+            ),
+            (
+                MOSQ_EVT_EXT_AUTH_CONTINUE,
+                ext_auth_continue_callback as MosqFuncGenericCallback,
+                ptr::null(),
+            ),
+            (
+                MOSQ_EVT_MESSAGE,
+                message_callback as MosqFuncGenericCallback,
+                ptr::null(),
+            ),
+            (
+                MOSQ_EVT_MESSAGE_OUT,
+                message_out_callback as MosqFuncGenericCallback,
+                ptr::null(),
+            ),
+            (
+                MOSQ_EVT_TICK,
+                tick_callback as MosqFuncGenericCallback,
+                ptr::null(),
+            ),
+            (
+                MOSQ_EVT_DISCONNECT,
+                disconnect_callback as MosqFuncGenericCallback,
+                ptr::null(),
+            ),
+            (
+                MOSQ_EVT_CONTROL,
+                control_callback as MosqFuncGenericCallback,
+                c"$CONTROL/dynamic-security/v1".as_ptr().cast::<c_void>(),
+            ),
+        ];
+        let mut registered_callbacks = Vec::with_capacity(registrations.len());
+        for (event, callback, event_data) in registrations {
+            let rc =
+                mosquitto_callback_register(identifier, event, callback, event_data, *userdata);
+            if rc != MOSQ_ERR_SUCCESS {
+                log_info(&format!(
+                    "Callback registration failed: event={event} rc={rc}"
+                ));
+                let mut rollback_succeeded = true;
+                for &(registered_event, registered_callback, registered_event_data) in
+                    registered_callbacks.iter().rev()
+                {
+                    let unregister_rc = mosquitto_callback_unregister(
+                        identifier,
+                        registered_event,
+                        registered_callback,
+                        registered_event_data,
+                    );
+                    if unregister_rc != MOSQ_ERR_SUCCESS {
+                        rollback_succeeded = false;
+                        log_info(&format!(
+                            "Callback registration rollback failed: event={registered_event} rc={unregister_rc}"
+                        ));
+                    }
+                }
+                if rollback_succeeded {
+                    drop(Box::from_raw((*userdata).cast::<PluginState>()));
+                    *userdata = ptr::null_mut();
+                } else {
+                    log_info(
+                        "Plugin state retained after callback rollback failure for broker cleanup",
+                    );
+                }
+                return rc;
+            }
+            registered_callbacks.push((event, callback, event_data));
+        }
 
         log_info("Biscuit Auth Plugin initialized");
 

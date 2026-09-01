@@ -146,27 +146,31 @@ def test_resource_interval_uses_bracketing_counter_delta_and_interval_memory(
 ) -> None:  # noqa: ANN001
     monkeypatch.setattr(rs, "_compose_service_container_id", lambda *_args, **_kwargs: "abc123")
     monkeypatch.setattr(rs.time, "time", lambda: 101.0)
-    monkeypatch.setattr(rs.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        rs,
+        "_wait_for_prometheus_samples_after",
+        lambda *_args, **_kwargs: {"cpu": 100.5, "memory": 100.75},
+    )
 
     def fake_range_query(_base, query, start, end, _ca, _insecure):  # noqa: ANN001
         assert start == 98.0
-        assert end == 101.25
+        assert end == 101.0
         if "timestamp" in query:
             values = (
-                [[98.0, "97.75"], [99.0, "98.75"], [101.25, "101"]]
+                [[98.0, "97.75"], [99.0, "98.75"], [101.0, "101"]]
                 if "cpu_usage" in query
                 else [
                     [98.0, "97.75"],
                     [99.0, "98.75"],
                     [100.0, "99.75"],
-                    [101.25, "101"],
+                    [101.0, "101"],
                 ]
             )
         else:
             values = (
-                [[98.0, "10"], [99.0, "11"], [101.25, "14.5"]]
+                [[98.0, "10"], [99.0, "11"], [101.0, "14.5"]]
                 if "cpu_usage" in query
-                else [[98.0, "90"], [99.0, "100"], [100.0, "130"], [101.25, "110"]]
+                else [[98.0, "90"], [99.0, "100"], [100.0, "130"], [101.0, "110"]]
             )
         return {"status": "success", "data": {"result": [{"values": values}]}}
 
@@ -196,7 +200,11 @@ def test_resource_interval_rejects_post_finish_evaluation_of_stale_scrape(
 ) -> None:  # noqa: ANN001
     monkeypatch.setattr(rs, "_compose_service_container_id", lambda *_args, **_kwargs: "abc123")
     monkeypatch.setattr(rs.time, "time", lambda: 101.0)
-    monkeypatch.setattr(rs.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        rs,
+        "_wait_for_prometheus_samples_after",
+        lambda *_args, **_kwargs: {"cpu": 100.75, "memory": 100.75},
+    )
 
     def fake_range_query(_base, query, _start, _end, _ca, _insecure):  # noqa: ANN001
         values = (
@@ -218,6 +226,58 @@ def test_resource_interval_rejects_post_finish_evaluation_of_stale_scrape(
     assert resource["available"] is False
     assert resource["reason"] == "workload_interval_not_bracketed_by_prometheus_samples"
     assert resource["sample_counts"] == {"cpu": 1, "memory": 1}
+
+
+def test_wait_for_prometheus_samples_after_polls_source_timestamps(monkeypatch) -> None:
+    responses = iter(
+        [
+            100.0,
+            100.5,
+            101.25,
+            101.5,
+        ]
+    )
+    queries: list[str] = []
+
+    def fake_prom_query(_base, query, _ca, _insecure):  # noqa: ANN001
+        queries.append(query)
+        return {
+            "status": "success",
+            "data": {"result": [{"value": [102.0, str(next(responses))]}]},
+        }
+
+    monotonic_values = iter([0.0, 0.0, 0.25])
+    monkeypatch.setattr(rs, "_prom_query", fake_prom_query)
+    monkeypatch.setattr(rs.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(rs.time, "sleep", lambda _seconds: None)
+
+    observed = rs._wait_for_prometheus_samples_after(
+        "http://prometheus",
+        {"cpu": "cpu_selector", "memory": "memory_selector"},
+        101.0,
+        None,
+        False,
+    )
+
+    assert queries == [
+        "max(timestamp(cpu_selector))",
+        "max(timestamp(memory_selector))",
+        "max(timestamp(cpu_selector))",
+        "max(timestamp(memory_selector))",
+    ]
+    assert observed == {"cpu": 101.25, "memory": 101.5}
+
+
+def test_prometheus_range_end_includes_awaited_scrape_on_evaluation_grid() -> None:
+    query_start = 98.0276506
+    awaited_scrape = 101.2
+
+    query_end = rs._aligned_prometheus_query_end(query_start, awaited_scrape)
+
+    assert query_end >= awaited_scrape
+    assert (query_end - query_start) / 0.25 == pytest.approx(
+        round((query_end - query_start) / 0.25)
+    )
 
 
 def test_validate_resource_interval_rejects_unbracketed_evidence() -> None:

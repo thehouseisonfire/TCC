@@ -36,6 +36,9 @@ pub const MOSQ_EVT_EXT_AUTH_START: c_int = 4;
 pub const MOSQ_EVT_EXT_AUTH_CONTINUE: c_int = 5;
 pub const MOSQ_EVT_CONTROL: c_int = 6;
 pub const MOSQ_EVT_MESSAGE: c_int = 7;
+pub const MOSQ_EVT_TICK: c_int = 9;
+pub const MOSQ_EVT_DISCONNECT: c_int = 10;
+pub const MOSQ_EVT_MESSAGE_OUT: c_int = 27;
 
 #[repr(C)]
 pub struct MosquittoOpt {
@@ -67,6 +70,25 @@ pub struct MosquittoEvtMessage {
     pub qos: u8,
     pub reason_code: u8,
     pub retain: bool,
+    pub future2: [*mut c_void; 4],
+}
+
+#[repr(C)]
+#[allow(deprecated)] // libc::time_t is the exact C ABI type used by mosquitto_evt_tick.
+pub struct MosquittoEvtTick {
+    pub future: *mut c_void,
+    pub now_ns: libc::c_long,
+    pub next_ms: libc::c_long,
+    pub now_s: libc::time_t,
+    pub next_s: libc::time_t,
+    pub future2: [*mut c_void; 4],
+}
+
+#[repr(C)]
+pub struct MosquittoEvtDisconnect {
+    pub future: *mut c_void,
+    pub client: *mut c_void,
+    pub reason: c_int,
     pub future2: [*mut c_void; 4],
 }
 

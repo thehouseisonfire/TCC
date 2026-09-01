@@ -38,6 +38,66 @@ pub struct ControlCommand {
     pub allow: Option<bool>,
 }
 
+impl ControlCommand {
+    pub fn handling_error(&self) -> Option<String> {
+        let Some(kind) = ControlCommandKind::parse(&self.command) else {
+            return Some(format!("unsupported command: {}", self.command));
+        };
+        let missing = |field: &str| Some(format!("{}: missing {field}", self.command));
+        let present = |value: Option<&str>| value.is_some_and(|value| !value.trim().is_empty());
+        match kind {
+            ControlCommandKind::DisableClient | ControlCommandKind::EnableClient => {
+                if present(self.username.as_deref()) {
+                    None
+                } else {
+                    missing("username")
+                }
+            }
+            ControlCommandKind::CreateRole | ControlCommandKind::DeleteRole => {
+                if present(self.rolename.as_deref()) {
+                    None
+                } else {
+                    missing("rolename")
+                }
+            }
+            ControlCommandKind::CreateGroup | ControlCommandKind::DeleteGroup => {
+                if present(self.groupname.as_deref()) {
+                    None
+                } else {
+                    missing("groupname")
+                }
+            }
+            ControlCommandKind::AddGroupClient | ControlCommandKind::RemoveGroupClient => {
+                if !present(self.groupname.as_deref()) {
+                    missing("groupname")
+                } else if !present(self.username.as_deref()) {
+                    missing("username")
+                } else {
+                    None
+                }
+            }
+            ControlCommandKind::AddRoleAcl | ControlCommandKind::RemoveRoleAcl => {
+                if !present(self.rolename.as_deref()) {
+                    missing("rolename")
+                } else if !present(self.acltype.as_deref()) {
+                    missing("acltype")
+                } else if !present(self.topic.as_deref()) {
+                    missing("topic")
+                } else if self
+                    .acltype
+                    .as_deref()
+                    .and_then(AclType::from_control_str)
+                    .is_none()
+                {
+                    Some(format!("{}: unsupported acltype", self.command))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlCommandKind {
     DisableClient,
@@ -91,6 +151,7 @@ pub struct ControlEnforcementTargets {
     pub kick_usernames: Vec<String>,
     pub notify_events: Vec<ControlNotifyEvent>,
     pub persist_warning: Option<String>,
+    pub command_errors: Vec<Option<String>>,
 }
 
 #[derive(Debug, Clone)]

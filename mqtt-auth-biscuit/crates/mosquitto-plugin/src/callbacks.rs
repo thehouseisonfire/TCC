@@ -1,6 +1,9 @@
 use super::{
-    apply_dynamic_security_control_enforcement, disconnect_expired_acl_client,
-    log_static_acl_policy_bias,
+    DYNAMIC_SECURITY_CONTROL_RESPONSE_TOPIC, apply_dynamic_security_control_disconnects,
+    apply_dynamic_security_control_enforcement, cancel_deferred_control_disconnect,
+    defer_control_disconnect_until_response, disconnect_expired_acl_client,
+    has_deferred_control_disconnect, is_pending_control_response, log_static_acl_policy_bias,
+    mark_control_response_dispatched, take_dispatched_control_disconnects,
 };
 use crate::auth::AuthError;
 use crate::auth_runtime::{
@@ -8,13 +11,11 @@ use crate::auth_runtime::{
 };
 use crate::authz::{AuthzOutcome, AuthzParams, check_authorization, check_token_expiry};
 use crate::identity_binding::enforce_identity_binding;
-use crate::mosquitto_ffi::ffi_utils::{
-    acl_payload_bytes, bytes_from_c_void, control_payload_bytes, message_payload_bytes,
-};
+use crate::mosquitto_ffi::ffi_utils::{bytes_from_c_void, control_payload_bytes};
 use crate::mosquitto_ffi::mosquitto_abi::{
-    MOSQ_ACL_CONTROL, MOSQ_ACL_WRITE, MOSQ_ERR_ACL_DENIED, MOSQ_ERR_AUTH, MOSQ_ERR_INVAL,
-    MOSQ_ERR_PLUGIN_DEFER, MOSQ_ERR_SUCCESS, MosquittoEvtAclCheck, MosquittoEvtBasicAuth,
-    MosquittoEvtControl, MosquittoEvtExtendedAuth, MosquittoEvtMessage,
+    MOSQ_ACL_CONTROL, MOSQ_ERR_ACL_DENIED, MOSQ_ERR_AUTH, MOSQ_ERR_INVAL, MOSQ_ERR_PLUGIN_DEFER,
+    MOSQ_ERR_SUCCESS, MosquittoEvtAclCheck, MosquittoEvtBasicAuth, MosquittoEvtControl,
+    MosquittoEvtDisconnect, MosquittoEvtExtendedAuth, MosquittoEvtMessage, MosquittoEvtTick,
 };
 use crate::mosquitto_ffi::mosquitto_runtime::{
     log_debug, mosq_client_id_string, mosq_client_username_string, set_control_reauth_signal,
@@ -263,6 +264,13 @@ pub extern "C" fn acl_check_callback(
     let username = normalize_username(mosq_client_username_string(evt.client));
     let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
 
+    // A self-disable command has already changed the policy by the time its
+    // correlated response enters Mosquitto's outbound path. Permit exactly
+    // that targeted response until MESSAGE_OUT confirms it was dispatched.
+    if is_acl_read_only(evt.access) && is_pending_control_response(state, &client_id, &topic) {
+        return MOSQ_ERR_SUCCESS;
+    }
+
     let cached_token = state.cache.get(&client_id);
     if let Some(token_type) = cached_token {
         if is_acl_read_only(evt.access) && !state.config.acl_read_full_authz {
@@ -300,15 +308,6 @@ pub extern "C" fn acl_check_callback(
         state.authz_metrics.observe(outcome);
         match outcome {
             AuthzOutcome::Allowed => {
-                if topic.starts_with("$CONTROL/") && (evt.access & MOSQ_ACL_WRITE) != 0 {
-                    apply_dynamic_security_control_enforcement(
-                        state,
-                        &client_id,
-                        username.as_deref(),
-                        topic.as_ref(),
-                        acl_payload_bytes(evt),
-                    );
-                }
                 if state.config.policy.mode == PolicyMode::StaticAclStrict {
                     return MOSQ_ERR_PLUGIN_DEFER;
                 }
@@ -359,20 +358,74 @@ pub extern "C" fn message_callback(
         return MOSQ_ERR_INVAL;
     }
     let evt = unsafe { event_mut::<MosquittoEvtMessage>(event_data) };
-    let state = unsafe { plugin_state(userdata) };
     if evt.topic.is_null() {
         return MOSQ_ERR_INVAL;
     }
-    let topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
+    let _topic = unsafe { CStr::from_ptr(evt.topic).to_string_lossy() };
+    MOSQ_ERR_SUCCESS
+}
+
+pub extern "C" fn message_out_callback(
+    _event: c_int,
+    event_data: *mut c_void,
+    userdata: *mut c_void,
+) -> c_int {
+    if event_data.is_null() || userdata.is_null() {
+        return MOSQ_ERR_INVAL;
+    }
+    let evt = unsafe { event_ref::<MosquittoEvtMessage>(event_data) };
+    let state = unsafe { plugin_state(userdata) };
+    if !has_deferred_control_disconnect(state) {
+        return MOSQ_ERR_SUCCESS;
+    }
+    if evt.topic.is_null() {
+        return MOSQ_ERR_INVAL;
+    }
+    let topic = unsafe { CStr::from_ptr(evt.topic) };
+    if topic.to_bytes() != DYNAMIC_SECURITY_CONTROL_RESPONSE_TOPIC.as_bytes() {
+        return MOSQ_ERR_SUCCESS;
+    }
+    let Some(client_id) = mosq_client_id_string(evt.client) else {
+        return MOSQ_ERR_SUCCESS;
+    };
+    if evt.payload.is_null() {
+        return MOSQ_ERR_SUCCESS;
+    }
+    let response_payload = unsafe { bytes_from_c_void(evt.payload, evt.payloadlen as usize) };
+    mark_control_response_dispatched(state, &client_id, response_payload);
+    MOSQ_ERR_SUCCESS
+}
+
+pub extern "C" fn tick_callback(
+    _event: c_int,
+    event_data: *mut c_void,
+    userdata: *mut c_void,
+) -> c_int {
+    if event_data.is_null() || userdata.is_null() {
+        return MOSQ_ERR_INVAL;
+    }
+    let _evt = unsafe { event_mut::<MosquittoEvtTick>(event_data) };
+    let state = unsafe { plugin_state(userdata) };
+    if !has_deferred_control_disconnect(state) {
+        return MOSQ_ERR_SUCCESS;
+    }
+    let kick_targets = take_dispatched_control_disconnects(state);
+    apply_dynamic_security_control_disconnects(state, kick_targets);
+    MOSQ_ERR_SUCCESS
+}
+
+pub extern "C" fn disconnect_callback(
+    _event: c_int,
+    event_data: *mut c_void,
+    userdata: *mut c_void,
+) -> c_int {
+    if event_data.is_null() || userdata.is_null() {
+        return MOSQ_ERR_INVAL;
+    }
+    let evt = unsafe { event_ref::<MosquittoEvtDisconnect>(event_data) };
     if let Some(client_id) = mosq_client_id_string(evt.client) {
-        let username = mosq_client_username_string(evt.client);
-        apply_dynamic_security_control_enforcement(
-            state,
-            &client_id,
-            username.as_deref(),
-            topic.as_ref(),
-            message_payload_bytes(evt),
-        );
+        let state = unsafe { plugin_state(userdata) };
+        cancel_deferred_control_disconnect(state, &client_id);
     }
     MOSQ_ERR_SUCCESS
 }
@@ -487,13 +540,51 @@ pub extern "C" fn control_callback(
                 log_debug(&format!(
                     "Control authorized: client={client_id} topic={topic}"
                 ));
-                apply_dynamic_security_control_enforcement(
+                let payload = control_payload_bytes(evt);
+                let enforcement = apply_dynamic_security_control_enforcement(
                     state,
                     &client_id,
                     username.as_deref(),
                     topic.as_ref(),
-                    control_payload_bytes(evt),
+                    payload,
                 );
+                match enforcement {
+                    Ok(mut enforcement) => {
+                        let response = super::dynamic_security_control_response(
+                            payload,
+                            &enforcement.command_errors,
+                        );
+                        let self_disconnect = enforcement
+                            .kick_targets
+                            .iter()
+                            .position(|target| target == &client_id)
+                            .map(|index| enforcement.kick_targets.remove(index));
+                        let self_disconnect_deferred =
+                            self_disconnect.as_deref().is_some_and(|target| {
+                                defer_control_disconnect_until_response(
+                                    state,
+                                    target,
+                                    response.as_bytes(),
+                                )
+                            });
+                        let response_published =
+                            super::publish_dynamic_security_control_response(&client_id, &response);
+                        if let Some(target) = self_disconnect
+                            && (!self_disconnect_deferred || !response_published)
+                        {
+                            cancel_deferred_control_disconnect(state, &target);
+                            enforcement.kick_targets.push(target);
+                        }
+                        apply_dynamic_security_control_disconnects(state, enforcement.kick_targets);
+                    }
+                    Err(error) => {
+                        let command_errors =
+                            super::dynamic_security_control_command_errors(payload, &error);
+                        let response =
+                            super::dynamic_security_control_response(payload, &command_errors);
+                        super::publish_dynamic_security_control_response(&client_id, &response);
+                    }
+                }
                 if state.config.policy.mode == PolicyMode::StaticAclStrict {
                     return MOSQ_ERR_PLUGIN_DEFER;
                 }

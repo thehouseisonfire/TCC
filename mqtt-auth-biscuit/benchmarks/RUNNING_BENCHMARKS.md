@@ -720,7 +720,7 @@ only Prometheus's externally accessed query API uses TLS.
 For the microbenchmark or single-run metrics collector over TLS:
 
 ```bash
-uv run --locked python benchmarks/mqtt_auth_client.py --token1 "<token>" --token2 "<token>" --tls
+uv run --locked python benchmarks/mqtt_auth_client.py --token1 "<token>" --token2 "<token>" --token1-topic "sensors/<client_id>/before" --token2-topic "sensors/<client_id>/after" --tls
 uv run --locked python benchmarks/metrics_collector.py --tls --port 8883
 ```
 
@@ -785,7 +785,7 @@ Defaults:
 For the MQTT `AUTH` reauthentication microbenchmark only:
 
 ```bash
-uv run --locked python benchmarks/mqtt_auth_client.py --token1 "<token>" --token2 "<token>"
+uv run --locked python benchmarks/mqtt_auth_client.py --token1 "<token>" --token2 "<token>" --token1-topic "sensors/<client_id>/before" --token2-topic "sensors/<client_id>/after"
 ```
 
 You can also monitor resource usage via:

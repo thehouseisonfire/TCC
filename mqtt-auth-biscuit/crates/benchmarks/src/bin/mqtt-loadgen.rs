@@ -2537,18 +2537,21 @@ async fn apply_fanout_churn(
             async {
                 let correlation = format!("fanout-churn-{}", args.fanout_churn_after_messages);
                 let correlated = correlated_control_payload(payload.as_bytes(), &correlation)?;
-                publish_and_wait(publisher, publisher_eventloop, topic, correlated, 1).await?;
-                poll_until(publisher_eventloop, Duration::from_secs(10), |event| {
-                    let Event::Incoming(Packet::Publish(response)) = event else {
-                        return None;
-                    };
-                    match validate_control_response(&response.payload, &correlation) {
-                        Ok(true) => Some(Ok(())),
-                        Ok(false) => None,
-                        Err(err) => Some(Err(err)),
-                    }
-                })
-                .await?
+                let expected_responses = control_command_count(&correlated)?;
+                let response_topic = args
+                    .control_response_topic
+                    .as_deref()
+                    .unwrap_or("$CONTROL/dynamic-security/v1/response");
+                publish_fanout_control_and_wait(
+                    publisher,
+                    publisher_eventloop,
+                    topic,
+                    correlated,
+                    response_topic,
+                    &correlation,
+                    expected_responses,
+                )
+                .await
             }
             .await
         }
@@ -4050,19 +4053,13 @@ async fn run_fanout(args: Args) -> Result<Output> {
     }
     let (publisher, mut publisher_eventloop) =
         connect_fanout_publisher(&args, &fallback_password).await?;
-    if args.fanout_churn_kind.as_deref() == Some("dynamic_security_control") {
-        let response_topic = args
-            .control_response_topic
-            .as_deref()
-            .unwrap_or("$CONTROL/dynamic-security/v1/response");
-        let codes =
-            subscribe_and_wait(&publisher, &mut publisher_eventloop, response_topic, 1).await?;
-        if codes.iter().any(|code| !matches!(code, 0..=2)) {
-            runtime
-                .errors
-                .push(format!("fanout_control_response_suback_rejected:{codes:?}"));
-        }
-    }
+    prepare_fanout_control_responses(
+        &args,
+        &publisher,
+        &mut publisher_eventloop,
+        &mut runtime.errors,
+    )
+    .await?;
     let publishing_done = Arc::new(AtomicBool::new(false));
     let churn_receipts = Arc::new(AtomicUsize::new(0));
     let subscriber_tasks = if fanout_ready {
@@ -4273,6 +4270,13 @@ async fn run_fanout_publisher(args: Args) -> Result<Output> {
     let published = if ready {
         let (publisher, mut publisher_eventloop) =
             connect_fanout_publisher(&args, &fallback_password).await?;
+        prepare_fanout_control_responses(
+            &args,
+            &publisher,
+            &mut publisher_eventloop,
+            &mut runtime.errors,
+        )
+        .await?;
         let published = publish_fanout(
             &args,
             &publisher,
@@ -4324,6 +4328,30 @@ async fn run_fanout_publisher(args: Args) -> Result<Output> {
             metrics: &metrics,
         },
     ))
+}
+
+fn fanout_control_response_topic(args: &Args) -> Option<&str> {
+    (args.fanout_churn_kind.as_deref() == Some("dynamic_security_control")).then(|| {
+        args.control_response_topic
+            .as_deref()
+            .unwrap_or("$CONTROL/dynamic-security/v1/response")
+    })
+}
+
+async fn prepare_fanout_control_responses(
+    args: &Args,
+    publisher: &AsyncClient,
+    publisher_eventloop: &mut rumqttc::EventLoop,
+    errors: &mut Vec<String>,
+) -> Result<()> {
+    let Some(response_topic) = fanout_control_response_topic(args) else {
+        return Ok(());
+    };
+    let codes = subscribe_and_wait(publisher, publisher_eventloop, response_topic, 1).await?;
+    if codes.iter().any(|code| !matches!(code, 0..=2)) {
+        errors.push(format!("fanout_control_response_suback_rejected:{codes:?}"));
+    }
+    Ok(())
 }
 
 async fn resolve_worker_password(
@@ -4755,7 +4783,21 @@ fn correlated_control_payload(payload: &[u8], correlation: &str) -> Result<Vec<u
         .map_err(|err| MqttHelperError::Message(format!("control_payload_encode_failed:{err}")))
 }
 
-fn validate_control_response(payload: &[u8], correlation: &str) -> Result<bool> {
+fn control_command_count(payload: &[u8]) -> Result<usize> {
+    let value: Value = serde_json::from_slice(payload)
+        .map_err(|err| MqttHelperError::Message(format!("control_payload_invalid:{err}")))?;
+    value
+        .get("commands")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .ok_or_else(|| MqttHelperError::Message("control payload missing commands".to_string()))
+}
+
+fn validate_control_response(
+    payload: &[u8],
+    correlation: &str,
+    expected_responses: usize,
+) -> Result<bool> {
     let value: Value = serde_json::from_slice(payload)
         .map_err(|err| MqttHelperError::Message(format!("control_response_invalid_json:{err}")))?;
     let responses = value
@@ -4769,12 +4811,22 @@ fn validate_control_response(payload: &[u8], correlation: &str) -> Result<bool> 
             "control_response_empty_responses".to_string(),
         ));
     }
-    if responses.iter().any(|response| {
-        response.get("correlationData").and_then(Value::as_str) != Some(correlation)
-    }) {
+    let correlated = responses
+        .iter()
+        .filter(|response| {
+            response.get("correlationData").and_then(Value::as_str) == Some(correlation)
+        })
+        .collect::<Vec<_>>();
+    if correlated.is_empty() {
         return Ok(false);
     }
-    for response in responses {
+    if correlated.len() != expected_responses {
+        return Err(MqttHelperError::Message(format!(
+            "control_response_count_mismatch:expected={expected_responses}:actual={}",
+            correlated.len()
+        )));
+    }
+    for response in correlated {
         if let Some(error) = response.get("error").and_then(Value::as_str)
             && !error.is_empty()
         {
@@ -4791,6 +4843,83 @@ fn validate_control_response(payload: &[u8], correlation: &str) -> Result<bool> 
     Ok(true)
 }
 
+#[derive(Default)]
+struct FanoutControlExchangeState {
+    publish_complete: bool,
+    response_complete: bool,
+}
+
+impl FanoutControlExchangeState {
+    const fn is_complete(&self) -> bool {
+        self.publish_complete && self.response_complete
+    }
+
+    fn observe_response(
+        &mut self,
+        payload: &[u8],
+        correlation: &str,
+        expected_responses: usize,
+    ) -> Result<()> {
+        if validate_control_response(payload, correlation, expected_responses)? {
+            self.response_complete = true;
+        }
+        Ok(())
+    }
+}
+
+async fn publish_fanout_control_and_wait(
+    client: &AsyncClient,
+    eventloop: &mut rumqttc::EventLoop,
+    request_topic: &str,
+    request_payload: Vec<u8>,
+    response_topic: &str,
+    correlation: &str,
+    expected_responses: usize,
+) -> Result<()> {
+    let notice = client
+        .publish_tracked(
+            request_topic,
+            rumqttc::QoS::AtLeastOnce,
+            false,
+            request_payload,
+        )
+        .await?;
+    let mut completion = Box::pin(notice.wait_completion_async());
+    let mut state = FanoutControlExchangeState::default();
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            tokio::select! {
+                result = &mut completion, if !state.publish_complete => {
+                    result.map_err(|err| {
+                        MqttHelperError::Message(format!("control_publish_failed:{err}"))
+                    })?;
+                    state.publish_complete = true;
+                }
+                event = eventloop.poll() => {
+                    let event = event?;
+                    if !state.response_complete
+                        && let Event::Incoming(Packet::Publish(response)) = event
+                        && response.topic == response_topic
+                    {
+                        state.observe_response(
+                            &response.payload,
+                            correlation,
+                            expected_responses,
+                        )?;
+                    }
+                }
+            }
+            if state.is_complete() {
+                return Ok::<(), MqttHelperError>(());
+            }
+        }
+    })
+    .await
+    .map_err(|_| MqttHelperError::Message("control_exchange_timeout".to_string()))??;
+    Ok(())
+}
+
 async fn publish_control_and_validate(
     args: &Args,
     client: &AsyncClient,
@@ -4802,6 +4931,13 @@ async fn publish_control_and_validate(
 ) {
     let correlated = match correlated_control_payload(payload, &correlation) {
         Ok(payload) => payload,
+        Err(err) => {
+            result.errors.push(err.to_string());
+            return;
+        }
+    };
+    let expected_responses = match control_command_count(&correlated) {
+        Ok(count) => count,
         Err(err) => {
             result.errors.push(err.to_string());
             return;
@@ -4823,7 +4959,7 @@ async fn publish_control_and_validate(
             let payload = response_rx.recv().await.ok_or_else(|| {
                 MqttHelperError::Message("control_response_channel_closed".to_string())
             })?;
-            if validate_control_response(&payload, &correlation)? {
+            if validate_control_response(&payload, &correlation, expected_responses)? {
                 return Ok::<(), MqttHelperError>(());
             }
         }
@@ -6542,20 +6678,87 @@ mod tests {
         assert!(validate_control_response(
             br#"{"responses":[{"command":"listClients","correlationData":"worker-1","data":{}},{"command":"listRoles","correlationData":"worker-1","data":{}}]}"#,
             "worker-1",
+            2,
         )
         .expect("response should validate"));
         assert!(
             validate_control_response(
                 br#"{"responses":[{"command":"listClients","correlationData":"other","data":{}}]}"#,
                 "worker-1",
+                1,
             )
             .is_ok_and(|matched| !matched)
         );
         assert!(validate_control_response(
             br#"{"responses":[{"command":"listClients","correlationData":"worker-1","error":"denied"}]}"#,
             "worker-1",
+            1,
         )
         .is_err());
+        assert!(validate_control_response(
+            br#"{"responses":[{"command":"listClients","correlationData":"other"},{"command":"listRoles","correlationData":"worker-1"}]}"#,
+            "worker-1",
+            1,
+        )
+        .expect("unrelated responses should be ignored"));
+        assert!(
+            validate_control_response(
+                br#"{"responses":[{"command":"listClients","correlationData":"worker-1"}]}"#,
+                "worker-1",
+                2,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_control_response(br#"{"error":"endpoint not available"}"#, "worker-1", 1,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn fanout_control_exchange_preserves_response_before_publish_completion() {
+        let mut state = FanoutControlExchangeState::default();
+        state
+            .observe_response(
+                br#"{"responses":[{"command":"disableClient","correlationData":"fanout-1"}]}"#,
+                "fanout-1",
+                1,
+            )
+            .expect("response should validate");
+
+        assert!(state.response_complete);
+        assert!(!state.is_complete());
+
+        state.publish_complete = true;
+        assert!(state.is_complete());
+    }
+
+    #[test]
+    fn all_fanout_publishers_prepare_dynamic_security_control_responses() {
+        for role in ["combined", "publisher"] {
+            let args = Args::parse_from([
+                "mqtt-loadgen",
+                "--mode",
+                "fanout",
+                "--fanout-role",
+                role,
+                "--fanout-churn-kind",
+                "dynamic_security_control",
+            ]);
+            assert_eq!(
+                fanout_control_response_topic(&args),
+                Some("$CONTROL/dynamic-security/v1/response")
+            );
+        }
+
+        let unrelated = Args::parse_from([
+            "mqtt-loadgen",
+            "--mode",
+            "fanout",
+            "--fanout-role",
+            "publisher",
+        ]);
+        assert_eq!(fanout_control_response_topic(&unrelated), None);
     }
 
     #[test]

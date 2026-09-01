@@ -1213,6 +1213,60 @@ def _range_values_with_scrape_timestamps(
     return unique
 
 
+def _instant_vector_value(payload: dict[str, Any], metric: str) -> float:
+    data = payload.get("data")
+    results = data.get("result") if isinstance(data, dict) else None
+    if not isinstance(results, list) or len(results) != 1:
+        raise RuntimeError(f"{metric}: expected exactly one Prometheus instant series")
+    value = results[0].get("value") if isinstance(results[0], dict) else None
+    if not isinstance(value, list) or len(value) != 2:
+        raise RuntimeError(f"{metric}: Prometheus instant value missing")
+    return float(value[1])
+
+
+def _wait_for_prometheus_samples_after(
+    base_url: str,
+    selectors: dict[str, str],
+    timestamp: float,
+    ca_file: str | None,
+    insecure: bool,
+    *,
+    timeout_seconds: float = 10.0,
+) -> dict[str, float]:
+    """Wait until every selector has a source sample at or after ``timestamp``."""
+    deadline = time.monotonic() + timeout_seconds
+    observed: dict[str, float] = {}
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            observed = {
+                metric: _instant_vector_value(
+                    _prom_query(base_url, f"max(timestamp({selector}))", ca_file, insecure),
+                    f"{metric} scrape timestamp",
+                )
+                for metric, selector in selectors.items()
+            }
+            if all(sampled_at >= timestamp for sampled_at in observed.values()):
+                return observed
+            last_error = None
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+        time.sleep(0.25)
+    detail = f"last source timestamps={observed}"
+    if last_error is not None:
+        detail = f"last error={last_error!r}"
+    raise RuntimeError(
+        f"timed out waiting for Prometheus source samples at or after {timestamp}: {detail}"
+    )
+
+
+def _aligned_prometheus_query_end(query_start: float, minimum_end: float) -> float:
+    """Return the first 250 ms range evaluation at or after ``minimum_end``."""
+    step_seconds = 0.25
+    steps = max(0, math.ceil((minimum_end - query_start) / step_seconds))
+    return query_start + steps * step_seconds
+
+
 def _python_subprocess_env(extra_env: dict[str, str] | None = None) -> dict[str, str]:
     env = os.environ.copy()
     repo_pythonpath = str(REPO_ROOT)
@@ -1385,12 +1439,20 @@ def _resource_interval(
         compose_files=compose_files,
         compose_project_name=compose_project_name,
     )
-    query_start = workload_started_at - 2.0
-    query_end = max(time.time(), workload_finished_at + 1.25)
-    if query_end > time.time():
-        time.sleep(query_end - time.time())
     cpu_selector = f'container_cpu_usage_seconds_total{{id=~".*{container_id}.*"}}'
     memory_selector = f'container_memory_working_set_bytes{{id=~".*{container_id}.*"}}'
+    observed_scrapes = _wait_for_prometheus_samples_after(
+        base_url,
+        {"cpu": cpu_selector, "memory": memory_selector},
+        workload_finished_at,
+        ca_file,
+        insecure,
+    )
+    query_start = workload_started_at - 2.0
+    query_end = _aligned_prometheus_query_end(
+        query_start,
+        max(time.time(), *observed_scrapes.values()),
+    )
     cpu_payload = _prom_range_query(
         base_url,
         f"sum({cpu_selector})",

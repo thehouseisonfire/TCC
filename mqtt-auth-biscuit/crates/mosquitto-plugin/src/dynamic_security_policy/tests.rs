@@ -698,7 +698,7 @@ fn apply_control_payload_disable_client_marks_user_disabled_and_returns_client_i
 }
 
 #[test]
-fn apply_control_payload_ignores_non_disable_commands() {
+fn apply_control_payload_reports_unsupported_commands() {
     let path = write_test_dynsec_config();
     let policy = DynamicSecurityPolicy::new(path.clone(), Duration::from_secs(60))
         .expect("policy must load");
@@ -710,6 +710,10 @@ fn apply_control_payload_ignores_non_disable_commands() {
     assert!(targets.kick_client_ids.is_empty());
     assert!(targets.kick_usernames.is_empty());
     assert!(targets.notify_events.is_empty());
+    assert_eq!(
+        targets.command_errors,
+        vec![Some("unsupported command: listRoles".to_string())]
+    );
     assert!(
         policy
             .check(
@@ -719,6 +723,29 @@ fn apply_control_payload_ignores_non_disable_commands() {
                 ACL_WRITE
             )
             .expect("policy check should succeed")
+    );
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn apply_control_payload_distinguishes_supported_noop_from_unhandled_command() {
+    let path = write_test_dynsec_config();
+    let policy = DynamicSecurityPolicy::new(path.clone(), Duration::from_secs(60))
+        .expect("policy must load");
+
+    let targets = policy
+        .apply_control_payload(
+            br#"{"commands":[{"command":"removeGroupClient","groupname":"missing","username":"nobody"},{"command":"listRoles"},{"command":"disableClient"}]}"#,
+        )
+        .expect("control payload should be classified");
+
+    assert_eq!(
+        targets.command_errors,
+        vec![
+            None,
+            Some("unsupported command: listRoles".to_string()),
+            Some("disableClient: missing username".to_string()),
+        ]
     );
     let _ = fs::remove_file(path);
 }

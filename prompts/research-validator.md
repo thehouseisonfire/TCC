@@ -40,7 +40,7 @@ Compare PROGRESS.md claims against codebase evidence for each component:
 - netem separation (network_mode: service:mosquitto, CAP_NET_ADMIN isolation)
 - Correct security boundaries (cAdvisor host mounts separated from Prometheus)
 
-**Token Generation (benchmarks/gen_tokens.rs):**
+**Token Generation (`crates/benchmarks/src/main.rs`):**
 - Deterministic JWT (ES256, baseline/short-lived/padded variants)
 - Deterministic Biscuit (baseline, multi-block 1/5/25, delegated, short-lived)
 - Private key isolation (keys exist only in generator memory, only public keys exported)
@@ -48,7 +48,7 @@ Compare PROGRESS.md claims against codebase evidence for each component:
 **Benchmark Harness (benchmarks/):**
 - run_scenarios.py: scenario orchestration
 - loadgen.py: multi-client MQTT with sync_connect option
-- mqtt5_auth_client.py: raw-socket MQTT5 AUTH packet microbenchmark
+- `mqtt_auth_client.py`: MQTT 5 AUTH client compatibility entrypoint
 - metrics_collector.py: legacy single-run benchmark
 
 #### 4. IDENTIFIED GAP ANALYSIS

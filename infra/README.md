@@ -115,7 +115,6 @@ Use `HCLOUD_TOKEN` from the environment. Do not put API tokens in repo files.
 Typical local flow:
 
 ```bash
-cd /home/eagle/TCC2
 terraform -chdir=infra/terraform init
 terraform -chdir=infra/terraform plan -var-file=terraform.tfvars
 terraform -chdir=infra/terraform apply -var-file=terraform.tfvars

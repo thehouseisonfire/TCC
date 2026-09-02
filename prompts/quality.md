@@ -9,9 +9,16 @@ Perform a thorough code + architecture audit of the Mosquitto authentication/aut
 and then propose concrete refactorings, tests, and benchmark changes that reduce operational risk, lower CPU/latency under load, improve reproducibility, and make the codebase easier to maintain and extend. If a proposed change would introduce unacceptable security trade-offs or not meaningfully improve metrics, explicitly call that out and avoid frivolous refactors.
 
 ## Context
-- **Repo composition**: Rust crates (`mosquitto-plugin`, `token-issuer`, `benchmarks`) + Python benchmark scripts + Docker Compose orchestration + Prometheus/cAdvisor telemetry. (See `benchmarks/`, `crates/mosquitto-plugin/src/`, `docker/`, `benchmarks/run_scenarios.py`.)
+- **Repo composition**: Rust crates (`mosquitto-plugin`, `token-issuer`,
+  `authz-server`, `benchmarks`) plus Python orchestration, Docker Compose, and
+  Prometheus/cAdvisor telemetry. Paths below are relative to
+  `mqtt-auth-biscuit/`.
 - **Primary languages**: Rust (plugin + core logic), Python (benchmark runner + clients), shell/Docker for orchestration.
-- **Runtime**: Mosquitto broker (C) loads a Rust-built `.so` plugin via FFI, using `mosquitto_plugin_init` and callback hooks (e.g., `MOSQ_EVT_Basic_AUTH`, `MOSQ_EVT_EXT_AUTH_START`, `MOSQ_EVT_ACL_CHECK`, `MOSQ_EVT_MESSAGE`, `MOSQ_EVT_CONTROL`).
+- **Runtime**: Mosquitto broker (C) loads a Rust-built `.so` plugin via FFI,
+  using `mosquitto_plugin_init` and callback hooks such as
+  `MOSQ_EVT_BASIC_AUTH`, `MOSQ_EVT_EXT_AUTH_START`,
+  `MOSQ_EVT_EXT_AUTH_CONTINUE`, `MOSQ_EVT_ACL_CHECK`, `MOSQ_EVT_MESSAGE`, and
+  `MOSQ_EVT_CONTROL`.
 - **Token types**: JWT (ES256 baseline, `jsonwebtoken` + AWS-LC backend) and Biscuit (Datalog, `biscuit-auth`, Ed25519).
 - **Benchmark goals**: Latency (p50/p95/p99), throughput (mps), CPU/memory, MTU/fragmentation, thundering-herd reconnect, policy complexity scaling, hybrid/HTTP fallback behavior, reproducibility via Docker resource controls.
 - **Key files / entrypoints** (examples you should inspect):
@@ -22,7 +29,8 @@ and then propose concrete refactorings, tests, and benchmark changes that reduce
   - `crates/mosquitto-plugin/src/authz.rs`
   - `crates/mosquitto-plugin/src/cache.rs`
   - `benchmarks/run_scenarios.py`, `benchmarks/loadgen.py`, `benchmarks/mqtt_auth_client.py`
-  - `docker/docker-compose.yml`, `docker/Dockerfile.mosquitto`, `docker/authz_server.py`
+  - `docker/docker-compose.yml`, `docker/Dockerfile.mosquitto.custom`,
+    `crates/authz-server/src/main.rs`
 
 ## Success Criteria
 - All proposed refactors preserve correct JWT and Biscuit semantics (see guardrails below) and do not weaken security.
@@ -84,7 +92,8 @@ and then propose concrete refactorings, tests, and benchmark changes that reduce
 - Extract common JSON schema and request/response models into `crate::types` and shared Python schemas (or OpenAPI) for bench & authz service.
 - Make HTTP policy client non-blocking or run it on a dedicated thread-pool with bounded latency to avoid blocking broker callbacks.
 - Add feature flags/config options: `acl_read_full_authz`, `biscuit_transport_mode`, `cache_ttl_clamp_margin`.
-- Improve benchmark runner reproducibility: automated iperf3 baseline, packet captures for fragmentation scenarios, and emqtt-bench integration for client-per-container mode.
+- Review the implemented automated iperf3 baseline, packet capture, and
+  container-per-client modes for correctness and remaining reproducibility gaps.
 
 ## Output Format
 
@@ -130,4 +139,3 @@ For each prioritized finding (ordered by severity/impact):
 
 ## Output Delivery
 Return your answer as a single structured document (markdown) following the **Output Format** above. Include concrete Rust code snippets that are ready to paste into the repo and example `pytest`/`cargo test` snippets where relevant. If an item cannot be fully resolved without running the harness, provide the exact test/benchmark command and the observable that would confirm the fix.
-

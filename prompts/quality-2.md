@@ -8,7 +8,8 @@ Your objective is to verify strict adherence to the research constraints, ensure
 If the current design is already near-optimal, you must explicitly state that and avoid suggesting superficial or unjustified changes.
 
 ## Context
-- **Broker**: Mosquitto 2.0.x, using the official plugin API.  
+- **Broker**: Repository-pinned Mosquitto source build with the password-length
+  event ABI required by the plugin, using the official plugin API.
 - **Protocol**: MQTT 5.0, including CONNECT, AUTH, and CONTROL flows.  
 - **Implementation Language**: Rust for the security logic, exposed to Mosquitto via C-compatible FFI in a shared object (.so) plugin.  
 - **Token Formats**:  
@@ -18,9 +19,12 @@ If the current design is already near-optimal, you must explicitly state that an
   - `ARTICLE.md` defines non-negotiable constraints for Mosquitto plugin lifecycle usage, JWT correctness guardrails, Biscuit semantics, and experimental methodology. Treat these as ground truth; do not simplify or override them.  
 - **Experimental Environment**:  
   - Docker-based testbed with controlled CPU and memory allocation (`--cpus`, `--memory`, `--cpuset-cpus`), possible blkio constraints, and network emulation via `tc`/`netem`.  
-  - MQTT load via tools such as `mqtt-stresser` and `emqtt-bench`, optionally orchestrated with Mininet/Containernet for more complex topologies.  
+  - MQTT load generation via the repository's Rust `mqtt-loadgen` binary and
+    Docker topologies implemented by the scenario runner.
 - **Scope**:  
-  - Authentication and authorization flows across MOSQEVTBASICAUTH, MOSQEVTEXTAUTHSTART/CONTINUE, MOSQEVTACLCHECK, MOSQEVTMESSAGE, and MOSQEVTCONTROL events.  
+  - Authentication and authorization flows across `MOSQ_EVT_BASIC_AUTH`,
+    `MOSQ_EVT_EXT_AUTH_START`, `MOSQ_EVT_EXT_AUTH_CONTINUE`,
+    `MOSQ_EVT_ACL_CHECK`, `MOSQ_EVT_MESSAGE`, and `MOSQ_EVT_CONTROL` events.
   - Token issuance assumed to be handled by an external authority; the plugin focuses on verification, policy evaluation, and enforcement.  
 
 ## Success Criteria
@@ -36,7 +40,8 @@ If the current design is already near-optimal, you must explicitly state that an
    - Verify correct use of `mosquitto_plugin_version` and `mosquitto_plugin_init` for lifecycle management and API compatibility checks.
    - Ensure all long-lived Rust state is anchored via the `userdata` pointer provided by Mosquitto, avoiding ad-hoc global state.
    - Confirm that callbacks are registered only for required events (BASIC_AUTH, EXT_AUTH, ACL_CHECK, MESSAGE, CONTROL) and that each callback correctly distinguishes event subtypes (e.g., ACL read/write/subscribe).
-   - Check that authorization costs in `MOSQEVT_ACL_CHECK` scale sensibly, especially in fan-out scenarios where checks are invoked per subscriber.
+   - Check that authorization costs in `MOSQ_EVT_ACL_CHECK` scale sensibly,
+     especially in fan-out scenarios where checks are invoked per subscriber.
 
 2. **JWT Correctness Guardrails**
    - Ensure Base64URL-encoded JWTs are handled as-is, preserving their natural size inflation (~33%) for MTU/fragmentation studies without using binary JWT shortcuts.

@@ -45,7 +45,7 @@ All points below are **hard constraints** for implementation and must be treated
 
 - The plugin lifecycle is defined by Mosquitto calling `mosquitto_plugin_version` to verify API compatibility and then `mosquitto_plugin_init` to initialize the module.
 - `mosquitto_plugin_init` provides configuration and a pointer to user memory (`user_data`) that Mosquitto will preserve and pass back to subsequent callback invocations, so long-lived Rust state must be anchored through this mechanism rather than invented global state.
-- Security-relevant events that must be treated as ground truth are: `MOSQ_EVT_Basic_AUTH`, `MOSQ_EVT_EXT_AUTH_START`, `MOSQ_EVT_EXT_AUTH_CONTINUE`, `MOSQ_EVT_ACL_CHECK`, `MOSQ_EVT_MESSAGE`, and `MOSQ_EVT_CONTROL`.
+- Security-relevant events that must be treated as ground truth are: `MOSQ_EVT_BASIC_AUTH`, `MOSQ_EVT_EXT_AUTH_START`, `MOSQ_EVT_EXT_AUTH_CONTINUE`, `MOSQ_EVT_ACL_CHECK`, `MOSQ_EVT_MESSAGE`, and `MOSQ_EVT_CONTROL`.
 - `MOSQ_EVT_ACL_CHECK` is triggered during message publish request (parameter type `MOSQ_ACL_WRITE`), topic subscription request (parameter type `MOSQ_ACL_SUBSCRIBE`) , and is invoked individually for each subscriber that will receive the message (fan-out, parameter type `MOSQ_ACL_READ`), which means per-message authorization cost can scale with subscriber count if not careful to check the event subtype. It is the primary vector for applying authorization rules.
 - The `$CONTROL` topic is relevant because it is used by Mosquitto's Dynamic Security extension for runtime ACL/RBAC management, so any evaluation scenario involving dynamic ACLs must align to this control-plane behavior rather than an invented interface.
 - Mosquitto provides utilities like `mosquitto_kick_client_by_clientid` / `mosquitto_kick_client_by_username` for forced disconnection.
@@ -120,7 +120,7 @@ not inherit hidden allow semantics from startup defaults.
 
 The proposed solution consists of developing an extension module for Mosquitto, developed in Rust. The choice is justified by Rust's memory safety and performance guarantees, in addition to the native availability of the Biscuit reference implementation. The final artifact will be a dynamic library (*Shared Object* - `.so`) loaded at runtime by Mosquitto.
 
-Using the `cbindgen` tool, C headers (`.h`) will be generated that expose Rust functions to the Mosquitto plugin API (focused on version 2.0+ and MQTT 5.0 protocol). The exported functions will intercept *broker* events, specifically: `MOSQ_EVT_BASIC_AUTH` and `MOSQ_EVT_EXT_AUTH` for authentication; and `MOSQ_EVT_ACL_CHECK`, `MOSQ_EVT_MESSAGE`, and `MOSQ_EVT_CONTROL` for publication, subscription, and control authorization.
+The `cbindgen` configuration generates a C header (`.h`) for the Rust functions exposed to the Mosquitto plugin API. The current plugin targets MQTT 5 and the newer Mosquitto event ABI required for binary CONNECT passwords. Its exported callbacks handle `MOSQ_EVT_BASIC_AUTH`, `MOSQ_EVT_EXT_AUTH_START`, and `MOSQ_EVT_EXT_AUTH_CONTINUE` for authentication, plus `MOSQ_EVT_ACL_CHECK`, `MOSQ_EVT_MESSAGE`, and `MOSQ_EVT_CONTROL` for publication, subscription, and control authorization.
 
 For issuance and verification, the module will integrate the `jsonwebtoken` and `biscuit_auth` libraries. Clients request tokens from an external authority before contacting the *broker*, and the server has the root public key pre-configured. In capability scenarios, a shared fixture token may still be reused intentionally. In strict multi-client parity scenarios, however, the harness provisions one token per client identity so the configured `client_id` binding is actually exercised rather than assumed.
 
@@ -133,11 +133,11 @@ For continuous authorization, the solution will optimize Biscuit performance, av
 
 ## Proposed Environment
 
-The experimental environment will be standardized with Docker (version 29.0.x), hosting Mosquitto (2.0.x) and clients in isolated containers. The module development will use Rust (version 1.92.x), integrating the `biscuit_auth` (6.x, with support for Biscuit 3.0+) and `jsonwebtoken` (10.x.x) libraries. The SQLite database (3.51.x) will be used for scenarios requiring local persistence of access policies (excluding static ACLs and the *Dynamic Security* module).
+The implemented experimental environment uses Docker 29.x, Rust 1.93.1, `biscuit-auth` 6.0.0, `jsonwebtoken` 10.4.0, and bundled SQLite through `rusqlite` 0.39.0. Mosquitto is built from the repository-pinned upstream commit into the `mosquitto:2.1.3-custom` image because the plugin requires the `MOSQ_EVT_BASIC_AUTH` password-length ABI fix and the official `2.1.3-alpine` image is not yet available.
 
 To ensure test integrity and minimize neighborhood noise, Docker's `--cpuset` option will be used to pin the *broker* and load generator processes to distinct and consistent physical cores of the host machine.
 
-Network emulation will use `iperf3` to measure the nominal channel capacity, while `tc` (with the `netem` module) will introduce latency, packet loss, and bandwidth limitation in a controlled manner. More complex topologies will be orchestrated via Mininet or Containernet.
+The current harness uses `iperf3` to measure nominal channel capacity and `tc`/`netem` to introduce controlled latency, packet loss, bandwidth limits, and MTU changes. Mininet or Containernet remain possible future extensions for experiments that require topologies beyond the implemented Docker modes; they are not part of the current runnable harness.
 
 ## Test Scenarios
 

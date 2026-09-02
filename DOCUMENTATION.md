@@ -1,17 +1,24 @@
 # Documentation Hub
 
-Use this file as the entry point to project documentation.
+Use this page as the entry point for maintained project documentation.
 
-## Core Docs
+## Start Here
 
-- Onboarding and quickstart: `mqtt-auth-biscuit/README.md`
-- Benchmark execution runbook: `mqtt-auth-biscuit/benchmarks/RUNNING_BENCHMARKS.md`
-- Scenario policy semantics and parity: `SCENARIO_POLICIES.md`
-- Project status and backlog: `PROGRESS.md`
-- Perf-specific operator guide: `mqtt-auth-biscuit/benchmarks/PERF_PROFILING.md`
-- Benchmark host infrastructure: `infra/README.md`
-- Custom Mosquitto build path: `BUILD-MOSQUITTO.md`
+- [Workspace overview and quick start](README.md)
+- [Plugin overview and local Docker setup](mqtt-auth-biscuit/README.md)
+- [Benchmark execution runbook](mqtt-auth-biscuit/benchmarks/RUNNING_BENCHMARKS.md)
+- [Full benchmark run plan](RUN.md)
+- [Testing and semantic-verification plan](TESTING.md)
+- [Recorded semantic-verification evidence](SEMANTIC-VERIFIED.md)
 
-## Research Context
+## Design and Status
 
-- Research plan and constraints: `ARTICLE.md`
+- [Scenario policy semantics and parity](SCENARIO_POLICIES.md)
+- [Project status and backlog](PROGRESS.md)
+- [Research context and methodology](ARTICLE.md)
+- [Perf-specific operator guide](mqtt-auth-biscuit/benchmarks/PERF_PROFILING.md)
+
+## Build and Infrastructure
+
+- [Benchmark host infrastructure](infra/README.md)
+- [Custom Mosquitto source build](BUILD-MOSQUITTO.md)

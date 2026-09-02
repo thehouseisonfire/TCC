@@ -154,7 +154,7 @@ Build once and reuse across all iterations:
 cd mqtt-auth-biscuit
 cargo build --locked --release -p mosquitto-auth-biscuit
 cargo run --locked -p gen-tokens --bin gen-tokens
-cd ../..
+cd ..
 ```
 
 ### Step 2: Part 1 — Full baseline

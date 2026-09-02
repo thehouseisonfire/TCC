@@ -21,6 +21,7 @@ on:
       - 'run_python_tests.sh'
       - 'scripts/**'
       - 'tools/**'
+      - '**/*.md'
   pull_request:
     branches: [master, main]
     paths:
@@ -41,6 +42,7 @@ on:
       - 'run_python_tests.sh'
       - 'scripts/**'
       - 'tools/**'
+      - '**/*.md'
   schedule:
     - cron: '0 3 * * *'
   workflow_dispatch:
@@ -82,7 +84,11 @@ jobs:
             -p repo-benchmark-host-helper \
             -p repo-benchmark-host-smoke \
             -p repo-check-pins \
+            -p repo-check-docs \
             -p repo-render-benchmark-inventory
+
+      - name: Audit documentation
+        run: ./scripts/check-docs
 
       - name: Check Terraform formatting
         run: terraform -chdir=infra/terraform fmt -check
@@ -159,6 +165,7 @@ jobs:
         run: |
           uv run --locked --group dev pytest -q \
             mqtt-auth-biscuit/benchmarks/test_loadgen_wrapper.py \
+            mqtt-auth-biscuit/benchmarks/test_documentation_contracts.py \
             mqtt-auth-biscuit/benchmarks/test_runner_startup_readiness.py \
             mqtt-auth-biscuit/benchmarks/test_scenario_semantics.py
 

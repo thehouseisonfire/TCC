@@ -106,6 +106,7 @@ cargo fmt --all --manifest-path mqtt-auth-biscuit/Cargo.toml -- --check
 uv run --locked --group dev ruff check .
 uv run --locked --group dev mypy mqtt-auth-biscuit
 ./scripts/check-pins
+./scripts/check-docs
 ```
 
 ## Documentation

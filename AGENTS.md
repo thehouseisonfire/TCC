@@ -15,6 +15,7 @@ This is a reproducible MQTT authorization benchmark workspace. Root Rust helper 
 - `uv run --locked --group dev mypy mqtt-auth-biscuit`: type-check Python benchmark code.
 - `./run_python_tests.sh`: run Python unit and smoke tests; starts Docker Compose when available.
 - `./scripts/check-pins`: audit pinned toolchain and package versions.
+- `./scripts/check-docs`: validate tracked Markdown links, anchors, and citations.
 
 ## Coding Style & Naming Conventions
 

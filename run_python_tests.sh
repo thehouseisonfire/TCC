@@ -17,13 +17,24 @@ export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-python-tests}"
 export RESOURCE_SNAPSHOT_COMPOSE_PROJECT_NAME="$COMPOSE_PROJECT_NAME"
 
 cleanup() {
-  $COMPOSE_BIN "${COMPOSE_FILES[@]}" down
+  local exit_status=$?
+  local cleanup_status=0
+  trap - EXIT
+  set +e
+
   if [ "$TOKEN_FILE_EXISTED" -eq 1 ]; then
-    cp "$TOKEN_BACKUP" "$TOKEN_FILE"
+    cp "$TOKEN_BACKUP" "$TOKEN_FILE" || cleanup_status=$?
   else
-    rm -f "$TOKEN_FILE"
+    rm -f "$TOKEN_FILE" || cleanup_status=$?
   fi
-  rm -rf "$CAPABILITY_OUT_DIR" "$PARITY_OUT_DIR" "$PER_CLIENT_OUT_DIR" "$TOKEN_BACKUP"
+  $COMPOSE_BIN "${COMPOSE_FILES[@]}" down || true
+  rm -rf "$CAPABILITY_OUT_DIR" "$PARITY_OUT_DIR" "$PER_CLIENT_OUT_DIR" "$TOKEN_BACKUP" \
+    || cleanup_status=$?
+
+  if [ "$exit_status" -ne 0 ]; then
+    return "$exit_status"
+  fi
+  return "$cleanup_status"
 }
 trap cleanup EXIT
 
@@ -57,6 +68,7 @@ run_non_docker_python_tests() {
   PYTHONPATH="$WORKDIR" \
     uv run --locked --group dev pytest \
     "$WORKDIR/benchmarks/test_loadgen_wrapper.py" \
+    "$WORKDIR/benchmarks/test_documentation_contracts.py" \
     "$WORKDIR/benchmarks/test_runner_startup_readiness.py" \
     "$WORKDIR/benchmarks/test_packet_analysis.py" \
     "$WORKDIR/benchmarks/test_scenario_semantics.py"
@@ -66,6 +78,8 @@ if [ -f "$TOKEN_FILE" ]; then
   cp "$TOKEN_FILE" "$TOKEN_BACKUP"
   TOKEN_FILE_EXISTED=1
 fi
+
+(cd "$WORKDIR" && cargo run --locked -p gen-tokens --bin gen-tokens)
 
 if ! docker_bridge_available; then
   run_non_docker_python_tests
@@ -78,11 +92,10 @@ fi
 
 $COMPOSE_BIN "${COMPOSE_FILES[@]}" up --build -d "${SERVICES[@]}"
 
-(cd "$WORKDIR" && cargo run --locked -p gen-tokens --bin gen-tokens)
-
 PYTHONPATH="$WORKDIR" \
   uv run --locked --group dev pytest \
   "$WORKDIR/benchmarks/test_loadgen_wrapper.py" \
+  "$WORKDIR/benchmarks/test_documentation_contracts.py" \
   "$WORKDIR/benchmarks/test_runner_startup_readiness.py" \
   "$WORKDIR/benchmarks/test_resource_snapshot.py" \
   "$WORKDIR/benchmarks/test_packet_analysis.py" \

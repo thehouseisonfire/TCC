@@ -2808,7 +2808,7 @@ async fn publish_and_wait(
 ) -> Result<f64> {
     let start = Instant::now();
     client
-        .publish(topic, qos(qos_value)?, false, payload)
+        .publish(topic, payload, rumqttc::PublishOptions::new(qos(qos_value)?))
         .await?;
     if qos_value == 0 {
         poll_until(eventloop, Duration::from_secs(10), |event| {
@@ -2837,7 +2837,7 @@ async fn publish_tracked_and_wait(
 ) -> Result<f64> {
     let start = Instant::now();
     let notice = client
-        .publish_tracked(topic, qos(qos_value)?, false, payload)
+        .publish_tracked(topic, payload, rumqttc::PublishOptions::new(qos(qos_value)?))
         .await?;
     tokio::time::timeout(Duration::from_secs(10), notice.wait_completion_async())
         .await
@@ -2856,7 +2856,11 @@ async fn publish_with_retain_and_wait(
 ) -> Result<f64> {
     let start = Instant::now();
     client
-        .publish(topic, qos(qos_value)?, retain, payload)
+        .publish(
+            topic,
+            payload,
+            rumqttc::PublishOptions::new(qos(qos_value)?).retain(retain),
+        )
         .await?;
     if qos_value == 0 {
         poll_until(eventloop, Duration::from_secs(10), |event| {
@@ -4879,9 +4883,8 @@ async fn publish_fanout_control_and_wait(
     let notice = client
         .publish_tracked(
             request_topic,
-            rumqttc::QoS::AtLeastOnce,
-            false,
             request_payload,
+            rumqttc::PublishOptions::new(rumqttc::QoS::AtLeastOnce),
         )
         .await?;
     let mut completion = Box::pin(notice.wait_completion_async());

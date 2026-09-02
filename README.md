@@ -13,7 +13,6 @@ The plugin is a research prototype and currently supports MQTT 5 only.
 | Path | Purpose |
 | --- | --- |
 | [`mqtt-auth-biscuit/`](mqtt-auth-biscuit/) | Mosquitto plugin, token issuer, authorization server, Docker environment, and benchmark orchestration |
-| [`rumqtt/`](rumqtt/) | Vendored MQTT client and benchmark workspace |
 | [`tools/`](tools/) | Rust implementations of repository-level helper commands |
 | [`scripts/`](scripts/) | Stable operator-facing wrappers for the helper tools |
 | [`infra/`](infra/) | Terraform and Ansible automation for a reproducible benchmark host |

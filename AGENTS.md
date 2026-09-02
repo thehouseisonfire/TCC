@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is a reproducible MQTT authorization benchmark workspace. Root Rust helper binaries live in `tools/*` and are exposed through `scripts/`. The main plugin project is `mqtt-auth-biscuit/`, with Rust crates in `crates/`, Python benchmark orchestration and tests in `benchmarks/`, Docker fixtures in `docker/`, and runtime integration tests in `tests/integration/`. `rumqtt/` is a vendored MQTT benchmark/client workspace. Infrastructure automation lives under `infra/ansible/` and `infra/terraform/`.
+This is a reproducible MQTT authorization benchmark workspace. Root Rust helper binaries live in `tools/*` and are exposed through `scripts/`. The main plugin project is `mqtt-auth-biscuit/`, with Rust crates in `crates/`, Python benchmark orchestration and tests in `benchmarks/`, Docker fixtures in `docker/`, and runtime integration tests in `tests/integration/`. Infrastructure automation lives under `infra/ansible/` and `infra/terraform/`.
 
 ## Build, Test, and Development Commands
 

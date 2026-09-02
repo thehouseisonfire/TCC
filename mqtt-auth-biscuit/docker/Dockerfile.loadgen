@@ -6,7 +6,6 @@ WORKDIR /app
 
 COPY mqtt-auth-biscuit/Cargo.toml mqtt-auth-biscuit/Cargo.lock ./
 COPY mqtt-auth-biscuit/crates/benchmarks ./crates/benchmarks
-COPY rumqtt /rumqtt
 RUN printf '[workspace]\nmembers = ["crates/benchmarks"]\nresolver = "2"\n' > Cargo.toml
 
 RUN cargo build --release -p gen-tokens --bin mqtt-loadgen

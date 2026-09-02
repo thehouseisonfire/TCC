@@ -65,9 +65,8 @@ async fn publish_probe(
     let notice = client
         .publish_tracked(
             topic,
-            QoS::AtLeastOnce,
-            false,
             b"mqtt5-auth-probe".as_slice(),
+            rumqttc::PublishOptions::new(QoS::AtLeastOnce),
         )
         .await
         .map_err(|err| err.to_string())?;

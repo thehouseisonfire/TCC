@@ -13,5 +13,5 @@ default-members = [
   "tools/render-benchmark-inventory",
   "tools/run-benchmarks",
 ]
-exclude = ["mqtt-auth-biscuit", "rumqtt"]
+exclude = ["mqtt-auth-biscuit"]
 resolver = "3"

@@ -1262,7 +1262,7 @@ def test_runtime_enhanced_auth_entrypoint_over_tcp_and_tls(
         token1_topic,
         "--token2-topic",
         token2_topic,
-        "--sleep",
+        "--sleep-s",
         "0.2",
     ]
     if tls:

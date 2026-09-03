@@ -22,7 +22,7 @@ struct Args {
     #[arg(long)]
     token2: String,
     #[arg(long, default_value_t = 2.0)]
-    sleep: f64,
+    sleep_s: f64,
     #[arg(long)]
     tls: bool,
     #[arg(long)]
@@ -106,7 +106,7 @@ async fn main() -> Result<()> {
         .await
         .is_ok();
 
-    tokio::time::sleep(Duration::from_secs_f64(args.sleep)).await;
+    tokio::time::sleep(Duration::from_secs_f64(args.sleep_s)).await;
     let props = AuthProperties {
         method: Some(args.auth_method),
         data: Some(Bytes::from(token2.clone())),

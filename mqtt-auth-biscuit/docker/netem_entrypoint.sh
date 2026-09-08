@@ -5,6 +5,9 @@ IFACE="${NETEM_IFACE:-eth0}"
 
 if [ "${NETEM_MTU:-}" != "" ]; then
   ip link set dev "$IFACE" mtu "$NETEM_MTU"
+  # Packet capture shares this namespace. Disable segmentation/coalescing so
+  # the pcap records packets as transmitted on the configured MTU path.
+  ethtool -K "$IFACE" tso off gso off gro off
 fi
 
 if [ "${NETEM_CLEAR:-0}" = "1" ]; then

@@ -13,6 +13,35 @@ from benchmarks import run_scenarios as rs
 from benchmarks.perf_profiler import PerfConfig
 
 
+def _measured_result(
+    connect_count: int,
+    publish_count: int,
+    receive_count: int = 0,
+) -> dict[str, Any]:
+    connect = [1.0] * connect_count
+    publish = [1.0] * publish_count
+    receive = [1.0] * receive_count
+    return {
+        "connect": rs._summary_from_values(connect),
+        "publish": rs._summary_from_values(publish),
+        "receive": rs._summary_from_values(receive),
+        "publish_qos_0": rs._summary_from_values([]),
+        "publish_qos_1": rs._summary_from_values(publish),
+        "publish_qos_2": rs._summary_from_values([]),
+        "raw_metrics": {
+            "connect": connect,
+            "publish": publish,
+            "receive": receive,
+            "publish_qos_0": [],
+            "publish_qos_1": publish,
+            "publish_qos_2": [],
+        },
+        "publish_throughput_mps": float(publish_count),
+        "receive_throughput_mps": float(receive_count),
+        "throughput_mps": float(receive_count),
+    }
+
+
 def _resolved_mosquitto_healthcheck(
     compose_files: list[str],
     *,
@@ -162,11 +191,11 @@ def test_compose_checked_includes_broker_diagnostics(
             "loadgen errors",
         ),
         (
-            {"errors": [], "publish": {"count": 0}, "receive": {"count": 0}},
+            {**_measured_result(11, 0), "errors": []},
             "published 0/10",
         ),
         (
-            {"errors": [], "publish": {"count": 10}, "receive": {"count": 0}},
+            {**_measured_result(11, 10), "errors": []},
             "received 0/100 deliveries",
         ),
     ],
@@ -225,9 +254,8 @@ def test_fanout_validation_accepts_valid_churn_result() -> None:
             "delivery_contract": {"steady": "all"},
         },
         {
+            **_measured_result(21, 10, 200),
             "errors": [],
-            "publish": {"count": 10},
-            "receive": {"count": 200},
         },
         message_count=10,
         client_count=20,
@@ -554,6 +582,20 @@ def test_normalize_tcpdump_output_dir_returns_absolute_repo_path() -> None:
     assert path == str((Path(rs.REPO_ROOT) / "benchmarks/results/pcap").resolve())
 
 
+def test_wait_for_tcpdump_ready_requires_listening_confirmation(monkeypatch) -> None:
+    outputs = iter(("Starting tcpdump\n", "tcpdump: listening on eth0\n"))
+
+    def fake_run(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        return subprocess.CompletedProcess([], 0, stdout=next(outputs), stderr="")
+
+    monkeypatch.setattr(rs.subprocess, "run", fake_run)
+    monkeypatch.setattr(rs.time, "sleep", lambda _seconds: None)
+
+    rs._wait_for_tcpdump_ready(
+        extra_env={}, compose_files=["docker/docker-compose.yml"], timeout_seconds=1.0
+    )
+
+
 def test_main_normalizes_output_directory_strings(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -646,6 +688,7 @@ def test_main_normalizes_output_directory_strings(
     monkeypatch.setattr(rs, "_compose", fake_compose)
     monkeypatch.setattr(rs.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(rs, "_wait_for_mqtt_listener", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(rs, "_wait_for_tcpdump_ready", lambda **_kwargs: None)
     monkeypatch.setattr(rs, "_wait_for_service_health", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(rs, "_wait_for_prometheus_api", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(rs, "_wait_for_non_empty_resource_snapshot", lambda *_args, **_kwargs: {})
@@ -701,11 +744,8 @@ def test_main_normalizes_output_directory_strings(
         rs,
         "_run_loadgen",
         lambda **_kwargs: {
+            **_measured_result(50, 1000),
             "errors": [],
-            "publish": {"count": 1000},
-            "publish_qos_0": {"count": 0},
-            "publish_qos_1": {"count": 1000},
-            "publish_qos_2": {"count": 0},
             "qos_distribution_actual": {
                 "qos_0_count": 0,
                 "qos_1_count": 1000,
@@ -746,6 +786,8 @@ def test_main_normalizes_output_directory_strings(
     assert isinstance(compose_extra_env, dict)
     assert compose_extra_env["MOSQUITTO_HEALTH_PORT"] == "1883"
     assert compose_extra_env["TCPDUMP_OUTPUT_DIR"] == str(tcpdump_output_dir.resolve())
+    assert compose_extra_env["NETEM_MTU"] == "1200"
+    assert compose_extra_env["LOADGEN_MTU"] == "1200"
     assert compose_calls[0] == ["rm", "-s", "-f", "netem", "tcpdump"]
     assert compose_calls[1][:4] == ["up", "--build", "-d", "mosquitto"]
     assert compose_calls[2] == ["up", "--build", "--no-deps", "-d", "netem", "tcpdump"]
@@ -1898,6 +1940,8 @@ def test_container_per_client_runtime_control_uses_one_coordinated_controller(
         "$CONTROL/dynamic-security/v1",
         "--control-payload",
         "{}",
+        "--control-response-topic",
+        "$CONTROL/dynamic-security/v1/response",
         "--runtime-control-username",
         "admin",
         "--runtime-control-password",
@@ -1926,6 +1970,7 @@ def test_container_per_client_runtime_control_uses_one_coordinated_controller(
 
     assert len(publisher_commands) == 2
     assert all("--runtime-control-username" not in cmd for cmd in publisher_commands)
+    assert all("--control-response-topic" not in cmd for cmd in publisher_commands)
     assert all("--runtime-control-barrier-url" in cmd for cmd in publisher_commands)
     assert {
         cmd[cmd.index("--runtime-control-local-after-messages") + 1] for cmd in publisher_commands
@@ -1937,8 +1982,10 @@ def test_container_per_client_runtime_control_uses_one_coordinated_controller(
         == "runtime-dynsec-controller"
     )
     assert "--password-map-profile" not in controller_commands[0]
+    assert "--control-response-topic" in controller_commands[0]
     assert result["connect"]["count"] == 2
     assert result["raw_metrics"]["runtime_control_connect_ms"] == pytest.approx(99.0)
+    assert result["raw_metrics"]["runtime_control_applied_after_successful_publishes"] == 4
     assert result["control"]["count"] == 1
     assert result["policy_denial_count"] == 2
     assert result["runtime_control"]["local_quotas"] == [2, 2]
@@ -2022,6 +2069,70 @@ def test_smoke_mqtt5_auth_tls_flags_propagate(monkeypatch) -> None:
     assert "--tls-ca-file" in cmd
     assert cmd[cmd.index("--tls-ca-file") + 1] == "docker/tls/ca.pem"
     assert "--tls-insecure" in cmd
+
+
+@pytest.mark.parametrize(
+    ("topology", "host", "ca_file", "expected_host", "expected_ca"),
+    (
+        ("host", "localhost", "docker/tls/ca.pem", "localhost", "docker/tls/ca.pem"),
+        (
+            "container-per-client",
+            "mosquitto",
+            "/workspace/docker/tls/ca.pem",
+            "mosquitto",
+            "/workspace/docker/tls/ca.pem",
+        ),
+    ),
+)
+def test_benchmark_mqtt5_auth_uses_issued_identity_and_requested_topology(
+    monkeypatch: pytest.MonkeyPatch,
+    topology: rs.ClientTopology,
+    host: str,
+    ca_file: str,
+    expected_host: str,
+    expected_ca: str,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(rs, "_resolve_rust_helper", lambda _name: ["mqtt-auth-client"])
+
+    def fake_check_output(cmd: list[str], **kwargs: Any) -> str:
+        captured["cmd"] = cmd
+        captured["env"] = kwargs.get("env")
+        return json.dumps({"connect_ok": True})
+
+    monkeypatch.setattr(rs.subprocess, "check_output", fake_check_output)
+    result = rs._run_mqtt5_auth(
+        host,
+        8883,
+        "token-one",
+        "token-two",
+        "sensors/issued/before",
+        "sensors/issued/after",
+        True,
+        ca_file,
+        False,
+        client_id="issued-client-id",
+        client_topology=topology,
+        compose_files=["docker/docker-compose.yml"],
+        compose_project_name="mqtt5-test",
+        extra_env={"TEST_MQTT5": "1"},
+    )
+
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--client-id") + 1] == "issued-client-id"
+    assert cmd[cmd.index("--host") + 1] == expected_host
+    assert cmd[cmd.index("--tls-ca-file") + 1] == expected_ca
+    if topology == "host":
+        assert cmd[0] == "mqtt-auth-client"
+        assert result["topology"]["container_count"] == 0
+    else:
+        assert "--entrypoint" in cmd
+        assert "--quiet-build" in cmd
+        assert cmd[cmd.index("--entrypoint") + 1] == "/usr/local/bin/mqtt-auth-client"
+        assert result["topology"]["container_count"] == 1
+    assert result["topology"]["mode"] == topology
+    assert captured["env"]["TEST_MQTT5"] == "1"
 
 
 def test_smoke_issue_mqtt5_auth_tokens_mints_distinct_authorized_topics(monkeypatch) -> None:

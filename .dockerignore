@@ -4,6 +4,9 @@
 mqtt-auth-biscuit/*
 !mqtt-auth-biscuit/Cargo.toml
 !mqtt-auth-biscuit/Cargo.lock
+!mqtt-auth-biscuit/docker/
+mqtt-auth-biscuit/docker/*
+!mqtt-auth-biscuit/docker/loadgen_entrypoint.sh
 !mqtt-auth-biscuit/crates/
 mqtt-auth-biscuit/crates/*
 !mqtt-auth-biscuit/crates/benchmarks/

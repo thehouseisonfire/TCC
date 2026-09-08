@@ -37,6 +37,7 @@ from benchmarks.perf_profiler import (
     get_default_perf_scenarios,
     profile_mosquitto_container,
 )
+from benchmarks.rust_helpers import resolve_rust_helper as _resolve_rust_helper
 
 
 def _read_tokens(path: str) -> dict[str, Any]:
@@ -87,20 +88,6 @@ class PerClientRuntimeControl:
 class DynamicSecurityScenarioState:
     generated_path: str | None
     broker_started: bool = False
-
-
-def _resolve_rust_helper(binary: str) -> list[str]:
-    env_name = f"MQTT_AUTH_BISCUIT_{binary.upper().replace('-', '_')}"
-    if override := os.environ.get(env_name):
-        return [override]
-    for profile in ("release", "debug"):
-        candidate = REPO_ROOT / "target" / profile / binary
-        if candidate.exists():
-            return [str(candidate)]
-    cargo = shutil.which("cargo")
-    if cargo is None:
-        raise SystemExit(f"Missing required command: cargo (needed to run {binary})")
-    return [cargo, "run", "--locked", "-p", "gen-tokens", "--bin", binary, "--"]
 
 
 ScenarioTokenKind = Literal["jwt", "biscuit"]
@@ -352,6 +339,8 @@ class ScenarioConfig(TypedDict, total=False):
     )
     complexity_level: Literal["simple", "med", "complex", "baseline", "low", "high"] | None
     mqtt5_auth: Mqtt5AuthConfig | None
+    workload_kind: Literal["mqtt5_reauth_transition"]
+    authorization_probe_count: int
     restart_mosquitto: bool
     sync_connect: bool
     repeat: int
@@ -483,6 +472,34 @@ def _compose_checked(
             compose_files=compose_files,
         )
         raise RuntimeError(f"{phase} failed: {exc}\n{diagnostics}") from exc
+
+
+def _wait_for_tcpdump_ready(
+    *,
+    extra_env: dict[str, str],
+    compose_files: list[str],
+    timeout_seconds: float = 15.0,
+) -> None:
+    """Wait until tcpdump has opened its capture interface and output file."""
+    env = {**os.environ, **extra_env}
+    deadline = time.monotonic() + timeout_seconds
+    last_output = ""
+    while time.monotonic() < deadline:
+        completed = subprocess.run(
+            _compose_cmd(["logs", "--no-color", "tcpdump"], compose_files=compose_files),
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        last_output = "\n".join(
+            part.strip() for part in (completed.stdout, completed.stderr) if part.strip()
+        )
+        if "tcpdump: listening on" in last_output:
+            return
+        time.sleep(0.1)
+    raise RuntimeError(f"tcpdump did not become ready within {timeout_seconds}s: {last_output}")
 
 
 def _read_effective_mtu(
@@ -1716,6 +1733,7 @@ def _run_loadgen(
     client_topology: ClientTopology = "host",
     compose_files: list[str] | None = None,
     compose_project_name: str | None = None,
+    compose_env: dict[str, str] | None = None,
     loadgen_service: str = "loadgen",
     loadgen_cpus: str = "1.0",
     loadgen_memory: str = "512m",
@@ -1936,6 +1954,7 @@ def _run_loadgen(
 
     loadgen_args = cmd[len(helper_cmd) :]
     env = {
+        **(compose_env or {}),
         "LOADGEN_CPUS": loadgen_cpus,
         "LOADGEN_MEMORY": loadgen_memory,
     }
@@ -2261,11 +2280,19 @@ def _wait_for_sync_barrier_ready(
     deadline = time.monotonic() + timeout_seconds
     last_status: dict[str, Any] | None = None
     while time.monotonic() < deadline:
-        exited = [
-            (container_name, process.returncode)
-            for container_name, process in processes
-            if process.poll() is not None
-        ]
+        exited = []
+        for container_name, process in processes:
+            if process.poll() is None:
+                continue
+            stdout, stderr = process.communicate()
+            exited.append(
+                {
+                    "container": container_name,
+                    "returncode": process.returncode,
+                    "stdout": stdout[-4000:],
+                    "stderr": stderr[-4000:],
+                }
+            )
         if exited:
             raise RuntimeError(f"sync barrier participant exited before release: {exited}")
         status = _sync_barrier_status(run_id)
@@ -2398,6 +2425,96 @@ def _summary_from_values(values: list[float]) -> dict[str, Any]:
     }
 
 
+_SUMMARY_VALUE_FIELDS = (
+    "min_ms",
+    "p50_ms",
+    "p95_ms",
+    "p99_ms",
+    "max_ms",
+    "mean_ms",
+    "median_ms",
+)
+
+
+def _validate_metric_summary(
+    scenario_id: str,
+    result: dict[str, Any],
+    metric: str,
+    *,
+    expected_count: int | None = None,
+) -> int:
+    summary = result.get(metric)
+    if not isinstance(summary, dict):
+        raise RuntimeError(f"{scenario_id}: {metric} metric summary is missing")
+    count = summary.get("count")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise RuntimeError(f"{scenario_id}: {metric} metric count is invalid")
+    if expected_count is not None and count != expected_count:
+        raise RuntimeError(
+            f"{scenario_id}: {metric} metric count {count} does not match {expected_count}"
+        )
+    raw_metrics = result.get("raw_metrics")
+    raw = raw_metrics.get(metric) if isinstance(raw_metrics, dict) else None
+    if not isinstance(raw, list):
+        raise RuntimeError(f"{scenario_id}: raw {metric} metric samples are missing")
+    if len(raw) != count:
+        raise RuntimeError(f"{scenario_id}: raw {metric} metric count does not match summary")
+    if count == 0:
+        if any(summary.get(field) is not None for field in _SUMMARY_VALUE_FIELDS):
+            raise RuntimeError(f"{scenario_id}: empty {metric} metric summary is inconsistent")
+        return count
+    values: dict[str, float] = {}
+    for field in _SUMMARY_VALUE_FIELDS:
+        value = summary.get(field)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or not math.isfinite(float(value))
+            or float(value) < 0
+        ):
+            raise RuntimeError(f"{scenario_id}: {metric}.{field} is missing or invalid")
+        values[field] = float(value)
+    if not (
+        values["min_ms"]
+        <= values["p50_ms"]
+        <= values["p95_ms"]
+        <= values["p99_ms"]
+        <= values["max_ms"]
+        and math.isclose(values["p50_ms"], values["median_ms"], abs_tol=1e-9)
+        and values["min_ms"] <= values["mean_ms"] <= values["max_ms"]
+    ):
+        raise RuntimeError(f"{scenario_id}: {metric} metric summary is inconsistent")
+    numeric_raw = [float(value) for value in raw]
+    if any(not math.isfinite(value) or value < 0 for value in numeric_raw):
+        raise RuntimeError(f"{scenario_id}: raw {metric} metric samples are invalid")
+    recomputed = _summary_from_values(numeric_raw)
+    for field in _SUMMARY_VALUE_FIELDS:
+        if not math.isclose(
+            float(summary[field]), float(recomputed[field]), rel_tol=1e-9, abs_tol=1e-9
+        ):
+            raise RuntimeError(f"{scenario_id}: {metric} metric summary does not match raw samples")
+    return count
+
+
+def _validate_throughput(
+    scenario_id: str,
+    result: dict[str, Any],
+    metric: str,
+    *,
+    require_positive: bool,
+) -> None:
+    value = result.get(metric)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not math.isfinite(float(value))
+        or float(value) < 0
+        or require_positive
+        and float(value) <= 0
+    ):
+        raise RuntimeError(f"{scenario_id}: {metric} is missing or invalid")
+
+
 def _raw_metric_values(payload: dict[str, Any], metric: str) -> list[float]:
     raw_metrics = payload.get("raw_metrics")
     if isinstance(raw_metrics, dict):
@@ -2466,6 +2583,7 @@ def _merge_per_client_loadgen_results(
         "publish_qos_2",
         "receive",
         "control",
+        "control_response",
         "control_injection_delay",
         "sync_connect_barrier_wait",
     ):
@@ -2491,6 +2609,7 @@ def _merge_per_client_loadgen_results(
             "publish_qos_2",
             "receive",
             "control",
+            "control_response",
             "control_injection_delay",
             "sync_connect_barrier_wait",
         )
@@ -2529,6 +2648,16 @@ def _merge_per_client_loadgen_results(
         "failed_by_qos": failed_by_qos,
     }
     merged["received_messages"] = _sum_count_object(results, "received_messages")
+    control_response_counts = _sum_count_object(results, "control_responses")
+    merged["control_responses"] = {
+        "enabled": any(
+            result.get("control_responses", {}).get("enabled") is True
+            for result in results
+            if isinstance(result.get("control_responses"), dict)
+        ),
+        "successes": control_response_counts.get("successes", 0),
+        "failures": control_response_counts.get("failures", 0),
+    }
     for field in (
         "proactive_refresh_attempts",
         "proactive_refresh_successes",
@@ -2641,10 +2770,15 @@ def _validate_mqtt5_auth_result(scenario_id: str, result: dict[str, Any]) -> Non
     if result.get("reauth_ok") is not True:
         detail = result.get("reauth_error") or "unknown error"
         raise RuntimeError(f"{scenario_id}: MQTT5 reauthentication failed: {detail}")
-    if not isinstance(result.get("connect_ms"), int | float):
-        raise RuntimeError(f"{scenario_id}: MQTT5 AUTH result is missing connect timing")
-    if not isinstance(result.get("reauth_ms"), int | float):
-        raise RuntimeError(f"{scenario_id}: MQTT5 AUTH result is missing reauth timing")
+    for metric in ("connect_ms", "reauth_ms"):
+        value = result.get(metric)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or not math.isfinite(float(value))
+            or float(value) < 0
+        ):
+            raise RuntimeError(f"{scenario_id}: MQTT5 AUTH {metric} is missing or invalid")
     token1_sha = result.get("token1_sha256")
     token2_sha = result.get("token2_sha256")
     attestation = result.get("credential_attestation")
@@ -2730,9 +2864,6 @@ def _validate_broker_path_contract(
         or int(attestation.get("benchmark_diagnostics_port") or 0) != BENCHMARK_DIAGNOSTICS_PORT
     ):
         raise RuntimeError(f"{scenario['id']}: broker diagnostics attestation missing")
-    if scenario.get("mqtt5_auth") is not None:
-        # Enhanced-auth replacement has its own credential/path contract.
-        return
     auth = result.get("broker_auth_delta")
     authz = result.get("broker_authz_delta")
     if not isinstance(auth, dict) or not isinstance(authz, dict):
@@ -2749,11 +2880,35 @@ def _validate_broker_path_contract(
         "sqlite": "Sqlite",
         "hybrid": "Hybrid",
     }
+    expected_connections = client_count
+    if (scenario.get("biscuit_delegate") or {}).get("handoff"):
+        # Each worker first authenticates a handoff-receiver session, and the
+        # delegator authenticates one master session used to publish the tokens.
+        expected_connections += client_count + 1
+    if scenario.get("traffic_pattern") == "fanout":
+        expected_connections += 1
+    if scenario.get("runtime_control_username"):
+        expected_connections += 1
     if observed_mode != normalized_modes.get(expected_mode):
         raise RuntimeError(
             f"{scenario['id']}: broker authorization path contract failed: {authz}, "
             f"attested_policy_mode={expected_mode!r}"
         )
+    if scenario.get("mqtt5_auth") is not None:
+        token_kind = _scenario_token_kind(scenario["id"], scenario)
+        if (
+            int(auth.get("attempts") or 0) != 2
+            or int(auth.get("successes") or 0) != 2
+            or int(auth.get("failures") or 0) != 0
+            or token_kind not in {"jwt", "biscuit"}
+            or int(auth.get(f"{token_kind}_validations") or 0) != 2
+            or int(authz.get("checks") or 0) < 3
+        ):
+            raise RuntimeError(
+                f"{scenario['id']}: MQTT5 enhanced-auth broker path contract failed: "
+                f"auth={auth}, authz={authz}"
+            )
+        return
     anonymous_dynamic_security = (
         expected_mode == "dynamic_security"
         and attestation.get("allow_anonymous_no_token") is True
@@ -2763,12 +2918,14 @@ def _validate_broker_path_contract(
     if anonymous_dynamic_security:
         attempts = int(auth.get("attempts") or 0)
         deferrals = int(auth.get("anonymous_deferrals") or 0)
+        authenticated_controllers = 1 if scenario.get("runtime_control_username") else 0
+        expected_deferrals = expected_connections - authenticated_controllers
         anonymous_checks = int(authz.get("anonymous_checks") or 0)
         anonymous_allows = int(authz.get("anonymous_allows") or 0)
         if (
-            attempts <= 0
-            or deferrals != attempts
-            or int(auth.get("successes") or 0) != 0
+            attempts != expected_connections
+            or deferrals != expected_deferrals
+            or int(auth.get("successes") or 0) != authenticated_controllers
             or int(auth.get("failures") or 0) != 0
             or anonymous_checks <= 0
             or anonymous_allows != anonymous_checks
@@ -2780,7 +2937,16 @@ def _validate_broker_path_contract(
                 f"auth={auth}, authz={authz}"
             )
         return
-    if int(auth.get("attempts") or 0) <= 0 or int(auth.get("successes") or 0) <= 0:
+    attempts = int(auth.get("attempts") or 0)
+    successes = int(auth.get("successes") or 0)
+    failures = int(auth.get("failures") or 0)
+    lifecycle_reconnects = bool(scenario.get("token_refresh") or scenario.get("proactive_refresh"))
+    wrong_connection_count = (
+        attempts < expected_connections
+        if lifecycle_reconnects
+        else attempts != expected_connections
+    )
+    if wrong_connection_count or successes != attempts or failures != 0:
         raise RuntimeError(f"{scenario['id']}: broker authentication path contract failed: {auth}")
     token_kind = _scenario_token_kind(scenario["id"], scenario)
     if token_kind is None and scenario.get("password_map_profile") == "jwt":
@@ -2983,6 +3149,16 @@ def _validate_result_contract(
         _validate_mqtt5_auth_result(scenario_id, result)
         return
 
+    expected_connect_count = client_count + (
+        1 if scenario.get("traffic_pattern") == "fanout" else 0
+    )
+    _validate_metric_summary(
+        scenario_id,
+        result,
+        "connect",
+        expected_count=expected_connect_count,
+    )
+
     if scenario.get("sync_connect"):
         _validate_thundering_herd_result(scenario_id, result, client_count=client_count)
 
@@ -2999,6 +3175,18 @@ def _validate_result_contract(
     attempted_count = int(outcomes.get("attempted") or publish_count)
     failed_count = int(outcomes.get("failed") or 0)
     succeeded_count = int(outcomes.get("succeeded") or publish_count)
+    _validate_metric_summary(
+        scenario_id,
+        result,
+        "publish",
+        expected_count=publish_count,
+    )
+    _validate_throughput(
+        scenario_id,
+        result,
+        "publish_throughput_mps",
+        require_positive=publish_count > 0,
+    )
     if attempted_count != succeeded_count + failed_count or succeeded_count != publish_count:
         raise RuntimeError(f"{scenario_id}: inconsistent publish outcome accounting: {outcomes}")
     if isinstance(outcomes_object, dict):
@@ -3175,9 +3363,15 @@ def _validate_result_contract(
         if not isinstance(actual_object, dict):
             raise RuntimeError(f"{scenario_id}: effective QoS metrics missing")
         for qos_value in (0, 1, 2):
-            expected_qos_count = expected_publish_count if qos_value == selected_qos else 0
+            expected_qos_count = attempted_count if qos_value == selected_qos else 0
             summary = result.get(f"publish_qos_{qos_value}")
             summary_count = int(summary.get("count") or 0) if isinstance(summary, dict) else 0
+            _validate_metric_summary(
+                scenario_id,
+                result,
+                f"publish_qos_{qos_value}",
+                expected_count=summary_count,
+            )
             actual_count = int(actual_object.get(f"qos_{qos_value}_count") or 0)
             failed_by_qos = outcomes.get("failed_by_qos")
             failed_qos_count = (
@@ -3208,6 +3402,12 @@ def _validate_result_contract(
         for qos_value, expected_qos_count in expected_qos.items():
             summary = result.get(f"publish_qos_{qos_value}")
             summary_count = int(summary.get("count") or 0) if isinstance(summary, dict) else 0
+            _validate_metric_summary(
+                scenario_id,
+                result,
+                f"publish_qos_{qos_value}",
+                expected_count=summary_count,
+            )
             actual_count = int(actual_object.get(f"qos_{qos_value}_count") or 0)
             if summary_count != expected_qos_count or actual_count != expected_qos_count:
                 raise RuntimeError(
@@ -3242,6 +3442,13 @@ def _validate_result_contract(
                 f"{scenario_id}: {transform_field} was applied to "
                 f"{transform_count}/{client_count} clients with {length_count} length samples"
             )
+        _validate_metric_summary(scenario_id, result, transform_field, expected_count=client_count)
+        _validate_metric_summary(
+            scenario_id,
+            result,
+            f"{transform_field}_len",
+            expected_count=client_count,
+        )
     handoff = (scenario.get("biscuit_delegate") or {}).get("handoff")
     if handoff:
         handoff_publish = result.get("delegation_handoff_publish")
@@ -3257,6 +3464,12 @@ def _validate_result_contract(
                 f"{scenario_id}: delegated credentials handed off "
                 f"{handoff_count}/{client_count} times"
             )
+        _validate_metric_summary(
+            scenario_id,
+            result,
+            "delegation_handoff_publish",
+            expected_count=client_count,
+        )
         if isinstance(topology_handoff, dict) and (
             int(topology_handoff.get("delegators") or 0) != 1
             or int(topology_handoff.get("delegatees") or 0) != client_count
@@ -3303,6 +3516,24 @@ def _validate_result_contract(
                 f"{scenario_id}: credential attestation does not prove chain depth {expected_depth}"
             )
 
+    expected_control_count: int | None = None
+    if scenario.get("control_mode"):
+        expected_control_count = client_count * int(scenario.get("control_repeat", 1))
+    elif scenario.get("runtime_control_username"):
+        expected_control_count = 1
+    elif scenario.get("control_after_messages"):
+        interval = int(scenario["control_after_messages"])
+        expected_control_count = client_count * (message_count // interval)
+    elif scenario.get("fanout_churn_kind"):
+        expected_control_count = int(scenario.get("fanout_churn_max_events", 1))
+    if expected_control_count is not None:
+        _validate_metric_summary(
+            scenario_id,
+            result,
+            "control",
+            expected_count=expected_control_count,
+        )
+
     if scenario.get("control_response_topic"):
         response = result.get("control_responses")
         successes = int(response.get("successes") or 0) if isinstance(response, dict) else 0
@@ -3319,34 +3550,64 @@ def _validate_result_contract(
                 f"{scenario_id}: validated {successes}/{expected_responses} control responses "
                 f"with {failures} failures"
             )
+        _validate_metric_summary(
+            scenario_id,
+            result,
+            "control_response",
+            expected_count=expected_responses,
+        )
 
     if scenario.get("runtime_control_expect_denial"):
         configured_threshold = int(scenario.get("runtime_control_after_messages") or 0)
         runtime_control = result.get("runtime_control")
         raw_metrics = result.get("raw_metrics")
-        applied_after = (
-            runtime_control.get("applied_after_successful_publishes")
-            if isinstance(runtime_control, dict)
-            else raw_metrics.get("runtime_control_applied_after_successful_publishes")
+        raw_applied_after = (
+            raw_metrics.get("runtime_control_applied_after_successful_publishes")
             if isinstance(raw_metrics, dict)
             else None
         )
-        if (
-            not isinstance(applied_after, int)
-            or applied_after < configured_threshold
-            or publish_count != applied_after
-            or int(result.get("policy_denial_count") or 0) != client_count
-            or isinstance(runtime_control, dict)
-            and (
-                runtime_control.get("enabled") is not True
+        controller_connect_ms = (
+            raw_metrics.get("runtime_control_connect_ms") if isinstance(raw_metrics, dict) else None
+        )
+        topology = result.get("topology")
+        topology_mode = topology.get("mode") if isinstance(topology, dict) else None
+        supported_topology = topology_mode in {
+            "host",
+            "container-single",
+            "container-per-client",
+        }
+        runtime_control_metadata_invalid = runtime_control is not None and (
+            not isinstance(runtime_control, dict)
+            or runtime_control.get("enabled") is not True
+            or runtime_control.get("applied_after_successful_publishes") != configured_threshold
+        )
+        if topology_mode == "container-per-client":
+            runtime_control_metadata_invalid = runtime_control_metadata_invalid or (
+                not isinstance(runtime_control, dict)
                 or int(runtime_control.get("participants") or 0) != client_count
                 or int(runtime_control.get("ready_count") or 0) != client_count
             )
+        if (
+            not supported_topology
+            or runtime_control_metadata_invalid
+            or isinstance(raw_applied_after, bool)
+            or not isinstance(raw_applied_after, int)
+            or raw_applied_after != configured_threshold
+            or publish_count != configured_threshold
+            or _policy_denial_count(result) != client_count
+            or attempted_count != configured_threshold + client_count
+            or succeeded_count != configured_threshold
+            or failed_count != client_count
+            or isinstance(controller_connect_ms, bool)
+            or not isinstance(controller_connect_ms, int | float)
+            or not math.isfinite(float(controller_connect_ms))
+            or float(controller_connect_ms) < 0
         ):
             raise RuntimeError(
                 f"{scenario_id}: Dynamic Security churn phase contract failed: "
-                f"published={publish_count}, denials={result.get('policy_denial_count')}, "
-                f"runtime_control={runtime_control}"
+                f"published={publish_count}, denials={_policy_denial_count(result)}, "
+                f"topology={topology_mode!r}, runtime_control={runtime_control}, "
+                f"raw_applied_after={raw_applied_after!r}"
             )
 
     if scenario.get("fanout_expect_control_notification"):
@@ -3362,6 +3623,24 @@ def _validate_result_contract(
 
     receive = result.get("receive")
     receive_count = int(receive.get("count") or 0) if isinstance(receive, dict) else 0
+    _validate_metric_summary(
+        scenario_id,
+        result,
+        "receive",
+        expected_count=receive_count,
+    )
+    _validate_throughput(
+        scenario_id,
+        result,
+        "receive_throughput_mps",
+        require_positive=receive_count > 0,
+    )
+    _validate_throughput(
+        scenario_id,
+        result,
+        "throughput_mps",
+        require_positive=receive_count > 0,
+    )
     contract = scenario.get("delivery_contract")
     if not isinstance(contract, dict):
         raise RuntimeError(f"{scenario_id}: fan-out delivery contract missing")
@@ -3658,6 +3937,7 @@ def _run_loadgen_container_per_client(
             "--control-topic",
             "--control-payload",
             "--control-payload-file",
+            "--control-response-topic",
         ):
             publisher_args = _remove_cli_option(publisher_args, option)
         publisher_args = _remove_cli_flag(
@@ -3878,15 +4158,28 @@ def _run_loadgen_container_per_client(
     if controller_result is not None and runtime_control is not None:
         controller_connect = _raw_metric_values(controller_result, "connect")
         controller_control = _raw_metric_values(controller_result, "control")
+        controller_response = _raw_metric_values(controller_result, "control_response")
         raw_metrics = cast(dict[str, Any], merged["raw_metrics"])
         raw_metrics["runtime_control_connect_ms"] = (
             controller_connect[0] if controller_connect else None
         )
+        raw_metrics["runtime_control_applied_after_successful_publishes"] = sum(quotas)
         raw_metrics["control"] = [
             *cast(list[float], raw_metrics.get("control", [])),
             *controller_control,
         ]
+        raw_metrics["control_response"] = [
+            *cast(list[float], raw_metrics.get("control_response", [])),
+            *controller_response,
+        ]
         merged["control"] = _summary_from_values(cast(list[float], raw_metrics["control"]))
+        merged["control_response"] = _summary_from_values(
+            cast(list[float], raw_metrics["control_response"])
+        )
+        controller_responses = controller_result.get("control_responses")
+        merged["control_responses"] = (
+            dict(controller_responses) if isinstance(controller_responses, dict) else {}
+        )
         merged["runtime_control"] = {
             "enabled": True,
             "barrier": "external",
@@ -4503,7 +4796,7 @@ def _effective_scenario_message_count(
         post_control_publishes = 1 if scenario.get("runtime_control_expect_denial") else 0
         minimum = max(
             minimum,
-            math.ceil((runtime_control_after + post_control_publishes) / effective_clients),
+            math.ceil(runtime_control_after / effective_clients) + post_control_publishes,
         )
     return max(configured, minimum)
 
@@ -5382,13 +5675,23 @@ def _run_mqtt5_auth(
     tls_enabled: bool,
     tls_ca_file: str | None,
     tls_insecure: bool,
-):
-    cmd = [
-        *_resolve_rust_helper("mqtt-auth-client"),
+    *,
+    client_id: str,
+    client_topology: ClientTopology = "host",
+    service: str = "loadgen",
+    scenario_id: str = "mqtt5-auth",
+    run_index: int = 0,
+    compose_files: list[str] | None = None,
+    compose_project_name: str | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    helper_args = [
         "--host",
         host,
         "--port",
         str(port),
+        "--client-id",
+        client_id,
         "--auth-method",
         "token",
         "--token1",
@@ -5401,17 +5704,48 @@ def _run_mqtt5_auth(
         token2_topic,
     ]
     if tls_enabled:
-        cmd.append("--tls")
+        helper_args.append("--tls")
     if tls_ca_file:
-        cmd.extend(["--tls-ca-file", tls_ca_file])
+        helper_args.extend(["--tls-ca-file", tls_ca_file])
     if tls_insecure:
-        cmd.append("--tls-insecure")
-    out = subprocess.check_output(
-        cmd,
-        cwd=REPO_ROOT,
-        text=True,
-    )
-    return json.loads(out)
+        helper_args.append("--tls-insecure")
+    if client_topology == "host":
+        cmd = [*_resolve_rust_helper("mqtt-auth-client"), *helper_args]
+    else:
+        container_name = _loadgen_container_name(
+            scenario_id=scenario_id,
+            run_index=run_index,
+            client_index=0,
+            compose_project_name=compose_project_name,
+            compose_files=compose_files,
+        )
+        cmd = _compose_cmd(
+            [
+                "run",
+                "--rm",
+                "--no-deps",
+                "--build",
+                "--quiet-build",
+                "--name",
+                container_name,
+                "--entrypoint",
+                "/usr/local/bin/mqtt-auth-client",
+                service,
+                *helper_args,
+            ],
+            compose_files=compose_files,
+            compose_project_name=compose_project_name,
+        )
+    env = os.environ.copy()
+    env.update(extra_env or {})
+    out = subprocess.check_output(cmd, cwd=REPO_ROOT, env=env, text=True)
+    result = json.loads(out)
+    result["topology"] = {
+        "mode": client_topology,
+        "container_count": 0 if client_topology == "host" else 1,
+        "aggregation": "single_mqtt5_auth_client",
+    }
+    return result
 
 
 class ScenarioModel(BaseModel):
@@ -6884,6 +7218,11 @@ def _build_available_scenarios(
             "mosquitto_conf": "./mosquitto.conf",
             "authz_config": None,
             "netem": {"clear": True},
+            "client_count": 1,
+            "message_count": 2,
+            "qos": 1,
+            "workload_kind": "mqtt5_reauth_transition",
+            "authorization_probe_count": 1,
             "mqtt5_auth": {
                 "kind": "jwt",
                 "token1_ttl_seconds": 180,
@@ -6894,6 +7233,11 @@ def _build_available_scenarios(
             "mosquitto_conf": "./mosquitto.conf",
             "authz_config": None,
             "netem": {"clear": True},
+            "client_count": 1,
+            "message_count": 2,
+            "qos": 1,
+            "workload_kind": "mqtt5_reauth_transition",
+            "authorization_probe_count": 1,
             "mqtt5_auth": {
                 "kind": "biscuit",
                 "token1_ttl_seconds": 180,
@@ -7779,7 +8123,13 @@ def main(
                     }
                 )
             if "mtu" in netem:
-                extra_env.update({"NETEM_CLEAR": "1", "NETEM_MTU": str(netem["mtu"])})
+                extra_env.update(
+                    {
+                        "NETEM_CLEAR": "1",
+                        "NETEM_MTU": str(netem["mtu"]),
+                        "LOADGEN_MTU": str(netem["mtu"]),
+                    }
+                )
             if "delay_ms" in netem:
                 extra_env.update({"NETEM_CLEAR": "1", "NETEM_DELAY_MS": str(netem["delay_ms"])})
             if "loss_pct" in netem:
@@ -7895,6 +8245,8 @@ def main(
                 compose_files=compose_files,
                 phase="namespace-service startup",
             )
+            if capture_this_scenario:
+                _wait_for_tcpdump_ready(extra_env=extra_env, compose_files=compose_files)
             effective_mtu: int | None = None
             if netem is not None and "mtu" in netem:
                 requested_mtu = int(netem["mtu"])
@@ -8122,6 +8474,8 @@ def main(
                         "fanout_publisher_password_map_profile"
                     ),
                     "traffic_pattern": s.get("traffic_pattern"),
+                    "workload_kind": s.get("workload_kind"),
+                    "authorization_probe_count": s.get("authorization_probe_count"),
                     "fanout_topic": s.get("fanout_topic"),
                     "subscriber_count": s.get("subscriber_count"),
                     "policy_source": policy_source,
@@ -8135,6 +8489,8 @@ def main(
                     "fanout_churn_settle_ms": s.get("fanout_churn_settle_ms"),
                     "fanout_churn_control_topic": s.get("fanout_churn_control_topic"),
                     "fanout_churn_control_payload": s.get("fanout_churn_control_payload"),
+                    "runtime_control_after_messages": s.get("runtime_control_after_messages"),
+                    "runtime_control_expect_denial": s.get("runtime_control_expect_denial", False),
                     "sqlite_seed_fanout": s.get("sqlite_seed_fanout"),
                     "sqlite_seed_profile": s.get("sqlite_seed_profile"),
                     "sqlite_seed_db": s.get("sqlite_seed_db"),
@@ -8145,6 +8501,7 @@ def main(
                     "fanout_churn_sqlite_subscribers": s.get("fanout_churn_sqlite_subscribers"),
                     "client_topology": {
                         "mode": client_topology_mode,
+                        "effective_mode": client_topology_mode,
                         "loadgen_service": loadgen_service,
                         "cpus": loadgen_cpus,
                         "memory": loadgen_memory,
@@ -8279,15 +8636,23 @@ def main(
                             insecure=tls_insecure,
                         )
                         res = _run_mqtt5_auth(
-                            host_mqtt_host,
+                            host_mqtt_host if client_topology_mode == "host" else loadgen_mqtt_host,
                             mqtt_port,
                             token1,
                             token2,
                             str(credential_metadata["token1_topic"]),
                             str(credential_metadata["token2_topic"]),
                             scenario_tls,
-                            scenario_tls_ca,
+                            (scenario_tls_ca if client_topology_mode == "host" else loadgen_tls_ca),
                             tls_insecure,
+                            client_id=str(credential_metadata["client_id"]),
+                            client_topology=client_topology_mode,
+                            service=loadgen_service,
+                            scenario_id=s["id"],
+                            run_index=idx,
+                            compose_files=compose_files,
+                            compose_project_name=compose_project_name,
+                            extra_env=extra_env,
                         )
                         res["credential_attestation"] = credential_metadata
                     else:
@@ -8527,6 +8892,7 @@ def main(
                             client_topology=client_topology_mode,
                             compose_files=compose_files,
                             compose_project_name=compose_project_name,
+                            compose_env=extra_env,
                             loadgen_service=loadgen_service,
                             loadgen_cpus=loadgen_cpus,
                             loadgen_memory=loadgen_memory,
@@ -8543,6 +8909,14 @@ def main(
                                 "fanout_publisher_password_map_profile"
                             ),
                         )
+                    res.setdefault(
+                        "topology",
+                        {
+                            "mode": client_topology_mode,
+                            "container_count": 0 if client_topology_mode == "host" else 1,
+                            "aggregation": "single_loadgen_process",
+                        },
+                    )
                     res["workload_interval"] = {
                         "started_at": workload_started_at,
                         "finished_at": time.time(),
@@ -8694,7 +9068,10 @@ def main(
                 compose_files=compose_files,
                 phase="packet capture flush",
             )
-            pcap_file = Path(tcpdump_output_dir) / f"{s['id']}.pcap"
+            # The bind mount is resolved relative to the benchmark repository,
+            # so inspect the same canonical host path even when the runner was
+            # launched from the outer workspace.
+            pcap_file = Path(normalized_tcpdump_output_dir) / f"{s['id']}.pcap"
             if pcap_file.exists():
                 logger.info("Running packet analysis for scenario %s", s["id"])
                 try:

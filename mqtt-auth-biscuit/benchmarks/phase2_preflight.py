@@ -19,6 +19,7 @@ from benchmarks.run_scenarios import (
     _infer_acl_read_enforcement,
     _infer_policy_source,
     _read_tokens,
+    _render_mosquitto_runtime_conf,
     _resolve_compose_path,
     _scenario_workload_axes,
     _scenario_workload_shape,
@@ -115,6 +116,33 @@ def _scenario_registry() -> dict[str, ScenarioConfig]:
     )
 
 
+def _current_broker_fixture_hash(
+    broker: dict[str, object], expected: ScenarioConfig, scenario: str
+) -> str:
+    effective_path = broker.get("effective_path")
+    if not isinstance(effective_path, str):
+        raise RuntimeError(f"{scenario}: effective broker configuration path missing")
+    effective_file = _resolve_compose_path(effective_path)
+    if ".generated" in effective_path:
+        requested_path = broker.get("requested_path")
+        if not isinstance(requested_path, str):
+            raise RuntimeError(f"{scenario}: generated broker fixture source is missing")
+        requested_file = _resolve_compose_path(requested_path)
+        if not requested_file.is_file():
+            raise RuntimeError(f"{scenario}: requested broker fixture is missing")
+        current_bytes = _render_mosquitto_runtime_conf(
+            requested_file.read_text(encoding="utf-8"),
+            jwt_identity_binding=expected.get("jwt_identity_binding") or "off",
+            biscuit_identity_binding=expected.get("biscuit_identity_binding") or "off",
+            biscuit_client_id_fact=str(expected.get("biscuit_client_id_fact") or "client_id"),
+        ).encode()
+    elif effective_file.is_file():
+        current_bytes = effective_file.read_bytes()
+    else:
+        raise RuntimeError(f"{scenario}: effective broker fixture is missing")
+    return hashlib.sha256(current_bytes).hexdigest()
+
+
 def _verify(output: Path, scenarios: tuple[str, ...]) -> list[dict[str, object]]:
     registry = _scenario_registry()
     evidence = []
@@ -136,6 +164,11 @@ def _verify(output: Path, scenarios: tuple[str, ...]) -> list[dict[str, object]]
         expected_qos = int(expected.get("qos", 1))
         expected_distribution = expected.get("qos_distribution")
         expected_tls = bool(expected.get("tls"))
+        expected_authz_profile = expected.get("authz_profile")
+        if expected_authz_profile is None and isinstance(expected.get("authz_config"), dict):
+            expected_authz_profile = cast(dict[str, Any], expected["authz_config"]).get(
+                "authz_profile"
+            )
         tls = result.get("tls")
         if (
             not isinstance(tls, dict)
@@ -157,7 +190,16 @@ def _verify(output: Path, scenarios: tuple[str, ...]) -> list[dict[str, object]]
             "workload_shape": _scenario_workload_shape(expected),
             "workload_axes": _scenario_workload_axes(expected),
             "credential_mode": expected.get("credential_mode"),
+            "password_map_profile": expected.get("password_map_profile"),
             "traffic_pattern": expected.get("traffic_pattern"),
+            "workload_kind": expected.get("workload_kind"),
+            "authorization_probe_count": expected.get("authorization_probe_count"),
+            "fanout_topic": expected.get("fanout_topic"),
+            "subscriber_count": expected.get("subscriber_count"),
+            "authz_profile": expected_authz_profile,
+            "fanout_churn_kind": expected.get("fanout_churn_kind"),
+            "runtime_control_after_messages": expected.get("runtime_control_after_messages"),
+            "runtime_control_expect_denial": expected.get("runtime_control_expect_denial", False),
             "policy_source": expected.get("policy_source") or _infer_policy_source(expected),
             "acl_read_enforcement": _infer_acl_read_enforcement(expected),
         }
@@ -168,7 +210,11 @@ def _verify(output: Path, scenarios: tuple[str, ...]) -> list[dict[str, object]]
                     f"expected {expected_value!r}"
                 )
         topology = config.get("client_topology")
-        if not isinstance(topology, dict) or topology.get("mode") != "container-per-client":
+        if (
+            not isinstance(topology, dict)
+            or topology.get("mode") != "container-per-client"
+            or topology.get("effective_mode") != "container-per-client"
+        ):
             raise RuntimeError(f"{scenario}: wrong client topology")
         broker = result.get("broker_config_attestation")
         if not isinstance(broker, dict) or broker.get("validated") is not True:
@@ -178,9 +224,7 @@ def _verify(output: Path, scenarios: tuple[str, ...]) -> list[dict[str, object]]
         effective_path = broker.get("effective_path")
         if not isinstance(effective_path, str):
             raise RuntimeError(f"{scenario}: effective broker configuration path missing")
-        current_hash = hashlib.sha256(
-            _resolve_compose_path(effective_path).read_bytes()
-        ).hexdigest()
+        current_hash = _current_broker_fixture_hash(broker, expected, scenario)
         if current_hash != broker.get("expected_sha256"):
             raise RuntimeError(f"{scenario}: result was produced from a stale broker fixture")
         runs = result.get("runs")
@@ -194,6 +238,12 @@ def _verify(output: Path, scenarios: tuple[str, ...]) -> list[dict[str, object]]
             resources = run.get("resources")
             if not isinstance(loadgen, dict) or not isinstance(resources, dict):
                 raise RuntimeError(f"{scenario}: loadgen/resource evidence missing")
+            loadgen_topology = loadgen.get("topology")
+            if (
+                not isinstance(loadgen_topology, dict)
+                or loadgen_topology.get("mode") != "container-per-client"
+            ):
+                raise RuntimeError(f"{scenario}: effective loadgen topology mismatch")
             _validate_broker_path_contract(
                 cast(Any, expected), loadgen, broker, client_count=expected_clients
             )

@@ -171,7 +171,10 @@ pub extern "C" fn ext_auth_start_callback(
         return MOSQ_ERR_PLUGIN_DEFER;
     }
 
+    state.auth_metrics.attempts.fetch_add(1, Ordering::Relaxed);
+
     if evt.data_in.is_null() || evt.data_in_len == 0 {
+        state.auth_metrics.failures.fetch_add(1, Ordering::Relaxed);
         return MOSQ_ERR_AUTH;
     }
 
@@ -179,6 +182,16 @@ pub extern "C" fn ext_auth_start_callback(
 
     match state.auth_engine.authenticate_binary(data) {
         Ok(token_type) => {
+            match &token_type {
+                crate::auth::TokenType::Jwt { .. } => state
+                    .auth_metrics
+                    .jwt_validations
+                    .fetch_add(1, Ordering::Relaxed),
+                crate::auth::TokenType::Biscuit { .. } => state
+                    .auth_metrics
+                    .biscuit_validations
+                    .fetch_add(1, Ordering::Relaxed),
+            };
             let token_type = match attach_biscuit_expiry(
                 token_type,
                 &state.config.biscuit.root_public_key,
@@ -186,6 +199,7 @@ pub extern "C" fn ext_auth_start_callback(
             ) {
                 Ok(token_type) => token_type,
                 Err(err) => {
+                    state.auth_metrics.failures.fetch_add(1, Ordering::Relaxed);
                     log_debug(&format!(
                         "Enhanced auth rejected: biscuit expiry extraction failed: {err}"
                     ));
@@ -193,24 +207,28 @@ pub extern "C" fn ext_auth_start_callback(
                 }
             };
             let Some(client_id) = mosq_client_id_string(evt.client) else {
+                state.auth_metrics.failures.fetch_add(1, Ordering::Relaxed);
                 log_debug("Enhanced auth rejected: live MQTT client_id missing");
                 return MOSQ_ERR_AUTH;
             };
             if let Err(err) =
                 enforce_identity_binding(&token_type, Some(client_id.as_str()), &state.config)
             {
+                state.auth_metrics.failures.fetch_add(1, Ordering::Relaxed);
                 log_debug(&format!("Enhanced auth rejected: {err}"));
                 return MOSQ_ERR_AUTH;
             }
             let token_type = attach_biscuit_roles(token_type, &state.config);
             log_static_acl_policy_bias(&token_type, &state.config);
             if let Err(err) = set_synthetic_username(evt.client, &token_type, &state.config) {
+                state.auth_metrics.failures.fetch_add(1, Ordering::Relaxed);
                 log_debug(&format!("Enhanced auth rejected: {err}"));
                 return MOSQ_ERR_AUTH;
             }
             let cache_ttl = match cache_ttl_for_token(&token_type, state.config.cache_ttl_seconds) {
                 Ok(ttl) => ttl,
                 Err(err) => {
+                    state.auth_metrics.failures.fetch_add(1, Ordering::Relaxed);
                     log_debug(&format!("Enhanced auth rejected: {err}"));
                     return MOSQ_ERR_AUTH;
                 }
@@ -219,13 +237,16 @@ pub extern "C" fn ext_auth_start_callback(
             prune_session_index_against_cache(state);
             let session_username = mosq_client_username_string(evt.client);
             bind_session_username(state, &client_id, session_username.as_deref());
+            state.auth_metrics.successes.fetch_add(1, Ordering::Relaxed);
             MOSQ_ERR_SUCCESS
         }
         Err(AuthError::Expired) => {
+            state.auth_metrics.failures.fetch_add(1, Ordering::Relaxed);
             log_debug("Enhanced auth rejected: token expired");
             MOSQ_ERR_AUTH
         }
         Err(AuthError::Invalid(msg)) => {
+            state.auth_metrics.failures.fetch_add(1, Ordering::Relaxed);
             log_debug(&format!("Enhanced auth rejected: {msg}"));
             MOSQ_ERR_AUTH
         }

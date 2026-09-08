@@ -8,14 +8,17 @@ COPY mqtt-auth-biscuit/Cargo.toml mqtt-auth-biscuit/Cargo.lock ./
 COPY mqtt-auth-biscuit/crates/benchmarks ./crates/benchmarks
 RUN printf '[workspace]\nmembers = ["crates/benchmarks"]\nresolver = "2"\n' > Cargo.toml
 
-RUN cargo build --release -p gen-tokens --bin mqtt-loadgen
+RUN cargo build --release -p gen-tokens --bin mqtt-loadgen --bin mqtt-auth-client
 
 FROM alpine:3.23.3@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
 
-RUN apk add --no-cache ca-certificates=20260611-r0
+RUN apk add --no-cache ca-certificates=20260611-r0 ethtool=6.15-r0 iproute2=6.17.0-r0
 
 WORKDIR /workspace
 
 COPY --from=builder /app/target/release/mqtt-loadgen /usr/local/bin/mqtt-loadgen
+COPY --from=builder /app/target/release/mqtt-auth-client /usr/local/bin/mqtt-auth-client
+COPY mqtt-auth-biscuit/docker/loadgen_entrypoint.sh /usr/local/bin/loadgen-entrypoint
+RUN chmod +x /usr/local/bin/loadgen-entrypoint
 
-ENTRYPOINT ["/usr/local/bin/mqtt-loadgen"]
+ENTRYPOINT ["/usr/local/bin/loadgen-entrypoint"]

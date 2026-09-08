@@ -20,9 +20,9 @@ multiple functional categories. The run plan has two parts:
 
 | Part | What | Runs | Est. time |
 |------|------|------|-----------|
-| 1 | All 444 scenarios, varying every non-fixed workload axis, × 3 runs | 3,222 | ~3–5 days |
+| 1 | All 444 scenarios, varying every non-fixed workload axis, × 3 runs | 3,186 | ~3–5 days |
 | 2 | Axis-aware representative cohorts × 3 runs | 1,530 | ~2–4 days |
-| **Total** | | **4,752** | **~5–9 days** |
+| **Total** | | **4,716** | **~5–9 days** |
 
 ## Research Dimensions
 
@@ -424,9 +424,9 @@ scenarios run once per repetition.
 
 | Component | Planned scenario-runs | Estimated time |
 |-----------|----------------------:|---------------:|
-| Part 1 | 3,222 | ~3–5 days |
+| Part 1 | 3,186 | ~3–5 days |
 | Part 2 | 1,530 | ~2–4 days |
-| **Total** | **4,752** | **~5–9 days** |
+| **Total** | **4,716** | **~5–9 days** |
 
 These are planning estimates, not performance results. Plan for overnight and
 weekend runs and preserve each invocation's output separately.
@@ -437,7 +437,7 @@ After all runs, count result files:
 
 ```bash
 # Part 1: each directory contains only its workload-shape group. Across all
-# Part 1 directories, expect 3,222 non-summary scenario JSON files.
+# Part 1 directories, expect 3,186 non-summary scenario JSON files.
 total=0
 for d in mqtt-auth-biscuit/benchmarks/results-p1-*/; do
   count=$(find "$d" -maxdepth 1 -type f -name '*.json' \

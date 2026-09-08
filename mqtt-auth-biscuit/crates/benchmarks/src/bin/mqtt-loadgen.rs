@@ -622,6 +622,7 @@ struct WorkerInvocation {
     publish_gate: Option<Arc<PublishStartGate>>,
     reauth_storm: Option<Arc<ReauthStormGate>>,
     runtime_control: Option<Arc<RuntimeControlState>>,
+    runtime_control_quota: Option<usize>,
 }
 
 struct StandardMetrics {
@@ -2808,7 +2809,11 @@ async fn publish_and_wait(
 ) -> Result<f64> {
     let start = Instant::now();
     client
-        .publish(topic, payload, rumqttc::PublishOptions::new(qos(qos_value)?))
+        .publish(
+            topic,
+            payload,
+            rumqttc::PublishOptions::new(qos(qos_value)?),
+        )
         .await?;
     if qos_value == 0 {
         poll_until(eventloop, Duration::from_secs(10), |event| {
@@ -2837,7 +2842,11 @@ async fn publish_tracked_and_wait(
 ) -> Result<f64> {
     let start = Instant::now();
     let notice = client
-        .publish_tracked(topic, payload, rumqttc::PublishOptions::new(qos(qos_value)?))
+        .publish_tracked(
+            topic,
+            payload,
+            rumqttc::PublishOptions::new(qos(qos_value)?),
+        )
         .await?;
     tokio::time::timeout(Duration::from_secs(10), notice.wait_completion_async())
         .await
@@ -3872,7 +3881,7 @@ async fn collect_fanout_results(
 async fn connect_fanout_publisher(
     args: &Args,
     fallback_password: &[u8],
-) -> Result<(AsyncClient, rumqttc::EventLoop)> {
+) -> Result<(AsyncClient, rumqttc::EventLoop, ConnectReport)> {
     let publisher_username = args
         .fanout_publisher_username
         .clone()
@@ -3906,19 +3915,24 @@ async fn connect_fanout_publisher(
         auth_method: None,
         auth_data: None,
     };
-    let (publisher, publisher_eventloop, _report) = connect(&publisher_spec).await?;
-    Ok((publisher, publisher_eventloop))
+    let (publisher, publisher_eventloop, report) = connect(&publisher_spec).await?;
+    Ok((publisher, publisher_eventloop, report))
 }
 
 fn fanout_metrics(
     results: &[WorkerResult],
+    publisher_connect_ms: Option<f64>,
     fanout_publish_ms: &[f64],
     duration_s: f64,
     churn_enabled: bool,
 ) -> FanoutMetrics {
     let receive: Vec<_> = results.iter().flat_map(|r| r.receive_ms.clone()).collect();
     FanoutMetrics {
-        connect: results.iter().filter_map(|r| r.connect_ms).collect(),
+        connect: results
+            .iter()
+            .filter_map(|r| r.connect_ms)
+            .chain(publisher_connect_ms)
+            .collect(),
         delegation: results.iter().filter_map(|r| r.delegation_ms).collect(),
         delegation_len: results.iter().filter_map(|r| r.delegation_len).collect(),
         attenuation: results.iter().filter_map(|r| r.attenuation_ms).collect(),
@@ -4055,7 +4069,7 @@ async fn run_fanout(args: Args) -> Result<Output> {
             .errors
             .push("fanout_subscribe_ready_timeout".to_string());
     }
-    let (publisher, mut publisher_eventloop) =
+    let (publisher, mut publisher_eventloop, publisher_report) =
         connect_fanout_publisher(&args, &fallback_password).await?;
     prepare_fanout_control_responses(
         &args,
@@ -4108,6 +4122,7 @@ async fn run_fanout(args: Args) -> Result<Output> {
     }
     let metrics = fanout_metrics(
         &results,
+        Some(publisher_report.connect_ms),
         &fanout_publish_ms,
         duration_s,
         args.fanout_churn_kind.is_some(),
@@ -4218,6 +4233,7 @@ async fn run_fanout_subscriber(args: Args) -> Result<Output> {
     let churn_state = FanoutChurnState::default();
     let metrics = fanout_metrics(
         &results,
+        None,
         &fanout_publish_ms,
         duration_s,
         args.fanout_churn_kind.is_some(),
@@ -4272,7 +4288,7 @@ async fn run_fanout_publisher(args: Args) -> Result<Output> {
     let qos_distribution = QosDistribution::parse(args.qos_distribution.as_deref())?;
     let token_refresh_codes = parse_token_refresh_codes(args.token_refresh_codes.as_deref())?;
     let published = if ready {
-        let (publisher, mut publisher_eventloop) =
+        let (publisher, mut publisher_eventloop, publisher_report) =
             connect_fanout_publisher(&args, &fallback_password).await?;
         prepare_fanout_control_responses(
             &args,
@@ -4300,10 +4316,11 @@ async fn run_fanout_publisher(args: Args) -> Result<Output> {
                 .errors
                 .push(format!("fanout_done_write_failed:{err}"));
         }
-        published
+        (published, Some(publisher_report.connect_ms))
     } else {
-        FanoutPublishResult::default()
+        (FanoutPublishResult::default(), None)
     };
+    let (published, publisher_connect_ms) = published;
     let FanoutPublishResult {
         publish_ms: fanout_publish_ms,
         publish_by_qos: fanout_publish_by_qos,
@@ -4314,6 +4331,7 @@ async fn run_fanout_publisher(args: Args) -> Result<Output> {
     let duration_s = start.elapsed().as_secs_f64().max(1e-9);
     let metrics = fanout_metrics(
         &[],
+        publisher_connect_ms,
         &fanout_publish_ms,
         duration_s,
         args.fanout_churn_kind.is_some(),
@@ -4632,7 +4650,7 @@ async fn drive_worker_eventloop(
     mut eventloop: rumqttc::EventLoop,
     shutdown: Arc<Notify>,
     shutdown_requested: Arc<AtomicBool>,
-    control_response_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    control_response: Option<(String, mpsc::UnboundedSender<Vec<u8>>)>,
 ) -> Option<String> {
     loop {
         if shutdown_requested.load(Ordering::Acquire) {
@@ -4643,9 +4661,11 @@ async fn drive_worker_eventloop(
             result = eventloop.poll() => {
                 match result {
                     Ok(Event::Incoming(Packet::Publish(publish)))
-                        if control_response_tx.is_some() =>
+                        if control_response.as_ref().is_some_and(
+                            |(topic, _)| publish.topic == *topic
+                        ) =>
                     {
-                        if let Some(tx) = &control_response_tx {
+                        if let Some((_, tx)) = &control_response {
                             let _ = tx.send(publish.payload.to_vec());
                         }
                     }
@@ -4808,7 +4828,9 @@ fn validate_control_response(
         .get("responses")
         .and_then(Value::as_array)
         .ok_or_else(|| {
-            MqttHelperError::Message("control_response_missing_responses".to_string())
+            MqttHelperError::Message(format!(
+                "control_response_missing_responses:payload={value}"
+            ))
         })?;
     if responses.is_empty() {
         return Err(MqttHelperError::Message(
@@ -5025,6 +5047,7 @@ async fn run_publish_mode(
     client: &AsyncClient,
     plan: WorkerPublishPlan<'_>,
     runtime_control: Option<&RuntimeControlState>,
+    runtime_control_quota: Option<usize>,
     control_response_rx: Option<&mut mpsc::UnboundedReceiver<Vec<u8>>>,
     result: &mut WorkerResult,
 ) {
@@ -5053,6 +5076,19 @@ async fn run_publish_mode(
     }
     let mut response_rx = control_response_rx;
     for message_index in 0..args.messages {
+        if let Some(state) = runtime_control
+            && args.runtime_control_expect_denial
+            && !state.applied.load(Ordering::Acquire)
+            && local_successful_publishes >= runtime_control_quota.unwrap_or_default()
+        {
+            while !state.applied.load(Ordering::Acquire) {
+                let notified = state.progress.notified();
+                if state.applied.load(Ordering::Acquire) {
+                    break;
+                }
+                notified.await;
+            }
+        }
         let publish_qos = plan
             .qos_distribution
             .map_or(args.qos, QosDistribution::choose);
@@ -5157,6 +5193,7 @@ async fn run_worker_session(
     qos_distribution: Option<&QosDistribution>,
     client: &AsyncClient,
     runtime_control: Option<&RuntimeControlState>,
+    runtime_control_quota: Option<usize>,
     control_response_rx: Option<&mut mpsc::UnboundedReceiver<Vec<u8>>>,
     result: &mut WorkerResult,
 ) {
@@ -5195,6 +5232,7 @@ async fn run_worker_session(
                 qos_distribution,
             },
             runtime_control,
+            runtime_control_quota,
             control_response_rx,
             result,
         )
@@ -5236,6 +5274,7 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
         publish_gate,
         reauth_storm,
         runtime_control,
+        runtime_control_quota,
     } = job;
     let mut result = WorkerResult::default();
     let mut publish_gate_participant = PublishGateParticipant::new(publish_gate);
@@ -5373,7 +5412,12 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
         eventloop,
         Arc::clone(&shutdown),
         Arc::clone(&shutdown_requested),
-        control_response_enabled.then_some(control_response_tx),
+        control_response_enabled.then(|| {
+            (
+                args.control_response_topic.clone().unwrap_or_default(),
+                control_response_tx,
+            )
+        }),
     ));
     let proactive_task = tokio::spawn(run_proactive_refresh_timer(
         args.clone(),
@@ -5396,6 +5440,7 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
         qos_distribution.as_ref(),
         &client,
         runtime_control.as_deref(),
+        runtime_control_quota,
         control_response_enabled.then_some(&mut control_response_rx),
         &mut result,
     )
@@ -5819,7 +5864,15 @@ async fn spawn_runtime_control(
             eventloop,
             Arc::clone(&shutdown),
             Arc::clone(&shutdown_requested),
-            response_enabled.then_some(control_response_tx),
+            response_enabled.then(|| {
+                (
+                    control_args
+                        .control_response_topic
+                        .clone()
+                        .unwrap_or_default(),
+                    control_response_tx,
+                )
+            }),
         ));
 
         if wait_for_runtime_control_threshold(&state, threshold).await {
@@ -5909,6 +5962,10 @@ async fn run_standard_mode(
             publish_gate: publish_gate.clone(),
             reauth_storm: reauth_storm.clone(),
             runtime_control: runtime_control.clone(),
+            runtime_control_quota: runtime_control.as_ref().map(|_| {
+                args.runtime_control_after_messages / args.clients
+                    + usize::from(index < args.runtime_control_after_messages % args.clients)
+            }),
         })));
     }
 
@@ -6133,6 +6190,7 @@ async fn run_handoff_delegatee(
             publish_gate: None,
             reauth_storm: None,
             runtime_control: None,
+            runtime_control_quota: None,
         })
         .await;
         results.push(result);
@@ -6575,6 +6633,22 @@ mod tests {
         );
         assert_eq!(metrics.control, vec![3.0]);
         assert_eq!(metrics.errors, vec!["controller-warning"]);
+    }
+
+    #[test]
+    fn fanout_connection_metrics_include_publisher_and_subscribers() {
+        let subscribers = vec![
+            WorkerResult {
+                connect_ms: Some(1.0),
+                ..WorkerResult::default()
+            },
+            WorkerResult {
+                connect_ms: Some(2.0),
+                ..WorkerResult::default()
+            },
+        ];
+        let metrics = fanout_metrics(&subscribers, Some(3.0), &[], 1.0, false);
+        assert_eq!(metrics.connect, vec![1.0, 2.0, 3.0]);
     }
 
     #[tokio::test]

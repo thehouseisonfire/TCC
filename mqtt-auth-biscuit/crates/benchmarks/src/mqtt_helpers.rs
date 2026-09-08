@@ -2,7 +2,7 @@ use base64::{Engine as _, engine::general_purpose};
 use bytes::Bytes;
 use rumqttc::mqttbytes::QoS as V5QoS;
 use rumqttc::mqttbytes::v5::{ConnectReturnCode, Packet, PubAckReason, SubscribeReasonCode};
-use rumqttc::{AsyncClient, Event, MqttOptions, TlsConfiguration, Transport};
+use rumqttc::{AsyncClient, Event, MqttOptions, NetworkOptions, TlsConfiguration, Transport};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
@@ -219,6 +219,9 @@ fn tls_config(ca_file: Option<&str>, insecure: bool) -> Result<TlsConfiguration>
 /// Returns an error when TLS configuration cannot be built.
 pub fn mqtt_options(spec: &ClientSpec) -> Result<MqttOptions> {
     let mut options = MqttOptions::new(spec.client_id.clone(), (spec.host.as_str(), spec.port));
+    let mut network_options = NetworkOptions::new();
+    network_options.set_connection_timeout(30);
+    options.set_network_options(network_options);
     if !spec.username.is_empty() || !spec.password.is_empty() {
         options.set_credentials(spec.username.clone(), Bytes::from(spec.password.clone()));
     }
@@ -328,6 +331,7 @@ mod tests {
     #[test]
     fn mqtt_options_omits_credentials_for_anonymous_clients() {
         let options = mqtt_options(&client_spec("", &[])).expect("options should build");
+        assert_eq!(options.network_options().connection_timeout(), 30);
 
         assert_eq!(options.auth(), &ConnectAuth::None);
     }

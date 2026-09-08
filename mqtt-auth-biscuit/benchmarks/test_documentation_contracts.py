@@ -23,5 +23,5 @@ def test_documented_scenario_inventory_matches_registry() -> None:
         assert "444" in content, relative_path
         assert "222" in content, relative_path
 
-    assert "3,222" in (REPO_ROOT / "RUN.md").read_text(encoding="utf-8")
+    assert "3,186" in (REPO_ROOT / "RUN.md").read_text(encoding="utf-8")
     assert "1,530" in (REPO_ROOT / "RUN.md").read_text(encoding="utf-8")

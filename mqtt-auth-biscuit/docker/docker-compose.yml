@@ -93,11 +93,14 @@ services:
       dockerfile: mqtt-auth-biscuit/docker/Dockerfile.loadgen
     environment:
       - MQTT_AUTH_BISCUIT_REPO_ROOT=/workspace
+      - LOADGEN_MTU=${LOADGEN_MTU:-}
     volumes:
       - ..:/workspace
     cpuset: "${LOADGEN_CPUSET:-}"
     cpus: "${LOADGEN_CPUS:-1.0}"
     mem_limit: "${LOADGEN_MEMORY:-512m}"
+    cap_add:
+      - NET_ADMIN
     networks:
       - mqtt-net
 

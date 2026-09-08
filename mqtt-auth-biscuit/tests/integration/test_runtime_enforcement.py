@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 import pytest
+
 from benchmarks import policy_churn
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

@@ -67,11 +67,8 @@ EOF
 run_non_docker_python_tests() {
   PYTHONPATH="$WORKDIR" \
     uv run --locked --group dev pytest \
-    "$WORKDIR/benchmarks/test_loadgen_wrapper.py" \
-    "$WORKDIR/benchmarks/test_documentation_contracts.py" \
-    "$WORKDIR/benchmarks/test_runner_startup_readiness.py" \
-    "$WORKDIR/benchmarks/test_packet_analysis.py" \
-    "$WORKDIR/benchmarks/test_scenario_semantics.py"
+    "$WORKDIR/benchmarks" \
+    --ignore="$WORKDIR/benchmarks/test_resource_snapshot.py"
 }
 
 if [ -f "$TOKEN_FILE" ]; then
@@ -93,13 +90,7 @@ fi
 $COMPOSE_BIN "${COMPOSE_FILES[@]}" up --build -d "${SERVICES[@]}"
 
 PYTHONPATH="$WORKDIR" \
-  uv run --locked --group dev pytest \
-  "$WORKDIR/benchmarks/test_loadgen_wrapper.py" \
-  "$WORKDIR/benchmarks/test_documentation_contracts.py" \
-  "$WORKDIR/benchmarks/test_runner_startup_readiness.py" \
-  "$WORKDIR/benchmarks/test_resource_snapshot.py" \
-  "$WORKDIR/benchmarks/test_packet_analysis.py" \
-  "$WORKDIR/benchmarks/test_scenario_semantics.py"
+  uv run --locked --group dev pytest "$WORKDIR/benchmarks"
 
 PYTHONPATH="$WORKDIR" uv run --locked python "$WORKDIR/benchmarks/smoke_test.py" --no-docker
 
@@ -142,3 +133,11 @@ PYTHONPATH="$WORKDIR" uv run --locked python "$WORKDIR/benchmarks/smoke_test.py"
       --no-tcpdump \
       --log-level INFO
 )
+
+# Broker integration fixtures own their Compose project and fixed host ports.
+# Stop the shared benchmark stack before handing those ports to the fixtures.
+$COMPOSE_BIN "${COMPOSE_FILES[@]}" down
+
+PYTHONPATH="$WORKDIR" \
+  uv run --locked --group dev pytest "$WORKDIR/tests/integration" \
+  -m "broker_integration and not ci_heavy"

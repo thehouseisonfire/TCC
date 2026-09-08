@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
-from benchmarks.phase2_preflight import _packet_metrics, _run, _verify, _verify_mtu_pair
+from benchmarks.phase2_preflight import (
+    _current_broker_fixture_hash,
+    _packet_metrics,
+    _run,
+    _verify,
+    _verify_mtu_pair,
+)
+from benchmarks.run_scenarios import ScenarioConfig, _render_mosquitto_runtime_conf
 
 
 def test_preflight_uses_client_correlatable_topology(
@@ -83,3 +91,42 @@ def test_preflight_rejects_result_with_wrong_scenario_identity(tmp_path: Path) -
 
     with pytest.raises(RuntimeError, match="identity mismatch"):
         _verify(tmp_path, ("BASELINE-NO-AUTH",))
+
+
+def test_generated_broker_fixture_hash_is_reconstructed_from_durable_source(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "mosquitto.conf"
+    source.write_text(
+        "plugin_opt_jwt_key_file jwt.pem\n"
+        "plugin_opt_biscuit_root_key_file biscuit.pem\n"
+        "plugin_opt_policy_mode token\n"
+    )
+    missing_generated = tmp_path / ".generated" / "mosquitto.conf"
+    paths = {"./mosquitto.conf": source, "./.generated/mosquitto.conf": missing_generated}
+    monkeypatch.setattr(
+        "benchmarks.phase2_preflight._resolve_compose_path", lambda path: paths[path]
+    )
+    expected: ScenarioConfig = {
+        "jwt_identity_binding": "strict",
+        "biscuit_identity_binding": "off",
+        "biscuit_client_id_fact": "device_id",
+    }
+    rendered = _render_mosquitto_runtime_conf(
+        source.read_text(),
+        jwt_identity_binding="strict",
+        biscuit_identity_binding="off",
+        biscuit_client_id_fact="device_id",
+    )
+
+    actual = _current_broker_fixture_hash(
+        {
+            "requested_path": "./mosquitto.conf",
+            "effective_path": "./.generated/mosquitto.conf",
+        },
+        expected,
+        "TOKEN-TLS",
+    )
+
+    assert actual == hashlib.sha256(rendered.encode()).hexdigest()
+    assert not missing_generated.exists()

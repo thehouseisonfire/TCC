@@ -236,8 +236,7 @@ async fn handle(cmd: Command, state: &mut Option<ClientState>) -> Result<Respons
                 .publish_tracked(
                     topic,
                     decode_b64(Some(&payload_b64))?,
-                    rumqttc::PublishOptions::new(qos(qos_value)?)
-                        .retain(retain.unwrap_or(false)),
+                    rumqttc::PublishOptions::new(qos(qos_value)?).retain(retain.unwrap_or(false)),
                 )
                 .await?;
             let result = tokio::time::timeout(

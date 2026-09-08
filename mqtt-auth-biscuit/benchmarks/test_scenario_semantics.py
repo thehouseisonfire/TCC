@@ -36,6 +36,26 @@ def _scenario_registry() -> dict[str, rs.ScenarioConfig]:
     )
 
 
+def _measured_result(connect_count: int, publish_count: int) -> dict[str, Any]:
+    connect = [1.0] * connect_count
+    publish = [1.0] * publish_count
+    return {
+        "connect": rs._summary_from_values(connect),
+        "publish": rs._summary_from_values(publish),
+        "publish_qos_0": rs._summary_from_values([]),
+        "publish_qos_1": rs._summary_from_values(publish),
+        "publish_qos_2": rs._summary_from_values([]),
+        "raw_metrics": {
+            "connect": connect,
+            "publish": publish,
+            "publish_qos_0": [],
+            "publish_qos_1": publish,
+            "publish_qos_2": [],
+        },
+        "publish_throughput_mps": float(publish_count),
+    }
+
+
 def test_scenario_semantics_metadata_is_present_for_capability_and_mixed_families() -> None:
     scenarios = _scenario_registry()
 
@@ -340,12 +360,12 @@ def test_composability_result_requires_transform_and_credential_attestation() ->
     scenario = _scenario_registry()["TOKEN-COMPOSABILITY-DELEGATED-DATALOG-MED-BISCUIT"]
     scenario["id"] = "TOKEN-COMPOSABILITY-DELEGATED-DATALOG-MED-BISCUIT"
     result: dict[str, Any] = {
+        **_measured_result(25, 25_000),
         "errors": [],
-        "publish": {"count": 25_000},
         "publish_qos_1": {"count": 25_000},
-        "delegation": {"count": 25},
-        "delegation_len": {"count": 25},
-        "delegation_handoff_publish": {"count": 25},
+        "delegation": rs._summary_from_values([1.0] * 25),
+        "delegation_len": rs._summary_from_values([1.0] * 25),
+        "delegation_handoff_publish": rs._summary_from_values([1.0] * 25),
         "authorization_probes": {"successes": 25, "failures": 0},
         "inputs": {
             "credential_attestations": {
@@ -363,6 +383,13 @@ def test_composability_result_requires_transform_and_credential_attestation() ->
             }
         },
     }
+    result["raw_metrics"].update(
+        {
+            "delegation": [1.0] * 25,
+            "delegation_len": [1.0] * 25,
+            "delegation_handoff_publish": [1.0] * 25,
+        }
+    )
 
     rs._validate_result_contract(scenario, result, message_count=1000, client_count=25)
 
@@ -411,8 +438,8 @@ def test_result_contract_validates_effective_cli_qos(qos: int) -> None:
     scenario: rs.ScenarioConfig = {"id": "CLI-QOS", "topic": "test"}
     expected = 6
     result = {
+        **_measured_result(2, expected),
         "errors": [],
-        "publish": {"count": expected},
         "qos_distribution_actual": {
             f"qos_{value}_count": expected if value == qos else 0 for value in range(3)
         },
@@ -420,11 +447,15 @@ def test_result_contract_validates_effective_cli_qos(qos: int) -> None:
             f"publish_qos_{value}": {"count": expected if value == qos else 0} for value in range(3)
         },
     }
+    for value in range(3):
+        samples = [1.0] * expected if value == qos else []
+        result[f"publish_qos_{value}"] = rs._summary_from_values(samples)
+        result["raw_metrics"][f"publish_qos_{value}"] = samples
     rs._validate_result_contract(
         scenario, result, message_count=3, client_count=2, effective_qos=qos
     )
     cast(dict[str, object], result[f"publish_qos_{qos}"])["count"] = 0
-    with pytest.raises(RuntimeError, match="effective QoS"):
+    with pytest.raises(RuntimeError, match=f"publish_qos_{qos} metric count"):
         rs._validate_result_contract(
             scenario, result, message_count=3, client_count=2, effective_qos=qos
         )
@@ -447,8 +478,8 @@ def test_reconnect_contract_requires_issuer_and_broker_attestations() -> None:
     scenario["id"] = "TOKEN-PUBLISH-STRESS-RECONNECT-JWT"
     records = [_issuance_record(f"client_{index}", f"{index:064x}") for index in range(1, 26)]
     result = {
+        **_measured_result(25, 25_000),
         "errors": [],
-        "publish": {"count": 25_000},
         "publish_qos_1": {"count": 25_000},
         "credential_issuance": records,
         "broker_auth_delta": {
@@ -532,8 +563,8 @@ def test_http_complexity_result_requires_every_publish_to_use_selected_profile()
     scenario = _scenario_registry()["HTTP-AUTHZ-COMPLEXITY-SIMPLE-JWT"]
     scenario["id"] = "HTTP-AUTHZ-COMPLEXITY-SIMPLE-JWT"
     result: dict[str, Any] = {
+        **_measured_result(25, 25_000),
         "errors": [],
-        "publish": {"count": 25_000},
         "inputs": {
             "credential_attestations": {
                 "clients": {
@@ -574,6 +605,13 @@ def test_workload_shape_preserves_each_unspecified_matrix_axis() -> None:
         == "fixed-clients"
     )
     assert rs._scenario_workload_shape({"message_count": 25}) == "fixed-messages"
+    mqtt5 = scenarios["TOKEN-MQTT5-REAUTH-JWT"]
+    assert rs._scenario_workload_shape(mqtt5) == "fixed"
+    assert mqtt5["client_count"] == 1
+    assert mqtt5["message_count"] == 2
+    assert mqtt5["qos"] == 1
+    assert mqtt5["workload_kind"] == "mqtt5_reauth_transition"
+    assert mqtt5["authorization_probe_count"] == 1
 
 
 @pytest.mark.parametrize(

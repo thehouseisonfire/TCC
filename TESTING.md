@@ -310,8 +310,9 @@ is semantically accepted only when all applicable checks below pass.
 - Reconnect scenarios perform the expected number of full sessions.
 - Proactive reauthentication and storm scenarios report attempts, successes,
   zero unexpected expiry denials, and session continuity.
-- MQTT 5 AUTH scenarios report successful initial AUTH and reauthentication with
-  both timing samples present.
+- MQTT 5 AUTH scenarios use one client at QoS 1, report successful publishes
+  before and after reauthentication, reject the old topic afterward, and retain
+  finite initial-AUTH and reauthentication timing samples.
 
 Exit gate: all 222 base scenarios have one accepted semantic run, or appear in a
 blocking-issues list with owner, evidence, and required fix. Update
@@ -369,7 +370,7 @@ unresolved path ambiguity.
 
 ## Phase 6 — Part 1 full baseline matrix
 
-Goal: produce the complete 3,222-run baseline dataset.
+Goal: produce the complete 3,186-run baseline dataset.
 
 Execute Step 2 of `RUN.md` exactly, including workload-shape grouping and the
 host-topology exception for reauthentication storms. Validate each output
@@ -390,7 +391,7 @@ throttling, memory pressure/OOM events, broker reconnects, policy-server delay,
 packet loss, packet-capture overhead, and host contention. Rerun the entire
 three-repetition cell after fixing an environmental cause.
 
-Exit gate: 3,222 scenario JSON files are present, contract-valid, attributable to
+Exit gate: 3,186 scenario JSON files are present, contract-valid, attributable to
 their intended cells, and either free of unexplained anomalies or accompanied by
 an explicit exclusion record.
 
@@ -425,7 +426,7 @@ Exit gate: all 108 sweep invocations contain 32 reviewed scenario results, for
 
 Goal: produce an auditable statement of exactly what can be used in analysis.
 
-1. Count results as described in `RUN.md`: 3,222 Part 1 scenario runs and 1,530
+1. Count results as described in `RUN.md`: 3,186 Part 1 scenario runs and 1,530
    Part 2 scenario runs.
 2. Compare result scenario IDs against the frozen Phase 0 inventory and the
    expected matrix cells. Detect missing, duplicate, stale, and extra files.

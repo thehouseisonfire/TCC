@@ -33,6 +33,8 @@ mqtt-auth-biscuit/benchmarks/**.json
 /mqtt-auth-biscuit/docker/sqlite/policy.db
 
 # benchmark results
-
 /mqtt-auth-biscuit/benchmarks/results/
 /mqtt-auth-biscuit/benchmarks/result*
+results-p*
+/combined-part1/
+/mqtt-auth-biscuit/benchmarks/combined-part1/

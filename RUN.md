@@ -159,7 +159,7 @@ cd ..
 
 ### Step 2: Part 1 — Full baseline
 
-Generate the full scenario list:
+Generate the full scenario list (444 total scenarios across 112 matrix, 282 fixed-client, 46 fixed, and 4 reauth-storm, totaling 3,186 runs across their respective cells and 3 repetitions):
 
 ```bash
 readarray -t SCENARIO_GROUPS < <(cd mqtt-auth-biscuit && uv run --locked python -c "
@@ -445,7 +445,7 @@ for d in mqtt-auth-biscuit/benchmarks/results-p1-*/; do
   echo "$d: $count scenarios"
   total=$((total + count))
 done
-echo "Part 1 total: $total / 3174"
+echo "Part 1 total: $total / 3186"
 
 # Part 2: expect 32 JSON files per sweep run
 for d in mqtt-auth-biscuit/benchmarks/results-p2-*/; do
@@ -460,23 +460,27 @@ done
 Use the aggregation script on any results directory:
 
 ```bash
-uv run --locked python benchmarks/aggregate_results.py \
-  --input mqtt-auth-biscuit/benchmarks/results-p1-c10-m10-r1 \
+cd mqtt-auth-biscuit
+uv run --locked python -m benchmarks.aggregate_results \
+  --input benchmarks/results-p1-c10-m10-r1 \
   --out-json summary.json \
   --out-csv summary.csv
+cd ..
 ```
 
 Or aggregate across all Part 1 runs for a combined view:
 
 ```bash
-mkdir -p combined-part1
-for d in mqtt-auth-biscuit/benchmarks/results-p1-*/; do
-  cp "$d"/*.json combined-part1/ 2>/dev/null
+cd mqtt-auth-biscuit
+mkdir -p benchmarks/combined-part1
+for d in benchmarks/results-p1-*/; do
+  cp "$d"/*.json benchmarks/combined-part1/ 2>/dev/null
 done
-uv run --locked python benchmarks/aggregate_results.py \
-  --input combined-part1 \
-  --out-json combined-part1/summary.json \
-  --out-csv combined-part1/summary.csv
+uv run --locked python -m benchmarks.aggregate_results \
+  --input benchmarks/combined-part1 \
+  --out-json benchmarks/combined-part1/summary.json \
+  --out-csv benchmarks/combined-part1/summary.csv
+cd ..
 ```
 
 ## Notes

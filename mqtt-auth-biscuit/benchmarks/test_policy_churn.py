@@ -325,6 +325,29 @@ def test_build_dynsec_snapshot_publish_multi_client_profiles_remove_client_pin()
     } in admin_role["acls"]
 
 
+def test_build_dynsec_snapshot_publish_multi_client_base_denies_sensor_subscribe() -> None:
+    payload = policy_churn.build_dynsec_snapshot("publish_multi_client_base")
+    roles = payload["roles"]
+    assert isinstance(roles, list)
+
+    sensor_writer = next(role for role in roles if role.get("rolename") == "sensor_writer")
+    writer_acls = sensor_writer["acls"]
+    assert isinstance(writer_acls, list)
+    assert writer_acls, "sensor_writer must retain its publish ACL"
+    assert all(acl.get("acltype") == "publishClientSend" for acl in writer_acls)
+    assert all(acl.get("allow") is True for acl in writer_acls)
+
+    for role in roles:
+        for acl in role.get("acls", []):
+            assert not (
+                acl.get("acltype") in {"subscribe", "subscribeLiteral", "subscribePattern"}
+                and "sensors/" in str(acl.get("topic", ""))
+            ), f"unexpected sensors subscribe ACL in role {role.get('rolename')}: {acl}"
+
+    default_access = payload["defaultACLAccess"]
+    assert default_access["subscribe"] is False
+
+
 def test_build_dynsec_snapshot_large_state_adds_deterministic_bulk_entities() -> None:
     payload = policy_churn.build_dynsec_snapshot("large_state_control")
 

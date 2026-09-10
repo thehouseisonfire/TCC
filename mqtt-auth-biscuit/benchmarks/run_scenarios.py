@@ -2658,6 +2658,30 @@ def _merge_per_client_loadgen_results(
         "successes": control_response_counts.get("successes", 0),
         "failures": control_response_counts.get("failures", 0),
     }
+    probe_successes = 0
+    probe_failures = 0
+    probe_enabled = False
+    probe_operation: str | None = None
+    probe_expected: str | None = None
+    for result in results:
+        probes = result.get("authorization_probes")
+        if not isinstance(probes, dict):
+            continue
+        if probes.get("enabled") is True:
+            probe_enabled = True
+        if probe_operation is None and probes.get("operation") is not None:
+            probe_operation = str(probes["operation"])
+        if probe_expected is None and probes.get("expected") is not None:
+            probe_expected = str(probes["expected"])
+        probe_successes += int(probes.get("successes") or 0)
+        probe_failures += int(probes.get("failures") or 0)
+    merged["authorization_probes"] = {
+        "enabled": probe_enabled,
+        "operation": probe_operation,
+        "expected": probe_expected,
+        "successes": probe_successes,
+        "failures": probe_failures,
+    }
     for field in (
         "proactive_refresh_attempts",
         "proactive_refresh_successes",

@@ -1275,6 +1275,144 @@ def test_container_per_client_merge_aggregates_all_reported_metrics() -> None:
     assert merged["topology"]["wall_duration_s"] == 2.0
 
 
+def test_container_per_client_merge_sums_authorization_probes() -> None:
+    results = [
+        {
+            "inputs": {"clients": 1},
+            "connect": {"count": 1, "mean_ms": 10.0},
+            "publish": {"count": 10, "mean_ms": 1.0},
+            "publish_qos_0": {"count": 0},
+            "publish_qos_1": {"count": 10, "mean_ms": 1.0},
+            "publish_qos_2": {"count": 0},
+            "receive": {"count": 0},
+            "qos_distribution_actual": {
+                "qos_0_count": 0,
+                "qos_1_count": 10,
+                "qos_2_count": 0,
+            },
+            "publish_outcomes": {
+                "attempted": 10,
+                "succeeded": 10,
+                "failed": 0,
+                "attempted_by_qos": {"qos_0": 0, "qos_1": 10, "qos_2": 0},
+                "failed_by_qos": {"qos_0": 0, "qos_1": 0, "qos_2": 0},
+            },
+            "received_messages": {"count": 0},
+            "control_responses": {"enabled": False, "successes": 0, "failures": 0},
+            "authorization_probes": {
+                "enabled": True,
+                "operation": "subscribe",
+                "expected": "deny",
+                "successes": 1,
+                "failures": 0,
+            },
+            "proactive_refresh_attempts": 0,
+            "proactive_refresh_successes": 0,
+            "proactive_refresh_failures": 0,
+            "expiry_denial_count": 0,
+            "session_continuity_ok": True,
+            "raw_publish_ms": [1.0] * 10,
+            "raw_metrics": {
+                "connect": [10.0],
+                "publish": [1.0] * 10,
+                "publish_qos_0": [],
+                "publish_qos_1": [1.0] * 10,
+                "publish_qos_2": [],
+                "receive": [],
+            },
+            "errors": [],
+            "throughput_mps": 10.0,
+            "publish_throughput_mps": 10.0,
+            "receive_throughput_mps": 0.0,
+        }
+        for _ in range(10)
+    ]
+
+    merged = rs._merge_per_client_loadgen_results(results, wall_duration_s=2.0)
+
+    assert merged["inputs"]["clients"] == 10
+    assert merged["publish"]["count"] == 100
+    assert merged["authorization_probes"] == {
+        "enabled": True,
+        "operation": "subscribe",
+        "expected": "deny",
+        "successes": 10,
+        "failures": 0,
+    }
+
+
+def test_container_per_client_merge_sums_mixed_authorization_probe_outcomes() -> None:
+    denied = {
+        "enabled": True,
+        "operation": "subscribe",
+        "expected": "deny",
+        "successes": 1,
+        "failures": 0,
+    }
+    allowed = {
+        "enabled": True,
+        "operation": "subscribe",
+        "expected": "deny",
+        "successes": 0,
+        "failures": 1,
+    }
+    results = [
+        {
+            "inputs": {"clients": 1},
+            "connect": {"count": 1, "mean_ms": 10.0},
+            "publish": {"count": 10, "mean_ms": 1.0},
+            "publish_qos_0": {"count": 0},
+            "publish_qos_1": {"count": 10, "mean_ms": 1.0},
+            "publish_qos_2": {"count": 0},
+            "receive": {"count": 0},
+            "qos_distribution_actual": {
+                "qos_0_count": 0,
+                "qos_1_count": 10,
+                "qos_2_count": 0,
+            },
+            "publish_outcomes": {
+                "attempted": 10,
+                "succeeded": 10,
+                "failed": 0,
+                "attempted_by_qos": {"qos_0": 0, "qos_1": 10, "qos_2": 0},
+                "failed_by_qos": {"qos_0": 0, "qos_1": 0, "qos_2": 0},
+            },
+            "received_messages": {"count": 0},
+            "control_responses": {"enabled": False, "successes": 0, "failures": 0},
+            "authorization_probes": probes,
+            "proactive_refresh_attempts": 0,
+            "proactive_refresh_successes": 0,
+            "proactive_refresh_failures": 0,
+            "expiry_denial_count": 0,
+            "session_continuity_ok": True,
+            "raw_publish_ms": [1.0] * 10,
+            "raw_metrics": {
+                "connect": [10.0],
+                "publish": [1.0] * 10,
+                "publish_qos_0": [],
+                "publish_qos_1": [1.0] * 10,
+                "publish_qos_2": [],
+                "receive": [],
+            },
+            "errors": [],
+            "throughput_mps": 10.0,
+            "publish_throughput_mps": 10.0,
+            "receive_throughput_mps": 0.0,
+        }
+        for probes in ([denied] * 9 + [allowed])
+    ]
+
+    merged = rs._merge_per_client_loadgen_results(results, wall_duration_s=2.0)
+
+    assert merged["authorization_probes"] == {
+        "enabled": True,
+        "operation": "subscribe",
+        "expected": "deny",
+        "successes": 9,
+        "failures": 1,
+    }
+
+
 def test_reauth_storm_validation_accepts_complete_success() -> None:
     rs._validate_reauth_storm_result(
         "TOKEN-LIFECYCLE-REAUTH-STORM-JWT",

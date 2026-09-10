@@ -938,6 +938,31 @@ def test_broker_path_contract_validates_anonymous_dynamic_security_defer() -> No
         rs._validate_broker_path_contract(scenario, result, attestation, client_count=2)
 
 
+def _dynamic_security_url(conf_text: str) -> str | None:
+    for line in conf_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("plugin_opt_dynamic_security_url"):
+            return stripped.split(None, 1)[1]
+    return None
+
+
+def test_tls_mosquitto_confs_share_base_dynamic_security_url() -> None:
+    tls_dir = rs._resolve_compose_path("./tls")
+    compared = 0
+    for tls_conf in sorted(tls_dir.glob("mosquitto_*.conf")):
+        base_conf = rs._resolve_compose_path(tls_conf.name)
+        if not base_conf.exists():
+            continue
+        tls_url = _dynamic_security_url(tls_conf.read_text(encoding="utf-8"))
+        base_url = _dynamic_security_url(base_conf.read_text(encoding="utf-8"))
+        assert tls_url == base_url, (
+            f"{tls_conf.name} dynamic_security_url {tls_url!r} "
+            f"diverges from base {base_url!r}"
+        )
+        compared += 1
+    assert compared > 0
+
+
 def test_effective_mosquitto_runtime_conf_materializes_plugin_backed_config() -> None:
     generated_conf = rs._resolve_compose_path(
         ".generated/mosquitto.jwt-strict.biscuit-off.fact-client_id.conf"

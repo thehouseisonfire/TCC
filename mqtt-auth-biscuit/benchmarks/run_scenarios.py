@@ -4804,7 +4804,9 @@ def _effective_scenario_message_count(
 def _apply_result_contracts(scenarios: dict[str, ScenarioConfig]) -> dict[str, ScenarioConfig]:
     """Populate and validate the invariant contracts shared by fan-out families."""
     for scenario_id, scenario in scenarios.items():
-        if scenario.get("control_topic") == "$CONTROL/dynamic-security/v1":
+        if scenario.get(
+            "control_topic"
+        ) == "$CONTROL/dynamic-security/v1" and _scenario_uses_dynamic_security(scenario):
             scenario["control_response_topic"] = "$CONTROL/dynamic-security/v1/response"
         if scenario.get("traffic_pattern") != "fanout":
             continue

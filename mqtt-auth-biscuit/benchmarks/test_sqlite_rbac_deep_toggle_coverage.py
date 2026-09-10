@@ -40,3 +40,33 @@ def test_sqlite_rbac_deep_toggle_control_scenarios_enable_control_mode() -> None
         assert scenario["control_topic"] == "$CONTROL/dynamic-security/v1"
         assert scenario["control_repeat"] == 5
         assert scenario["sqlite_seed_profile"] == "rbac_deep_control_allow"
+
+
+def test_sqlite_control_scenarios_keep_publish_path_without_dynsec_response() -> None:
+    scenarios = rs._apply_result_contracts(rs._sqlite_rbac_deep_toggle_scenarios(_tokens()))
+    for scenario_id in ["SQLITE-RBAC-DEEP-CONTROL-JWT", "SQLITE-RBAC-DEEP-CONTROL-BISCUIT"]:
+        scenario = scenarios[scenario_id]
+        # The control operation itself is preserved: the allow path is still measured.
+        assert scenario["control_mode"] is True
+        assert scenario["control_topic"] == "$CONTROL/dynamic-security/v1"
+        assert scenario["control_payload"] == {"commands": [{"command": "listClients"}]}
+        assert scenario["control_repeat"] == 5
+        # SQLite mode has no DynSec responder, so no correlated response is expected.
+        assert "control_response_topic" not in scenario
+
+
+def test_dynsec_control_scenarios_keep_correlated_response_topic() -> None:
+    scenarios: dict[str, rs.ScenarioConfig] = {
+        "dynsec-conf": {
+            "control_topic": "$CONTROL/dynamic-security/v1",
+            "mosquitto_conf": "./mosquitto_dynsec.conf",
+        },
+        "dynsec-profile": {
+            "control_topic": "$CONTROL/dynamic-security/v1",
+            "mosquitto_conf": "./mosquitto_sqlite_acl_read.conf",
+            "dynamic_security_generated_profile": "control_admin_base",
+        },
+    }
+    rs._apply_result_contracts(scenarios)
+    for scenario in scenarios.values():
+        assert scenario["control_response_topic"] == "$CONTROL/dynamic-security/v1/response"

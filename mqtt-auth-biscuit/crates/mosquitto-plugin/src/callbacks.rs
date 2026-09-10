@@ -574,6 +574,7 @@ pub extern "C" fn control_callback(
                         let response = super::dynamic_security_control_response(
                             payload,
                             &enforcement.command_errors,
+                            &enforcement.command_data,
                         );
                         let self_disconnect = enforcement
                             .kick_targets
@@ -602,7 +603,7 @@ pub extern "C" fn control_callback(
                         let command_errors =
                             super::dynamic_security_control_command_errors(payload, &error);
                         let response =
-                            super::dynamic_security_control_response(payload, &command_errors);
+                            super::dynamic_security_control_response(payload, &command_errors, &[]);
                         super::publish_dynamic_security_control_response(&client_id, &response);
                     }
                 }

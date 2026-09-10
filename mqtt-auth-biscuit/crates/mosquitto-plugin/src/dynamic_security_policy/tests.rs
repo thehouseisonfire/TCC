@@ -4213,6 +4213,208 @@ fn apply_control_payload_remove_role_acl_then_restore_same_payload_skips_notify(
 }
 
 #[test]
+fn apply_control_payload_get_client_returns_dynsec_compatible_data() {
+    let path = write_test_dynsec_config();
+    let policy = DynamicSecurityPolicy::new(path.clone(), Duration::from_secs(60))
+        .expect("policy must load");
+
+    // Same shape as the CONTROL-INTERLEAVED benchmark payloads.
+    let payload = br#"{"commands":[{"command":"getClient","username":"test_user"}]}"#;
+    let targets = policy
+        .apply_control_payload(payload)
+        .expect("control payload should apply");
+    assert_eq!(targets.command_errors, vec![None]);
+    assert!(targets.kick_client_ids.is_empty());
+    assert!(targets.kick_usernames.is_empty());
+    assert!(targets.notify_events.is_empty());
+
+    let data = targets
+        .command_data
+        .first()
+        .and_then(|data| data.clone())
+        .expect("getClient should return data");
+    let client = data
+        .get("client")
+        .expect("getClient data should contain client");
+    assert_eq!(client["username"], json!("test_user"));
+    assert_eq!(client["clientid"], json!("test_client"));
+    assert!(client.get("disabled").is_none());
+    assert_eq!(
+        client["roles"],
+        json!([{"rolename": "ctrl", "priority": 0}])
+    );
+    assert_eq!(client["groups"], json!([]));
+    assert_eq!(client["connections"], json!([]));
+
+    // A read must not change authorization behavior.
+    assert!(
+        policy
+            .check(
+                Some("test_user"),
+                Some("test_client"),
+                "$CONTROL/dynamic-security/v1",
+                ACL_WRITE
+            )
+            .expect("policy check should succeed")
+    );
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn apply_control_payload_get_client_reports_missing_client() {
+    let path = write_test_dynsec_config();
+    let policy = DynamicSecurityPolicy::new(path.clone(), Duration::from_secs(60))
+        .expect("policy must load");
+
+    let targets = policy
+        .apply_control_payload(br#"{"commands":[{"command":"getClient","username":"nobody"}]}"#)
+        .expect("control payload should apply");
+    assert_eq!(
+        targets.command_errors,
+        vec![Some("Client not found".to_string())]
+    );
+    assert!(targets.command_data.first().is_some_and(Option::is_none));
+    assert!(targets.kick_client_ids.is_empty());
+    assert!(targets.kick_usernames.is_empty());
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn apply_control_payload_get_client_requires_username() {
+    let path = write_test_dynsec_config();
+    let policy = DynamicSecurityPolicy::new(path.clone(), Duration::from_secs(60))
+        .expect("policy must load");
+
+    let targets = policy
+        .apply_control_payload(br#"{"commands":[{"command":"getClient"}]}"#)
+        .expect("control payload should apply");
+    assert_eq!(
+        targets.command_errors,
+        vec![Some("getClient: missing username".to_string())]
+    );
+    assert!(targets.command_data.first().is_some_and(Option::is_none));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn apply_control_payload_list_clients_returns_total_count_by_default() {
+    let path = write_test_dynsec_config();
+    let policy = DynamicSecurityPolicy::new(path.clone(), Duration::from_secs(60))
+        .expect("policy must load");
+
+    // Same shape as the SQLITE-RBAC-DEEP-CONTROL benchmark payloads.
+    let targets = policy
+        .apply_control_payload(br#"{"commands":[{"command":"listClients"}]}"#)
+        .expect("control payload should apply");
+    assert_eq!(targets.command_errors, vec![None]);
+    let data = targets
+        .command_data
+        .first()
+        .and_then(|data| data.clone())
+        .expect("listClients should return data");
+    assert_eq!(data["totalCount"], json!(1));
+    assert_eq!(data["clients"], json!(["test_user"]));
+    assert!(targets.kick_client_ids.is_empty());
+    assert!(targets.kick_usernames.is_empty());
+    assert!(targets.notify_events.is_empty());
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn apply_control_payload_list_clients_supports_verbose_and_pagination() {
+    let path = write_test_dynsec_config();
+    let policy = DynamicSecurityPolicy::new(path.clone(), Duration::from_secs(60))
+        .expect("policy must load");
+    policy
+        .apply_control_payload(
+            br#"{"commands":[
+                {"command":"createGroup","groupname":"extra","roles":[]},
+                {"command":"addGroupClient","groupname":"extra","username":"second_user","priority":0}
+            ]}"#,
+        )
+        .expect("setup payload should apply");
+
+    let targets = policy
+        .apply_control_payload(
+            br#"{"commands":[{"command":"listClients","verbose":true,"count":1,"offset":1}]}"#,
+        )
+        .expect("control payload should apply");
+    assert_eq!(targets.command_errors, vec![None]);
+    let data = targets
+        .command_data
+        .first()
+        .and_then(|data| data.clone())
+        .expect("listClients should return data");
+    assert_eq!(data["totalCount"], json!(2));
+    let clients = data["clients"]
+        .as_array()
+        .expect("clients should be an array");
+    assert_eq!(clients.len(), 1);
+    assert_eq!(clients[0]["username"], json!("test_user"));
+
+    let empty = policy
+        .apply_control_payload(br#"{"commands":[{"command":"listClients","count":1,"offset":5}]}"#)
+        .expect("control payload should apply");
+    let empty_data = empty
+        .command_data
+        .first()
+        .and_then(|data| data.clone())
+        .expect("listClients should return data");
+    assert_eq!(empty_data["totalCount"], json!(2));
+    assert_eq!(empty_data["clients"], json!([]));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn apply_control_payload_reads_leave_persisted_config_unchanged() {
+    let path = write_test_dynsec_config();
+    let before = fs::read_to_string(&path).expect("test dynsec config should be readable");
+    let policy = DynamicSecurityPolicy::new(path.clone(), Duration::from_secs(60))
+        .expect("policy must load");
+
+    let targets = policy
+        .apply_control_payload(
+            br#"{"commands":[
+                {"command":"getClient","username":"test_user"},
+                {"command":"listClients"}
+            ]}"#,
+        )
+        .expect("control payload should apply");
+    assert_eq!(targets.command_errors, vec![None, None]);
+    assert!(targets.command_data.iter().all(Option::is_some));
+    assert!(targets.persist_warning.is_none());
+
+    let after = fs::read_to_string(&path).expect("test dynsec config should be readable");
+    assert_eq!(before, after);
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn apply_control_payload_read_observes_prior_mutation_in_same_payload() {
+    let path = write_test_dynsec_config();
+    let policy = DynamicSecurityPolicy::new(path.clone(), Duration::from_secs(60))
+        .expect("policy must load");
+
+    let targets = policy
+        .apply_control_payload(
+            br#"{"commands":[
+                {"command":"disableClient","username":"test_user"},
+                {"command":"getClient","username":"test_user"}
+            ]}"#,
+        )
+        .expect("control payload should apply");
+    assert_eq!(targets.command_errors, vec![None, None]);
+    assert_eq!(targets.kick_usernames, vec!["test_user".to_string()]);
+    let data = targets
+        .command_data
+        .get(1)
+        .and_then(|data| data.clone())
+        .expect("getClient should return data");
+    assert_eq!(data["client"]["disabled"], json!(true));
+    let _ = fs::remove_file(path);
+}
+
+#[test]
 fn remove_role_acl_overlay_survives_stale_file_reload() {
     let path = write_test_dynsec_notify_config();
     let policy =

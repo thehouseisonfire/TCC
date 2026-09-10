@@ -523,6 +523,7 @@ impl Drop for BenchmarkDiagnosticsServer {
 struct DynamicSecurityControlEnforcement {
     kick_targets: Vec<String>,
     command_errors: Vec<Option<String>>,
+    command_data: Vec<Option<Value>>,
 }
 
 fn apply_dynamic_security_control_enforcement(
@@ -582,6 +583,7 @@ fn apply_dynamic_security_control_enforcement(
             notify_events,
             persist_warning,
             command_errors,
+            command_data,
         }) => {
             let mut kick_targets: HashSet<String> = kick_client_ids.into_iter().collect();
             for username in kick_usernames {
@@ -605,6 +607,7 @@ fn apply_dynamic_security_control_enforcement(
             Ok(DynamicSecurityControlEnforcement {
                 kick_targets,
                 command_errors,
+                command_data,
             })
         }
         Err(err) => {
@@ -633,7 +636,11 @@ fn apply_dynamic_security_control_disconnects(state: &PluginState, kick_targets:
     }
 }
 
-fn dynamic_security_control_response(payload: &[u8], command_errors: &[Option<String>]) -> String {
+fn dynamic_security_control_response(
+    payload: &[u8],
+    command_errors: &[Option<String>],
+    command_data: &[Option<Value>],
+) -> String {
     let commands: Vec<Value> = serde_json::from_slice::<Value>(payload)
         .ok()
         .and_then(|value| value.get("commands").and_then(Value::as_array).cloned())
@@ -655,6 +662,8 @@ fn dynamic_security_control_response(payload: &[u8], command_errors: &[Option<St
             }
             if let Some(error) = command_errors.get(index).and_then(Option::as_deref) {
                 response.insert("error".to_string(), Value::String(error.to_string()));
+            } else if let Some(data) = command_data.get(index).and_then(|data| data.clone()) {
+                response.insert("data".to_string(), data);
             }
             Value::Object(response)
         })

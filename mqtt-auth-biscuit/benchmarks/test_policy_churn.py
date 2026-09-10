@@ -90,7 +90,7 @@ def test_seed_sqlite_deep_policy_sets_conflict_and_control_roles(tmp_path) -> No
         profile="rbac_deep",
     )
     assert seeded["profile"] == "rbac_deep"
-    assert seeded["rows_seeded"] == 34
+    assert seeded["rows_seeded"] == 35
 
     with sqlite3.connect(db_path) as conn:
         for client_id in ["client_1", "client_2"]:
@@ -168,6 +168,17 @@ def test_seed_sqlite_deep_control_allow_profile_assigns_client_control_role(tmp_
             ("client_1", policy_churn.DEEP_CONTROL_ADMIN_ROLE),
         ).fetchone()
         assert row is not None
+        # The allow path needs both halves of the control-plane capability:
+        # WRITE authorizes the MQTT PUBLISH packet, ACL_CONTROL the control event.
+        grants = {
+            access
+            for (access,) in conn.execute(
+                "SELECT access FROM role_acls WHERE role_name = ? AND topic_filter = ?",
+                (policy_churn.DEEP_CONTROL_ADMIN_ROLE, "$CONTROL/#"),
+            ).fetchall()
+        }
+        assert policy_churn.ACL_WRITE in grants
+        assert policy_churn.ACL_CONTROL in grants
 
 
 def test_build_dynsec_snapshot_fanout_control_allow_grants_control_publish_acl() -> None:

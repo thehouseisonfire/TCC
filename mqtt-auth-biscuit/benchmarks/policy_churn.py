@@ -575,6 +575,9 @@ def seed_sqlite_deep_policy(
                 (DEEP_DATA_ALLOW_ROLE, topic, ACL_READ),
                 (DEEP_PUBLISHER_ROLE, topic, ACL_WRITE),
                 (DEEP_CONTROL_ADMIN_ROLE, "$CONTROL/#", ACL_CONTROL),
+                # The MQTT PUBLISH carrying a control command is authorized as
+                # WRITE; ACL_CONTROL only covers the broker control event.
+                (DEEP_CONTROL_ADMIN_ROLE, "$CONTROL/#", ACL_WRITE),
                 (DEEP_CONTROL_ADMIN_ROLE, "system/notifications/#", ACL_SUBSCRIBE),
                 (DEEP_CONTROL_ADMIN_ROLE, "system/notifications/#", ACL_READ),
                 (DEEP_CONTROL_ADMIN_ROLE, "system/notifications/#", ACL_WRITE),
@@ -594,9 +597,13 @@ def seed_sqlite_deep_policy(
         )
         conn.commit()
 
+    # Shared rows: 5 roles + (subscribers + 3) users + (2 * subscribers + 3)
+    # user_roles + 10 role_acls + 2 deny_acls, plus one user_roles row when a
+    # control publisher is provisioned.
+    control_rows = 1 if control_client_id is not None else 0
     return {
         "subscriber_count": subscriber_count,
-        "rows_seeded": (3 * subscriber_count) + 22,
+        "rows_seeded": (3 * subscriber_count) + 23 + control_rows,
         "topic": topic,
         "profile": profile_name,
     }

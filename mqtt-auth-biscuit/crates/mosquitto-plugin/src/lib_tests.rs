@@ -1571,7 +1571,7 @@ fn message_callback_does_not_apply_dynamic_security_control_payload() {
 #[test]
 fn dynamic_security_control_response_preserves_command_correlations() {
     let payload = br#"{"commands":[{"command":"disableClient","username":"test_user","correlationData":"one"},{"command":"removeRoleACL","correlationData":"two"}]}"#;
-    let response = dynamic_security_control_response(payload, &[]);
+    let response = dynamic_security_control_response(payload, &[], &[]);
     let value: serde_json::Value = serde_json::from_str(&response).unwrap();
     let responses = value["responses"].as_array().unwrap();
     assert_eq!(responses.len(), 2);
@@ -1586,6 +1586,7 @@ fn dynamic_security_control_response_reports_application_error() {
     let response = dynamic_security_control_response(
         br#"{"commands":[{"command":"disableClient","correlationData":"one"}]}"#,
         &[Some("policy update failed".to_string())],
+        &[],
     );
     let value: serde_json::Value = serde_json::from_str(&response).unwrap();
     assert_eq!(value["responses"][0]["error"], "policy update failed");
@@ -1596,6 +1597,7 @@ fn dynamic_security_control_response_reports_errors_per_command() {
     let response = dynamic_security_control_response(
         br#"{"commands":[{"command":"removeGroupClient","correlationData":"one"},{"command":"listRoles","correlationData":"two"}]}"#,
         &[None, Some("unsupported command: listRoles".to_string())],
+        &[],
     );
     let value: serde_json::Value = serde_json::from_str(&response).unwrap();
     assert!(value["responses"][0].get("error").is_none());
@@ -1605,6 +1607,34 @@ fn dynamic_security_control_response_reports_errors_per_command() {
         "unsupported command: listRoles"
     );
     assert_eq!(value["responses"][1]["correlationData"], "two");
+}
+
+#[test]
+fn dynamic_security_control_response_includes_read_data_without_error() {
+    let payload =
+        br#"{"commands":[{"command":"getClient","username":"test_user","correlationData":"one"}]}"#;
+    let data = serde_json::json!({"client": {"username": "test_user"}});
+    let response = dynamic_security_control_response(payload, &[None], &[Some(data.clone())]);
+    let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(value["responses"][0]["command"], "getClient");
+    assert_eq!(value["responses"][0]["correlationData"], "one");
+    assert_eq!(value["responses"][0]["data"], data);
+    assert!(value["responses"][0].get("error").is_none());
+}
+
+#[test]
+fn dynamic_security_control_response_prefers_error_over_data() {
+    let payload =
+        br#"{"commands":[{"command":"getClient","username":"missing","correlationData":"one"}]}"#;
+    let data = serde_json::json!({"client": {"username": "missing"}});
+    let response = dynamic_security_control_response(
+        payload,
+        &[Some("Client not found".to_string())],
+        &[Some(data)],
+    );
+    let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(value["responses"][0]["error"], "Client not found");
+    assert!(value["responses"][0].get("data").is_none());
 }
 
 #[test]

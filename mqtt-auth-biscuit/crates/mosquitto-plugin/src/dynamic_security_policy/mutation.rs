@@ -7,6 +7,7 @@ use super::{
     prune_placeholder_client, state_allows_username_access,
 };
 use serde::Deserialize;
+use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -36,6 +37,12 @@ pub struct ControlCommand {
     pub priority: Option<i32>,
     #[serde(default)]
     pub allow: Option<bool>,
+    #[serde(default)]
+    pub verbose: Option<bool>,
+    #[serde(default)]
+    pub count: Option<i64>,
+    #[serde(default)]
+    pub offset: Option<i64>,
 }
 
 impl ControlCommand {
@@ -94,6 +101,14 @@ impl ControlCommand {
                     None
                 }
             }
+            ControlCommandKind::GetClient => {
+                if present(self.username.as_deref()) {
+                    None
+                } else {
+                    missing("username")
+                }
+            }
+            ControlCommandKind::ListClients => None,
         }
     }
 }
@@ -110,6 +125,8 @@ pub enum ControlCommandKind {
     RemoveGroupClient,
     AddRoleAcl,
     RemoveRoleAcl,
+    GetClient,
+    ListClients,
 }
 
 impl ControlCommandKind {
@@ -125,6 +142,8 @@ impl ControlCommandKind {
             "removeGroupClient" => Some(Self::RemoveGroupClient),
             "addRoleACL" => Some(Self::AddRoleAcl),
             "removeRoleACL" => Some(Self::RemoveRoleAcl),
+            "getClient" => Some(Self::GetClient),
+            "listClients" => Some(Self::ListClients),
             _ => None,
         }
     }
@@ -141,17 +160,24 @@ impl ControlCommandKind {
             Self::RemoveGroupClient => "removeGroupClient",
             Self::AddRoleAcl => "addRoleACL",
             Self::RemoveRoleAcl => "removeRoleACL",
+            Self::GetClient => "getClient",
+            Self::ListClients => "listClients",
         }
+    }
+
+    pub const fn is_read_only(self) -> bool {
+        matches!(self, Self::GetClient | Self::ListClients)
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ControlEnforcementTargets {
     pub kick_client_ids: Vec<String>,
     pub kick_usernames: Vec<String>,
     pub notify_events: Vec<ControlNotifyEvent>,
     pub persist_warning: Option<String>,
     pub command_errors: Vec<Option<String>>,
+    pub command_data: Vec<Option<Value>>,
 }
 
 #[derive(Debug, Clone)]
@@ -195,6 +221,9 @@ impl ControlMutationDraft {
         let Some(command) = ControlCommandKind::parse(&cmd.command) else {
             return;
         };
+        if command.is_read_only() {
+            return;
+        }
 
         match command {
             ControlCommandKind::DisableClient | ControlCommandKind::EnableClient => {
@@ -210,6 +239,7 @@ impl ControlMutationDraft {
             ControlCommandKind::AddRoleAcl | ControlCommandKind::RemoveRoleAcl => {
                 self.apply_role_acl_command(command, cmd);
             }
+            ControlCommandKind::GetClient | ControlCommandKind::ListClients => {}
         }
     }
 
@@ -688,6 +718,120 @@ impl ControlMutationDraft {
             let usernames = role_member_usernames(&self.initial_state, rolename);
             self.queue_publish_receive_revocation_candidate(command, rolename, topic, &usernames);
         }
+    }
+}
+
+pub fn client_to_control_json(
+    username: &str,
+    client: &DynSecClient,
+    effective_disabled: bool,
+) -> Value {
+    let mut roles: Vec<Value> = client
+        .roles
+        .iter()
+        .map(|role| json!({"rolename": role.name, "priority": role.priority}))
+        .collect();
+    roles.sort_by(|a, b| {
+        a.get("rolename")
+            .and_then(Value::as_str)
+            .cmp(&b.get("rolename").and_then(Value::as_str))
+    });
+    let mut groups: Vec<Value> = client
+        .groups
+        .iter()
+        .map(|group| json!({"groupname": group.name, "priority": group.priority}))
+        .collect();
+    groups.sort_by(|a, b| {
+        a.get("groupname")
+            .and_then(Value::as_str)
+            .cmp(&b.get("groupname").and_then(Value::as_str))
+    });
+    let mut object = serde_json::Map::new();
+    object.insert("username".to_string(), Value::String(username.to_string()));
+    if let Some(client_id) = client.client_id.as_deref() {
+        object.insert("clientid".to_string(), Value::String(client_id.to_string()));
+    }
+    if effective_disabled {
+        object.insert("disabled".to_string(), Value::Bool(true));
+    }
+    object.insert("roles".to_string(), Value::Array(roles));
+    object.insert("groups".to_string(), Value::Array(groups));
+    object.insert("connections".to_string(), Value::Array(Vec::new()));
+    Value::Object(object)
+}
+
+pub fn get_client_control_data(
+    state: &DynSecState,
+    runtime_disabled_usernames: &HashSet<String>,
+    username: &str,
+) -> Option<Value> {
+    let name = username.trim();
+    let client = state.clients.get(name)?;
+    let effective_disabled = client.disabled || runtime_disabled_usernames.contains(name);
+    Some(json!({"client": client_to_control_json(name, client, effective_disabled)}))
+}
+
+pub fn list_clients_control_data(
+    state: &DynSecState,
+    runtime_disabled_usernames: &HashSet<String>,
+    verbose: bool,
+    count: i64,
+    offset: i64,
+) -> Value {
+    let mut usernames: Vec<&String> = state.clients.keys().collect();
+    usernames.sort();
+    let total = usernames.len();
+    let start = offset.max(0) as usize;
+    let limit = if count < 0 {
+        None
+    } else {
+        Some(count.max(0) as usize)
+    };
+    let mut clients = Vec::new();
+    for username in usernames.into_iter().skip(start) {
+        if let Some(limit) = limit
+            && clients.len() >= limit
+        {
+            break;
+        }
+        let Some(client) = state.clients.get(username) else {
+            continue;
+        };
+        if verbose {
+            let effective_disabled =
+                client.disabled || runtime_disabled_usernames.contains(username);
+            clients.push(client_to_control_json(username, client, effective_disabled));
+        } else {
+            clients.push(Value::String(username.clone()));
+        }
+    }
+    json!({"totalCount": total, "clients": clients})
+}
+
+pub fn read_command_control_data(
+    kind: ControlCommandKind,
+    cmd: &ControlCommand,
+    state: &DynSecState,
+    runtime_disabled_usernames: &HashSet<String>,
+) -> Option<Value> {
+    match kind {
+        ControlCommandKind::GetClient => {
+            let username = cmd.username.as_deref().unwrap_or("").trim();
+            get_client_control_data(state, runtime_disabled_usernames, username)
+        }
+        ControlCommandKind::ListClients => {
+            let verbose = cmd.verbose.unwrap_or(false);
+            let count = cmd.count.unwrap_or(-1);
+            let offset = cmd.offset.unwrap_or(0);
+            Some(list_clients_control_data(
+                state,
+                runtime_disabled_usernames,
+                verbose,
+                count,
+                offset,
+            ))
+        }
+        _ => None,
     }
 }
 

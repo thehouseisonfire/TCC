@@ -17,7 +17,7 @@ use model::{
 };
 use mutation::{
     ControlCommand, ControlCommandKind, ControlMutationDraft, ControlPayload, PersistMutation,
-    RetryIntentReducer, RoleAclMutation,
+    RetryIntentReducer, RoleAclMutation, read_command_control_data,
 };
 pub use mutation::{ControlEnforcementTargets, ControlNotifyEvent};
 use persist::apply_persist_mutations;
@@ -174,25 +174,79 @@ impl DynamicSecurityPolicy {
         // normal throughput/latency measurements.
         let _control_guard = lock_mutex(&self.control_apply_lock, "control")?;
         let state = self.load_state_for_control_payload()?;
-        let command_errors = parsed
+        let mut command_errors = parsed
             .commands
             .iter()
             .map(ControlCommand::handling_error)
             .collect::<Vec<_>>();
-        let handled_commands = parsed
+        let mut command_data: Vec<Option<Value>> = vec![None; parsed.commands.len()];
+        let mut draft = self.new_control_mutation_draft(state)?;
+        for (index, command) in parsed.commands.iter().enumerate() {
+            if command_errors[index].is_some() {
+                continue;
+            }
+            let Some(kind) = ControlCommandKind::parse(&command.command) else {
+                continue;
+            };
+            if !kind.is_read_only() {
+                draft.apply_command(command);
+                continue;
+            }
+            match read_command_control_data(
+                kind,
+                command,
+                &draft.state,
+                &draft.runtime_disabled_usernames,
+            ) {
+                Some(data) => command_data[index] = Some(data),
+                None => {
+                    if kind == ControlCommandKind::GetClient {
+                        let username = command.username.as_deref().unwrap_or("").trim();
+                        if !draft.state.clients.contains_key(username) {
+                            command_errors[index] = Some("Client not found".to_string());
+                        }
+                    }
+                }
+            }
+        }
+        draft.finalize_notify_events();
+        let mutation_commands = parsed
             .commands
             .iter()
             .zip(&command_errors)
-            .filter_map(|(command, error)| error.is_none().then_some(command.clone()))
+            .filter_map(|(command, error)| {
+                if error.is_some() {
+                    return None;
+                }
+                let kind = ControlCommandKind::parse(&command.command)?;
+                (!kind.is_read_only()).then(|| command.clone())
+            })
             .collect::<Vec<_>>();
-        let draft = self.build_control_mutation_draft(state, &handled_commands)?;
         let retry_persist_mutations =
-            self.collect_retry_persist_mutations(&handled_commands, &draft)?;
+            self.collect_retry_persist_mutations(&mutation_commands, &draft)?;
 
         let mut targets = self.commit_control_mutation_draft(draft, None)?;
         targets.command_errors = command_errors;
+        targets.command_data = command_data;
         self.flush_retry_persist_mutations(retry_persist_mutations, &mut targets);
         Ok(targets)
+    }
+
+    fn new_control_mutation_draft(&self, state: DynSecState) -> DynSecResult<ControlMutationDraft> {
+        // **Limitation**: The full runtime state, disabled-username set, and role-ACL
+        // override map are cloned into the ControlMutationDraft so mutations can be
+        // computed without holding the read locks. For large deployments this adds
+        // allocation pressure on every control command; acceptable for the bounded
+        // entity counts in the research benchmark scenarios.
+        let runtime_disabled_usernames =
+            lock_mutex(&self.runtime_disabled_usernames, "runtime disable")?.clone();
+        let runtime_role_acl_overrides =
+            lock_mutex(&self.runtime_role_acl_overrides, "runtime role-acl")?.clone();
+        Ok(ControlMutationDraft::new(
+            state,
+            runtime_disabled_usernames,
+            runtime_role_acl_overrides,
+        ))
     }
 
     /// **Limitation**: `reload_is_due` is checked outside `control_apply_lock` to avoid
@@ -281,32 +335,6 @@ impl DynamicSecurityPolicy {
             }
             Err(err) => Err(err),
         }
-    }
-
-    fn build_control_mutation_draft(
-        &self,
-        state: DynSecState,
-        commands: &[ControlCommand],
-    ) -> DynSecResult<ControlMutationDraft> {
-        // **Limitation**: The full runtime state, disabled-username set, and role-ACL
-        // override map are cloned into the ControlMutationDraft so mutations can be
-        // computed without holding the read locks. For large deployments this adds
-        // allocation pressure on every control command; acceptable for the bounded
-        // entity counts in the research benchmark scenarios.
-        let runtime_disabled_usernames =
-            lock_mutex(&self.runtime_disabled_usernames, "runtime disable")?.clone();
-        let runtime_role_acl_overrides =
-            lock_mutex(&self.runtime_role_acl_overrides, "runtime role-acl")?.clone();
-        let mut draft = ControlMutationDraft::new(
-            state,
-            runtime_disabled_usernames,
-            runtime_role_acl_overrides,
-        );
-        for command in commands {
-            draft.apply_command(command);
-        }
-        draft.finalize_notify_events();
-        Ok(draft)
     }
 
     fn collect_retry_persist_mutations(
@@ -525,6 +553,7 @@ impl DynamicSecurityPolicy {
             notify_events,
             persist_warning,
             command_errors: Vec::new(),
+            command_data: Vec::new(),
         })
     }
 

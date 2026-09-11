@@ -242,17 +242,22 @@ pub fn mqtt_options(spec: &ClientSpec) -> Result<MqttOptions> {
 
 /// Connect to the broker and wait for a `CONNACK`.
 ///
+/// The timeout is caller-provided so benchmark scenarios with injected
+/// authorization latency can grant headroom for connections queueing behind
+/// serial broker authorizations without changing the configured delay itself.
+///
 /// # Errors
 ///
 /// Returns an error when connection setup fails or times out.
 pub async fn connect(
     spec: &ClientSpec,
+    timeout: Duration,
 ) -> Result<(AsyncClient, rumqttc::EventLoop, ConnectReport)> {
     let options = mqtt_options(spec)?;
     let (client, mut eventloop) = AsyncClient::builder(options).capacity(100).build();
     let start = Instant::now();
     loop {
-        let event = tokio::time::timeout(Duration::from_secs(10), eventloop.poll())
+        let event = tokio::time::timeout(timeout, eventloop.poll())
             .await
             .map_err(|_| MqttHelperError::Message("connect_timeout".to_string()))??;
         if let Event::Incoming(Packet::ConnAck(connack)) = event {

@@ -101,7 +101,7 @@ async fn main() -> Result<()> {
         auth_method: Some(args.auth_method.clone()),
         auth_data: Some(token1.clone()),
     };
-    let (client, mut eventloop, connect_report) = connect(&spec).await?;
+    let (client, mut eventloop, connect_report) = connect(&spec, Duration::from_secs(10)).await?;
     let pre_reauth_publish_ok = publish_probe(&client, &mut eventloop, &args.token1_topic)
         .await
         .is_ok();

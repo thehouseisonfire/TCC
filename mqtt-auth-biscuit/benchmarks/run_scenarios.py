@@ -1645,6 +1645,28 @@ def _wait_for_non_empty_resource_snapshot(
     )
 
 
+BASE_PUBLISH_TIMEOUT_S = 10
+PUBLISH_TIMEOUT_HEADROOM_S = 15
+
+
+def _publish_timeout_seconds(scenario: ScenarioConfig, clients: int) -> int:
+    """Derive the per-operation MQTT completion budget from the PDP delay.
+
+    The configured ``http_expected_delay_ms`` remains the measured independent
+    variable. This timeout only provides measurement headroom for both publish
+    PUBACK waits and connect CONNACK waits: under the single-threaded
+    Mosquitto ACL path, concurrent publishers queue behind each delayed
+    authorization, and later connections queue behind in-flight publishes, so
+    worst-case per-operation latency scales with ``clients * delay``.
+    Non-latency scenarios keep the historical 10 s base.
+    """
+    delay_ms = int(scenario.get("http_expected_delay_ms") or 0)
+    if delay_ms <= 0:
+        return BASE_PUBLISH_TIMEOUT_S
+    queued_s = (delay_ms / 1000.0) * max(int(clients), 1)
+    return max(BASE_PUBLISH_TIMEOUT_S, int(math.ceil(queued_s + PUBLISH_TIMEOUT_HEADROOM_S)))
+
+
 def _run_loadgen(
     tokens: dict,
     host: str,
@@ -1740,6 +1762,8 @@ def _run_loadgen(
     loadgen_cpuset: str | None = None,
     scenario_id: str = "scenario",
     run_index: int = 0,
+    publish_timeout_seconds: int | None = None,
+    connect_timeout_seconds: int | None = None,
 ):
     helper_cmd = _resolve_rust_helper("mqtt-loadgen")
     cmd = [
@@ -1762,6 +1786,18 @@ def _run_loadgen(
         str(qos),
         "--message-size",
         str(message_size),
+        "--publish-timeout-seconds",
+        str(
+            publish_timeout_seconds
+            if publish_timeout_seconds is not None
+            else BASE_PUBLISH_TIMEOUT_S
+        ),
+        "--connect-timeout-seconds",
+        str(
+            connect_timeout_seconds
+            if connect_timeout_seconds is not None
+            else BASE_PUBLISH_TIMEOUT_S
+        ),
         "--json",
     ]
     if qos_distribution:
@@ -8525,6 +8561,13 @@ def main(
                     "fanout_churn_sqlite_db": s.get("fanout_churn_sqlite_db"),
                     "fanout_churn_sqlite_topic": s.get("fanout_churn_sqlite_topic"),
                     "fanout_churn_sqlite_subscribers": s.get("fanout_churn_sqlite_subscribers"),
+                    "http_expected_delay_ms": s.get("http_expected_delay_ms"),
+                    "publish_timeout_seconds": _publish_timeout_seconds(
+                        s, effective_client_count
+                    ),
+                    "connect_timeout_seconds": _publish_timeout_seconds(
+                        s, effective_client_count
+                    ),
                     "client_topology": {
                         "mode": client_topology_mode,
                         "effective_mode": client_topology_mode,
@@ -8925,6 +8968,12 @@ def main(
                             loadgen_cpuset=loadgen_cpuset,
                             scenario_id=s["id"],
                             run_index=idx,
+                            publish_timeout_seconds=_publish_timeout_seconds(
+                                s, effective_client_count
+                            ),
+                            connect_timeout_seconds=_publish_timeout_seconds(
+                                s, effective_client_count
+                            ),
                             password_map_path=(
                                 "benchmarks/password-map.json"
                                 if credential_mode == "per_client"

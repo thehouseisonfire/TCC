@@ -5,7 +5,7 @@ import os
 import sqlite3
 import subprocess
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 import pytest
 
@@ -942,6 +942,8 @@ class _RunLoadgenKwargs(TypedDict):
     biscuit_delegate_handoff_qos: int | None
     biscuit_delegate_handoff_retain: bool | None
     biscuit_delegate_handoff_ready_timeout_seconds: int | None
+    publish_timeout_seconds: NotRequired[int | None]
+    connect_timeout_seconds: NotRequired[int | None]
 
 
 def _minimal_run_loadgen_kwargs() -> _RunLoadgenKwargs:
@@ -1040,6 +1042,37 @@ def test_container_single_runs_loadgen_through_compose(monkeypatch) -> None:
     assert compose_call[compose_call.index("--name") + 1] == "loadgen_bench_token_baseline_jwt_1"
     assert "--host" in compose_call
     assert compose_call[compose_call.index("--host") + 1] == "mosquitto"
+
+
+def test_run_loadgen_forwards_publish_timeout_seconds(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    class Completed:
+        stdout = '{"errors":[],"raw_publish_ms":[]}'
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN202
+        calls.append(cmd)
+        return Completed()
+
+    monkeypatch.setattr(rs, "_resolve_rust_helper", lambda _binary: ["mqtt-loadgen"])
+    monkeypatch.setattr(rs.subprocess, "run", fake_run)
+
+    kwargs = _minimal_run_loadgen_kwargs()
+    kwargs["publish_timeout_seconds"] = 20
+    kwargs["connect_timeout_seconds"] = 20
+    rs._run_loadgen(
+        **kwargs,
+        client_topology="container-single",
+        compose_files=["docker/docker-compose.yml"],
+        compose_project_name="bench",
+        scenario_id="HTTP-LATENCY-1000MS-JWT",
+    )
+
+    compose_call = calls[-1]
+    assert "--publish-timeout-seconds" in compose_call
+    assert compose_call[compose_call.index("--publish-timeout-seconds") + 1] == "20"
+    assert "--connect-timeout-seconds" in compose_call
+    assert compose_call[compose_call.index("--connect-timeout-seconds") + 1] == "20"
 
 
 def test_container_single_passes_explicit_password_map_profiles(monkeypatch) -> None:

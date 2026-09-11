@@ -261,6 +261,17 @@ struct Args {
     qos_distribution: Option<String>,
     #[arg(long, env = "MQTT_MESSAGE_SIZE", default_value_t = 0)]
     message_size: usize,
+    /// Per-publish PUBACK completion budget. The runner derives this from the
+    /// scenario's configured HTTP authorization delay so the delay remains the
+    /// measured independent variable and this timeout only provides headroom
+    /// for queued authorization under concurrent load.
+    #[arg(long, env = "MQTT_PUBLISH_TIMEOUT_SECONDS", default_value_t = 10)]
+    publish_timeout_seconds: u64,
+    /// Per-connection CONNACK budget. Shares the same derived headroom as the
+    /// publish timeout because connections queue behind the same serial
+    /// broker authorization path under injected PDP latency.
+    #[arg(long, env = "MQTT_CONNECT_TIMEOUT_SECONDS", default_value_t = 10)]
+    connect_timeout_seconds: u64,
     /// Continue the configured workload after a failed publish. The benchmark
     /// runner enables this only for scenarios whose result contract expects
     /// workload-visible publish failures.
@@ -2644,6 +2655,8 @@ fn inputs_json(
         "qos": args.qos,
         "qos_distribution": qos_distribution.map(QosDistribution::as_json),
         "message_size": args.message_size,
+        "publish_timeout_seconds": args.publish_timeout_seconds,
+        "connect_timeout_seconds": args.connect_timeout_seconds,
         "protocol": "mqttv5",
         "sync_connect": args.sync_connect,
         "sync_connect_barrier_url": args.sync_connect_barrier_url,
@@ -2800,12 +2813,21 @@ fn summarize(values: &[f64]) -> Summary {
     }
 }
 
+fn publish_timeout(args: &Args) -> Duration {
+    Duration::from_secs(args.publish_timeout_seconds.max(1))
+}
+
+fn connect_timeout(args: &Args) -> Duration {
+    Duration::from_secs(args.connect_timeout_seconds.max(1))
+}
+
 async fn publish_and_wait(
     client: &rumqttc::AsyncClient,
     eventloop: &mut rumqttc::EventLoop,
     topic: &str,
     payload: Vec<u8>,
     qos_value: u8,
+    timeout: Duration,
 ) -> Result<f64> {
     let start = Instant::now();
     client
@@ -2816,12 +2838,12 @@ async fn publish_and_wait(
         )
         .await?;
     if qos_value == 0 {
-        poll_until(eventloop, Duration::from_secs(10), |event| {
+        poll_until(eventloop, timeout, |event| {
             matches!(event, Event::Outgoing(Outgoing::Publish(0))).then_some(())
         })
         .await?;
     } else {
-        poll_until(eventloop, Duration::from_secs(10), |event| match event {
+        poll_until(eventloop, timeout, |event| match event {
             Event::Incoming(Packet::PubAck(puback)) => {
                 let _ = puback_reason_code(puback.reason);
                 Some(())
@@ -2839,6 +2861,7 @@ async fn publish_tracked_and_wait(
     topic: &str,
     payload: Vec<u8>,
     qos_value: u8,
+    timeout: Duration,
 ) -> Result<f64> {
     let start = Instant::now();
     let notice = client
@@ -2848,7 +2871,7 @@ async fn publish_tracked_and_wait(
             rumqttc::PublishOptions::new(qos(qos_value)?),
         )
         .await?;
-    tokio::time::timeout(Duration::from_secs(10), notice.wait_completion_async())
+    tokio::time::timeout(timeout, notice.wait_completion_async())
         .await
         .map_err(|_| MqttHelperError::Message("publish_timeout".to_string()))?
         .map_err(|err| MqttHelperError::Message(format!("publish_failed:{err}")))?;
@@ -2862,6 +2885,7 @@ async fn publish_with_retain_and_wait(
     payload: Vec<u8>,
     qos_value: u8,
     retain: bool,
+    timeout: Duration,
 ) -> Result<f64> {
     let start = Instant::now();
     client
@@ -2872,12 +2896,12 @@ async fn publish_with_retain_and_wait(
         )
         .await?;
     if qos_value == 0 {
-        poll_until(eventloop, Duration::from_secs(10), |event| {
+        poll_until(eventloop, timeout, |event| {
             matches!(event, Event::Outgoing(Outgoing::Publish(0))).then_some(())
         })
         .await?;
     } else {
-        poll_until(eventloop, Duration::from_secs(10), |event| match event {
+        poll_until(eventloop, timeout, |event| match event {
             Event::Incoming(Packet::PubAck(_) | Packet::PubComp(_)) => Some(()),
             _ => None,
         })
@@ -2946,9 +2970,10 @@ async fn subscribe_handoff_receiver(args: &Args, client_id: &str) -> Result<Hand
         auth_method: None,
         auth_data: None,
     };
-    let (client, mut eventloop, report) = connect(&spec).await.map_err(|err| {
-        MqttHelperError::Message(format!("delegation_handoff_connect_failed:{err}"))
-    })?;
+    let (client, mut eventloop, report) =
+        connect(&spec, connect_timeout(args)).await.map_err(|err| {
+            MqttHelperError::Message(format!("delegation_handoff_connect_failed:{err}"))
+        })?;
     if !report.connect_ok {
         return Err(MqttHelperError::Message(format!(
             "delegation_handoff_connect_denied:{:?}",
@@ -3102,7 +3127,7 @@ async fn publish_handoff_tokens(
         auth_method: None,
         auth_data: None,
     };
-    let Ok((client, mut eventloop, report)) = connect(&spec).await else {
+    let Ok((client, mut eventloop, report)) = connect(&spec, connect_timeout(args)).await else {
         return (
             Vec::new(),
             vec!["delegation_master_connect_failed".to_string()],
@@ -3132,6 +3157,7 @@ async fn publish_handoff_tokens(
                     bytes,
                     args.biscuit_delegate_handoff_qos,
                     handoff_retain(args),
+                    publish_timeout(args),
                 )
                 .await
             }
@@ -3512,7 +3538,7 @@ async fn connect_fanout_subscriber(
         auth_method: None,
         auth_data: None,
     };
-    let (client, mut eventloop, report) = connect(&spec).await?;
+    let (client, mut eventloop, report) = connect(&spec, connect_timeout(args)).await?;
     let mut result = WorkerResult {
         connect_ms: Some(report.connect_ms),
         delegation_ms: prepared.bootstrap.delegation_ms,
@@ -3814,6 +3840,7 @@ async fn publish_fanout(
             &args.fanout_topic,
             payload,
             publish_qos,
+            publish_timeout(args),
         )
         .await
         {
@@ -3915,7 +3942,8 @@ async fn connect_fanout_publisher(
         auth_method: None,
         auth_data: None,
     };
-    let (publisher, publisher_eventloop, report) = connect(&publisher_spec).await?;
+    let (publisher, publisher_eventloop, report) =
+        connect(&publisher_spec, connect_timeout(args)).await?;
     Ok((publisher, publisher_eventloop, report))
 }
 
@@ -4475,7 +4503,7 @@ async fn connect_worker(
 ) -> Option<(AsyncClient, rumqttc::EventLoop, ConnectReport, Option<i64>)> {
     let mut current_exp = None;
     loop {
-        let connect_result = match connect(spec).await {
+        let connect_result = match connect(spec, connect_timeout(args)).await {
             Ok(value) => value,
             Err(err) => {
                 result.errors.push(format!("connect_failed:{err}"));
@@ -4969,7 +4997,15 @@ async fn publish_control_and_validate(
         }
     };
     let started = Instant::now();
-    match publish_tracked_and_wait(client, topic, correlated, args.control_qos).await {
+    match publish_tracked_and_wait(
+        client,
+        topic,
+        correlated,
+        args.control_qos,
+        publish_timeout(args),
+    )
+    .await
+    {
         Ok(ms) => result.control_ms.push(ms),
         Err(err) => {
             result.errors.push(format!("control_publish_failed:{err}"));
@@ -5098,8 +5134,14 @@ async fn run_publish_mode(
         {
             *attempts += 1;
         }
-        match publish_tracked_and_wait(client, plan.topic, plan.data_payload.to_vec(), publish_qos)
-            .await
+        match publish_tracked_and_wait(
+            client,
+            plan.topic,
+            plan.data_payload.to_vec(),
+            publish_qos,
+            publish_timeout(args),
+        )
+        .await
         {
             Ok(ms) => {
                 result.publish_ms.push(ms);
@@ -5832,7 +5874,7 @@ async fn spawn_runtime_control(
         auth_method: None,
         auth_data: None,
     };
-    let (client, mut eventloop, report) = connect(&spec).await?;
+    let (client, mut eventloop, report) = connect(&spec, connect_timeout(args)).await?;
     if !report.connect_ok {
         return Err(MqttHelperError::Message(format!(
             "runtime control connect rejected with reason {:?}",
@@ -6973,6 +7015,25 @@ mod tests {
 
         assert_eq!(args.biscuit_delegate_handoff_ready_timeout_seconds, 37);
         assert!(validate_startup_provisioning(&args).is_ok());
+    }
+
+    #[test]
+    fn publish_timeout_defaults_to_ten_seconds_and_is_configurable() {
+        let default_args = Args::parse_from(["mqtt-loadgen"]);
+        assert_eq!(default_args.publish_timeout_seconds, 10);
+        assert_eq!(publish_timeout(&default_args), Duration::from_secs(10));
+        assert_eq!(default_args.connect_timeout_seconds, 10);
+        assert_eq!(connect_timeout(&default_args), Duration::from_secs(10));
+
+        let tuned_args = Args::parse_from(["mqtt-loadgen", "--publish-timeout-seconds", "20"]);
+        assert_eq!(tuned_args.publish_timeout_seconds, 20);
+        assert_eq!(publish_timeout(&tuned_args), Duration::from_secs(20));
+
+        let zero_args = Args::parse_from(["mqtt-loadgen", "--publish-timeout-seconds", "0"]);
+        assert_eq!(publish_timeout(&zero_args), Duration::from_secs(1));
+
+        let conn_args = Args::parse_from(["mqtt-loadgen", "--connect-timeout-seconds", "25"]);
+        assert_eq!(connect_timeout(&conn_args), Duration::from_secs(25));
     }
 
     #[tokio::test]

@@ -1035,3 +1035,31 @@ def test_default_dynsec_snapshot_preserves_publish_and_fanout_baselines():
     }
     assert "fanout/broadcast" in fanout_writer_topics
     assert "$CONTROL/dynamic-security/v1" not in fanout_writer_topics
+
+
+def test_publish_timeout_keeps_configured_delay_as_measured_variable() -> None:
+    base: rs.ScenarioConfig = {"id": "BASELINE-NO-AUTH"}
+    assert rs._publish_timeout_seconds(base, 10) == rs.BASE_PUBLISH_TIMEOUT_S
+    assert rs._publish_timeout_seconds(base, 200) == rs.BASE_PUBLISH_TIMEOUT_S
+
+    latency_200: rs.ScenarioConfig = {
+        "id": "HTTP-LATENCY-200MS-JWT",
+        "http_expected_delay_ms": 200,
+    }
+    latency_1000: rs.ScenarioConfig = {
+        "id": "HTTP-LATENCY-1000MS-JWT",
+        "http_expected_delay_ms": 1000,
+    }
+    # General scenario/runner rule: budget scales with configured delay and
+    # effective clients to cover queueing behind serial broker authorizations.
+    assert rs._publish_timeout_seconds(latency_200, 10) == 17
+    assert rs._publish_timeout_seconds(latency_1000, 10) == 25
+    assert rs._publish_timeout_seconds(latency_1000, 1) == 16
+    # Synthetic delay proves this is not an ID-specific exception.
+    synthetic: rs.ScenarioConfig = {"id": "SYNTHETIC", "http_expected_delay_ms": 500}
+    assert rs._publish_timeout_seconds(synthetic, 4) == 17
+    # The 1000 ms c10/m10 HOLD case: budget must exceed worst-case queued
+    # latency (clients * delay) plus headroom, not just a single delay.
+    budget = rs._publish_timeout_seconds(latency_1000, 10)
+    assert budget > 10
+    assert budget * 1000 > 10 * 1000 + rs.PUBLISH_TIMEOUT_HEADROOM_S * 1000 // 2

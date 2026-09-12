@@ -164,6 +164,49 @@ def test_thundering_herd_scenarios_are_synchronized_connect_bursts(
 
 
 @pytest.mark.parametrize(
+    "scenario_id",
+    (
+        "HTTP-LATENCY-200MS-JWT",
+        "HTTP-LATENCY-1000MS-JWT",
+        "HTTP-LATENCY-200MS-BISCUIT",
+    ),
+)
+def test_http_latency_scenarios_use_deterministic_connect_barrier(scenario_id: str) -> None:
+    """Latency cells must not let staggered container starts queue CONNECTs.
+
+    With an injected PDP delay and Mosquitto's single-threaded blocking
+    authorization path, a container that publishes early blocks later
+    containers' CONNECTs behind delayed authorizations. The worst-case queue
+    then grows with total staggered work instead of the bounded
+    ``clients * delay`` budget. Requiring the cross-container connect barrier
+    makes connects-before-publishes deterministic for container-per-client.
+    """
+    scenarios = _scenario_registry()
+    scenario = scenarios[scenario_id]
+
+    assert scenario["sync_connect"] is True
+    # Latency cells measure steady-state publish authorizations, not cold
+    # broker starts, so they must not request a broker restart.
+    assert scenario.get("restart_mosquitto") is not True
+
+
+@pytest.mark.parametrize(
+    "scenario_id",
+    (
+        "HTTP-LATENCY-200MS-JWT-TLS",
+        "HTTP-LATENCY-1000MS-JWT-TLS",
+        "HTTP-LATENCY-200MS-BISCUIT-TLS",
+    ),
+)
+def test_http_latency_tls_variants_inherit_connect_barrier(scenario_id: str) -> None:
+    """TLS matrix expansion must preserve the deterministic barrier."""
+    base = _scenario_registry()
+    expanded = rs._expand_tls_matrix(base)
+
+    assert expanded[scenario_id]["sync_connect"] is True
+
+
+@pytest.mark.parametrize(
     ("scenario_id", "kind"),
     (
         ("TOKEN-LIFECYCLE-RECONNECT-PUBLISH-JWT", "jwt"),

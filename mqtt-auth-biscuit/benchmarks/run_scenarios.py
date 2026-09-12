@@ -2869,7 +2869,11 @@ def _validate_mqtt5_auth_result(scenario_id: str, result: dict[str, Any]) -> Non
 
 
 def _validate_thundering_herd_result(
-    scenario_id: str, result: dict[str, Any], *, client_count: int
+    scenario_id: str,
+    result: dict[str, Any],
+    *,
+    client_count: int,
+    require_restart: bool = True,
 ) -> None:
     sync = result.get("sync_connect")
     restart = result.get("broker_restart")
@@ -2883,7 +2887,7 @@ def _validate_thundering_herd_result(
         or sync.get("errors")
     ):
         raise RuntimeError(f"{scenario_id}: synchronized connection barrier contract failed")
-    if (
+    if require_restart and (
         not isinstance(restart, dict)
         or restart.get("completed") is not True
         or not isinstance(restart.get("completed_at_unix_ms"), int)
@@ -3220,7 +3224,15 @@ def _validate_result_contract(
     )
 
     if scenario.get("sync_connect"):
-        _validate_thundering_herd_result(scenario_id, result, client_count=client_count)
+        _validate_thundering_herd_result(
+            scenario_id,
+            result,
+            client_count=client_count,
+            # Thundering-herd scenarios restart the broker to measure cold
+            # starts; latency scenarios reuse the barrier only to make
+            # connects-before-publishes deterministic under injected delay.
+            require_restart=bool(scenario.get("restart_mosquitto")),
+        )
 
     publish = result.get("publish")
     publish_count = int(publish.get("count") or 0) if isinstance(publish, dict) else 0
@@ -7045,6 +7057,11 @@ def _build_available_scenarios(
             "netem": {"clear": True},
             "message_size": 0,
             "http_expected_delay_ms": 200,
+            # Deterministic connects-before-publishes for container-per-client:
+            # without a barrier, staggered container starts let early publishes
+            # block the single-threaded broker and queue later CONNECTs behind
+            # delayed authorizations, exceeding the bounded clients*delay budget.
+            "sync_connect": True,
         },
         "HTTP-PROFILE-SIMPLE-JWT": {
             "mosquitto_conf": "./mosquitto_http.conf",
@@ -7131,6 +7148,9 @@ def _build_available_scenarios(
             "netem": {"clear": True},
             "message_size": 0,
             "http_expected_delay_ms": 1000,
+            # Same deterministic barrier as the 200 ms cell: bound queueing to
+            # clients*delay instead of total staggered work.
+            "sync_connect": True,
         },
         "HYBRID-FALLBACK-AUTHZ-DOWN-JWT": {
             "mosquitto_conf": "./mosquitto_hybrid.conf",
@@ -7167,6 +7187,8 @@ def _build_available_scenarios(
             ),
             "netem": {"clear": True},
             "message_size": 0,
+            # Keep the Biscuit latency cell consistent with the JWT cells.
+            "sync_connect": True,
         },
         "HTTP-PROFILE-SIMPLE-BISCUIT": {
             "mosquitto_conf": "./mosquitto_http.conf",

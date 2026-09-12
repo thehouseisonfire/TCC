@@ -2028,6 +2028,51 @@ def test_container_per_client_sync_connect_uses_cross_container_barrier(
     assert result["sync_connect"]["client_wait"]["count"] == 2
 
 
+def test_sync_barrier_validation_distinguishes_herd_restart_from_latency_cells() -> None:
+    """Barrier must be reusable without a broker restart.
+
+    Thundering-herd scenarios restart the broker to measure cold starts, but
+    HTTP latency cells reuse the barrier only to order connects before
+    publishes under injected delay. Requiring restart provenance for every
+    barrier would force latency scenarios to either restart (changing the
+    experiment) or skip the barrier (reintroducing staggered-start queueing
+    that exceeds the bounded clients*delay budget with connect timeouts and
+    exact-count contract failures).
+    """
+    barrier_ok: dict[str, Any] = {
+        "sync_connect": {
+            "enabled": True,
+            "participants": 10,
+            "ready_count": 10,
+            "max_ready_skew_ms": 8.0,
+            "errors": [],
+        },
+        "connect": {"count": 10},
+    }
+    herd = {
+        **barrier_ok,
+        "broker_restart": {"completed": True, "completed_at_unix_ms": 1760000000000},
+    }
+    rs._validate_thundering_herd_result("TOKEN-THUNDERING-HERD-JWT", herd, client_count=10)
+
+    latency = dict(barrier_ok)
+    rs._validate_thundering_herd_result(
+        "HTTP-LATENCY-1000MS-JWT", latency, client_count=10, require_restart=False
+    )
+    with pytest.raises(RuntimeError, match="broker restart provenance missing"):
+        rs._validate_thundering_herd_result(
+            "TOKEN-THUNDERING-HERD-JWT", barrier_ok, client_count=10
+        )
+    bad_barrier = {
+        **latency,
+        "sync_connect": {**barrier_ok["sync_connect"], "ready_count": 9},
+    }
+    with pytest.raises(RuntimeError, match="synchronized connection barrier contract failed"):
+        rs._validate_thundering_herd_result(
+            "HTTP-LATENCY-1000MS-JWT", bad_barrier, client_count=10, require_restart=False
+        )
+
+
 def test_container_per_client_runtime_control_uses_one_coordinated_controller(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

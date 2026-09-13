@@ -956,8 +956,7 @@ def test_tls_mosquitto_confs_share_base_dynamic_security_url() -> None:
         tls_url = _dynamic_security_url(tls_conf.read_text(encoding="utf-8"))
         base_url = _dynamic_security_url(base_conf.read_text(encoding="utf-8"))
         assert tls_url == base_url, (
-            f"{tls_conf.name} dynamic_security_url {tls_url!r} "
-            f"diverges from base {base_url!r}"
+            f"{tls_conf.name} dynamic_security_url {tls_url!r} diverges from base {base_url!r}"
         )
         compared += 1
     assert compared > 0

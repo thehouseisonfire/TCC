@@ -104,15 +104,12 @@ def _run(output: Path, scenarios: tuple[str, ...], *, tls: bool) -> None:
 def _scenario_registry() -> dict[str, ScenarioConfig]:
     repo_root = Path(__file__).parents[1]
     tokens = _read_tokens(str(repo_root / "benchmarks/tokens.json"))
-    return cast(
-        dict[str, ScenarioConfig],
-        _expand_tls_matrix(
-            _build_available_scenarios(
-                tokens,
-                token_issuer_no_default_roles=False,
-                token_issuer_no_default_grants=False,
-            )
-        ),
+    return _expand_tls_matrix(
+        _build_available_scenarios(
+            tokens,
+            token_issuer_no_default_roles=False,
+            token_issuer_no_default_grants=False,
+        )
     )
 
 
@@ -134,7 +131,7 @@ def _current_broker_fixture_hash(
             requested_file.read_text(encoding="utf-8"),
             jwt_identity_binding=expected.get("jwt_identity_binding") or "off",
             biscuit_identity_binding=expected.get("biscuit_identity_binding") or "off",
-            biscuit_client_id_fact=str(expected.get("biscuit_client_id_fact") or "client_id"),
+            biscuit_client_id_fact=expected.get("biscuit_client_id_fact") or "client_id",
         ).encode()
     elif effective_file.is_file():
         current_bytes = effective_file.read_bytes()
@@ -161,7 +158,7 @@ def _verify(output: Path, scenarios: tuple[str, ...]) -> list[dict[str, object]]
         expected_messages = _effective_scenario_message_count(
             expected, 10, effective_clients=expected_clients
         )
-        expected_qos = int(expected.get("qos", 1))
+        expected_qos = expected.get("qos", 1)
         expected_distribution = expected.get("qos_distribution")
         expected_tls = bool(expected.get("tls"))
         expected_authz_profile = expected.get("authz_profile")
@@ -228,7 +225,7 @@ def _verify(output: Path, scenarios: tuple[str, ...]) -> list[dict[str, object]]
         if current_hash != broker.get("expected_sha256"):
             raise RuntimeError(f"{scenario}: result was produced from a stale broker fixture")
         runs = result.get("runs")
-        if not isinstance(runs, list) or len(runs) != int(expected.get("repeat", 1)):
+        if not isinstance(runs, list) or len(runs) != expected.get("repeat", 1):
             raise RuntimeError(f"{scenario}: missing measured runs")
         checks = ["identity", "configuration", "topology", "tls", "broker_config"]
         for run_index, run in enumerate(runs):
@@ -253,7 +250,7 @@ def _verify(output: Path, scenarios: tuple[str, ...]) -> list[dict[str, object]]
                 message_count=expected_messages,
                 client_count=expected_clients,
                 effective_qos=expected_qos,
-                effective_qos_distribution=cast(str | None, expected_distribution),
+                effective_qos_distribution=expected_distribution,
             )
             _validate_resource_interval(resources, scenario_id=scenario, run_index=run_index)
             checks.extend(["broker_path", "result_contract", "resource_interval"])

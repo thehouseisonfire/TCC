@@ -1920,7 +1920,7 @@ def test_delegation_handoff_readiness_fails_fast_when_delegatee_exits(tmp_path) 
         rs._wait_for_delegation_handoff_ready_files(
             tmp_path,
             clients=1,
-            processes=[("loadgen_delegatee_1", ExitedProcess())],  # type: ignore[list-item]
+            processes=[("loadgen_delegatee_1", ExitedProcess())],
             timeout_seconds=120,
         )
 

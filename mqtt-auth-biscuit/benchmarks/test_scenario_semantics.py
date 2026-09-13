@@ -480,7 +480,7 @@ def test_part2_inventory_rejects_missing_and_misclassified_scenarios() -> None:
 def test_result_contract_validates_effective_cli_qos(qos: int) -> None:
     scenario: rs.ScenarioConfig = {"id": "CLI-QOS", "topic": "test"}
     expected = 6
-    result = {
+    result: dict[str, Any] = {
         **_measured_result(2, expected),
         "errors": [],
         "qos_distribution_actual": {
@@ -491,9 +491,11 @@ def test_result_contract_validates_effective_cli_qos(qos: int) -> None:
         },
     }
     for value in range(3):
-        samples = [1.0] * expected if value == qos else []
+        samples: list[float] = [1.0] * expected if value == qos else []
         result[f"publish_qos_{value}"] = rs._summary_from_values(samples)
-        result["raw_metrics"][f"publish_qos_{value}"] = samples
+        raw_metrics = result["raw_metrics"]
+        assert isinstance(raw_metrics, dict)
+        raw_metrics[f"publish_qos_{value}"] = samples
     rs._validate_result_contract(
         scenario, result, message_count=3, client_count=2, effective_qos=qos
     )

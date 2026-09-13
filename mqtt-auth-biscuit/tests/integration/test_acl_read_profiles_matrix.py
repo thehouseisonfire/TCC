@@ -3,10 +3,11 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 import httpx
 import pytest
+
 from benchmarks import policy_churn
 from benchmarks import run_scenarios as rs
 
@@ -60,6 +61,12 @@ class _ObservedMqttClientLike(Protocol):
     def assert_connected_for(self, duration_s: float) -> None: ...
 
     def close(self) -> None: ...
+
+
+class _MqttClientFactory(Protocol):
+    def __call__(self, *args: Any, **kwargs: Any) -> _ObservedMqttClientLike: ...
+
+    def _helper_path(self) -> Path: ...
 
 
 def _is_granted(codes: list[int]) -> bool:
@@ -177,7 +184,7 @@ def _prepare_sqlite_policy_db_for_container_write() -> None:
 @pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
 def test_runtime_token_strict_acl_read_allow_and_deny_profile_matrix(
     compose_harness,
-    mqtt_client_factory,
+    mqtt_client_factory: _MqttClientFactory,
     unique_suffix: str,
     token_kind: str,
 ) -> None:
@@ -272,7 +279,7 @@ def test_runtime_token_strict_acl_read_allow_and_deny_profile_matrix(
 )
 def test_runtime_token_strict_acl_read_allow_scaling_profile_matrix(
     compose_harness,
-    mqtt_client_factory,
+    mqtt_client_factory: _MqttClientFactory,
     unique_suffix: str,
     token_kind: str,
     subscriber_count: int,
@@ -360,7 +367,7 @@ def test_runtime_token_strict_acl_read_allow_scaling_profile_matrix(
 )
 def test_runtime_http_hybrid_profile_fanout_enforcement_profile_matrix(
     compose_harness,
-    mqtt_client_factory,
+    mqtt_client_factory: _MqttClientFactory,
     unique_suffix: str,
     policy_source: str,
     token_kind: str,
@@ -426,6 +433,8 @@ def test_runtime_http_hybrid_profile_fanout_enforcement_profile_matrix(
             username=token_kind,
             password=pub_token,
         )
+        assert subscriber is not None
+        assert publisher is not None
 
         subscriber.connect()
         assert _is_granted(subscriber.subscribe(topic, qos=1))
@@ -470,7 +479,7 @@ def test_runtime_http_hybrid_profile_fanout_enforcement_profile_matrix(
 )
 def test_runtime_http_hybrid_med_allow_scaling_profile_matrix(
     compose_harness,
-    mqtt_client_factory,
+    mqtt_client_factory: _MqttClientFactory,
     unique_suffix: str,
     policy_source: str,
     token_kind: str,
@@ -571,7 +580,7 @@ def test_runtime_http_hybrid_med_allow_scaling_profile_matrix(
 @pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
 def test_runtime_sqlite_strict_acl_read_revoke_profile_matrix(
     compose_harness,
-    mqtt_client_factory,
+    mqtt_client_factory: _MqttClientFactory,
     unique_suffix: str,
     token_kind: str,
 ) -> None:

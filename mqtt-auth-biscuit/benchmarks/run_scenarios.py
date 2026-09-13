@@ -9,11 +9,11 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Literal, Protocol, TypedDict, cast
 
 import httpx
 import typer
@@ -586,7 +586,7 @@ def _broker_diagnostic_snapshot(
 
 
 def _counter_delta(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
-    return {key: value - int(before.get(key, 0)) for key, value in after.items()}
+    return {key: value - before.get(key, 0) for key, value in after.items()}
 
 
 def _authz_counter_delta(
@@ -879,8 +879,8 @@ def _resolve_mqtt5_auth_tokens(
     token1 = mqtt5_cfg.get("token1")
     token2 = mqtt5_cfg.get("token2")
     if token1 and token2:
-        token1_topic = str(mqtt5_cfg.get("token1_topic") or "mqtt5/auth/before")
-        token2_topic = str(mqtt5_cfg.get("token2_topic") or "mqtt5/auth/after")
+        token1_topic = mqtt5_cfg.get("token1_topic") or "mqtt5/auth/before"
+        token2_topic = mqtt5_cfg.get("token2_topic") or "mqtt5/auth/after"
         return (
             token1,
             token2,
@@ -888,16 +888,14 @@ def _resolve_mqtt5_auth_tokens(
                 "source": "static",
                 "token_kind": mqtt5_cfg.get("kind"),
                 "client_id": "client_auth",
-                "token1_ttl_seconds": int(mqtt5_cfg.get("token1_ttl_seconds", 0)),
-                "token2_ttl_seconds": int(mqtt5_cfg.get("token2_ttl_seconds", 0)),
+                "token1_ttl_seconds": mqtt5_cfg.get("token1_ttl_seconds", 0),
+                "token2_ttl_seconds": mqtt5_cfg.get("token2_ttl_seconds", 0),
                 "token1_topic": token1_topic,
                 "token2_topic": token2_topic,
             },
         )
 
-    token_kind = cast(ScenarioTokenKind | None, mqtt5_cfg.get("kind")) or _scenario_token_kind(
-        scenario_id, scenario
-    )
+    token_kind = mqtt5_cfg.get("kind") or _scenario_token_kind(scenario_id, scenario)
     if token_kind is None:
         raise RuntimeError(f"{scenario_id}: mqtt5 auth token kind is not configured")
 
@@ -905,8 +903,8 @@ def _resolve_mqtt5_auth_tokens(
         scenario_id,
         token_kind,
         token_issuer_base,
-        token1_ttl_seconds=int(mqtt5_cfg.get("token1_ttl_seconds", 180)),
-        token2_ttl_seconds=int(mqtt5_cfg.get("token2_ttl_seconds", 300)),
+        token1_ttl_seconds=mqtt5_cfg.get("token1_ttl_seconds", 180),
+        token2_ttl_seconds=mqtt5_cfg.get("token2_ttl_seconds", 300),
         ca_file=ca_file,
         insecure=insecure,
     )
@@ -1660,11 +1658,11 @@ def _publish_timeout_seconds(scenario: ScenarioConfig, clients: int) -> int:
     worst-case per-operation latency scales with ``clients * delay``.
     Non-latency scenarios keep the historical 10 s base.
     """
-    delay_ms = int(scenario.get("http_expected_delay_ms") or 0)
+    delay_ms = scenario.get("http_expected_delay_ms") or 0
     if delay_ms <= 0:
         return BASE_PUBLISH_TIMEOUT_S
-    queued_s = (delay_ms / 1000.0) * max(int(clients), 1)
-    return max(BASE_PUBLISH_TIMEOUT_S, int(math.ceil(queued_s + PUBLISH_TIMEOUT_HEADROOM_S)))
+    queued_s = (delay_ms / 1000.0) * max(clients, 1)
+    return max(BASE_PUBLISH_TIMEOUT_S, math.ceil(queued_s + PUBLISH_TIMEOUT_HEADROOM_S))
 
 
 def _run_loadgen(
@@ -2399,11 +2397,18 @@ def _wait_for_fanout_ready_files(
     )
 
 
+class _PollableProcess(Protocol):
+    @property
+    def returncode(self) -> int | None: ...
+
+    def poll(self) -> int | None: ...
+
+
 def _wait_for_delegation_handoff_ready_files(
     ready_dir: Path,
     *,
     clients: int,
-    processes: list[tuple[str, subprocess.Popen[str]]] | None = None,
+    processes: Sequence[tuple[str, _PollableProcess]] | None = None,
     timeout_seconds: float = 120.0,
 ) -> None:
     deadline = time.monotonic() + timeout_seconds
@@ -3159,7 +3164,7 @@ def _validate_credential_freshness(
     scenario: ScenarioConfig, runs: list[dict[str, Any]], *, client_count: int
 ) -> dict[str, Any]:
     scenario_id = scenario["id"]
-    expected_repeats = int(scenario.get("repeat", 1))
+    expected_repeats = scenario.get("repeat", 1)
     by_client: dict[str, list[dict[str, Any]]] = {}
     for run in runs:
         loadgen = run.get("loadgen") if isinstance(run, dict) else None
@@ -3397,7 +3402,7 @@ def _validate_result_contract(
             or active_profile_requests != expected_publish_count
             or int(stats.get("policy_denies") or 0) != 0
             or int(stats.get("injected_failures") or 0) != 0
-            or int(stats.get("configured_delay_ms") or 0) != int(expected_delay)
+            or int(stats.get("configured_delay_ms") or 0) != expected_delay
             or stats.get("configured_profile") != "simple"
             or stats.get("configured_fail_mode") != "none"
         ):
@@ -3545,7 +3550,7 @@ def _validate_result_contract(
         if isinstance(topology_handoff, dict) and (
             int(topology_handoff.get("delegators") or 0) != 1
             or int(topology_handoff.get("delegatees") or 0) != client_count
-            or int(topology_handoff.get("qos") or -1) != int(handoff.get("qos", 1))
+            or int(topology_handoff.get("qos") or -1) != handoff.get("qos", 1)
         ):
             raise RuntimeError(f"{scenario_id}: delegation handoff topology mismatch")
 
@@ -3590,14 +3595,14 @@ def _validate_result_contract(
 
     expected_control_count: int | None = None
     if scenario.get("control_mode"):
-        expected_control_count = client_count * int(scenario.get("control_repeat", 1))
+        expected_control_count = client_count * scenario.get("control_repeat", 1)
     elif scenario.get("runtime_control_username"):
         expected_control_count = 1
     elif scenario.get("control_after_messages"):
-        interval = int(scenario["control_after_messages"])
+        interval = scenario["control_after_messages"]
         expected_control_count = client_count * (message_count // interval)
     elif scenario.get("fanout_churn_kind"):
-        expected_control_count = int(scenario.get("fanout_churn_max_events", 1))
+        expected_control_count = scenario.get("fanout_churn_max_events", 1)
     if expected_control_count is not None:
         _validate_metric_summary(
             scenario_id,
@@ -3611,11 +3616,11 @@ def _validate_result_contract(
         successes = int(response.get("successes") or 0) if isinstance(response, dict) else 0
         failures = int(response.get("failures") or 0) if isinstance(response, dict) else 0
         if scenario.get("control_mode"):
-            expected_responses = client_count * int(scenario.get("control_repeat", 1))
+            expected_responses = client_count * scenario.get("control_repeat", 1)
         elif scenario.get("runtime_control_username"):
             expected_responses = 1
         else:
-            interval = int(scenario.get("control_after_messages", 0))
+            interval = scenario.get("control_after_messages", 0)
             expected_responses = client_count * (message_count // interval) if interval else 0
         if successes != expected_responses or failures != 0:
             raise RuntimeError(
@@ -3630,7 +3635,7 @@ def _validate_result_contract(
         )
 
     if scenario.get("runtime_control_expect_denial"):
-        configured_threshold = int(scenario.get("runtime_control_after_messages") or 0)
+        configured_threshold = scenario.get("runtime_control_after_messages") or 0
         runtime_control = result.get("runtime_control")
         raw_metrics = result.get("raw_metrics")
         raw_applied_after = (
@@ -3736,7 +3741,7 @@ def _validate_result_contract(
         raise RuntimeError(f"{scenario_id}: fanout churn did not trigger")
     phases = churn.get("phases")
     applied_events = int(churn.get("applied_events") or 0)
-    expected_events = int(scenario.get("fanout_churn_max_events", 1))
+    expected_events = scenario.get("fanout_churn_max_events", 1)
     required_phase_count = applied_events + 1
     control = result.get("control")
     control_count = int(control.get("count") or 0) if isinstance(control, dict) else 0
@@ -4244,10 +4249,8 @@ def _run_loadgen_container_per_client(
             *cast(list[float], raw_metrics.get("control_response", [])),
             *controller_response,
         ]
-        merged["control"] = _summary_from_values(cast(list[float], raw_metrics["control"]))
-        merged["control_response"] = _summary_from_values(
-            cast(list[float], raw_metrics["control_response"])
-        )
+        merged["control"] = _summary_from_values(raw_metrics["control"])
+        merged["control_response"] = _summary_from_values(raw_metrics["control_response"])
         controller_responses = controller_result.get("control_responses")
         merged["control_responses"] = (
             dict(controller_responses) if isinstance(controller_responses, dict) else {}
@@ -4647,7 +4650,7 @@ def _restore_dynamic_security_baseline(snapshot: bytes | None) -> None:
 
 def _scenario_uses_dynamic_security(scenario: ScenarioConfig) -> bool:
     return (
-        "mosquitto_dynsec.conf" in str(scenario.get("mosquitto_conf") or "")
+        "mosquitto_dynsec.conf" in (scenario.get("mosquitto_conf") or "")
         or bool(scenario.get("dynamic_security_config"))
         or bool(scenario.get("dynamic_security_generated_profile"))
         or bool(scenario.get("runtime_control_username"))
@@ -4662,19 +4665,19 @@ def _dynamic_security_scenario_config(
     compose_files: list[str] | None = None,
     host: str = "localhost",
     port: int = 1883,
-) -> Iterator[DynamicSecurityScenarioState]:
+) -> Generator[DynamicSecurityScenarioState]:
     baseline = _capture_dynamic_security_baseline()
     generated_path: str | None = None
     state = DynamicSecurityScenarioState(generated_path=None)
     try:
         if scenario.get("dynamic_security_generated_profile"):
             generated_path = _generate_dynamic_security_config(
-                cast(str, scenario["dynamic_security_generated_profile"])
+                scenario["dynamic_security_generated_profile"]
             )
             state.generated_path = generated_path
             _apply_dynamic_security_config(generated_path)
         elif scenario.get("dynamic_security_config"):
-            _apply_dynamic_security_config(cast(str, scenario["dynamic_security_config"]))
+            _apply_dynamic_security_config(scenario["dynamic_security_config"])
         yield state
     finally:
         policy_churn.cleanup_dynsec_snapshot(generated_path)
@@ -4712,7 +4715,7 @@ def _seed_sqlite_scenario_policy(
     default_clients: int,
     allow_replace: bool,
 ) -> None:
-    db_path = str(scenario.get("sqlite_seed_db", "docker/sqlite/policy.db"))
+    db_path = scenario.get("sqlite_seed_db", "docker/sqlite/policy.db")
     resolved_db_path = _resolve_repo_path(db_path)
     resolved_db_path.parent.mkdir(parents=True, exist_ok=True)
     resolved_db_path.parent.chmod(0o777)
@@ -4720,19 +4723,19 @@ def _seed_sqlite_scenario_policy(
     def seed() -> None:
         policy_churn.seed_sqlite_fanout_policy(
             db_path,
-            topic=str(
+            topic=(
                 scenario.get(
                     "sqlite_seed_topic",
                     scenario.get("fanout_topic", "fanout/broadcast"),
                 )
             ),
-            subscriber_count=int(
+            subscriber_count=(
                 scenario.get(
                     "sqlite_seed_subscribers",
                     scenario.get("subscriber_count", default_clients),
                 )
             ),
-            profile=str(scenario.get("sqlite_seed_profile", "fanout_basic")),
+            profile=scenario.get("sqlite_seed_profile", "fanout_basic"),
         )
 
     try:
@@ -4817,7 +4820,7 @@ def _load_dynamic_security_snapshot(path: str) -> dict[str, Any]:
 
 
 def _effective_scenario_client_count(scenario: ScenarioConfig, default_clients: int) -> int:
-    return int(scenario.get("client_count", scenario.get("subscriber_count", default_clients)))
+    return scenario.get("client_count", scenario.get("subscriber_count", default_clients))
 
 
 WorkloadShape = Literal["matrix", "fixed-clients", "fixed-messages", "fixed"]
@@ -4855,15 +4858,15 @@ def _effective_scenario_message_count(
     *,
     effective_clients: int | None = None,
 ) -> int:
-    configured = int(scenario.get("message_count", default_messages))
-    minimum = int(scenario.get("control_after_messages", 0))
-    fanout_churn_after = int(scenario.get("fanout_churn_after_messages", 0))
+    configured = scenario.get("message_count", default_messages)
+    minimum = scenario.get("control_after_messages", 0)
+    fanout_churn_after = scenario.get("fanout_churn_after_messages", 0)
     if scenario.get("fanout_churn_kind") and fanout_churn_after > 0:
-        interval = int(scenario.get("fanout_churn_interval_messages", 0))
-        max_events = int(scenario.get("fanout_churn_max_events", 1))
+        interval = scenario.get("fanout_churn_interval_messages", 0)
+        max_events = scenario.get("fanout_churn_max_events", 1)
         last_event = fanout_churn_after + interval * max(max_events - 1, 0)
         minimum = max(minimum, last_event + 1)
-    runtime_control_after = int(scenario.get("runtime_control_after_messages", 0))
+    runtime_control_after = scenario.get("runtime_control_after_messages", 0)
     if runtime_control_after > 0 and effective_clients is not None:
         post_control_publishes = 1 if scenario.get("runtime_control_expect_denial") else 0
         minimum = max(
@@ -5162,14 +5165,8 @@ def _scenario_active_identity_binding(
     if token_kind is None:
         return None
     if token_kind == "jwt":
-        return token_kind, cast(
-            IdentityBindingMode,
-            scenario.get("jwt_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[0]),
-        )
-    return token_kind, cast(
-        IdentityBindingMode,
-        scenario.get("biscuit_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[1]),
-    )
+        return token_kind, scenario.get("jwt_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[0])
+    return token_kind, scenario.get("biscuit_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[1])
 
 
 def _scenario_requires_per_client_strict_provisioning(
@@ -5199,13 +5196,9 @@ def _supports_per_client_strict_provisioning(
     effective_client_count = _effective_scenario_client_count(scenario, default_clients)
     if effective_client_count <= 1:
         return True
-    jwt_identity_binding = cast(
-        IdentityBindingMode,
-        scenario.get("jwt_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[0]),
-    )
-    biscuit_identity_binding = cast(
-        IdentityBindingMode,
-        scenario.get("biscuit_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[1]),
+    jwt_identity_binding = scenario.get("jwt_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[0])
+    biscuit_identity_binding = scenario.get(
+        "biscuit_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[1]
     )
     if jwt_identity_binding != "strict" and biscuit_identity_binding != "strict":
         return True
@@ -5226,18 +5219,11 @@ def _validate_scenario_semantics(
     *,
     default_clients: int,
 ) -> None:
-    jwt_identity_binding = cast(
-        IdentityBindingMode,
-        scenario.get("jwt_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[0]),
+    jwt_identity_binding = scenario.get("jwt_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[0])
+    biscuit_identity_binding = scenario.get(
+        "biscuit_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[1]
     )
-    biscuit_identity_binding = cast(
-        IdentityBindingMode,
-        scenario.get("biscuit_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[1]),
-    )
-    semantic_class = cast(
-        SemanticClass,
-        scenario.get("semantic_class", SCENARIO_SEMANTIC_DEFAULTS[2]),
-    )
+    semantic_class = scenario.get("semantic_class", SCENARIO_SEMANTIC_DEFAULTS[2])
 
     expected_bindings = SCENARIO_SEMANTIC_RULES[semantic_class]
     actual_bindings = (jwt_identity_binding, biscuit_identity_binding)
@@ -5277,18 +5263,11 @@ def _scenario_semantics_metadata(
 ) -> dict[str, str]:
     _validate_scenario_semantics(scenario_id, scenario, default_clients=default_clients)
     return {
-        "jwt_identity_binding": cast(
-            IdentityBindingMode,
-            scenario.get("jwt_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[0]),
+        "jwt_identity_binding": scenario.get("jwt_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[0]),
+        "biscuit_identity_binding": scenario.get(
+            "biscuit_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[1]
         ),
-        "biscuit_identity_binding": cast(
-            IdentityBindingMode,
-            scenario.get("biscuit_identity_binding", SCENARIO_SEMANTIC_DEFAULTS[1]),
-        ),
-        "semantic_class": cast(
-            SemanticClass,
-            scenario.get("semantic_class", SCENARIO_SEMANTIC_DEFAULTS[2]),
-        ),
+        "semantic_class": scenario.get("semantic_class", SCENARIO_SEMANTIC_DEFAULTS[2]),
     }
 
 
@@ -5523,11 +5502,11 @@ def _validate_dynamic_security_alignment(
     *,
     default_clients: int,
 ) -> None:
-    dynamic_security_config = cast(str | None, scenario.get("dynamic_security_config"))
+    dynamic_security_config = scenario.get("dynamic_security_config")
     generated_snapshot_path: str | None = None
     if not dynamic_security_config and scenario.get("dynamic_security_generated_profile"):
         generated_snapshot_path = _generate_dynamic_security_config(
-            cast(str, scenario["dynamic_security_generated_profile"])
+            scenario["dynamic_security_generated_profile"]
         )
         dynamic_security_config = generated_snapshot_path
     has_churn_validation_input = bool(
@@ -5586,7 +5565,7 @@ def _validate_dynamic_security_alignment(
                     required_clientid="fanout_publisher",
                 )
         elif scenario.get("dynamic_security_churn"):
-            for churn_snapshot in cast(list[str], scenario["dynamic_security_churn"]):
+            for churn_snapshot in scenario["dynamic_security_churn"]:
                 if subscriber_username:
                     _validate_dynamic_security_snapshot_supports_principal(
                         scenario_id=scenario_id,
@@ -6425,7 +6404,7 @@ def _acl_read_profile_matrix_scenarios(tokens: dict[str, Any]) -> dict[str, Scen
 
 
 def _infer_policy_source(scenario: ScenarioConfig) -> str | None:
-    conf = str(scenario.get("mosquitto_conf", ""))
+    conf = scenario.get("mosquitto_conf", "")
     if "mosquitto_http" in conf:
         return "http"
     if "mosquitto_hybrid" in conf:
@@ -6447,8 +6426,8 @@ def _infer_acl_read_enforcement(
     scenario: ScenarioConfig,
 ) -> Literal["expiry_only", "strict"]:
     if "acl_read_enforcement" in scenario:
-        return cast(Literal["expiry_only", "strict"], scenario["acl_read_enforcement"])
-    conf = str(scenario.get("mosquitto_conf", ""))
+        return scenario["acl_read_enforcement"]
+    conf = scenario.get("mosquitto_conf", "")
     strict_conf_suffixes = (
         "mosquitto_integration_acl_read_full.conf",
         "mosquitto_dynsec_acl_read.conf",
@@ -8170,10 +8149,7 @@ def main(
                 IdentityBindingMode,
                 scenario_semantics["biscuit_identity_binding"],
             ),
-            biscuit_client_id_fact=cast(
-                str,
-                s.get("biscuit_client_id_fact", "client_id"),
-            ),
+            biscuit_client_id_fact=s.get("biscuit_client_id_fact", "client_id"),
         )
         extra_env = {"MOSQUITTO_CONF": runtime_mosq_conf}
         endpoints = _scenario_endpoint_config(
@@ -8333,7 +8309,7 @@ def main(
                 _wait_for_tcpdump_ready(extra_env=extra_env, compose_files=compose_files)
             effective_mtu: int | None = None
             if netem is not None and "mtu" in netem:
-                requested_mtu = int(netem["mtu"])
+                requested_mtu = netem["mtu"]
                 effective_mtu = _read_effective_mtu(
                     interface=os.environ.get("NETEM_IFACE", "eth0"),
                     extra_env=extra_env,
@@ -8435,7 +8411,7 @@ def main(
                     _expected_authz_state(cfg, reset_baseline),
                 )
 
-            repeats = int(s.get("repeat", 1))
+            repeats = s.get("repeat", 1)
             token_len = len(s.get("password", "")) if s.get("password") else 0
             token_issuer_no_default_grants = s.get(
                 "token_issuer_no_default_grants", token_issuer_no_default_grants
@@ -8468,7 +8444,7 @@ def main(
                     "container-single topology"
                 )
             effective_client_count = (
-                int(reauth_storm_clients)
+                reauth_storm_clients
                 if s.get("reauth_storm") and reauth_storm_clients is not None
                 else _effective_scenario_client_count(s, clients)
             )
@@ -8482,13 +8458,13 @@ def main(
                     f"{s['id']}: multi-client MTU capture requires container-per-client "
                     "topology for client-correlated packet evidence"
                 )
-            configured_messages = int(s.get("message_count", messages))
+            configured_messages = s.get("message_count", messages)
             scenario_messages = _effective_scenario_message_count(
                 s,
                 messages,
                 effective_clients=effective_client_count,
             )
-            scenario_qos = int(s.get("qos", qos))
+            scenario_qos = s.get("qos", qos)
             scenario_qos_distribution = s.get("qos_distribution", qos_distribution)
             scenario_workload_shape = _scenario_workload_shape(s)
             if scenario_messages > configured_messages:
@@ -8584,12 +8560,8 @@ def main(
                     "fanout_churn_sqlite_topic": s.get("fanout_churn_sqlite_topic"),
                     "fanout_churn_sqlite_subscribers": s.get("fanout_churn_sqlite_subscribers"),
                     "http_expected_delay_ms": s.get("http_expected_delay_ms"),
-                    "publish_timeout_seconds": _publish_timeout_seconds(
-                        s, effective_client_count
-                    ),
-                    "connect_timeout_seconds": _publish_timeout_seconds(
-                        s, effective_client_count
-                    ),
+                    "publish_timeout_seconds": _publish_timeout_seconds(s, effective_client_count),
+                    "connect_timeout_seconds": _publish_timeout_seconds(s, effective_client_count),
                     "client_topology": {
                         "mode": client_topology_mode,
                         "effective_mode": client_topology_mode,
@@ -8691,7 +8663,7 @@ def main(
                         port=mqtt_port,
                     )
                     if s.get("dynamic_security_churn"):
-                        churn_list = cast(list[str], s["dynamic_security_churn"])
+                        churn_list = s["dynamic_security_churn"]
                         _apply_dynamic_security_config(churn_list[idx % len(churn_list)])
                         _restart_mosquitto(
                             extra_env=extra_env,
@@ -8748,11 +8720,8 @@ def main(
                         res["credential_attestation"] = credential_metadata
                     else:
                         token_refresh = s.get("token_refresh")
-                        proactive_refresh = bool(s.get("proactive_refresh", False))
-                        credential_mode = cast(
-                            CredentialMode,
-                            s.get("credential_mode", "shared"),
-                        )
+                        proactive_refresh = s.get("proactive_refresh", False)
+                        credential_mode = s.get("credential_mode", "shared")
                         strict_startup_provisioning = (
                             None
                             if credential_mode == "per_client"
@@ -8782,9 +8751,9 @@ def main(
                             fanout_topic=s.get("fanout_topic"),
                             qos=scenario_qos,
                             qos_distribution=scenario_qos_distribution,
-                            message_size=int(s.get("message_size", 0)),
+                            message_size=s.get("message_size", 0),
                             http_failure_rate=s.get("http_failure_rate"),
-                            sync_connect=bool(s.get("sync_connect", False)),
+                            sync_connect=s.get("sync_connect", False),
                             token_issuer_url=(
                                 loadgen_token_issuer_base
                                 if credential_mode == "issuer"
@@ -8809,10 +8778,10 @@ def main(
                             proactive_refresh_timeout_seconds=s.get(
                                 "proactive_refresh_timeout_seconds"
                             ),
-                            proactive_refresh_assert_continuity=bool(
-                                s.get("proactive_refresh_assert_continuity", False)
+                            proactive_refresh_assert_continuity=s.get(
+                                "proactive_refresh_assert_continuity", False
                             ),
-                            reauth_storm=bool(s.get("reauth_storm", False)),
+                            reauth_storm=s.get("reauth_storm", False),
                             jwt_identity_binding=cast(
                                 IdentityBindingMode,
                                 scenario_semantics["jwt_identity_binding"],
@@ -8821,10 +8790,7 @@ def main(
                                 IdentityBindingMode,
                                 scenario_semantics["biscuit_identity_binding"],
                             ),
-                            biscuit_client_id_fact=cast(
-                                str,
-                                s.get("biscuit_client_id_fact", "client_id"),
-                            ),
+                            biscuit_client_id_fact=s.get("biscuit_client_id_fact", "client_id"),
                             tls_enabled=scenario_tls,
                             tls_ca_file=loadgen_tls_ca,
                             tls_insecure=tls_insecure,
@@ -8854,7 +8820,7 @@ def main(
                                 if s.get("biscuit_attenuate")
                                 else None
                             ),
-                            attenuation_probe_subscribe_denied=bool(
+                            attenuation_probe_subscribe_denied=(
                                 s.get("attenuation_probe_subscribe_denied", False)
                                 or s.get("authorization_probe_subscribe_denied", False)
                             ),
@@ -8939,7 +8905,7 @@ def main(
                             control_topic=s.get("control_topic"),
                             control_payload=s.get("control_payload")
                             or _generate_control_churn_payload(s["id"], "admin"),
-                            control_mode=bool(s.get("control_mode", False)),
+                            control_mode=s.get("control_mode", False),
                             control_repeat=s.get("control_repeat", 1),
                             control_response_topic=s.get("control_response_topic"),
                             control_after_messages=s.get("control_after_messages", 0),
@@ -8948,8 +8914,8 @@ def main(
                             runtime_control_after_messages=s.get(
                                 "runtime_control_after_messages", 0
                             ),
-                            runtime_control_expect_denial=bool(
-                                s.get("runtime_control_expect_denial", False)
+                            runtime_control_expect_denial=s.get(
+                                "runtime_control_expect_denial", False
                             ),
                             fanout_churn_kind=s.get("fanout_churn_kind"),
                             fanout_churn_after_messages=s.get("fanout_churn_after_messages", 0),
@@ -8959,7 +8925,7 @@ def main(
                             fanout_churn_max_events=s.get("fanout_churn_max_events", 1),
                             fanout_churn_settle_ms=s.get("fanout_churn_settle_ms", 0),
                             fanout_churn_phase_delivery=(
-                                cast(DeliveryContract, s.get("delivery_contract", {})).get("phases")
+                                s.get("delivery_contract", {}).get("phases")
                             ),
                             fanout_churn_dynamic_security_source=(
                                 _container_repo_path(s.get("fanout_churn_dynamic_security_source"))
@@ -8968,8 +8934,8 @@ def main(
                             ),
                             fanout_churn_control_topic=s.get("fanout_churn_control_topic"),
                             fanout_churn_control_payload=s.get("fanout_churn_control_payload"),
-                            fanout_expect_control_notification=bool(
-                                s.get("fanout_expect_control_notification", False)
+                            fanout_expect_control_notification=s.get(
+                                "fanout_expect_control_notification", False
                             ),
                             fanout_churn_sqlite_db=(
                                 _container_repo_path(s.get("fanout_churn_sqlite_db"))
@@ -9207,7 +9173,7 @@ def main(
                     ):
                         raise RuntimeError(f"{s['id']}: capture contains no MQTT TCP traffic")
                     max_ip_packet = int(metrics.get("max_ip_packet_bytes") or 0)
-                    asserted_mtu = int(effective_mtu or 0)
+                    asserted_mtu = effective_mtu or 0
                     if max_ip_packet <= 0 or asserted_mtu <= 0 or max_ip_packet > asserted_mtu:
                         raise RuntimeError(
                             f"{s['id']}: observed IP packet size {max_ip_packet} exceeds "

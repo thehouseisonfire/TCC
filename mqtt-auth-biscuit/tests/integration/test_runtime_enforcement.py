@@ -47,6 +47,8 @@ class _TokenIssuerLike(Protocol):
 
 
 class _ObservedMqttClientLike(Protocol):
+    password: str | bytes
+
     @property
     def message_count(self) -> int: ...
 
@@ -73,6 +75,12 @@ class _ObservedMqttClientLike(Protocol):
     def assert_connected_for(self, duration_s: float) -> None: ...
 
     def close(self) -> None: ...
+
+
+class _MqttClientFactory(Protocol):
+    def __call__(self, *args: Any, **kwargs: Any) -> _ObservedMqttClientLike: ...
+
+    def _helper_path(self) -> Path: ...
 
 
 def _resolve_conf(base_conf: str, *, tls: bool) -> str:
@@ -269,7 +277,7 @@ def _total_messages(clients: list[_ObservedMqttClientLike]) -> int:
 @pytest.mark.parametrize("acl_read_full_authz", [False, True])
 def test_runtime_acl_read_expiry_disconnect_and_reconnect(
     compose_harness,
-    mqtt_client_factory,
+    mqtt_client_factory: _MqttClientFactory,
     unique_suffix: str,
     token_kind: str,
     acl_read_full_authz: bool,
@@ -370,6 +378,7 @@ def test_runtime_acl_read_expiry_disconnect_and_reconnect(
                 username=token_kind,
                 password=fresh_sub_token,
             )
+            assert reconnect_sub is not None
             reconnect_sub.connect()
             if _is_granted(reconnect_sub.subscribe(topic, qos=1)):
                 granted = True
@@ -393,7 +402,7 @@ def test_runtime_acl_read_expiry_disconnect_and_reconnect(
 @pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
 def test_runtime_expiry_disconnect_does_not_emit_lwt(
     compose_harness,
-    mqtt_client_factory,
+    mqtt_client_factory: _MqttClientFactory,
     unique_suffix: str,
     token_kind: str,
 ) -> None:
@@ -490,7 +499,7 @@ def test_runtime_expiry_disconnect_does_not_emit_lwt(
 @pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
 def test_runtime_control_acl_read_notify_workflow(
     compose_harness,
-    mqtt_client_factory,
+    mqtt_client_factory: _MqttClientFactory,
     unique_suffix: str,
     token_kind: str,
     tmp_path,
@@ -583,7 +592,7 @@ def test_runtime_control_acl_read_notify_workflow(
 @pytest.mark.broker_integration
 def test_runtime_dynsec_publish_churn_keeps_broker_alive_for_two_clients(
     compose_harness,
-    mqtt_client_factory,
+    mqtt_client_factory: _MqttClientFactory,
     unique_suffix: str,
 ) -> None:
     snapshot = policy_churn.generate_dynsec_snapshot("publish_multi_client_base")
@@ -676,7 +685,7 @@ def test_runtime_dynsec_publish_churn_keeps_broker_alive_for_two_clients(
 @pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
 def test_runtime_control_group_membership_role_churn_workflow(
     compose_harness,
-    mqtt_client_factory,
+    mqtt_client_factory: _MqttClientFactory,
     unique_suffix: str,
     token_kind: str,
     tmp_path,
@@ -843,7 +852,7 @@ def test_runtime_control_group_membership_role_churn_workflow(
 @pytest.mark.parametrize("token_kind", ["jwt", "biscuit"])
 def test_runtime_negative_controls_no_false_disconnects(
     compose_harness,
-    mqtt_client_factory,
+    mqtt_client_factory: _MqttClientFactory,
     unique_suffix: str,
     token_kind: str,
 ) -> None:
@@ -1015,7 +1024,7 @@ def test_runtime_negative_controls_no_false_disconnects(
 )
 def test_runtime_control_disable_client_kick_and_reconnect_denied(
     compose_harness,
-    mqtt_client_factory,
+    mqtt_client_factory: _MqttClientFactory,
     unique_suffix: str,
     token_kind: str,
     tls: bool,
@@ -1122,7 +1131,7 @@ def test_runtime_control_disable_client_kick_and_reconnect_denied(
 @pytest.mark.parametrize("tls", [False, True])
 def test_runtime_control_disable_client_skips_offline_stale_session_kick(
     compose_harness,
-    mqtt_client_factory,
+    mqtt_client_factory: _MqttClientFactory,
     unique_suffix: str,
     token_kind: str,
     tls: bool,
@@ -1287,7 +1296,7 @@ def test_runtime_enhanced_auth_entrypoint_over_tcp_and_tls(
 @pytest.mark.ci_heavy
 def test_runtime_basic_auth_over_tls_stays_functional(
     compose_harness,
-    mqtt_client_factory,
+    mqtt_client_factory: _MqttClientFactory,
     unique_suffix: str,
 ) -> None:
     compose_harness.up(
@@ -1359,7 +1368,7 @@ def test_runtime_basic_auth_over_tls_stays_functional(
 )
 def test_runtime_fanout_churn_enforcement(
     compose_harness,
-    mqtt_client_factory,
+    mqtt_client_factory: _MqttClientFactory,
     unique_suffix: str,
     token_kind: str,
     subscriber_count: int,

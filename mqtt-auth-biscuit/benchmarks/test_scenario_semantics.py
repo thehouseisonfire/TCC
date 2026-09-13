@@ -169,6 +169,8 @@ def test_thundering_herd_scenarios_are_synchronized_connect_bursts(
         "HTTP-LATENCY-200MS-JWT",
         "HTTP-LATENCY-1000MS-JWT",
         "HTTP-LATENCY-200MS-BISCUIT",
+        "HTTP-LATENCY-200MS-PARITY-JWT",
+        "HTTP-LATENCY-200MS-PARITY-BISCUIT",
     ),
 )
 def test_http_latency_scenarios_use_deterministic_connect_barrier(scenario_id: str) -> None:
@@ -196,6 +198,8 @@ def test_http_latency_scenarios_use_deterministic_connect_barrier(scenario_id: s
         "HTTP-LATENCY-200MS-JWT-TLS",
         "HTTP-LATENCY-1000MS-JWT-TLS",
         "HTTP-LATENCY-200MS-BISCUIT-TLS",
+        "HTTP-LATENCY-200MS-PARITY-JWT-TLS",
+        "HTTP-LATENCY-200MS-PARITY-BISCUIT-TLS",
     ),
 )
 def test_http_latency_tls_variants_inherit_connect_barrier(scenario_id: str) -> None:

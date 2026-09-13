@@ -610,6 +610,7 @@ struct WorkerResult {
     control_injection_ms: Vec<f64>,
     sync_barrier_wait_ms: Option<f64>,
     sync_barrier_released_at_unix_ms: Option<u128>,
+    sync_barrier_max_ready_skew_ms: Option<f64>,
     errors: Vec<String>,
     credential_issuance: Vec<CredentialIssuance>,
 }
@@ -671,6 +672,7 @@ struct StandardMetrics {
     control_injection: Vec<f64>,
     sync_barrier_wait: Vec<f64>,
     sync_barrier_released_at_unix_ms: Vec<u128>,
+    sync_barrier_max_ready_skew_ms: Option<f64>,
     errors: Vec<String>,
     publish_throughput_mps: f64,
     receive_throughput_mps: f64,
@@ -1112,6 +1114,7 @@ fn sync_connect_json(
     args: &Args,
     barrier_wait: &[f64],
     released_at: &[u128],
+    max_ready_skew_ms: Option<f64>,
     errors: &[String],
 ) -> Value {
     if !args.sync_connect {
@@ -1123,6 +1126,19 @@ fn sync_connect_json(
         "in_process"
     };
     let first_release = released_at.iter().min().copied();
+    // The sync_connect result schema is topology-independent: every successful
+    // synchronized connect reports max_ready_skew_ms. The in-process gate
+    // releases all workers atomically in one process, so cross-container
+    // readiness skew is definitionally 0.0. External barriers report the
+    // server-observed ready skew passed through from the wait report.
+    let skew = if barrier == "in_process" {
+        serde_json::json!(0.0)
+    } else {
+        match max_ready_skew_ms {
+            Some(value) => serde_json::json!(value),
+            None => serde_json::Value::Null,
+        }
+    };
     serde_json::json!({
         "enabled": true,
         "barrier": barrier,
@@ -1130,6 +1146,7 @@ fn sync_connect_json(
         "participants": args.sync_connect_participants.unwrap_or(args.clients),
         "ready_count": if barrier == "external" { barrier_wait.len() } else { args.clients },
         "released_at_unix_ms": first_release,
+        "max_ready_skew_ms": skew,
         "client_wait": summarize(barrier_wait),
         "errors": errors
             .iter()
@@ -4072,7 +4089,7 @@ fn fanout_output(args: &Args, parts: FanoutOutputParts<'_>) -> Output {
             metrics.received_by_phase.as_deref(),
             parts.phase_events,
         ),
-        sync_connect: sync_connect_json(args, &[], &[], &parts.runtime.errors),
+        sync_connect: sync_connect_json(args, &[], &[], None, &parts.runtime.errors),
         reauth_storm: serde_json::json!({"enabled": false}),
         raw_publish_ms: parts.fanout_publish_ms,
         raw_metrics,
@@ -5384,6 +5401,7 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
             Ok(report) => {
                 result.sync_barrier_wait_ms = Some(report.wait_ms);
                 result.sync_barrier_released_at_unix_ms = report.status.released_at_unix_ms;
+                result.sync_barrier_max_ready_skew_ms = report.status.max_ready_skew_ms;
             }
             Err(err) => {
                 result.errors.push(format!("sync_barrier_failed:{err}"));
@@ -5608,6 +5626,12 @@ fn standard_metrics(
         .iter()
         .filter_map(|r| r.sync_barrier_released_at_unix_ms)
         .collect();
+    let sync_barrier_max_ready_skew_ms = results
+        .iter()
+        .filter_map(|r| r.sync_barrier_max_ready_skew_ms)
+        .fold(None, |max: Option<f64>, value| {
+            Some(max.map_or(value, |current: f64| current.max(value)))
+        });
     let credential_issuance = results
         .iter()
         .flat_map(|r| r.credential_issuance.clone())
@@ -5655,6 +5679,7 @@ fn standard_metrics(
         control_injection,
         sync_barrier_wait,
         sync_barrier_released_at_unix_ms,
+        sync_barrier_max_ready_skew_ms,
         errors,
     }
 }
@@ -5735,6 +5760,7 @@ fn standard_output(
         args,
         &metrics.sync_barrier_wait,
         &metrics.sync_barrier_released_at_unix_ms,
+        metrics.sync_barrier_max_ready_skew_ms,
         &metrics.errors,
     );
     Output {
@@ -6097,6 +6123,7 @@ fn empty_standard_metrics() -> StandardMetrics {
         control_injection: Vec::new(),
         sync_barrier_wait: Vec::new(),
         sync_barrier_released_at_unix_ms: Vec::new(),
+        sync_barrier_max_ready_skew_ms: None,
         errors: Vec::new(),
         publish_throughput_mps: 0.0,
         receive_throughput_mps: 0.0,
@@ -6441,6 +6468,7 @@ mod tests {
             control_injection: Vec::new(),
             sync_barrier_wait: Vec::new(),
             sync_barrier_released_at_unix_ms: Vec::new(),
+            sync_barrier_max_ready_skew_ms: None,
             errors: Vec::new(),
             publish_throughput_mps: 0.0,
             receive_throughput_mps: 0.0,
@@ -6754,6 +6782,45 @@ mod tests {
             "2",
         ]);
         assert!(external_sync_barrier(&valid).unwrap().is_some());
+    }
+
+    #[test]
+    fn sync_connect_json_is_topology_independent() {
+        let in_process = Args::parse_from(["mqtt-loadgen", "--sync-connect", "--clients", "1"]);
+        let rendered = sync_connect_json(&in_process, &[], &[], None, &[]);
+        assert_eq!(rendered["enabled"], serde_json::json!(true));
+        assert_eq!(rendered["barrier"], serde_json::json!("in_process"));
+        assert_eq!(rendered["participants"], serde_json::json!(1));
+        assert_eq!(rendered["ready_count"], serde_json::json!(1));
+        assert_eq!(rendered["max_ready_skew_ms"], serde_json::json!(0.0));
+
+        let external = Args::parse_from([
+            "mqtt-loadgen",
+            "--sync-connect",
+            "--clients",
+            "1",
+            "--sync-connect-barrier-url",
+            "http://sync-barrier:8083",
+            "--sync-connect-run-id",
+            "run-1",
+            "--sync-connect-participant-id",
+            "client_1",
+            "--sync-connect-participants",
+            "2",
+        ]);
+        let rendered = sync_connect_json(&external, &[5.0], &[1_760_000_000_000], Some(12.4), &[]);
+        assert_eq!(rendered["barrier"], serde_json::json!("external"));
+        assert_eq!(
+            rendered["max_ready_skew_ms"],
+            serde_json::json!(12.4),
+            "external barriers must surface the server-observed ready skew"
+        );
+
+        let disabled = Args::parse_from(["mqtt-loadgen"]);
+        assert_eq!(
+            sync_connect_json(&disabled, &[], &[], None, &[]),
+            serde_json::json!({"enabled": false})
+        );
     }
 
     #[test]

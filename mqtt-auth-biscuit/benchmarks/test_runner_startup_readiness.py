@@ -2073,6 +2073,69 @@ def test_sync_barrier_validation_distinguishes_herd_restart_from_latency_cells()
         )
 
 
+def test_sync_barrier_contract_is_topology_independent() -> None:
+    """Every successful synchronized connect must report max_ready_skew_ms.
+
+    Host and container-single topologies use the in-process gate, which
+    releases workers atomically in one process and reports 0.0 skew.
+    External container-per-client barriers report the server-observed ready
+    skew. The consumer contract must not become topology-dependent, so a
+    missing skew field fails regardless of barrier mode. This guards the
+    single-client HTTP latency parity runs in run_python_tests.sh, which
+    execute with the default host topology.
+    """
+    in_process = {
+        "sync_connect": {
+            "enabled": True,
+            "barrier": "in_process",
+            "participants": 1,
+            "ready_count": 1,
+            "max_ready_skew_ms": 0.0,
+            "errors": [],
+        },
+        "connect": {"count": 1},
+    }
+    rs._validate_thundering_herd_result(
+        "HTTP-LATENCY-200MS-PARITY-JWT", in_process, client_count=1, require_restart=False
+    )
+
+    external_single = {
+        "sync_connect": {
+            "enabled": True,
+            "barrier": "external",
+            "participants": 1,
+            "ready_count": 1,
+            "max_ready_skew_ms": 0.0,
+            "errors": [],
+        },
+        "connect": {"count": 1},
+    }
+    rs._validate_thundering_herd_result(
+        "HTTP-LATENCY-200MS-PARITY-JWT",
+        external_single,
+        client_count=1,
+        require_restart=False,
+    )
+
+    missing_skew = {
+        "sync_connect": {
+            "enabled": True,
+            "barrier": "in_process",
+            "participants": 1,
+            "ready_count": 1,
+            "errors": [],
+        },
+        "connect": {"count": 1},
+    }
+    with pytest.raises(RuntimeError, match="synchronized connection barrier contract failed"):
+        rs._validate_thundering_herd_result(
+            "HTTP-LATENCY-200MS-PARITY-JWT",
+            missing_skew,
+            client_count=1,
+            require_restart=False,
+        )
+
+
 def test_container_per_client_runtime_control_uses_one_coordinated_controller(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -52,11 +52,11 @@ def test_workload_interval_coverage_counts_only_packets_inside_each_run() -> Non
         mqtt_times=[0.5, 1.1, 1.5, 2.1, 3.2],
         payload_times=[1.5, 3.2],
         client_events=[
-            (0.5, "readiness"),
-            (1.1, "client-a"),
-            (1.2, "client-a"),
-            (1.5, "client-b"),
-            (3.2, "client-a"),
+            (0.5, "readiness", 40000),
+            (1.1, "client-a", 40001),
+            (1.2, "client-a", 40001),
+            (1.5, "client-b", 40002),
+            (3.2, "client-a", 40003),
         ],
         intervals=[(1.0, 2.0), (3.0, 4.0)],
     )
@@ -68,6 +68,7 @@ def test_workload_interval_coverage_counts_only_packets_inside_each_run() -> Non
             "mqtt_packets": 2,
             "mqtt_payload_packets": 1,
             "mqtt_client_ips": 2,
+            "mqtt_client_connections": 2,
         },
         {
             "started_at": 3.0,
@@ -75,6 +76,34 @@ def test_workload_interval_coverage_counts_only_packets_inside_each_run() -> Non
             "mqtt_packets": 1,
             "mqtt_payload_packets": 1,
             "mqtt_client_ips": 1,
+            "mqtt_client_connections": 1,
+        },
+    ]
+
+
+def test_workload_interval_coverage_counts_recycled_container_ips_separately() -> None:
+    """Two sequential clients sharing one Docker-recycled IP (different source
+    ports) must each count toward client presence."""
+    from benchmarks.packet_analysis import _workload_interval_coverage
+
+    coverage = _workload_interval_coverage(
+        mqtt_times=[0.5, 5.5],
+        payload_times=[0.5, 5.5],
+        client_events=[
+            (0.5, "172.22.0.8", 57256),
+            (5.5, "172.22.0.8", 60112),
+        ],
+        intervals=[(0.0, 6.0)],
+    )
+
+    assert coverage == [
+        {
+            "started_at": 0.0,
+            "finished_at": 6.0,
+            "mqtt_packets": 2,
+            "mqtt_payload_packets": 2,
+            "mqtt_client_ips": 1,
+            "mqtt_client_connections": 2,
         },
     ]
 

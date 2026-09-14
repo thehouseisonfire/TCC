@@ -119,6 +119,33 @@ fn sensor_biscuit(root_keypair: &KeyPair, client_id: &str) -> Biscuit {
     )
 }
 
+/// Shared fixture for authorizer-template complexity scenarios. This keeps
+/// token bytes constant while plugin-side authorizer profiles change. Rights
+/// are pinned to `BASE_TOPIC`: every worker must publish there (see
+/// `_biscuit_authorizer_template_scenarios`), since a per-client topic would
+/// fall outside this token's scope for every worker except client_1.
+fn authorizer_template_biscuit(root_keypair: &KeyPair) -> Biscuit {
+    Biscuit::builder()
+        .fact(r#"right("publish", "sensors/client_1/#")"#)
+        .unwrap()
+        .fact(r#"right("subscribe", "sensors/client_1/#")"#)
+        .unwrap()
+        .fact(r#"role("writer")"#)
+        .unwrap()
+        .fact(r#"role_right("writer", "publish", "sensors/client_1/#")"#)
+        .unwrap()
+        .fact(r#"role_right("writer", "subscribe", "sensors/client_1/#")"#)
+        .unwrap()
+        .fact(r#"role_active_from("writer", 0)"#)
+        .unwrap()
+        .fact(r#"role_active_until("writer", 4102444800)"#)
+        .unwrap()
+        .fact("expires_at(2000000000)")
+        .unwrap()
+        .build(root_keypair)
+        .unwrap()
+}
+
 fn biscuit_with_empty_blocks(token: &Biscuit, blocks: usize) -> Biscuit {
     let mut result = token.clone();
     for _ in 1..blocks {
@@ -698,25 +725,7 @@ fn main() {
 
     // Shared fixture for authorizer-template complexity scenarios.
     // This keeps token bytes constant while plugin-side authorizer profiles change.
-    let biscuit_authorizer_template = Biscuit::builder()
-        .fact(r#"right("publish", "sensors/client_1/#")"#)
-        .unwrap()
-        .fact(r#"right("subscribe", "sensors/client_1/#")"#)
-        .unwrap()
-        .fact(r#"role("writer")"#)
-        .unwrap()
-        .fact(r#"role_right("writer", "publish", "sensors/client_1/#")"#)
-        .unwrap()
-        .fact(r#"role_right("writer", "subscribe", "sensors/client_1/#")"#)
-        .unwrap()
-        .fact(r#"role_active_from("writer", 0)"#)
-        .unwrap()
-        .fact(r#"role_active_until("writer", 4102444800)"#)
-        .unwrap()
-        .fact("expires_at(2000000000)")
-        .unwrap()
-        .build(&root_keypair)
-        .unwrap();
+    let biscuit_authorizer_template = authorizer_template_biscuit(&root_keypair);
 
     let biscuit_handoff = Biscuit::builder()
         .fact("right(\"publish\", \"delegation/handoff\")")
@@ -796,6 +805,7 @@ fn main() {
         "jwt_grants_schema": jwt_grants_schema,
         "jwt_denies_schema": jwt_denies_schema,
         "biscuit": biscuit_b64,
+        "biscuit_chain_1": biscuit_b64,
         "biscuit_5": biscuit_medium_b64,
         "biscuit_25": biscuit_large_b64,
         "biscuit_delegated": biscuit_delegated_b64,
@@ -982,6 +992,16 @@ fn main() {
             &client_id,
             encoded_biscuit(&sensor),
         );
+        // Dedicated CHAIN-1 experimental profile. The generic `biscuit`
+        // profile intentionally carries no chain_length semantics so baseline
+        // scenarios are not recorded as chain-length experiments.
+        add_credential(
+            &mut profiles,
+            "biscuit_chain_1",
+            "biscuit",
+            &client_id,
+            encoded_biscuit(&sensor),
+        );
         add_credential(
             &mut profiles,
             "biscuit_5",
@@ -1109,7 +1129,23 @@ fn main() {
         }
     }
 
+    // Note: the generic `biscuit` baseline profile has no entry here, so it
+    // attests `semantic: null`. Only the dedicated `biscuit_chain_1`
+    // experimental profile carries chain_length semantics.
     let profile_semantics = BTreeMap::from([
+        (
+            "biscuit_chain_1",
+            CredentialSemantic {
+                token_kind: "biscuit",
+                complexity_axis: "chain_length",
+                complexity_level: "low",
+                biscuit_blocks: 1,
+                facts: 0,
+                rules: 0,
+                checks: 0,
+                chain_depth: 1,
+            },
+        ),
         (
             "biscuit_5",
             CredentialSemantic {
@@ -1281,5 +1317,34 @@ mod tests {
         }
         assert!(lengths[0] < lengths[1]);
         assert!(lengths[1] < lengths[2]);
+    }
+
+    #[test]
+    fn authorizer_template_token_rights_are_pinned_to_client_1() {
+        let root_keypair = KeyPair::from(
+            &PrivateKey::from_bytes(&TEST_BISCUIT_ROOT_BYTES, biscuit_auth::Algorithm::Ed25519)
+                .unwrap(),
+        );
+        let token = authorizer_template_biscuit(&root_keypair);
+        let mut authorizer = AuthorizerBuilder::new().build(&token).unwrap();
+        let rights: Vec<(String, String)> = authorizer
+            .query_all("data($op, $res) <- right($op, $res)")
+            .unwrap();
+        // Wildcard matching itself lives in the plugin (topic_matches); here
+        // we pin the fixture contract: every right is client_1-scoped, so the
+        // shared workload topic sensors/client_1/temp authorizes while any
+        // per-client topic (e.g. sensors/client_2/temp) cannot.
+        assert!(!rights.is_empty());
+        assert!(rights.contains(&("publish".to_string(), "sensors/client_1/#".to_string())));
+        for (operation, resource) in &rights {
+            assert!(
+                resource.starts_with("sensors/client_1/"),
+                "unexpected {operation} scope {resource}"
+            );
+            assert!(
+                !resource.contains("client_2"),
+                "unexpected scope {resource}"
+            );
+        }
     }
 }

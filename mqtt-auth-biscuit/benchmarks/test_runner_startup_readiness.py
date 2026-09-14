@@ -736,6 +736,7 @@ def test_main_normalizes_output_directory_strings(
                     "mqtt_packets": 100,
                     "mqtt_payload_packets": 50,
                     "mqtt_client_ips": 50,
+                    "mqtt_client_connections": 50,
                 }
             ],
         },
@@ -1042,6 +1043,35 @@ def test_container_single_runs_loadgen_through_compose(monkeypatch) -> None:
     assert compose_call[compose_call.index("--name") + 1] == "loadgen_bench_token_baseline_jwt_1"
     assert "--host" in compose_call
     assert compose_call[compose_call.index("--host") + 1] == "mosquitto"
+
+
+def test_ensure_sync_barrier_service_removes_stale_container_before_up(monkeypatch) -> None:
+    calls: list[tuple[list[str], bool]] = []
+
+    class Completed:
+        returncode = 0
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN202
+        calls.append((cmd, kwargs.get("check", False)))
+        return Completed()
+
+    monkeypatch.setattr(rs.subprocess, "run", fake_run)
+    monkeypatch.setattr(rs, "_wait_for_service_health", lambda *args, **kwargs: None)
+
+    rs._ensure_sync_barrier_service(
+        compose_files=["docker/docker-compose.yml"],
+        compose_project_name="bench",
+    )
+
+    assert len(calls) == 2
+    rm_cmd, rm_check = calls[0]
+    up_cmd, up_check = calls[1]
+    # Best-effort stale cleanup first: a zombie container referencing a
+    # deleted network must not make `up` fail.
+    assert rm_cmd[-4:] == ["rm", "--force", "--stop", "sync-barrier"]
+    assert rm_check is False
+    assert up_cmd[-4:] == ["up", "-d", "--build", "sync-barrier"]
+    assert up_check is True
 
 
 def test_run_loadgen_forwards_publish_timeout_seconds(monkeypatch) -> None:
@@ -1907,6 +1937,11 @@ def test_container_per_client_delegation_handoff_splits_delegatee_and_delegator_
     assert result["topology"]["delegation_handoff"]["delegatees"] == 2
     assert result["topology"]["delegation_handoff"]["qos"] == 0
     assert result["topology"]["delegation_handoff"]["run_id"] == "handoff-run-..."
+    # The delegator container emits no measured connects: containers = N + 1,
+    # connects = N, inputs.clients = N. This asymmetry is intentional.
+    assert result["connect"]["count"] == 2
+    assert result["topology"]["container_count"] == 3
+    assert result["inputs"]["clients"] == 2
 
 
 def test_delegation_handoff_readiness_fails_fast_when_delegatee_exits(tmp_path) -> None:

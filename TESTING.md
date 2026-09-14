@@ -264,7 +264,10 @@ is semantically accepted only when all applicable checks below pass.
 - The scenario ID and recorded policy source match the requested scenario.
 - Requested and effective clients, messages, QoS, distribution, and topology
   match the scenario/CLI workload-axis provenance.
-- Connect count matches the client role topology.
+- Connect count matches the client role topology. For delegation-handoff
+  scenarios the expected asymmetry is `container_count = clients + 1` (one
+  delegator container) with `connect.count = clients` (the delegator emits no
+  measured connects).
 - Successful publish count matches the contract, including expected-denial
   exceptions.
 - Per-QoS counts sum to successful publishes and match the requested schedule.

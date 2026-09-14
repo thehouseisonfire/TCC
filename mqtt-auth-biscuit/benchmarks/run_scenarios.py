@@ -2275,6 +2275,16 @@ def _ensure_sync_barrier_service(
     compose_files: list[str] | None,
     compose_project_name: str | None,
 ) -> None:
+    # Best-effort removal of any stale fixed-name container first: a zombie
+    # referencing a deleted network (e.g. from an older interrupted run)
+    # would otherwise make `up` fail while starting the existing container.
+    # Removal is not a gate; `up` remains the authority on readiness.
+    rm_cmd = _compose_cmd(
+        ["rm", "--force", "--stop", SYNC_BARRIER_SERVICE],
+        compose_files=compose_files,
+        compose_project_name=compose_project_name,
+    )
+    subprocess.run(rm_cmd, cwd=REPO_ROOT, env=os.environ.copy(), check=False)
     cmd = _compose_cmd(
         ["up", "-d", "--build", SYNC_BARRIER_SERVICE],
         compose_files=compose_files,
@@ -3194,6 +3204,12 @@ def _validate_credential_freshness(
     }
 
 
+#: Expected Biscuit chain depth per chain_length complexity tier. Every
+#: registered chain_length scenario must declare one of these levels; an
+#: unknown or missing level is a definition error, never a silent default.
+_CHAIN_LENGTH_DEPTHS: dict[str, int] = {"low": 1, "med": 5, "high": 25}
+
+
 def _validate_result_contract(
     scenario: ScenarioConfig,
     result: dict[str, Any],
@@ -3581,7 +3597,12 @@ def _validate_result_contract(
         attestations = inputs.get("credential_attestations") if isinstance(inputs, dict) else None
         attestation = attestations.get("clients") if isinstance(attestations, dict) else None
         semantic = attestation.get("semantic") if isinstance(attestation, dict) else None
-        expected_depth = 5 if scenario.get("complexity_level") == "med" else 25
+        level = scenario.get("complexity_level")
+        expected_depth = _CHAIN_LENGTH_DEPTHS.get(level) if isinstance(level, str) else None
+        if expected_depth is None:
+            raise RuntimeError(
+                f"{scenario_id}: chain_length scenario has unknown complexity_level {level!r}"
+            )
         if (
             not isinstance(semantic, dict)
             or semantic.get("token_kind") != "biscuit"
@@ -5074,6 +5095,10 @@ PROFILE_TOKEN_KEYS = (
     "biscuit_25",
     "biscuit_5",
     "biscuit",
+    # `biscuit_chain_1` is intentionally last: its token bytes are identical
+    # to the generic baseline, so it must never win password-equality
+    # matching below (CHAIN-1 resolves by scenario before the loop).
+    "biscuit_chain_1",
 )
 
 SHARED_CREDENTIAL_SCENARIOS = frozenset(
@@ -5096,7 +5121,16 @@ def _profile_for_password(
         return "biscuit_strict_client_id"
     if scenario_id.endswith("-PARITY-JWT"):
         return "jwt_strict_sub_client_id"
+    # CHAIN-1 is the only chain_length/low experiment. Its token bytes are
+    # identical to the generic baseline, so resolve by scenario, not by
+    # password equality, to avoid attesting baselines as chain experiments.
+    if scenario_id.startswith("TOKEN-COMPLEXITY-CHAIN-1-BISCUIT"):
+        return "biscuit_chain_1"
     for key in PROFILE_TOKEN_KEYS:
+        if key == "biscuit_chain_1":
+            # Scenario-resolved only: identical bytes to the generic
+            # baseline, so password equality must never select it.
+            continue
         if password == tokens.get(key):
             return key
     if "-JWT" in scenario_id:
@@ -5288,9 +5322,12 @@ def _validate_scenario_credentials(scenario_id: str, scenario: ScenarioConfig) -
     if mode == "issuer" and not scenario.get("token_refresh"):
         raise ValueError(f"{scenario_id}: issuer mode requires token_refresh configuration")
     if mode == "shared":
+        # TLS variants are shallow copies of their base scenario with identical
+        # credential semantics, so the allowlist applies to the base ID.
+        base_id = scenario_id[:-4] if scenario_id.endswith("-TLS") else scenario_id
         allowed = (
             scenario.get("mqtt5_auth") is not None
-            or scenario_id in SHARED_CREDENTIAL_SCENARIOS
+            or base_id in SHARED_CREDENTIAL_SCENARIOS
             or (
                 scenario.get("traffic_pattern") == "fanout"
                 and scenario.get("acl_read_enforcement") == "strict"
@@ -5950,12 +5987,17 @@ def _biscuit_authorizer_template_scenarios(tokens: dict[str, Any]) -> dict[str, 
     if template_token is None:
         return {}
 
+    # The template token is pinned to client_1 (rights on sensors/client_1/#)
+    # and shared by every worker, so the workload topic must be fixed: a
+    # per-client topic template would publish out of the token's scope for
+    # every worker except client_1.
+    shared_topic = "sensors/client_1/temp"
     return {
         "TOKEN-AUTHORIZER-PROFILE-SIMPLE-BISCUIT": {
             "mosquitto_conf": "./mosquitto_biscuit_authz_simple.conf",
             "username": "biscuit",
             "password": template_token,
-            "topic": "sensors/{client_id}/temp",
+            "topic": shared_topic,
             "authz_config": None,
             "netem": {"clear": True},
             "message_size": 0,
@@ -5967,7 +6009,7 @@ def _biscuit_authorizer_template_scenarios(tokens: dict[str, Any]) -> dict[str, 
             "mosquitto_conf": "./mosquitto_biscuit_authz_rbac.conf",
             "username": "biscuit",
             "password": template_token,
-            "topic": "sensors/{client_id}/temp",
+            "topic": shared_topic,
             "authz_config": None,
             "netem": {"clear": True},
             "message_size": 0,
@@ -5979,7 +6021,7 @@ def _biscuit_authorizer_template_scenarios(tokens: dict[str, Any]) -> dict[str, 
             "mosquitto_conf": "./mosquitto_biscuit_authz_contextual.conf",
             "username": "biscuit",
             "password": template_token,
-            "topic": "sensors/{client_id}/temp",
+            "topic": shared_topic,
             "authz_config": None,
             "netem": {"clear": True},
             "message_size": 0,
@@ -6824,12 +6866,13 @@ def _build_available_scenarios(
         "TOKEN-COMPLEXITY-CHAIN-1-BISCUIT": {
             "mosquitto_conf": "./mosquitto.conf",
             "username": "biscuit",
-            "password": tokens["biscuit"],
+            "password": tokens["biscuit_chain_1"],
             "topic": "sensors/{client_id}/temp",
             "authz_config": None,
             "netem": {"clear": True},
             "message_size": 0,
             "complexity_axis": "chain_length",
+            "complexity_level": "low",
         },
         "TOKEN-COMPLEXITY-CHAIN-5-BISCUIT": {
             "mosquitto_conf": "./mosquitto.conf",
@@ -7838,7 +7881,10 @@ def _build_available_scenarios(
         },
     }
 
-    # Add dynamic MTU scenarios
+    # Add dynamic MTU scenarios. MTU 9000 requires a jumbo-capable path
+    # (host NIC, Docker bridge, and veths all >= 9000); on a 1500-MTU host
+    # any credential or TLS flight above 1500 bytes is dropped before auth,
+    # so those variants are environment-blocked there, not broken scenarios.
     for mtu in [500, 1500, 9000]:
         available_scenarios[f"NETWORK-MTU-{mtu}-BISCUIT-CHAIN-25"] = {
             "mosquitto_conf": "./mosquitto.conf",
@@ -9189,7 +9235,10 @@ def main(
                             not isinstance(interval, dict)
                             or int(interval.get("mqtt_packets") or 0) <= 0
                             or int(interval.get("mqtt_payload_packets") or 0) <= 0
-                            or int(interval.get("mqtt_client_ips") or 0) < effective_client_count
+                            # Distinct client connections, not IPs: sequential
+                            # clients may share a recycled container IP.
+                            or int(interval.get("mqtt_client_connections") or 0)
+                            < effective_client_count
                             for interval in coverage
                         )
                     ):

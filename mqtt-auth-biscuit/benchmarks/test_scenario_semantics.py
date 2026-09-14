@@ -522,6 +522,167 @@ def test_ordinary_datalog_scenarios_have_attested_levels(scenario_id: str, level
     assert _scenario_registry()[scenario_id]["complexity_level"] == level
 
 
+def _chain_length_result(
+    scenario: rs.ScenarioConfig,
+    profile: str,
+    depth: int,
+    clients: int,
+    messages: int,
+) -> dict[str, Any]:
+    total = clients * messages
+    return {
+        **_measured_result(clients, total),
+        "errors": [],
+        "publish_outcomes": {
+            "attempted": total,
+            "succeeded": total,
+            "failed": 0,
+            "attempted_by_qos": {"qos_0": 0, "qos_1": total, "qos_2": 0},
+            "failed_by_qos": {"qos_0": 0, "qos_1": 0, "qos_2": 0},
+        },
+        "qos_distribution_actual": {
+            "qos_0_count": 0,
+            "qos_1_count": total,
+            "qos_2_count": 0,
+        },
+        "inputs": {
+            "credential_attestations": {
+                "clients": {
+                    "profile": profile,
+                    "validated_credentials": clients,
+                    "semantic": {
+                        "token_kind": "biscuit",
+                        "complexity_axis": "chain_length",
+                        "complexity_level": scenario["complexity_level"],
+                        "chain_depth": depth,
+                        "biscuit_blocks": depth,
+                    },
+                }
+            }
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "level", "depth", "profile"),
+    (
+        ("TOKEN-COMPLEXITY-CHAIN-1-BISCUIT", "low", 1, "biscuit_chain_1"),
+        ("TOKEN-COMPLEXITY-CHAIN-5-BISCUIT", "med", 5, "biscuit_5"),
+        ("TOKEN-COMPLEXITY-CHAIN-25-BISCUIT", "high", 25, "biscuit_25"),
+    ),
+)
+def test_chain_length_scenarios_attest_their_declared_depth(
+    scenario_id: str, level: str, depth: int, profile: str
+) -> None:
+    scenario = _scenario_registry()[scenario_id]
+    scenario["id"] = scenario_id
+    assert scenario["complexity_axis"] == "chain_length"
+    assert scenario["complexity_level"] == level
+    assert scenario["password_map_profile"] == profile
+    result = _chain_length_result(scenario, profile, depth, clients=2, messages=3)
+    rs._validate_result_contract(scenario, result, message_count=3, client_count=2)
+
+
+def test_chain_length_contract_rejects_wrong_depth() -> None:
+    scenario = _scenario_registry()["TOKEN-COMPLEXITY-CHAIN-1-BISCUIT"]
+    scenario["id"] = "TOKEN-COMPLEXITY-CHAIN-1-BISCUIT"
+    result = _chain_length_result(scenario, "biscuit_chain_1", 25, clients=2, messages=3)
+    with pytest.raises(RuntimeError, match="does not prove chain depth 1"):
+        rs._validate_result_contract(scenario, result, message_count=3, client_count=2)
+
+
+def test_chain_length_contract_rejects_missing_semantic() -> None:
+    scenario = _scenario_registry()["TOKEN-COMPLEXITY-CHAIN-1-BISCUIT"]
+    scenario["id"] = "TOKEN-COMPLEXITY-CHAIN-1-BISCUIT"
+    result = _chain_length_result(scenario, "biscuit_chain_1", 1, clients=2, messages=3)
+    attestation = result["inputs"]["credential_attestations"]["clients"]
+    assert isinstance(attestation, dict)
+    attestation["semantic"] = None
+    with pytest.raises(RuntimeError, match="does not prove chain depth 1"):
+        rs._validate_result_contract(scenario, result, message_count=3, client_count=2)
+
+
+def test_chain_length_contract_rejects_unknown_level() -> None:
+    scenario = dict(_scenario_registry()["TOKEN-COMPLEXITY-CHAIN-5-BISCUIT"])
+    scenario["id"] = "TOKEN-COMPLEXITY-CHAIN-5-BISCUIT"
+    scenario["complexity_level"] = "bogus"
+    result = _chain_length_result(
+        cast("rs.ScenarioConfig", scenario), "biscuit_5", 5, clients=2, messages=3
+    )
+    with pytest.raises(RuntimeError, match="unknown complexity_level"):
+        rs._validate_result_contract(
+            cast("rs.ScenarioConfig", scenario), result, message_count=3, client_count=2
+        )
+
+
+def test_all_chain_length_scenarios_declare_a_known_depth_tier() -> None:
+    scenarios = _scenario_registry()
+    chain = {
+        scenario_id: scenario
+        for scenario_id, scenario in scenarios.items()
+        if scenario.get("complexity_axis") == "chain_length"
+    }
+    assert len(chain) >= 3
+    for scenario_id, scenario in chain.items():
+        assert scenario.get("complexity_level") in rs._CHAIN_LENGTH_DEPTHS, scenario_id
+    expanded = rs._expand_tls_matrix(scenarios)
+    assert expanded["TOKEN-COMPLEXITY-CHAIN-1-BISCUIT-TLS"]["complexity_level"] == "low"
+
+
+def test_chain_1_uses_dedicated_profile_not_generic_biscuit() -> None:
+    scenarios = _scenario_registry()
+    scenario = scenarios["TOKEN-COMPLEXITY-CHAIN-1-BISCUIT"]
+    assert scenario["password_map_profile"] == "biscuit_chain_1"
+    expanded = rs._expand_tls_matrix(scenarios)
+    assert (
+        expanded["TOKEN-COMPLEXITY-CHAIN-1-BISCUIT-TLS"]["password_map_profile"]
+        == "biscuit_chain_1"
+    )
+
+
+def test_generic_biscuit_scenarios_are_not_chain_length_experiments() -> None:
+    scenarios = _scenario_registry()
+    generic = {
+        scenario_id: scenario
+        for scenario_id, scenario in scenarios.items()
+        if scenario.get("password_map_profile") == "biscuit"
+    }
+    assert generic, "expected unrelated scenarios to keep the generic biscuit profile"
+    assert "TOKEN-BASELINE-BISCUIT" in generic
+    for scenario_id, scenario in generic.items():
+        assert scenario.get("complexity_axis") != "chain_length", scenario_id
+        assert scenario.get("password_map_profile") != "biscuit_chain_1", scenario_id
+
+
+def test_chain_1_mapping_survives_identical_baseline_bytes() -> None:
+    # Real tokens.json emits identical bytes for `biscuit` and
+    # `biscuit_chain_1`; the split must come from the scenario, not from
+    # password equality.
+    tokens = _placeholder_tokens()
+    tokens["biscuit_chain_1"] = tokens["biscuit"]
+    scenarios = rs._build_available_scenarios(
+        tokens,
+        token_issuer_no_default_roles=False,
+        token_issuer_no_default_grants=False,
+    )
+    assert scenarios["TOKEN-COMPLEXITY-CHAIN-1-BISCUIT"]["password_map_profile"] == (
+        "biscuit_chain_1"
+    )
+    assert scenarios["TOKEN-BASELINE-BISCUIT"]["password_map_profile"] == "biscuit"
+    generic = [
+        scenario_id
+        for scenario_id, scenario in scenarios.items()
+        if scenario.get("password_map_profile") == "biscuit"
+    ]
+    assert generic
+    assert not [
+        scenario_id
+        for scenario_id, scenario in scenarios.items()
+        if scenario.get("password_map_profile") == "biscuit"
+        and scenario.get("complexity_axis") == "chain_length"
+    ]
+
+
 def test_reconnect_contract_requires_issuer_and_broker_attestations() -> None:
     scenario = _scenario_registry()["TOKEN-PUBLISH-STRESS-RECONNECT-JWT"]
     scenario["id"] = "TOKEN-PUBLISH-STRESS-RECONNECT-JWT"
@@ -847,6 +1008,13 @@ def test_every_scenario_declares_and_validates_credential_mode() -> None:
 
     for scenario_id, scenario in scenarios.items():
         rs._validate_scenario_credentials(scenario_id, scenario)
+
+    # TLS variants inherit base credential semantics, so shared-credential
+    # families must validate under their -TLS IDs as well.
+    expanded = rs._expand_tls_matrix(scenarios)
+    for scenario_id, scenario in expanded.items():
+        rs._validate_scenario_credentials(scenario_id, scenario)
+    assert expanded["TOKEN-AUTHORIZER-PROFILE-SIMPLE-BISCUIT-TLS"]["credential_mode"] == "shared"
 
     assert scenarios["TOKEN-BASELINE-JWT"]["password_map_profile"] == "jwt"
     assert scenarios["TOKEN-DENY-READ-JWT"]["credential_mode"] == "shared"

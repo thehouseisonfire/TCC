@@ -146,6 +146,15 @@ continued after churn. Strict read-churn coverage is provided by the
 
 ## Known interpretation boundaries
 
+- `NETWORK-MTU-9000-*` variants whose credential or TLS handshake flight
+  exceeds 1500 bytes are environment-blocked on hosts without a jumbo-capable
+  path (host NIC, Docker bridge, veths). On such hosts the broker observes
+  zero auth attempts because oversized datagrams are dropped before auth;
+  only small-payload siblings (e.g. plain-JWT MTU-9000) can pass there. This
+  was observed on commit `214cfca` (c10/m10 qualification: idx44/45/47 fail,
+  idx46 passes). These scenarios are unchanged and require a jumbo-capable
+  host for verification, not a scenario fix.
+
 - `BASELINE-NO-AUTH` pins QoS 0 and `TOKEN-QOS2-{JWT|BISCUIT}` pins QoS 2.
   They remain in Part 2 for other sweep dimensions but are not QoS sweeps.
 - Fixed-workload stress and lifecycle/control scenarios intentionally define

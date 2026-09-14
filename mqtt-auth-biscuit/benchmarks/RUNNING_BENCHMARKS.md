@@ -326,7 +326,10 @@ With `--client-topology container-per-client`,
 `TOKEN-DELEGATION-HANDOFF-BISCUIT` runs one delegator container and one
 delegatee container per MQTT client. Delegatees subscribe first using the
 handoff token, write readiness files, then accept only handoff payloads matching
-their `client_id` and the runner-provided nonce.
+their `client_id` and the runner-provided nonce. The delegator emits no
+measured connects, so merged results report `container_count = clients + 1`
+while `connect.count = clients`; this asymmetry is intentional, not an
+accounting leak.
 
 Default grants are added by the token issuer for `publish`/`subscribe` on
 `sensors/{subject}/temp` unless `no_default_grants` (request) or

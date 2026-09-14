@@ -35,7 +35,11 @@ def test_biscuit_authorizer_template_scenario_metadata_is_explicit() -> None:
         assert scenario["complexity_axis"] == "authorizer_template"
         assert scenario["complexity_level"] == tier
         assert scenario["authorizer_profile"] == profile
-        assert scenario["topic"] == "sensors/{client_id}/temp"
+        # The shared template token is pinned to client_1 rights, so every
+        # worker must publish to the fixed shared topic: a per-client topic
+        # template would deny every worker except client_1.
+        assert scenario["topic"] == "sensors/client_1/temp"
+        assert "{client_id}" not in scenario["topic"]
         assert scenario["username"] == "biscuit"
 
 

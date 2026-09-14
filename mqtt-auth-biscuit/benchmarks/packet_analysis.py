@@ -52,7 +52,10 @@ class PacketMetrics:
     packet_times: list[float] = field(default_factory=list)
     mqtt_packet_times: list[float] = field(default_factory=list)
     mqtt_payload_times: list[float] = field(default_factory=list)
-    mqtt_client_events: list[tuple[float, str]] = field(default_factory=list)
+    # (timestamp, client ip, client source port). The source port
+    # distinguishes sequential clients sharing a recycled container IP, which
+    # Docker IPAM can reassign while a capture is running.
+    mqtt_client_events: list[tuple[float, str, int]] = field(default_factory=list)
     tcp_streams: dict[str, StreamMetrics] = field(default_factory=dict)
     mqtt_connections: set[tuple[tuple[str, int], tuple[str, int]]] = field(default_factory=set)
 
@@ -104,14 +107,24 @@ def _canonical_connection(
 def _workload_interval_coverage(
     mqtt_times: list[float],
     payload_times: list[float],
-    client_events: list[tuple[float, str]],
+    client_events: list[tuple[float, str, int]],
     intervals: list[tuple[float, float]],
 ) -> list[dict[str, float | int]]:
-    """Count captured MQTT traffic occurring inside each measured interval."""
+    """Count captured MQTT traffic occurring inside each measured interval.
+
+    Client presence is counted per (ip, source port) endpoint rather than per
+    IP so that sequential clients sharing a recycled container IP are each
+    observed. `mqtt_client_ips` is retained alongside for diagnostics.
+    """
     mqtt_times = sorted(mqtt_times)
     payload_times = sorted(payload_times)
     coverage = []
     for started_at, finished_at in intervals:
+        endpoints = {
+            (client_ip, client_port)
+            for timestamp, client_ip, client_port in client_events
+            if started_at <= timestamp <= finished_at
+        }
         coverage.append(
             {
                 "started_at": started_at,
@@ -120,13 +133,8 @@ def _workload_interval_coverage(
                 - bisect_left(mqtt_times, started_at),
                 "mqtt_payload_packets": bisect_right(payload_times, finished_at)
                 - bisect_left(payload_times, started_at),
-                "mqtt_client_ips": len(
-                    {
-                        client_ip
-                        for timestamp, client_ip in client_events
-                        if started_at <= timestamp <= finished_at
-                    }
-                ),
+                "mqtt_client_ips": len({client_ip for client_ip, _ in endpoints}),
+                "mqtt_client_connections": len(endpoints),
             }
         )
     return coverage
@@ -191,7 +199,7 @@ def parse_pcap_with_dpkt(pcap_path: str | Path) -> PacketMetrics:
             metrics.mqtt_tcp_packets += 1
             metrics.mqtt_packet_times.append(timestamp)
             if tcp.dport in {1883, 8883}:
-                metrics.mqtt_client_events.append((timestamp, _ip_to_str(ip.src)))
+                metrics.mqtt_client_events.append((timestamp, _ip_to_str(ip.src), tcp.sport))
             tcp_payload_len = len(tcp.data)
             if tcp_payload_len:
                 metrics.mqtt_payload_packets += 1

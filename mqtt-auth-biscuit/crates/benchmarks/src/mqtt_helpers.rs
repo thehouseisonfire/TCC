@@ -15,6 +15,16 @@ use std::time::{Duration, Instant};
 pub const RAW_BISCUIT_MARKER: &str = "b64:";
 static RUSTLS_PROVIDER: Once = Once::new();
 
+/// Headroom added to rumqttc's internal CONNACK timer above the caller-provided
+/// CONNECT budget so the outer timeout stays authoritative.
+///
+/// rumqttc aborts a pending CONNACK once its own `connect_timeout` (default
+/// 5 s) elapses. Benchmark scenarios with injected authorization latency
+/// deliberately queue CONNECTs behind serial broker authorizations for up to
+/// the caller-provided budget, so the internal timer must trail it instead of
+/// preempting it.
+pub const CONNECT_TIMEOUT_MARGIN: Duration = Duration::from_secs(5);
+
 #[derive(Debug, thiserror::Error)]
 pub enum MqttHelperError {
     #[error("{0}")]
@@ -214,11 +224,16 @@ fn tls_config(ca_file: Option<&str>, insecure: bool) -> Result<TlsConfiguration>
 
 /// Build MQTT options from a benchmark client specification.
 ///
+/// `connect_timeout` is the caller-provided CONNACK budget. It is propagated
+/// into rumqttc's internal CONNACK timer (plus [`CONNECT_TIMEOUT_MARGIN`])
+/// so the library default cannot terminate a queued CONNECT first.
+///
 /// # Errors
 ///
 /// Returns an error when TLS configuration cannot be built.
-pub fn mqtt_options(spec: &ClientSpec) -> Result<MqttOptions> {
+pub fn mqtt_options(spec: &ClientSpec, connect_timeout: Duration) -> Result<MqttOptions> {
     let mut options = MqttOptions::new(spec.client_id.clone(), (spec.host.as_str(), spec.port));
+    options.set_connect_timeout(connect_timeout.saturating_add(CONNECT_TIMEOUT_MARGIN));
     let mut network_options = NetworkOptions::new();
     network_options.set_connection_timeout(30);
     options.set_network_options(network_options);
@@ -245,6 +260,8 @@ pub fn mqtt_options(spec: &ClientSpec) -> Result<MqttOptions> {
 /// The timeout is caller-provided so benchmark scenarios with injected
 /// authorization latency can grant headroom for connections queueing behind
 /// serial broker authorizations without changing the configured delay itself.
+/// It doubles as the rumqttc internal CONNACK budget (plus a small margin),
+/// keeping the outer timeout authoritative.
 ///
 /// # Errors
 ///
@@ -253,7 +270,7 @@ pub async fn connect(
     spec: &ClientSpec,
     timeout: Duration,
 ) -> Result<(AsyncClient, rumqttc::EventLoop, ConnectReport)> {
-    let options = mqtt_options(spec)?;
+    let options = mqtt_options(spec, timeout)?;
     let (client, mut eventloop) = AsyncClient::builder(options).capacity(100).build();
     let start = Instant::now();
     loop {
@@ -335,16 +352,28 @@ mod tests {
 
     #[test]
     fn mqtt_options_omits_credentials_for_anonymous_clients() {
-        let options = mqtt_options(&client_spec("", &[])).expect("options should build");
+        let options =
+            mqtt_options(&client_spec("", &[]), Duration::from_secs(10)).expect("options builds");
         assert_eq!(options.network_options().connection_timeout(), 30);
 
         assert_eq!(options.auth(), &ConnectAuth::None);
     }
 
     #[test]
+    fn mqtt_options_propagates_connect_timeout_above_library_default() {
+        let options = mqtt_options(&client_spec("user", b"secret"), Duration::from_secs(25))
+            .expect("options builds");
+        assert_eq!(
+            options.connect_timeout(),
+            Duration::from_secs(25) + CONNECT_TIMEOUT_MARGIN
+        );
+        assert_ne!(options.connect_timeout(), Duration::from_secs(5));
+    }
+
+    #[test]
     fn mqtt_options_preserves_empty_username_or_password_when_configured() {
-        let password_only =
-            mqtt_options(&client_spec("", b"secret")).expect("options should build");
+        let password_only = mqtt_options(&client_spec("", b"secret"), Duration::from_secs(10))
+            .expect("options should build");
         assert_eq!(
             password_only.auth(),
             &ConnectAuth::UsernamePassword {
@@ -353,7 +382,8 @@ mod tests {
             }
         );
 
-        let username_only = mqtt_options(&client_spec("user", &[])).expect("options should build");
+        let username_only = mqtt_options(&client_spec("user", &[]), Duration::from_secs(10))
+            .expect("options should build");
         assert_eq!(
             username_only.auth(),
             &ConnectAuth::UsernamePassword {

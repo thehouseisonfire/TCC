@@ -146,7 +146,7 @@ async fn handle(cmd: Command, state: &mut Option<ClientState>) -> Result<Respons
                 auth_method: None,
                 auth_data: None,
             };
-            let mut options = mqtt_options(&spec)?;
+            let mut options = mqtt_options(&spec, Duration::from_secs(10))?;
             if let Some(topic) = will_topic {
                 let will = LastWill::new(
                     topic,

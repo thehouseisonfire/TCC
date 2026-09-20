@@ -132,6 +132,8 @@ fn check_docker_refs(root: &Path) -> Result<()> {
         root.join("mqtt-auth-biscuit/docker/Dockerfile.netem"),
         root.join("mqtt-auth-biscuit/docker/Dockerfile.token-issuer"),
         root.join("mqtt-auth-biscuit/docker/Dockerfile.authz"),
+        root.join("mqtt-auth-biscuit/docker/Dockerfile.loadgen"),
+        root.join("mqtt-auth-biscuit/docker/Dockerfile.sync-barrier"),
         root.join("mqtt-auth-biscuit/docker/docker-compose.yml"),
     ];
 
@@ -152,6 +154,11 @@ fn check_docker_refs(root: &Path) -> Result<()> {
                     .split_whitespace()
                     .filter(|pkg| !pkg.starts_with('-'))
                 {
+                    // ca-certificates is a data-only bundle with no link-time ABI;
+                    // pinning it breaks every Alpine refresh, so it floats.
+                    if pkg == "ca-certificates" {
+                        continue;
+                    }
                     if !pkg.contains('=') {
                         bail!("{} has unpinned apk package: {pkg}", path.display());
                     }

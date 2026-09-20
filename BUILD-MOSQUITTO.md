@@ -48,7 +48,7 @@ RUN set -eux; \
 
 # Stage 3: runtime
 FROM alpine:3.23.3@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
-RUN apk add --no-cache ca-certificates=20260611-r0 libgcc=15.2.0-r2 libstdc++=15.2.0-r2 openssl=3.5.8-r0 cjson=1.7.19-r1 libwebsockets=4.3.5-r2 c-ares=1.34.8-r0
+RUN apk add --no-cache ca-certificates libgcc=15.2.0-r2 libstdc++=15.2.0-r2 openssl=3.5.8-r0 cjson=1.7.19-r1 libwebsockets=4.3.5-r2 c-ares=1.34.8-r0
 COPY --from=mosq-builder /out/ /
 COPY --from=plugin-builder /app/target/release/libmosquitto_auth_biscuit.so /mosquitto/plugins/
 COPY docker/jwt_public.pem /mosquitto/config/

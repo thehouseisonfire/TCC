@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Archive the exact frozen images from docker/image-freeze.json via
+# `docker save`, hash the archive, and record the result in
+# <archive>.meta.json next to the archive.
+#
+# The archive lives outside Git (default: <repo>/../tcc2-benchmark-artifacts).
+# Usage: scripts/save-images [--archive PATH]
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+MANIFEST="$REPO_ROOT/mqtt-auth-biscuit/docker/image-freeze.json"
+ARCHIVE=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --archive)
+      ARCHIVE="${2:?--archive requires a path}"
+      shift 2
+      ;;
+    *)
+      echo "usage: save-images [--archive PATH]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$ARCHIVE" ]]; then
+  ARCHIVE="$(cd "$REPO_ROOT/.." && pwd)/tcc2-benchmark-artifacts/benchmark-images.tar"
+fi
+
+if [[ ! -f "$MANIFEST" ]]; then
+  echo "image-freeze manifest not found at $MANIFEST. Run scripts/freeze-images first." >&2
+  exit 1
+fi
+
+export MANIFEST ARCHIVE
+# Save by image reference (not ID) so `docker load` restores the tags that
+# check-images and compose resolve. Layer content is identical either way.
+mapfile -t IMAGES < <(python3 -c "import json, os; print('\n'.join(s['image'] for s in json.load(open(os.environ['MANIFEST']))['services']))")
+
+mkdir -p "$(dirname "$ARCHIVE")"
+docker save -o "$ARCHIVE" "${IMAGES[@]}"
+export ARCHIVE_SHA="$(sha256sum "$ARCHIVE" | cut -d' ' -f1)"
+python3 <<'EOF'
+import json
+import os
+
+with open(os.environ["MANIFEST"]) as handle:
+    manifest = json.load(handle)
+meta = {
+    "manifest_source_commit": manifest["source_commit"],
+    "sha256": os.environ["ARCHIVE_SHA"],
+    "images": [service["image_id"] for service in manifest["services"]],
+}
+with open(os.environ["ARCHIVE"] + ".meta.json", "w") as handle:
+    json.dump(meta, handle, indent=2)
+    handle.write("\n")
+EOF
+echo "archive: $ARCHIVE"
+echo "sha256:  $ARCHIVE_SHA"

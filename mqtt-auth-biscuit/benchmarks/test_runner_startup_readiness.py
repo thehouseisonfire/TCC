@@ -2492,3 +2492,110 @@ def test_smoke_issue_mqtt5_auth_tokens_mints_distinct_authorized_topics(monkeypa
     assert payload1["grants"][0]["res"] == topic2
     assert payload0["ttl_seconds"] == 180
     assert payload1["ttl_seconds"] == 300
+
+
+def test_compose_build_args_default_rebuilds(monkeypatch) -> None:
+    monkeypatch.delenv(rs.NO_BUILD_IMAGES_ENVVAR, raising=False)
+    assert rs._compose_build_args() == ["--build"]
+
+
+def test_compose_build_args_env_disables_rebuild(monkeypatch) -> None:
+    monkeypatch.setenv(rs.NO_BUILD_IMAGES_ENVVAR, "1")
+    assert rs._compose_build_args() == []
+
+
+def test_ensure_sync_barrier_service_up_without_build_when_frozen(
+    monkeypatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    class Completed:
+        returncode = 0
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN202
+        calls.append(cmd)
+        return Completed()
+
+    monkeypatch.setattr(rs.subprocess, "run", fake_run)
+    monkeypatch.setattr(rs, "_wait_for_service_health", lambda *args, **kwargs: None)
+    monkeypatch.setenv(rs.NO_BUILD_IMAGES_ENVVAR, "1")
+
+    rs._ensure_sync_barrier_service(
+        compose_files=["docker/docker-compose.yml"],
+        compose_project_name="bench",
+    )
+
+    assert calls[1] == [
+        "docker",
+        "compose",
+        "-f",
+        "docker/docker-compose.yml",
+        "-p",
+        "bench",
+        "up",
+        "-d",
+        "sync-barrier",
+    ]
+
+
+def _write_freeze_manifest(tmp_path: Path, image_id: str) -> Path:
+    manifest = {
+        "schema_version": 1,
+        "source_commit": "abc123",
+        "compose_files": [],
+        "services": [
+            {
+                "service": "mosquitto",
+                "image": "mosquitto:2.1.3-custom",
+                "image_id": image_id,
+                "repo_digests": [],
+                "platform": "linux/amd64",
+            }
+        ],
+        "archive": None,
+    }
+    path = tmp_path / "image-freeze.json"
+    path.write_text(json.dumps(manifest))
+    return path
+
+
+def test_verify_image_freeze_accepts_matching_ids(monkeypatch, tmp_path: Path) -> None:
+    path = _write_freeze_manifest(tmp_path, "sha256:frozen")
+
+    class Completed:
+        returncode = 0
+        stdout = "sha256:frozen\n"
+
+    monkeypatch.setattr(
+        rs.subprocess,
+        "run",
+        lambda *args, **kwargs: Completed(),  # noqa: ANN001, ANN202
+    )
+    assert rs.verify_image_freeze(path)["source_commit"] == "abc123"
+
+
+def test_verify_image_freeze_rejects_mismatch(monkeypatch, tmp_path: Path) -> None:
+    path = _write_freeze_manifest(tmp_path, "sha256:frozen")
+
+    class Completed:
+        returncode = 0
+        stdout = "sha256:rebuilt\n"
+
+    monkeypatch.setattr(
+        rs.subprocess,
+        "run",
+        lambda *args, **kwargs: Completed(),  # noqa: ANN001, ANN202
+    )
+    with pytest.raises(RuntimeError, match="!="):
+        rs.verify_image_freeze(path)
+
+
+def test_verify_image_freeze_requires_manifest(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="not found"):
+        rs.verify_image_freeze(tmp_path / "missing.json")
+
+
+def test_no_build_images_without_manifest_fails_fast(monkeypatch) -> None:
+    monkeypatch.setattr(rs, "_image_freeze_manifest_path", lambda: Path("/nonexistent"))
+    with pytest.raises(RuntimeError, match="freeze-images"):
+        rs.main(no_build_images=True)

@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Verify the image-freeze manifest schema and that every frozen image ID is
+# present locally. Restores via `docker load <archive>` are the operator's
+# responsibility; this script only reports mismatch, it never rebuilds.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+export MANIFEST="${1:-$REPO_ROOT/mqtt-auth-biscuit/docker/image-freeze.json}"
+python3 <<'EOF'
+import hashlib
+import json
+import os
+import subprocess
+import sys
+
+manifest_path = os.environ["MANIFEST"]
+try:
+    with open(manifest_path) as handle:
+        manifest = json.load(handle)
+except FileNotFoundError:
+    print(f"image-freeze manifest not found at {manifest_path}", file=sys.stderr)
+    sys.exit(1)
+
+workdir = os.path.dirname(os.path.dirname(manifest_path))
+errors: list[str] = []
+
+if manifest.get("schema_version") != 1:
+    errors.append(f"schema_version {manifest.get('schema_version')!r} != 1")
+for entry in manifest.get("compose_files", []):
+    path = os.path.join(workdir, entry["path"])
+    digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
+    if digest != entry["sha256"]:
+        errors.append(f"{entry['path']}: {digest} != frozen {entry['sha256']}")
+for service in manifest.get("services", []):
+    completed = subprocess.run(
+        ["docker", "image", "inspect", "--format={{.Id}}", service["image"]],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    actual = completed.stdout.strip() if completed.returncode == 0 else None
+    if actual is None:
+        errors.append(f"{service['service']}: image {service['image']} not present")
+    elif actual != service["image_id"]:
+        errors.append(
+            f"{service['service']}: {actual} != frozen {service['image_id']}"
+        )
+
+if errors:
+    print("\n".join(errors), file=sys.stderr)
+    sys.exit(1)
+print(f"image freeze OK: {len(manifest.get('services', []))} services, "
+      f"source commit {manifest.get('source_commit')}")
+EOF

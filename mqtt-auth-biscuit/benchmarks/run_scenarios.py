@@ -415,6 +415,87 @@ def _compose_bin():
     return os.environ.get("DOCKER_COMPOSE_BIN", "docker compose")
 
 
+IMAGE_FREEZE_MANIFEST = "docker/image-freeze.json"
+IMAGE_FREEZE_SCHEMA_VERSION = 1
+NO_BUILD_IMAGES_ENVVAR = "MQTT_NO_BUILD_IMAGES"
+
+
+def _no_build_images() -> bool:
+    return os.environ.get(NO_BUILD_IMAGES_ENVVAR, "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _compose_build_args() -> list[str]:
+    if _no_build_images():
+        return []
+    return ["--build"]
+
+
+def _image_freeze_manifest_path() -> Path:
+    return REPO_ROOT / IMAGE_FREEZE_MANIFEST
+
+
+def _load_image_freeze_manifest(
+    manifest_path: Path | None = None,
+) -> dict[str, Any] | None:
+    path = manifest_path or _image_freeze_manifest_path()
+    if not path.is_file():
+        return None
+    return cast(dict[str, Any], json.loads(path.read_text()))
+
+
+def _docker_image_id(image_ref: str) -> str | None:
+    try:
+        completed = subprocess.run(
+            ["docker", "image", "inspect", "--format={{.Id}}", image_ref],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if completed.returncode != 0:
+        return None
+    image_id = completed.stdout.strip()
+    return image_id or None
+
+
+def verify_image_freeze(manifest_path: Path | None = None) -> dict[str, Any]:
+    manifest = _load_image_freeze_manifest(manifest_path)
+    if manifest is None:
+        path = manifest_path or _image_freeze_manifest_path()
+        raise RuntimeError(
+            f"image-freeze manifest not found at {path}. Run scripts/freeze-images first."
+        )
+    if manifest.get("schema_version") != IMAGE_FREEZE_SCHEMA_VERSION:
+        raise RuntimeError(
+            "image-freeze manifest schema_version "
+            f"{manifest.get('schema_version')!r} != {IMAGE_FREEZE_SCHEMA_VERSION}"
+        )
+    for entry in manifest.get("compose_files", []):
+        compose_path = REPO_ROOT / entry["path"]
+        digest = hashlib.sha256(compose_path.read_bytes()).hexdigest()
+        if digest != entry["sha256"]:
+            raise RuntimeError(
+                f"compose file {entry['path']} sha256 {digest} != frozen {entry['sha256']}"
+            )
+    for service in manifest.get("services", []):
+        actual = _docker_image_id(service["image"])
+        if actual is None:
+            raise RuntimeError(
+                f"service {service['service']}: image {service['image']} not present. "
+                "Run scripts/freeze-images (or docker load the campaign archive) first."
+            )
+        if actual != service["image_id"]:
+            raise RuntimeError(
+                f"service {service['service']}: image ID {actual} != frozen {service['image_id']}"
+            )
+    return manifest
+
+
 def _compose(
     args: list[str],
     extra_env: dict | None = None,
@@ -2286,7 +2367,7 @@ def _ensure_sync_barrier_service(
     )
     subprocess.run(rm_cmd, cwd=REPO_ROOT, env=os.environ.copy(), check=False)
     cmd = _compose_cmd(
-        ["up", "-d", "--build", SYNC_BARRIER_SERVICE],
+        ["up", "-d", *_compose_build_args(), SYNC_BARRIER_SERVICE],
         compose_files=compose_files,
         compose_project_name=compose_project_name,
     )
@@ -8002,6 +8083,15 @@ def main(
         "--biscuit-delegate-handoff-ready-timeout-seconds",
         help="Readiness and token receive timeout for Biscuit delegation handoff roles.",
     ),
+    no_build_images: bool = typer.Option(
+        False,
+        "--no-build-images",
+        help=(
+            "Never rebuild Docker images (compose up without --build). "
+            "Requires docker/image-freeze.json; image IDs are verified before running. "
+            "Also enabled via MQTT_NO_BUILD_IMAGES=1."
+        ),
+    ),
 ):
     if not isinstance(log_level, str):
         log_level = "INFO"
@@ -8013,6 +8103,21 @@ def main(
             "workload_shape must be one of: all, matrix, fixed-clients, fixed-messages, fixed"
         )
     setup_logging(log_level)
+    no_build_images = _coerce_bool_arg(no_build_images, False)
+    if no_build_images:
+        os.environ[NO_BUILD_IMAGES_ENVVAR] = "1"
+    if _load_image_freeze_manifest() is not None:
+        frozen = verify_image_freeze()
+        logger.info(
+            "image freeze verified: source commit %s, %d services",
+            frozen.get("source_commit"),
+            len(frozen.get("services", [])),
+        )
+    elif _no_build_images():
+        raise RuntimeError(
+            "image rebuilds prohibited but no image-freeze manifest found. "
+            "Run scripts/freeze-images first."
+        )
     iperf3_enabled = _coerce_bool_arg(iperf3_enabled, True)
     perf_enabled = _coerce_bool_arg(perf_enabled, False)
     perf_callgraph = _coerce_bool_arg(perf_callgraph, True)
@@ -8273,7 +8378,7 @@ def main(
 
             core_services = [
                 "up",
-                "--build",
+                *_compose_build_args(),
                 "-d",
                 "mosquitto",
                 "authz",
@@ -8346,7 +8451,7 @@ def main(
                 extra_env=extra_env,
             )
             _compose_checked(
-                ["up", "--build", "--no-deps", "-d", *namespace_services],
+                ["up", *_compose_build_args(), "--no-deps", "-d", *namespace_services],
                 extra_env=extra_env,
                 compose_files=compose_files,
                 phase="namespace-service startup",

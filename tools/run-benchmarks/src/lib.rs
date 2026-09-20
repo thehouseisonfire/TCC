@@ -70,6 +70,9 @@ pub struct Cli {
     #[arg(long)]
     pub no_cleanup: bool,
 
+    #[arg(long)]
+    pub no_build_images: bool,
+
     #[arg(long, default_value = "INFO")]
     pub log_level: String,
 }
@@ -238,6 +241,9 @@ pub fn scenario_args(cli: &Cli) -> Vec<String> {
     if let Some(client_cpus) = &cli.client_cpus {
         args.push("--client-cpus".to_owned());
         args.push(client_cpus.clone());
+    }
+    if cli.no_build_images {
+        args.push("--no-build-images".to_owned());
     }
 
     args
@@ -497,6 +503,7 @@ mod tests {
             client_cpus: Some("0.5".to_owned()),
             compose_bin: None,
             no_cleanup: false,
+            no_build_images: true,
             log_level: "INFO".to_owned(),
         };
 
@@ -528,6 +535,7 @@ mod tests {
                 "96m".to_owned(),
                 "--client-cpus".to_owned(),
                 "0.5".to_owned(),
+                "--no-build-images".to_owned(),
             ]
         );
     }
@@ -563,6 +571,7 @@ mod tests {
             client_cpus: None,
             compose_bin: None,
             no_cleanup: false,
+            no_build_images: false,
             log_level: "INFO".to_owned(),
         };
 

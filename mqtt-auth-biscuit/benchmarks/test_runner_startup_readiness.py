@@ -2677,3 +2677,52 @@ def test_run_mqtt5_auth_container_keeps_build_by_default(monkeypatch) -> None:
     assert len(calls) == 1
     assert "--build" in calls[0]
     assert "--quiet-build" in calls[0]
+
+
+def test_ensure_compose_service_built_skips_build_when_frozen(monkeypatch) -> None:
+    monkeypatch.setenv(rs.NO_BUILD_IMAGES_ENVVAR, "1")
+    calls: list[list[str]] = []
+
+    class Completed:
+        returncode = 0
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN202
+        calls.append(cmd)
+        return Completed()
+
+    monkeypatch.setattr(rs.subprocess, "run", fake_run)
+    assert (
+        rs._ensure_compose_service_built(
+            service="loadgen",
+            compose_files=None,
+            compose_project_name=None,
+            extra_env={},
+        )
+        is False
+    )
+    assert calls == []
+
+
+def test_ensure_compose_service_built_builds_by_default(monkeypatch) -> None:
+    monkeypatch.delenv(rs.NO_BUILD_IMAGES_ENVVAR, raising=False)
+    calls: list[list[str]] = []
+
+    class Completed:
+        returncode = 0
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN202
+        calls.append(cmd)
+        return Completed()
+
+    monkeypatch.setattr(rs.subprocess, "run", fake_run)
+    assert (
+        rs._ensure_compose_service_built(
+            service="loadgen",
+            compose_files=None,
+            compose_project_name=None,
+            extra_env={},
+        )
+        is True
+    )
+    assert len(calls) == 1
+    assert calls[0][-2:] == ["build", "loadgen"]

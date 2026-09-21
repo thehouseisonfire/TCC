@@ -434,6 +434,31 @@ def _compose_build_args() -> list[str]:
     return ["--build"]
 
 
+def _ensure_compose_service_built(
+    *,
+    service: str,
+    compose_files: list[str] | None,
+    compose_project_name: str | None,
+    extra_env: dict[str, str],
+) -> bool:
+    """Build a compose service unless image rebuilds are prohibited.
+
+    Returns True when a build ran. Under MQTT_NO_BUILD_IMAGES the frozen
+    image is used as-is so campaign image IDs cannot drift mid-run.
+    """
+    if _no_build_images():
+        return False
+    build_cmd = _compose_cmd(
+        ["build", service],
+        compose_files=compose_files,
+        compose_project_name=compose_project_name,
+    )
+    env = os.environ.copy()
+    env.update(extra_env)
+    subprocess.run(build_cmd, cwd=REPO_ROOT, env=env, check=True)
+    return True
+
+
 def _image_freeze_manifest_path() -> Path:
     return REPO_ROOT / IMAGE_FREEZE_MANIFEST
 
@@ -4088,14 +4113,14 @@ def _run_loadgen_container_per_client(
     sync_connect: bool,
     runtime_control: PerClientRuntimeControl | None = None,
 ) -> dict[str, Any]:
-    build_cmd = _compose_cmd(
-        ["build", service],
+    _ensure_compose_service_built(
+        service=service,
         compose_files=compose_files,
         compose_project_name=compose_project_name,
+        extra_env=extra_env,
     )
     env = os.environ.copy()
     env.update(extra_env)
-    subprocess.run(build_cmd, cwd=REPO_ROOT, env=env, check=True)
     barrier_run_id = _sync_barrier_run_id(scenario_id, run_index) if sync_connect else None
     runtime_control_run_id = (
         _sync_barrier_run_id(f"{scenario_id}-runtime-control", run_index)
@@ -4400,14 +4425,14 @@ def _run_loadgen_container_per_client_delegation_handoff(
     handoff_qos: int,
     handoff_retain: bool,
 ) -> dict[str, Any]:
-    build_cmd = _compose_cmd(
-        ["build", service],
+    _ensure_compose_service_built(
+        service=service,
         compose_files=compose_files,
         compose_project_name=compose_project_name,
+        extra_env=extra_env,
     )
     env = os.environ.copy()
     env.update(extra_env)
-    subprocess.run(build_cmd, cwd=REPO_ROOT, env=env, check=True)
 
     ready_host_dir = _delegation_handoff_ready_host_dir(scenario_id, run_index)
     if ready_host_dir.exists():
@@ -4588,14 +4613,14 @@ def _run_loadgen_container_per_client_fanout(
     compose_project_name: str | None,
     extra_env: dict[str, str],
 ) -> dict[str, Any]:
-    build_cmd = _compose_cmd(
-        ["build", service],
+    _ensure_compose_service_built(
+        service=service,
         compose_files=compose_files,
         compose_project_name=compose_project_name,
+        extra_env=extra_env,
     )
     env = os.environ.copy()
     env.update(extra_env)
-    subprocess.run(build_cmd, cwd=REPO_ROOT, env=env, check=True)
 
     ready_host_dir = _fanout_ready_host_dir(scenario_id, run_index)
     if ready_host_dir.exists():

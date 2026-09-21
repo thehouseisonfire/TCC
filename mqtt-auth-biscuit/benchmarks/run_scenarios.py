@@ -2220,7 +2220,7 @@ def _compose_run_loadgen_cmd(
     build: bool,
 ) -> list[str]:
     args = ["run", "--rm", "--no-deps"]
-    if build:
+    if build and not _no_build_images():
         args.append("--build")
     args.extend(["--name", container_name, service, *loadgen_args])
     return _compose_cmd(
@@ -5895,8 +5895,8 @@ def _run_mqtt5_auth(
                 "run",
                 "--rm",
                 "--no-deps",
-                "--build",
-                "--quiet-build",
+                *_compose_build_args(),
+                *(["--quiet-build"] if not _no_build_images() else []),
                 "--name",
                 container_name,
                 "--entrypoint",

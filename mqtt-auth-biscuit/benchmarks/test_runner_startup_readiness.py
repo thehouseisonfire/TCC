@@ -2599,3 +2599,81 @@ def test_no_build_images_without_manifest_fails_fast(monkeypatch) -> None:
     monkeypatch.setattr(rs, "_image_freeze_manifest_path", lambda: Path("/nonexistent"))
     with pytest.raises(RuntimeError, match="freeze-images"):
         rs.main(no_build_images=True)
+
+
+def test_compose_run_loadgen_cmd_omits_build_when_frozen(monkeypatch) -> None:
+    monkeypatch.setenv(rs.NO_BUILD_IMAGES_ENVVAR, "1")
+    cmd = rs._compose_run_loadgen_cmd(
+        ["--clients", "10"],
+        service="loadgen",
+        container_name="loadgen_test_1",
+        compose_files=None,
+        compose_project_name=None,
+        build=True,
+    )
+    assert "--build" not in cmd
+
+
+def test_compose_run_loadgen_cmd_keeps_build_by_default(monkeypatch) -> None:
+    monkeypatch.delenv(rs.NO_BUILD_IMAGES_ENVVAR, raising=False)
+    cmd = rs._compose_run_loadgen_cmd(
+        ["--clients", "10"],
+        service="loadgen",
+        container_name="loadgen_test_1",
+        compose_files=None,
+        compose_project_name=None,
+        build=True,
+    )
+    assert "--build" in cmd
+
+
+def _capture_mqtt5_auth_cmd(monkeypatch) -> list[list[str]]:
+    calls: list[list[str]] = []
+
+    def fake_check_output(cmd, **kwargs):  # noqa: ANN001, ANN202
+        calls.append(cmd)
+        return json.dumps({"grants": []})
+
+    monkeypatch.setattr(rs.subprocess, "check_output", fake_check_output)
+    return calls
+
+
+def test_run_mqtt5_auth_container_omits_build_when_frozen(monkeypatch) -> None:
+    monkeypatch.setenv(rs.NO_BUILD_IMAGES_ENVVAR, "1")
+    calls = _capture_mqtt5_auth_cmd(monkeypatch)
+    rs._run_mqtt5_auth(
+        "localhost",
+        1883,
+        "token-one",
+        "token-two",
+        "topic/one",
+        "topic/two",
+        False,
+        None,
+        False,
+        client_id="test-client",
+        client_topology="container-per-client",
+    )
+    assert len(calls) == 1
+    assert "--build" not in calls[0]
+
+
+def test_run_mqtt5_auth_container_keeps_build_by_default(monkeypatch) -> None:
+    monkeypatch.delenv(rs.NO_BUILD_IMAGES_ENVVAR, raising=False)
+    calls = _capture_mqtt5_auth_cmd(monkeypatch)
+    rs._run_mqtt5_auth(
+        "localhost",
+        1883,
+        "token-one",
+        "token-two",
+        "topic/one",
+        "topic/two",
+        False,
+        None,
+        False,
+        client_id="test-client",
+        client_topology="container-per-client",
+    )
+    assert len(calls) == 1
+    assert "--build" in calls[0]
+    assert "--quiet-build" in calls[0]

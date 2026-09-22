@@ -1680,6 +1680,85 @@ def test_fanout_role_merge_rejects_inconsistent_latency_clock() -> None:
     assert "fanout_latency_clock_attestation_mismatch" in merged["errors"]
 
 
+def _notify_role_result(notifications: int, *, expected: bool) -> dict[str, Any]:
+    return {
+        "inputs": {
+            "mode": "fanout",
+            "fanout_latency_clock": {"source": "clock_monotonic_raw", "payload_version": "v3"},
+            "credential_attestations": {},
+        },
+        "publish": {"count": 0},
+        "receive": {"count": 0},
+        "raw_metrics": {"publish": [], "receive": []},
+        "control_effect": {
+            "notification_expected": expected,
+            "notifications": notifications,
+        },
+        "control_responses": {"enabled": False, "successes": 0, "failures": 0},
+        "errors": [],
+    }
+
+
+def test_fanout_role_merge_sums_control_notifications() -> None:
+    publisher = _notify_role_result(0, expected=True)
+    subscribers = [_notify_role_result(1, expected=True) for _ in range(10)]
+
+    merged = rs._merge_fanout_role_loadgen_results(
+        publisher=publisher,
+        subscribers=subscribers,
+        wall_duration_s=12.0,
+        scenario_id="CONTROL-ENFORCEMENT-ACL-READ-NOTIFY-BISCUIT",
+        run_index=0,
+        messages=10,
+    )
+
+    assert merged["control_effect"] == {"notification_expected": True, "notifications": 10}
+
+
+def test_control_notification_merge_is_token_format_independent() -> None:
+    def subscriber(profile: str) -> dict[str, Any]:
+        result = _notify_role_result(1, expected=True)
+        result["inputs"]["credential_attestations"]["clients"] = {
+            "profile": profile,
+            "semantic": None,
+            "validated_credentials": 1,
+        }
+        return result
+
+    merged_jwt = rs._merge_per_client_loadgen_results(
+        [_notify_role_result(0, expected=True), subscriber("jwt-profile")], 1.0
+    )
+    merged_biscuit = rs._merge_per_client_loadgen_results(
+        [_notify_role_result(0, expected=True), subscriber("biscuit-profile")], 1.0
+    )
+
+    assert merged_jwt["control_effect"] == {"notification_expected": True, "notifications": 1}
+    assert merged_biscuit["control_effect"] == {"notification_expected": True, "notifications": 1}
+
+
+def test_per_client_merge_preserves_zero_control_effect_without_expectation() -> None:
+    # KICK-style results never expect notifications: the merge must leave the
+    # inherited control_effect untouched rather than synthesizing a count.
+    publisher = _notify_role_result(0, expected=False)
+    del publisher["control_effect"]["notifications"]
+    merged = rs._merge_per_client_loadgen_results(
+        [publisher, _notify_role_result(0, expected=False)], 1.0
+    )
+
+    assert merged["control_effect"] == {"notification_expected": False}
+
+
+def test_per_client_merge_keeps_control_responses_aggregation() -> None:
+    publisher = _notify_role_result(0, expected=True)
+    publisher["control_responses"] = {"enabled": True, "successes": 1, "failures": 0}
+    subscriber = _notify_role_result(1, expected=True)
+
+    merged = rs._merge_per_client_loadgen_results([publisher, subscriber], 1.0)
+
+    assert merged["control_effect"] == {"notification_expected": True, "notifications": 1}
+    assert merged["control_responses"] == {"enabled": True, "successes": 1, "failures": 0}
+
+
 def test_credential_attestation_merge_rejects_same_role_profile_mismatch() -> None:
     errors: list[str] = []
     results = [

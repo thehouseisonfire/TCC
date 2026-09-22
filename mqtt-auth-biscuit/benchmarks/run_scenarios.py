@@ -2815,6 +2815,22 @@ def _merge_per_client_loadgen_results(
         "successes": control_response_counts.get("successes", 0),
         "failures": control_response_counts.get("failures", 0),
     }
+    # Per-role notification observations (e.g. fanout subscribers) must be
+    # summed: the publisher role observes none, so inheriting results[0]'s
+    # control_effect would silently report 0. Leave non-notification merges
+    # untouched by only rewriting when at least one role expected them.
+    control_effects: list[dict[str, Any]] = []
+    for result in results:
+        effect = result.get("control_effect")
+        if isinstance(effect, dict):
+            control_effects.append(effect)
+    if any(effect.get("notification_expected") is True for effect in control_effects):
+        merged["control_effect"] = {
+            "notification_expected": True,
+            "notifications": sum(
+                int(effect.get("notifications") or 0) for effect in control_effects
+            ),
+        }
     probe_successes = 0
     probe_failures = 0
     probe_enabled = False

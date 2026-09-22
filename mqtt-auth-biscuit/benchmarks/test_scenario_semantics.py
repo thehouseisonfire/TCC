@@ -1237,6 +1237,55 @@ def test_requested_partial_fixture_parity_scenario_is_selectable(monkeypatch) ->
 
 
 @pytest.mark.parametrize(
+    ("scenario_id", "token_key", "subscribers"),
+    (
+        ("TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-JWT-10", "jwt_fanout_allow", 10),
+        ("TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-JWT-50", "jwt_fanout_allow", 50),
+        ("TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-JWT-100", "jwt_fanout_allow", 100),
+        ("TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-BISCUIT-10", "biscuit_fanout_allow", 10),
+        ("TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-BISCUIT-50", "biscuit_fanout_allow", 50),
+        ("TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-BISCUIT-100", "biscuit_fanout_allow", 100),
+    ),
+)
+def test_token_acl_read_fanout_expiry_only_uses_fanout_authorized_credentials(
+    scenario_id: str,
+    token_key: str,
+    subscribers: int,
+) -> None:
+    scenarios = _scenario_registry()
+    scenario = scenarios[scenario_id]
+
+    assert scenario["password"] == f"{token_key}-fixture"
+    assert scenario["fanout_publisher_password"] == f"{token_key}-fixture"
+    assert scenario["subscriber_count"] == subscribers
+    assert scenario["topic"] == "fanout/broadcast"
+    assert scenario["fanout_topic"] == "fanout/broadcast"
+    assert scenario["mosquitto_conf"] == "./mosquitto.conf"
+
+
+@pytest.mark.parametrize(
+    "scenario_id",
+    (
+        "TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-JWT-10",
+        "TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-JWT-50",
+        "TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-JWT-100",
+        "TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-BISCUIT-10",
+        "TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-BISCUIT-50",
+        "TOKEN-ACL-READ-FANOUT-EXPIRY-ONLY-BISCUIT-100",
+    ),
+)
+def test_token_acl_read_fanout_expiry_only_retains_expiry_only_semantics(
+    scenario_id: str,
+) -> None:
+    scenarios = _scenario_registry()
+    scenario = scenarios[scenario_id]
+
+    assert rs._infer_acl_read_enforcement(scenario) == "expiry_only"
+    assert scenario["delivery_contract"] == {"steady": "all"}
+    assert rs._scenario_workload_shape(scenario) == "fixed-clients"
+
+
+@pytest.mark.parametrize(
     ("scenario_id", "missing_key"),
     (
         ("HTTP-LATENCY-200MS-PARITY-JWT", "jwt_strict_sub_client_id"),

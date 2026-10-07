@@ -393,6 +393,11 @@ class ScenarioConfig(TypedDict, total=False):
     runtime_control_after_messages: int
     runtime_control_expect_denial: bool
     http_expected_delay_ms: int
+    # Timeout-budget-only PDP delay (ms). Unlike ``http_expected_delay_ms`` it
+    # carries no no-failure latency contract; it only sizes the connect/publish
+    # outer budget for scenarios that inject a PDP delay together with
+    # failures (e.g. failure-injection cells).
+    http_timeout_budget_delay_ms: int
     hybrid_fallback_required: bool
     # Issue 19: ACL_READ fan-out subscriber count
     subscriber_count: int
@@ -1762,9 +1767,16 @@ def _publish_timeout_seconds(scenario: ScenarioConfig, clients: int) -> int:
     Mosquitto ACL path, concurrent publishers queue behind each delayed
     authorization, and later connections queue behind in-flight publishes, so
     worst-case per-operation latency scales with ``clients * delay``.
-    Non-latency scenarios keep the historical 10 s base.
+    Scenarios that inject a PDP delay together with failures (where
+    ``http_expected_delay_ms`` would trip the no-failure latency contract)
+    size the same budget through the explicit ``http_timeout_budget_delay_ms``
+    metadata instead. The helper never infers headroom from arbitrary
+    ``authz_config`` delay settings. Non-delayed scenarios keep the
+    historical 10 s base.
     """
     delay_ms = scenario.get("http_expected_delay_ms") or 0
+    if delay_ms <= 0:
+        delay_ms = scenario.get("http_timeout_budget_delay_ms") or 0
     if delay_ms <= 0:
         return BASE_PUBLISH_TIMEOUT_S
     queued_s = (delay_ms / 1000.0) * max(clients, 1)
@@ -7423,6 +7435,15 @@ def _build_available_scenarios(
             "message_count": 100,
             "http_failure_rate": 0.01,
             "allowed_error_prefixes": ["publish_failed:"],
+            # Same deterministic barrier as the latency cells: without it,
+            # staggered container starts let early publishes block the
+            # single-threaded broker and queue later CONNECTs behind delayed
+            # authorizations, exceeding the bounded clients*delay budget.
+            # (http_expected_delay_ms is deliberately unset: it would trip
+            # the no-failure latency contract; the timeout budget comes from
+            # the explicit http_timeout_budget_delay_ms metadata instead.)
+            "http_timeout_budget_delay_ms": 200,
+            "sync_connect": True,
         },
         "HTTP-FAILURE-INJECTION-200MS-5PCT-JWT": {
             "mosquitto_conf": "./mosquitto_http.conf",
@@ -7441,6 +7462,9 @@ def _build_available_scenarios(
             "message_count": 100,
             "http_failure_rate": 0.05,
             "allowed_error_prefixes": ["publish_failed:"],
+            # Same deterministic barrier as the 1% cell (see above).
+            "http_timeout_budget_delay_ms": 200,
+            "sync_connect": True,
         },
         "TOKEN-MQTT5-REAUTH-JWT": {
             "mosquitto_conf": "./mosquitto.conf",
@@ -8752,6 +8776,7 @@ def main(
                     "fanout_churn_sqlite_topic": s.get("fanout_churn_sqlite_topic"),
                     "fanout_churn_sqlite_subscribers": s.get("fanout_churn_sqlite_subscribers"),
                     "http_expected_delay_ms": s.get("http_expected_delay_ms"),
+                    "http_timeout_budget_delay_ms": s.get("http_timeout_budget_delay_ms"),
                     "publish_timeout_seconds": _publish_timeout_seconds(s, effective_client_count),
                     "connect_timeout_seconds": _publish_timeout_seconds(s, effective_client_count),
                     "client_topology": {

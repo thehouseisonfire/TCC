@@ -211,6 +211,56 @@ def test_http_latency_tls_variants_inherit_connect_barrier(scenario_id: str) -> 
 
 
 @pytest.mark.parametrize(
+    "scenario_id",
+    (
+        "HTTP-FAILURE-INJECTION-200MS-1PCT-JWT",
+        "HTTP-FAILURE-INJECTION-200MS-5PCT-JWT",
+    ),
+)
+def test_http_failure_injection_scenarios_use_deterministic_connect_barrier(
+    scenario_id: str,
+) -> None:
+    """Failure-injection cells inject the same PDP delay as latency cells.
+
+    With Mosquitto's single-threaded blocking authorization path, staggered
+    container starts let early publishes queue later CONNECTs behind delayed
+    authorizations, so these cells need the same connects-before-publishes
+    barrier — without declaring http_expected_delay_ms, which would trip the
+    no-failure latency contract.
+    """
+    scenarios = _scenario_registry()
+    scenario = scenarios[scenario_id]
+
+    assert scenario["sync_connect"] is True
+    assert scenario.get("http_expected_delay_ms") is None
+    assert scenario.get("restart_mosquitto") is not True
+    # Narrow HOLD timeout budget: explicit metadata only, producing the
+    # 20 s outer budget at c25 without touching the latency contract.
+    assert scenario.get("http_timeout_budget_delay_ms") == 200
+    assert rs._publish_timeout_seconds(scenario, 25) == 20
+
+
+@pytest.mark.parametrize(
+    "scenario_id",
+    (
+        "HTTP-FAILURE-INJECTION-200MS-1PCT-JWT-TLS",
+        "HTTP-FAILURE-INJECTION-200MS-5PCT-JWT-TLS",
+    ),
+)
+def test_http_failure_injection_tls_variants_inherit_connect_barrier(
+    scenario_id: str,
+) -> None:
+    """TLS matrix expansion must preserve the failure-injection barrier."""
+    base = _scenario_registry()
+    expanded = rs._expand_tls_matrix(base)
+
+    assert expanded[scenario_id]["sync_connect"] is True
+    assert expanded[scenario_id].get("http_expected_delay_ms") is None
+    assert expanded[scenario_id].get("http_timeout_budget_delay_ms") == 200
+    assert rs._publish_timeout_seconds(expanded[scenario_id], 25) == 20
+
+
+@pytest.mark.parametrize(
     ("scenario_id", "kind"),
     (
         ("TOKEN-LIFECYCLE-RECONNECT-PUBLISH-JWT", "jwt"),

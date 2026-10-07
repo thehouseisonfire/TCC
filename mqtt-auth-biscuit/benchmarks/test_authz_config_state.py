@@ -1,8 +1,9 @@
 import json
+import math
 import re
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -1057,8 +1058,133 @@ def test_publish_timeout_keeps_configured_delay_as_measured_variable() -> None:
     # Synthetic delay proves this is not an ID-specific exception.
     synthetic: rs.ScenarioConfig = {"id": "SYNTHETIC", "http_expected_delay_ms": 500}
     assert rs._publish_timeout_seconds(synthetic, 4) == 17
+    # Failure-injection cells declare no http_expected_delay_ms (it would trip
+    # the no-failure latency contract); the budget comes from the explicit
+    # http_timeout_budget_delay_ms metadata instead: 25 clients * 200 ms +
+    # 15 s headroom = 20 s.
+    failure_injection: rs.ScenarioConfig = {
+        "id": "HTTP-FAILURE-INJECTION-200MS-1PCT-JWT",
+        "http_timeout_budget_delay_ms": 200,
+        "authz_config": {
+            "delay_ms": 200,
+            "fail_mode": "rate",
+            "fail_rate": 0.01,
+            "authz_profile": "simple",
+        },
+    }
+    assert rs._publish_timeout_seconds(failure_injection, 25) == 20
+    # Arbitrary authz_config.delay_ms alone must NOT inflate the budget: the
+    # helper only honors explicit timeout metadata, so delayed scenarios
+    # without such metadata (e.g. HTTP-LATENCY-200MS-BISCUIT, which declares
+    # no http_expected_delay_ms) keep the frozen 10 s base.
+    authz_delay_only: rs.ScenarioConfig = {
+        "id": "HTTP-LATENCY-200MS-BISCUIT",
+        "authz_config": {
+            "delay_ms": 200,
+            "fail_mode": "none",
+            "authz_profile": "simple",
+        },
+    }
+    assert rs._publish_timeout_seconds(authz_delay_only, 25) == rs.BASE_PUBLISH_TIMEOUT_S
+    assert rs._publish_timeout_seconds(authz_delay_only, 1) == rs.BASE_PUBLISH_TIMEOUT_S
+    # Explicit http_expected_delay_ms still takes precedence over the
+    # timeout-budget metadata.
+    both: rs.ScenarioConfig = {
+        "id": "SYNTHETIC-BOTH",
+        "http_expected_delay_ms": 200,
+        "http_timeout_budget_delay_ms": 1000,
+    }
+    assert rs._publish_timeout_seconds(both, 10) == 17
     # The 1000 ms c10/m10 HOLD case: budget must exceed worst-case queued
     # latency (clients * delay) plus headroom, not just a single delay.
     budget = rs._publish_timeout_seconds(latency_1000, 10)
     assert budget > 10
     assert budget * 1000 > 10 * 1000 + rs.PUBLISH_TIMEOUT_HEADROOM_S * 1000 // 2
+
+
+# Frozen effective-behavior reference for the Part 1 HTTP failure-injection HOLD.
+_FROZEN_HOLD_HEAD = "234c2c4518bd45e16ef54f1999819a0350fbc505"
+
+_FAILURE_INJECTION_HOLD_IDS = frozenset(
+    {
+        "HTTP-FAILURE-INJECTION-200MS-1PCT-JWT",
+        "HTTP-FAILURE-INJECTION-200MS-1PCT-JWT-TLS",
+        "HTTP-FAILURE-INJECTION-200MS-5PCT-JWT",
+        "HTTP-FAILURE-INJECTION-200MS-5PCT-JWT-TLS",
+    }
+)
+
+_FROZEN_HOLD_PROBE_CLIENTS = (1, 10, 25, 50)
+
+
+def _frozen_hold_timeout_seconds(scenario: rs.ScenarioConfig, clients: int) -> int:
+    """Replica of ``_publish_timeout_seconds`` at frozen HEAD 234c2c4.
+
+    The frozen helper honored only ``http_expected_delay_ms`` and returned
+    the historical 10 s base otherwise; it never inspected ``authz_config``
+    delays or timeout-budget metadata (which did not exist yet).
+    """
+    delay_ms = scenario.get("http_expected_delay_ms") or 0
+    if delay_ms <= 0:
+        return rs.BASE_PUBLISH_TIMEOUT_S
+    queued_s = (delay_ms / 1000.0) * max(clients, 1)
+    return max(rs.BASE_PUBLISH_TIMEOUT_S, math.ceil(queued_s + rs.PUBLISH_TIMEOUT_HEADROOM_S))
+
+
+def test_failure_injection_hold_blast_radius_matches_frozen_head() -> None:
+    """Only the 4 failure-injection HOLD cells may change timeout/sync behavior.
+
+    Enumerates the full expanded registry and compares effective
+    connect/publish timeout budgets (across representative client counts) and
+    ``sync_connect`` semantics against the frozen HEAD 234c2c4 reference. Any
+    other effective difference fails the test.
+    """
+    base = rs._build_available_scenarios(
+        _placeholder_tokens(),
+        token_issuer_no_default_roles=False,
+        token_issuer_no_default_grants=False,
+    )
+    expanded = rs._expand_tls_matrix(base)
+    assert len(expanded) == 444
+
+    differing: list[str] = []
+    for scenario_id in sorted(expanded):
+        scenario = expanded[scenario_id]
+        frozen_view = cast(rs.ScenarioConfig, dict(scenario))
+        frozen_view.pop("http_timeout_budget_delay_ms", None)
+        if scenario_id in _FAILURE_INJECTION_HOLD_IDS:
+            # The frozen base failure cells declared no connect barrier.
+            frozen_view.pop("sync_connect", None)
+        timeout_differs = any(
+            rs._publish_timeout_seconds(scenario, clients)
+            != _frozen_hold_timeout_seconds(frozen_view, clients)
+            for clients in _FROZEN_HOLD_PROBE_CLIENTS
+        )
+        sync_differs = bool(scenario.get("sync_connect")) != bool(frozen_view.get("sync_connect"))
+        if timeout_differs or sync_differs:
+            differing.append(scenario_id)
+
+    assert set(differing) == _FAILURE_INJECTION_HOLD_IDS
+
+    # Pin the exact HOLD effect: sync barrier on, no latency-contract key,
+    # explicit 200 ms budget metadata, 20 s outer budget at c25.
+    for scenario_id in sorted(_FAILURE_INJECTION_HOLD_IDS):
+        scenario = expanded[scenario_id]
+        assert scenario["sync_connect"] is True
+        assert scenario.get("http_expected_delay_ms") is None
+        assert scenario.get("http_timeout_budget_delay_ms") == 200
+        assert rs._publish_timeout_seconds(scenario, 25) == 20
+
+    # Pin the frozen cells that must not move: the BISCUIT latency cells
+    # already have canonical fixed-client results, so any timeout drift here
+    # would contaminate provenance.
+    for scenario_id in (
+        "HTTP-LATENCY-200MS-BISCUIT",
+        "HTTP-LATENCY-200MS-BISCUIT-TLS",
+        "HTTP-LATENCY-200MS-PARITY-BISCUIT",
+        "HTTP-LATENCY-200MS-PARITY-BISCUIT-TLS",
+    ):
+        scenario = expanded[scenario_id]
+        assert scenario.get("http_timeout_budget_delay_ms") is None
+        for clients in _FROZEN_HOLD_PROBE_CLIENTS:
+            assert rs._publish_timeout_seconds(scenario, clients) == (rs.BASE_PUBLISH_TIMEOUT_S)

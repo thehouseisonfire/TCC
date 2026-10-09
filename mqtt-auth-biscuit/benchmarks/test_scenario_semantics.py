@@ -1242,6 +1242,7 @@ def test_partial_biscuit_strict_fixture_registers_only_biscuit_parity_scenarios(
 
 
 def test_requested_partial_fixture_parity_scenario_is_selectable(monkeypatch) -> None:
+    monkeypatch.delenv(rs.NO_BUILD_IMAGES_ENVVAR, raising=False)
     tokens = _placeholder_tokens()
     tokens.pop("biscuit_strict_client_id", None)
     warnings: list[str] = []

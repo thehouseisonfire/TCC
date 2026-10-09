@@ -603,6 +603,7 @@ def test_main_normalizes_output_directory_strings(
     captured: dict[str, object] = {}
     compose_calls: list[list[str]] = []
     scenario_id = "TEST-SCENARIO"
+    monkeypatch.delenv(rs.NO_BUILD_IMAGES_ENVVAR, raising=False)
     tcpdump_output_dir = tmp_path / "pcap"
     perf_output_dir = tmp_path / "perf"
 
@@ -2676,8 +2677,18 @@ def test_verify_image_freeze_requires_manifest(tmp_path: Path) -> None:
 
 def test_no_build_images_without_manifest_fails_fast(monkeypatch) -> None:
     monkeypatch.setattr(rs, "_image_freeze_manifest_path", lambda: Path("/nonexistent"))
-    with pytest.raises(RuntimeError, match="freeze-images"):
-        rs.main(no_build_images=True)
+    env_var = rs.NO_BUILD_IMAGES_ENVVAR
+    had_prior_value = env_var in os.environ
+    prior_value = os.environ.get(env_var)
+    try:
+        with pytest.raises(RuntimeError, match="freeze-images"):
+            rs.main(no_build_images=True)
+    finally:
+        if had_prior_value:
+            assert prior_value is not None
+            os.environ[env_var] = prior_value
+        else:
+            os.environ.pop(env_var, None)
 
 
 def test_compose_run_loadgen_cmd_omits_build_when_frozen(monkeypatch) -> None:
@@ -2805,3 +2816,17 @@ def test_ensure_compose_service_built_builds_by_default(monkeypatch) -> None:
     )
     assert len(calls) == 1
     assert calls[0][-2:] == ["build", "loadgen"]
+
+
+def test_no_build_images_fail_fast_does_not_leak_env(monkeypatch) -> None:
+    monkeypatch.delenv(rs.NO_BUILD_IMAGES_ENVVAR, raising=False)
+    test_no_build_images_without_manifest_fails_fast(monkeypatch)
+    assert os.environ.get(rs.NO_BUILD_IMAGES_ENVVAR) is None
+    assert rs._no_build_images() is False
+    assert rs._compose_build_args() == ["--build"]
+
+
+def test_no_build_images_fail_fast_preserves_prior_env(monkeypatch) -> None:
+    monkeypatch.setenv(rs.NO_BUILD_IMAGES_ENVVAR, "1")
+    test_no_build_images_without_manifest_fails_fast(monkeypatch)
+    assert os.environ.get(rs.NO_BUILD_IMAGES_ENVVAR) == "1"

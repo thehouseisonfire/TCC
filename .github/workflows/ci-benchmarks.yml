@@ -283,6 +283,16 @@ jobs:
           docker --version
           docker compose version
 
+      # Authenticated pulls raise the Docker Hub rate limit above the shared-IP
+      # anonymous quota. Skipped when secrets are unavailable (e.g. fork PRs);
+      # anonymous fallback can still hit Docker Hub 429 limits.
+      - name: Log in to Docker Hub (authenticated pulls)
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Run broker integration tests (fast suite)
         env:
           PYTHONPATH: mqtt-auth-biscuit
@@ -329,6 +339,16 @@ jobs:
         run: |
           docker --version
           docker compose version
+
+      # Authenticated pulls raise the Docker Hub rate limit above the shared-IP
+      # anonymous quota. Skipped when secrets are unavailable (e.g. fork PRs);
+      # anonymous fallback can still hit Docker Hub 429 limits.
+      - name: Log in to Docker Hub (authenticated pulls)
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Run broker integration tests (full suite)
         env:

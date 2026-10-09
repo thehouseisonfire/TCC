@@ -4691,6 +4691,25 @@ async fn perform_proactive_reauth(
     }
 }
 
+/// True only for [`rumqttc::ConnectionError::RequestsDone`].
+///
+/// `run_worker` and the runtime-control task retain `AsyncClient` senders for the whole
+/// useful session, so drained request sources are unreachable mid-session in the current
+/// lifecycle. `RequestsDone` can surface on graceful teardown after `disconnect`/drain.
+/// Genuine worker/task faults are caught separately (`publish_failed:*`, join paths),
+/// and result-contract accounting stays the backstop for incomplete workloads.
+fn is_eventloop_requests_done(err: &rumqttc::ConnectionError) -> bool {
+    matches!(err, rumqttc::ConnectionError::RequestsDone)
+}
+
+fn classify_eventloop_poll_error(err: rumqttc::ConnectionError) -> Option<String> {
+    if is_eventloop_requests_done(&err) {
+        None
+    } else {
+        Some(format!("eventloop_failed:{err}"))
+    }
+}
+
 async fn drive_worker_eventloop(
     mut eventloop: rumqttc::EventLoop,
     shutdown: Arc<Notify>,
@@ -4715,7 +4734,7 @@ async fn drive_worker_eventloop(
                         }
                     }
                     Ok(_) => {}
-                    Err(err) => return Some(format!("eventloop_failed:{err}")),
+                    Err(err) => return classify_eventloop_poll_error(err),
                 }
             }
         }
@@ -7929,5 +7948,42 @@ mod tests {
         assert_eq!(expected_fanout_churn_receipts(&args, 8), Some(8));
         assert_eq!(expected_fanout_churn_receipts(&args, 12), Some(16));
         assert_eq!(expected_fanout_churn_receipts(&args, 16), Some(16));
+    }
+
+    #[test]
+    fn eventloop_requests_done_maps_to_clean_terminal_teardown() {
+        assert!(is_eventloop_requests_done(
+            &rumqttc::ConnectionError::RequestsDone
+        ));
+        assert_eq!(
+            classify_eventloop_poll_error(rumqttc::ConnectionError::RequestsDone),
+            None
+        );
+    }
+
+    #[test]
+    fn eventloop_other_connection_errors_remain_failures() {
+        let cases = [
+            rumqttc::ConnectionError::DisconnectTimeout,
+            rumqttc::ConnectionError::BrokerTransportMismatch,
+            rumqttc::ConnectionError::AuthProcessingError,
+            rumqttc::ConnectionError::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "reset",
+            )),
+        ];
+        for err in cases {
+            assert!(!is_eventloop_requests_done(&err));
+            let classified = classify_eventloop_poll_error(err);
+            let message = classified.expect("non-RequestsDone must classify as failure");
+            assert!(
+                message.starts_with("eventloop_failed:"),
+                "unexpected classification: {message}"
+            );
+        }
+        let timeout_message =
+            classify_eventloop_poll_error(rumqttc::ConnectionError::DisconnectTimeout)
+                .expect("DisconnectTimeout must classify as failure");
+        assert!(timeout_message.contains("Graceful disconnect timed out"));
     }
 }

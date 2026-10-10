@@ -34,7 +34,7 @@ RUN strip --strip-unneeded /app/target/release/libmosquitto_auth_biscuit.so
 # Stage 2: build Mosquitto from source
 FROM alpine:3.23.3@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659 AS mosq-builder
 ARG MOSQ_REF=b3b4d77ef3faef6dfcdfac3fb00a9b5a42859aca
-RUN apk add --no-cache git=2.52.0-r0 build-base=0.5-r3 cmake=4.1.3-r0 openssl-dev=3.5.8-r0 cjson-dev=1.7.19-r1 libwebsockets-dev=4.3.5-r2 c-ares-dev=1.34.8-r0
+RUN apk add --no-cache git=2.52.0-r0 build-base=0.5-r3 cmake=4.1.3-r0 openssl-dev=3.5.9-r0 cjson-dev=1.7.19-r1 libwebsockets-dev=4.3.5-r2 c-ares-dev=1.34.8-r0
 RUN git clone https://github.com/eclipse-mosquitto/mosquitto.git /src
 WORKDIR /src
 RUN git checkout "${MOSQ_REF}"
@@ -48,7 +48,7 @@ RUN set -eux; \
 
 # Stage 3: runtime
 FROM alpine:3.23.3@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
-RUN apk add --no-cache ca-certificates libgcc=15.2.0-r2 libstdc++=15.2.0-r2 openssl=3.5.8-r0 cjson=1.7.19-r1 libwebsockets=4.3.5-r2 c-ares=1.34.8-r0
+RUN apk add --no-cache ca-certificates libgcc=15.2.0-r2 libstdc++=15.2.0-r2 openssl=3.5.9-r0 cjson=1.7.19-r1 libwebsockets=4.3.5-r2 c-ares=1.34.8-r0
 COPY --from=mosq-builder /out/ /
 COPY --from=plugin-builder /app/target/release/libmosquitto_auth_biscuit.so /mosquitto/plugins/
 COPY docker/jwt_public.pem /mosquitto/config/

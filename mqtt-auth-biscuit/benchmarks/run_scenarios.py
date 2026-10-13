@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Generator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -1864,6 +1864,186 @@ def _publish_timeout_seconds(scenario: ScenarioConfig, clients: int) -> int:
     return max(BASE_PUBLISH_TIMEOUT_S, math.ceil(queued_s + PUBLISH_TIMEOUT_HEADROOM_S))
 
 
+def _expected_publish_authorization_count(
+    scenario: ScenarioConfig, *, message_count: int, client_count: int
+) -> int:
+    """Shared terminal publish count used by result contracts and barriers.
+
+    This is the same formula ``_validate_result_contract`` enforces: fan-out
+    workloads publish ``message_count`` total messages, all other workloads
+    publish ``message_count`` per client.
+    """
+    if scenario.get("traffic_pattern") == "fanout":
+        return message_count
+    return message_count * client_count
+
+
+#: Poll interval for the QoS0 post-workload authorization quiescence barrier.
+_QOS0_QUIESCENCE_POLL_INTERVAL_S = 0.2
+
+
+def _qos0_quiescence_targets(
+    scenario: ScenarioConfig,
+    *,
+    message_count: int,
+    client_count: int,
+    qos: int,
+    qos_distribution: str | None,
+) -> dict[str, int]:
+    """Deterministic downstream counter targets for the QoS0 quiescence barrier.
+
+    At QoS 0, loadgen completion only means the publishes were flushed to TCP;
+    the single-threaded broker may still be draining queued PUBLISHes through
+    blocking HTTP authorization. Sampling cumulative counters immediately would
+    race that drain, so QoS0 scenarios whose result contracts validate
+    broker-side/HTTP-authorizer counters must wait for the expected terminal
+    target before snapshotting.
+
+    Keys name cumulative authorizer counters (``requests``, ``policy_allows``,
+    ``injected_failures``, or ``profile:<tier>``); values are the exact
+    terminal counts the result contract requires. Profile-scoped counters are
+    preferred over raw ingress totals because they increment only for the
+    publish authorizations relevant to the contract. Token kind (JWT/Biscuit)
+    does not change the targets: both exercise the same profile path.
+
+    Returns an empty mapping when no barrier applies: QoS 1/2 workloads carry
+    a broker-processing barrier already (PUBACK/PUBREC), mixed QoS
+    distributions are not pure QoS0 drains, MQTT5 AUTH scenarios validate no
+    publish-authorization counters, and non-HTTP scenarios have no downstream
+    authorization accounting to wait for.
+    """
+    if qos != 0 or qos_distribution is not None:
+        return {}
+    if scenario.get("mqtt5_auth") is not None:
+        return {}
+    expected = _expected_publish_authorization_count(
+        scenario, message_count=message_count, client_count=client_count
+    )
+    if scenario.get("complexity_axis") == "http_profile":
+        profile = scenario.get("complexity_level")
+        if not isinstance(profile, str) or not profile:
+            return {}
+        return {
+            "requests": expected,
+            f"profile:{profile}": expected,
+            "policy_allows": expected,
+        }
+    if scenario.get("http_expected_delay_ms") is not None:
+        return {
+            "requests": expected,
+            "profile:simple": expected,
+            "policy_allows": expected,
+        }
+    if scenario.get("hybrid_fallback_required"):
+        return {
+            "requests": expected,
+            "injected_failures": expected,
+        }
+    if scenario.get("http_failure_rate") is not None:
+        return {"requests": expected}
+    return {}
+
+
+def _qos0_quiescence_timeout_seconds(
+    scenario: ScenarioConfig, *, clients: int, expected_count: int
+) -> int:
+    """Bounded drain budget for the QoS0 quiescence barrier.
+
+    Reuses the same delay sources as ``_publish_timeout_seconds`` (the
+    measured ``http_expected_delay_ms`` variable or the explicit
+    ``http_timeout_budget_delay_ms`` metadata), but scales by the total
+    expected authorization count instead of the client count: after a QoS0
+    loadgen flush, the single-threaded broker may still have to drain every
+    already-issued publish through blocking HTTP authorization (for example
+    100 publishes x 1000 ms). The existing per-operation headroom and base
+    timeout are kept as a floor. The barrier returns as soon as the target is
+    reached; this budget only bounds genuine observation failures.
+    """
+    delay_ms = scenario.get("http_expected_delay_ms") or 0
+    if delay_ms <= 0:
+        delay_ms = scenario.get("http_timeout_budget_delay_ms") or 0
+    drain_budget_s = math.ceil(expected_count * (float(delay_ms) / 1000.0))
+    drain_budget_s += PUBLISH_TIMEOUT_HEADROOM_S
+    return max(_publish_timeout_seconds(scenario, clients), drain_budget_s)
+
+
+def _read_quiescence_counter(stats: dict[str, Any], key: str) -> int:
+    if key == "requests":
+        return int(stats.get("requests") or 0)
+    if key == "policy_allows":
+        return int(stats.get("policy_allows") or 0)
+    if key == "injected_failures":
+        return int(stats.get("injected_failures") or 0)
+    if key.startswith("profile:"):
+        tier = key.split(":", 1)[1]
+        profiles = stats.get("profile_requests")
+        if isinstance(profiles, dict):
+            return int(profiles.get(tier) or 0)
+        return 0
+    raise ValueError(f"unknown QoS0 quiescence counter: {key!r}")
+
+
+def _snapshot_quiescence_counters(stats: dict[str, Any], targets: dict[str, int]) -> dict[str, int]:
+    return {key: _read_quiescence_counter(stats, key) for key in targets}
+
+
+def _wait_for_qos0_authorization_quiescence(
+    scenario_id: str,
+    targets: dict[str, int],
+    *,
+    timeout_seconds: int,
+    read_stats: Callable[[], dict[str, Any]],
+    poll_interval_s: float = _QOS0_QUIESCENCE_POLL_INTERVAL_S,
+    now: Callable[[], float] = time.time,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    """Wait until cumulative authorizer counters reach their expected targets.
+
+    Polls the downstream authorizer until every ``targets`` counter has reached
+    (``>=``) its expected terminal value. A temporarily stable partial backlog
+    (for example 66, 66, 66 while 100 are expected) never counts as
+    quiescence: only reaching the expected target does. Once the target is
+    observed, one immediate confirmatory re-read guards against a torn
+    snapshot; cumulative counters cannot decrease, so a confirmed target is
+    terminal. There are no fixed sleeps and no workload retries: if the target
+    is not reached within ``timeout_seconds``, an explicit diagnostic error is
+    raised.
+    """
+    started_at = now()
+    polls = 0
+    observed: dict[str, int] = {}
+    while True:
+        observed = _snapshot_quiescence_counters(read_stats(), targets)
+        polls += 1
+        if all(observed[key] >= target for key, target in targets.items()):
+            confirmed = _snapshot_quiescence_counters(read_stats(), targets)
+            polls += 1
+            if all(confirmed[key] >= target for key, target in targets.items()):
+                return {
+                    "scenario_id": scenario_id,
+                    "targets": dict(targets),
+                    "observed": confirmed,
+                    "polls": polls,
+                    "elapsed_s": now() - started_at,
+                    "timeout_s": timeout_seconds,
+                }
+            observed = confirmed
+        elapsed_s = now() - started_at
+        if elapsed_s >= timeout_seconds:
+            pending = {
+                key: {"expected": target, "observed": observed.get(key, 0)}
+                for key, target in targets.items()
+                if observed.get(key, 0) < target
+            }
+            raise RuntimeError(
+                f"{scenario_id}: QoS0 authorization quiescence timeout: "
+                f"expected={targets} observed={observed} pending={pending} "
+                f"elapsed_s={elapsed_s:.1f} timeout_s={timeout_seconds}"
+            )
+        remaining_s = timeout_seconds - elapsed_s
+        sleep(min(poll_interval_s, remaining_s))
+
+
 def _run_loadgen(
     tokens: dict,
     host: str,
@@ -3472,10 +3652,8 @@ def _validate_result_contract(
 
     publish = result.get("publish")
     publish_count = int(publish.get("count") or 0) if isinstance(publish, dict) else 0
-    expected_publish_count = (
-        message_count
-        if scenario.get("traffic_pattern") == "fanout"
-        else message_count * client_count
+    expected_publish_count = _expected_publish_authorization_count(
+        scenario, message_count=message_count, client_count=client_count
     )
     http_failure_rate = scenario.get("http_failure_rate")
     outcomes_object = result.get("publish_outcomes")
@@ -9283,6 +9461,53 @@ def main(
                         "started_at": workload_started_at,
                         "finished_at": time.time(),
                     }
+                    # QoS0 post-workload quiescence barrier: at QoS 0 the
+                    # loadgen only flushed publishes to TCP, while the
+                    # single-threaded broker may still be draining them
+                    # through blocking HTTP authorization. Wait for the exact
+                    # downstream terminal targets before snapshotting any
+                    # cumulative broker/authorizer counters. QoS 1/2 carry a
+                    # PUBACK/PUBREC processing barrier already and skip this.
+                    # The resource window intentionally stays [started_at,
+                    # finished_at]: the drain is observation overhead, not
+                    # workload, so benchmark duration/throughput semantics are
+                    # unchanged.
+                    quiescence_targets = _qos0_quiescence_targets(
+                        s,
+                        message_count=scenario_messages,
+                        client_count=effective_client_count,
+                        qos=scenario_qos,
+                        qos_distribution=scenario_qos_distribution,
+                    )
+                    if quiescence_targets:
+                        quiescence_expected = _expected_publish_authorization_count(
+                            s,
+                            message_count=scenario_messages,
+                            client_count=effective_client_count,
+                        )
+                        quiescence_timeout_s = _qos0_quiescence_timeout_seconds(
+                            s,
+                            clients=effective_client_count,
+                            expected_count=quiescence_expected,
+                        )
+
+                        def _read_quiescence_stats(
+                            _authz_base: str = authz_base,
+                            _ca_file: str | None = scenario_tls_ca,
+                            _insecure: bool = tls_insecure,
+                        ) -> dict[str, Any]:
+                            return _authz_stats(
+                                _authz_base,
+                                ca_file=_ca_file,
+                                insecure=_insecure,
+                            )
+
+                        res["qos0_quiescence"] = _wait_for_qos0_authorization_quiescence(
+                            s["id"],
+                            quiescence_targets,
+                            timeout_seconds=quiescence_timeout_s,
+                            read_stats=_read_quiescence_stats,
+                        )
                     if attest_broker_auth:
                         broker_diagnostics_after = _broker_diagnostic_snapshot(
                             compose_files=compose_files,

@@ -15,10 +15,12 @@ benchmark datasets.
 - The suite contains **444 scenarios**: 222 base scenarios and 222 TLS variants.
 - Part 1 contains **3,222 planned runs**. It varies only workload axes that a
   scenario does not define itself.
-- Part 2 is the **axis-aware 32-scenario sweep**, comprising **1,530 planned
+- Part 2 is the **axis-aware 32-scenario sweep**, comprising **1,512 planned
   runs** across client count, message count, effective QoS, token-issuer
   configuration, and repetitions. Fixed-axis cohorts are run only over axes they
-  do not define themselves.
+  do not define themselves. The full matrix holds 22 scenarios at QoS 0/1/2;
+  `DYNAMIC-SECURITY-CHURN` runs in a dedicated 1-scenario cohort at QoS 1/2
+  only (QoS 0 denial is not client-observable).
 - The complete Part 1 and Part 2 matrices have **not** been run and semantically
   verified. Earlier minimal executions established startup and basic workload
   viability only.
@@ -157,6 +159,10 @@ continued after churn. Strict read-churn coverage is provided by the
 
 - `BASELINE-NO-AUTH` pins QoS 0 and `TOKEN-QOS2-{JWT|BISCUIT}` pins QoS 2.
   They remain in Part 2 for other sweep dimensions but are not QoS sweeps.
+- `DYNAMIC-SECURITY-CHURN` is restricted to QoS 1/2 by executable sweep
+  metadata and a runner guard. Its post-control denial is client-observable
+  as PUBACK rc135 (QoS 1) / PUBREC rc135 (QoS 2); at QoS 0 the denial has no
+  client-visible acknowledgement.
 - Fixed-workload stress and lifecycle/control scenarios intentionally define
   their own client or message axes and must be run as targeted slices described
   in `RUN.md`.

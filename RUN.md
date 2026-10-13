@@ -21,8 +21,8 @@ multiple functional categories. The run plan has two parts:
 | Part | What | Runs | Est. time |
 |------|------|------|-----------|
 | 1 | All 444 scenarios, varying every non-fixed workload axis, × 3 runs | 3,186 | ~3–5 days |
-| 2 | Axis-aware representative cohorts × 3 runs | 1,530 | ~2–4 days |
-| **Total** | | **4,716** | **~5–9 days** |
+| 2 | Axis-aware representative cohorts × 3 runs | 1,512 | ~2–4 days |
+| **Total** | | **4,698** | **~5–9 days** |
 
 ## Research Dimensions
 
@@ -36,7 +36,7 @@ Every lever below is pulled at least twice across the full plan.
 | TLS | Off, On | Off, On | `-TLS` suffix |
 | Client count | 10, 200 | 10, 50, 200 | `--clients` |
 | Message volume | 10, 100 | 10, 100 | `--messages` |
-| QoS | 1 (default) | 0, 1, 2 | `--qos` |
+| QoS | 1 (default) | 0, 1, 2 (churn cohort: 1, 2 only) | `--qos` |
 | Token issuer | Default | Default, Stripped | issuer cohort with roles/grants controls |
 
 Part 1 runs every scenario three times and varies each workload axis that the
@@ -50,14 +50,18 @@ cohort rather than being recorded against fixture credentials.
 ## Sweep Scenarios (Part 2)
 
 The executable `PART2_SWEEP_COHORTS` inventory is the source of truth. It contains
-32 registered scenarios partitioned by their effective workload axes:
+32 registered scenarios partitioned by their effective workload axes.
+`PART2_SWEEP_COHORT_QOS` and `PART2_SWEEP_COHORT_AXES` are the executable
+QoS/client/message contract: every cohort command below derives its QoS loop
+from that metadata instead of hard-coding `0 1 2`.
 
 | # | Category | Scenario 1 | Scenario 2 |
 |---|----------|------------|------------|
 | 1 | Baseline no-auth | `BASELINE-NO-AUTH` | — |
 | 2 | Token baseline | `TOKEN-BASELINE-JWT` | `TOKEN-BASELINE-BISCUIT` |
 | 3 | Static ACL | `STATIC-ACL-PUBLISH-JWT` | `STATIC-ACL-PUBLISH-BISCUIT` |
-| 4 | DynSec baseline | `DYNAMIC-SECURITY-BASELINE` | `DYNAMIC-SECURITY-CHURN` |
+| 4 | DynSec baseline | `DYNAMIC-SECURITY-BASELINE` | — |
+| 4b | DynSec churn (dedicated QoS 1/2 cohort) | `DYNAMIC-SECURITY-CHURN` | — |
 | 5 | HTTP profile simple | `HTTP-PROFILE-SIMPLE-JWT` | `HTTP-PROFILE-SIMPLE-BISCUIT` |
 | 6 | HTTP profile complex | `HTTP-PROFILE-COMPLEX-JWT` | `HTTP-PROFILE-COMPLEX-BISCUIT` |
 | 7 | HTTP latency | `HTTP-LATENCY-200MS-JWT` | `HTTP-LATENCY-1000MS-JWT` |
@@ -117,8 +121,47 @@ Part 2 omits axes that do not affect a scenario:
 - `BASELINE-NO-AUTH` and `TOKEN-QOS2-{JWT,BISCUIT}` omit the QoS loop.
 - `TOKEN-DENY-READ-JWT` and `TOKEN-ATTENUATED-DENY-BISCUIT` omit client and QoS loops.
 - `TOKEN-MQTT5-REAUTH-{JWT,BISCUIT}` run once per repetition.
+- `DYNAMIC-SECURITY-CHURN` runs only at QoS 1 and QoS 2 in its dedicated
+  `churn` cohort. Its `runtime_control_expect_denial` contract is only
+  client-observable at QoS 1 (PUBACK rc135 / NotAuthorized) and QoS 2 (PUBREC
+  rc135 / NotAuthorized). At QoS 0 Mosquitto denies the PUBLISH server-side
+  but there is no acknowledgement carrying the denial, so the result contract
+  is impossible to satisfy. The runner rejects `DYNAMIC-SECURITY-CHURN` with
+  `--qos 0` explicitly (`_validate_part2_qos_for_scenario`), and
+  `_validate_part2_sweep_inventory` rejects any placement of a
+  `runtime_control_expect_denial` scenario outside the `churn` cohort.
 
 The dedicated issuer cohort is the only cohort with a default/stripped issuance axis.
+
+Part 2 slot arithmetic (× 3 repetitions):
+
+- full matrix: 22 × 3 × 2 × 3 × 3 = 1,188
+- churn QoS 1/2: 1 × 3 × 2 × 2 × 3 = 36
+- fixed_qos: 3 × 3 × 2 × 1 × 3 = 54
+- fixed_clients_qos: 2 × 1 × 2 × 1 × 3 = 12
+- reauth: 2 × 1 × 1 × 1 × 3 = 6
+- issuer (× 2 default/stripped modes): 2 × 3 × 2 × 3 × 2 × 3 = 216
+- **Part 2 total = 1,512**
+
+Verify mechanically with:
+
+```bash
+cd mqtt-auth-biscuit && uv run --locked python -c \
+  'from benchmarks.run_scenarios import part2_expected_slot_total; print(part2_expected_slot_total())'
+# expected: 1512
+```
+
+## Part 2 provenance (frozen identity `770a0967b5295dd2c4708e8344241f564902fe7c`)
+
+- P2-01 under `770a096` remains accepted and reusable:
+  `results-p2-fixed-qos-c10-m10-r1` = 3 canonical slots.
+- P2-02 c10/m10/q0 r1 under `770a096` is FORFEIT/HOLD:
+  `results-quarantine-p2-770a096-matrix-c10-m10-q0-r1-HOLD-20261011T070707Z`.
+  Its 5 partial JSONs are diagnostic only and must never be spliced into a
+  canonical dataset.
+- q1/q2 CHURN qualification directories are noncanonical evidence only; they
+  support the QoS-axis diagnosis (observable PUBACK/PUBREC rc135 denial at
+  QoS 1/2, unobservable at QoS 0) but are not canonical Part 2 results.
 
 ## Prerequisites
 
@@ -271,21 +314,30 @@ done
 Every result records both requested and effective clients, messages, and QoS,
 plus whether each workload axis came from the CLI matrix or the scenario.
 
-### Step 3: Part 2 — Axis-aware parameter sweep (1,530 runs)
+### Step 3: Part 2 — Axis-aware parameter sweep (1,512 runs)
 
-Load the validated executable cohorts:
+Load the validated executable cohorts (including the dedicated `churn` cohort
+and its machine-readable QoS levels):
 
 ```bash
 readarray -t PART2_COHORTS < <(cd mqtt-auth-biscuit && uv run --locked python -c '
 from benchmarks.run_scenarios import PART2_SWEEP_COHORTS
-for name in ("matrix", "fixed_qos", "fixed_clients_qos", "reauth", "issuer"):
+for name in ("matrix", "churn", "fixed_qos", "fixed_clients_qos", "reauth", "issuer"):
     print(",".join(PART2_SWEEP_COHORTS[name]))
 ')
 MATRIX_SCENARIOS=${PART2_COHORTS[0]}
-FIXED_QOS_SCENARIOS=${PART2_COHORTS[1]}
-FIXED_CLIENTS_QOS_SCENARIOS=${PART2_COHORTS[2]}
-REAUTH_SCENARIOS=${PART2_COHORTS[3]}
-ISSUER_SCENARIOS=${PART2_COHORTS[4]}
+CHURN_SCENARIOS=${PART2_COHORTS[1]}
+FIXED_QOS_SCENARIOS=${PART2_COHORTS[2]}
+FIXED_CLIENTS_QOS_SCENARIOS=${PART2_COHORTS[3]}
+REAUTH_SCENARIOS=${PART2_COHORTS[4]}
+ISSUER_SCENARIOS=${PART2_COHORTS[5]}
+readarray -t PART2_QOS_LEVELS < <(cd mqtt-auth-biscuit && uv run --locked python -c '
+from benchmarks.run_scenarios import PART2_SWEEP_COHORT_QOS
+for name in ("matrix", "churn", "fixed_qos", "fixed_clients_qos", "reauth", "issuer"):
+    print(" ".join(map(str, PART2_SWEEP_COHORT_QOS[name])))
+')
+MATRIX_QOS=${PART2_QOS_LEVELS[0]}
+CHURN_QOS=${PART2_QOS_LEVELS[1]}
 ```
 
 Run the fixed-workload stress scenarios separately with explicit targeted
@@ -340,7 +392,7 @@ SQLITE-RBAC-CHURN-JWT,SQLITE-RBAC-CHURN-BISCUIT \
 ```
 
 Run each cohort only across its effective axes. The ordinary cohorts contribute
-1,314 runs and the issuer-backed default/stripped cohort contributes 216 runs:
+1,296 runs and the issuer-backed default/stripped cohort contributes 216 runs:
 
 ```bash
 run_p2() {
@@ -355,9 +407,13 @@ run_p2() {
 for run in 1 2 3; do
   for clients in 10 50 200; do
     for messages in 10 100; do
-      for qos in 0 1 2; do
+      for qos in $MATRIX_QOS; do
         run_p2 "matrix-c${clients}-m${messages}-q${qos}-r${run}" \
           "$MATRIX_SCENARIOS" "$clients" "$messages" "$qos"
+      done
+      for qos in $CHURN_QOS; do
+        run_p2 "churn-c${clients}-m${messages}-q${qos}-r${run}" \
+          "$CHURN_SCENARIOS" "$clients" "$messages" "$qos"
       done
       run_p2 "fixed-qos-c${clients}-m${messages}-r${run}" \
         "$FIXED_QOS_SCENARIOS" "$clients" "$messages" 1
@@ -427,8 +483,8 @@ scenarios run once per repetition.
 | Component | Planned scenario-runs | Estimated time |
 |-----------|----------------------:|---------------:|
 | Part 1 | 3,186 | ~3–5 days |
-| Part 2 | 1,530 | ~2–4 days |
-| **Total** | **4,716** | **~5–9 days** |
+| Part 2 | 1,512 | ~2–4 days |
+| **Total** | **4,698** | **~5–9 days** |
 
 These are planning estimates, not performance results. Plan for overnight and
 weekend runs and preserve each invocation's output separately.
@@ -449,7 +505,11 @@ for d in mqtt-auth-biscuit/benchmarks/results-p1-*/; do
 done
 echo "Part 1 total: $total / 3186"
 
-# Part 2: expect 32 JSON files per sweep run
+# Part 2: each cohort directory contains only its cohort. Matrix directories
+# contain 22 JSON files, churn directories contain 1 JSON file, fixed_qos
+# directories contain 3, fixed_clients_qos directories contain 2, reauth
+# directories contain 2, and issuer directories contain 1 (per kind/mode cell).
+# Across all Part 2 directories, expect 1,512 non-summary scenario JSON files.
 for d in mqtt-auth-biscuit/benchmarks/results-p2-*/; do
   count=$(find "$d" -maxdepth 1 -type f -name '*.json' \
     ! -name 'summary.json' | wc -l)

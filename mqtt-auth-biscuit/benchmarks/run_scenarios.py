@@ -186,6 +186,15 @@ STRICT_FANOUT_PARITY_POLICY_SOURCES = frozenset({"http", "hybrid"})
 # Part 2 is intentionally split by effective workload axes.  Keep this inventory
 # executable: RUN.md obtains the comma-separated groups from this mapping instead
 # of maintaining a second, easily-stale list.
+#
+# DYNAMIC-SECURITY-CHURN is intentionally NOT in ``matrix``.  Its
+# ``runtime_control_expect_denial`` contract is only client-observable at
+# QoS 1 (PUBACK rc135) and QoS 2 (PUBREC rc135); at QoS 0 Mosquitto denies
+# the PUBLISH server-side but there is no acknowledgement carrying the
+# denial, so the frozen result contract is impossible to satisfy.  The
+# dedicated ``churn`` cohort below is the only executable home for that
+# scenario and its allowed QoS subset is machine-readable in
+# ``PART2_SWEEP_COHORT_QOS``.
 PART2_SWEEP_COHORTS: dict[str, tuple[str, ...]] = {
     "matrix": (
         "TOKEN-BASELINE-JWT",
@@ -193,7 +202,6 @@ PART2_SWEEP_COHORTS: dict[str, tuple[str, ...]] = {
         "STATIC-ACL-PUBLISH-JWT",
         "STATIC-ACL-PUBLISH-BISCUIT",
         "DYNAMIC-SECURITY-BASELINE",
-        "DYNAMIC-SECURITY-CHURN",
         "HTTP-PROFILE-SIMPLE-JWT",
         "HTTP-PROFILE-SIMPLE-BISCUIT",
         "HTTP-PROFILE-COMPLEX-JWT",
@@ -212,16 +220,77 @@ PART2_SWEEP_COHORTS: dict[str, tuple[str, ...]] = {
         "TOKEN-THUNDERING-HERD-JWT",
         "TOKEN-THUNDERING-HERD-BISCUIT",
     ),
+    "churn": ("DYNAMIC-SECURITY-CHURN",),
     "fixed_qos": ("BASELINE-NO-AUTH", "TOKEN-QOS2-JWT", "TOKEN-QOS2-BISCUIT"),
     "fixed_clients_qos": ("TOKEN-DENY-READ-JWT", "TOKEN-ATTENUATED-DENY-BISCUIT"),
     "reauth": ("TOKEN-MQTT5-REAUTH-JWT", "TOKEN-MQTT5-REAUTH-BISCUIT"),
     "issuer": ("TOKEN-ISSUER-BASELINE-JWT", "TOKEN-ISSUER-BASELINE-BISCUIT"),
 }
 
+# Explicit allowed QoS subset per executable Part 2 cohort.  This is the
+# machine-readable sweep contract: RUN.md derives its QoS loops from this
+# mapping instead of hard-coding ``0 1 2`` for every cohort, so the invalid
+# CHURN+q0 combination cannot be produced by the documented commands.
+PART2_SWEEP_COHORT_QOS: dict[str, tuple[int, ...]] = {
+    "matrix": (0, 1, 2),
+    "churn": (1, 2),
+    "fixed_qos": (1,),
+    "fixed_clients_qos": (1,),
+    "reauth": (1,),
+    "issuer": (0, 1, 2),
+}
+
+# Explicit client/message sweep levels per executable Part 2 cohort.  The
+# issuer cohort has an additional default/stripped issuance axis (factor 2)
+# applied by RUN.md; see ``part2_expected_slot_total``.
+PART2_SWEEP_COHORT_AXES: dict[str, dict[str, tuple[int, ...]]] = {
+    "matrix": {"clients": (10, 50, 200), "messages": (10, 100), "qos": (0, 1, 2)},
+    "churn": {"clients": (10, 50, 200), "messages": (10, 100), "qos": (1, 2)},
+    "fixed_qos": {"clients": (10, 50, 200), "messages": (10, 100), "qos": (1,)},
+    "fixed_clients_qos": {"clients": (10,), "messages": (10, 100), "qos": (1,)},
+    "reauth": {"clients": (1,), "messages": (1,), "qos": (1,)},
+    "issuer": {"clients": (10, 50, 200), "messages": (10, 100), "qos": (0, 1, 2)},
+}
+
+PART2_ISSUER_MODES_PER_CELL = 2
+
+
+def part2_allowed_qos(cohort: str) -> tuple[int, ...]:
+    """Return the executable QoS levels for a Part 2 cohort."""
+    try:
+        return PART2_SWEEP_COHORT_QOS[cohort]
+    except KeyError as exc:
+        raise ValueError(f"Unknown Part 2 cohort: {cohort}") from exc
+
+
+def part2_expected_slot_total(*, repetitions: int = 3) -> int:
+    """Mechanically validated Part 2 slot count (scenario-runs per repetition set)."""
+    total = 0
+    for cohort, scenario_ids in PART2_SWEEP_COHORTS.items():
+        axes = PART2_SWEEP_COHORT_AXES[cohort]
+        cells = len(scenario_ids) * len(axes["clients"]) * len(axes["messages"]) * len(axes["qos"])
+        if cohort == "issuer":
+            cells *= PART2_ISSUER_MODES_PER_CELL
+        total += cells
+    return total * repetitions
+
+
+def _validate_part2_qos_for_scenario(scenario_id: str, scenario: ScenarioConfig, qos: int) -> None:
+    """Reject the structurally invalid CHURN+q0 combination at execution time."""
+    if scenario.get("runtime_control_expect_denial") and qos == 0:
+        raise RuntimeError(
+            f"{scenario_id}: runtime_control_expect_denial is not client-observable "
+            "at QoS 0 (no PUBACK/PUBREC carries the denial); use QoS 1 or 2"
+        )
+
 
 def _validate_part2_sweep_inventory(scenarios: dict[str, ScenarioConfig]) -> None:
     seen: set[str] = set()
     for cohort, scenario_ids in PART2_SWEEP_COHORTS.items():
+        if cohort not in PART2_SWEEP_COHORT_QOS:
+            raise ValueError(f"Part 2 cohort has no allowed QoS metadata: {cohort}")
+        if cohort not in PART2_SWEEP_COHORT_AXES:
+            raise ValueError(f"Part 2 cohort has no sweep axes metadata: {cohort}")
         for scenario_id in scenario_ids:
             if scenario_id in seen:
                 raise ValueError(f"Part 2 scenario is duplicated: {scenario_id}")
@@ -231,8 +300,20 @@ def _validate_part2_sweep_inventory(scenarios: dict[str, ScenarioConfig]) -> Non
                 raise ValueError(f"Part 2 {cohort} scenario is not registered: {scenario_id}")
             fixed_qos = "qos" in scenario or scenario.get("mqtt5_auth") is not None
             fixed_clients = "client_count" in scenario or "subscriber_count" in scenario
+            expect_denial = bool(scenario.get("runtime_control_expect_denial"))
+            if expect_denial and cohort != "churn":
+                raise ValueError(
+                    f"Part 2 {cohort} scenario requires the dedicated churn cohort: {scenario_id}"
+                )
             if cohort in {"matrix", "issuer"} and (fixed_qos or fixed_clients):
                 raise ValueError(f"Part 2 {cohort} scenario has a fixed sweep axis: {scenario_id}")
+            if cohort == "churn":
+                if fixed_qos or fixed_clients:
+                    raise ValueError(f"Part 2 churn scenario has a fixed sweep axis: {scenario_id}")
+                if not expect_denial:
+                    raise ValueError(f"Part 2 churn scenario does not expect denial: {scenario_id}")
+                if PART2_SWEEP_COHORT_QOS[cohort] != (1, 2):
+                    raise ValueError("Part 2 churn cohort must allow exactly QoS {1, 2}")
             if cohort == "fixed_qos" and (not fixed_qos or fixed_clients):
                 raise ValueError(f"Part 2 fixed_qos scenario has the wrong shape: {scenario_id}")
             if cohort == "fixed_clients_qos" and (not fixed_qos or not fixed_clients):
@@ -8682,6 +8763,7 @@ def main(
             )
             scenario_qos = s.get("qos", qos)
             scenario_qos_distribution = s.get("qos_distribution", qos_distribution)
+            _validate_part2_qos_for_scenario(s["id"], s, scenario_qos)
             scenario_workload_shape = _scenario_workload_shape(s)
             if scenario_messages > configured_messages:
                 logger.info(

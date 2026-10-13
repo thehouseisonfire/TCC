@@ -400,12 +400,18 @@ an explicit exclusion record.
 
 ## Phase 7 — Part 2 parameter sweep
 
-Goal: execute and verify all 1,530 scenario runs in the axis-aware Part 2 sweep.
+Goal: execute and verify all 1,512 scenario runs in the axis-aware Part 2 sweep.
 
-Execute Step 3 of `RUN.md`: three client levels × two message levels × three QoS
-levels × two issuer configurations × three repetitions. Remember that
+Execute Step 3 of `RUN.md`: the full matrix cohort runs three client levels ×
+two message levels × three QoS levels; the dedicated churn cohort runs the same
+client/message levels at QoS 1 and QoS 2 only; fixed-axis cohorts run only over
+axes they do not define; the issuer cohort adds default/stripped issuance
+modes; all × three repetitions. Remember that
 `BASELINE-NO-AUTH` pins QoS 0 and `TOKEN-QOS2-{JWT|BISCUIT}` pins QoS 2; verify
-their other axes but do not describe them as QoS sweeps.
+their other axes but do not describe them as QoS sweeps. Remember that
+`DYNAMIC-SECURITY-CHURN` is excluded from QoS 0 by executable sweep metadata
+(`PART2_SWEEP_COHORT_QOS`) and by a runner guard: its post-control denial is
+only client-observable at QoS 1/2.
 
 For every cell, confirm:
 
@@ -418,18 +424,20 @@ For every cell, confirm:
 - only performance/resource measurements—not the selected path or policy
   result—change with load.
 
-Review/fix gate: review all 32 raw results and their available repetitions at
+Review/fix gate: review every cohort result and its available repetitions at
 the end of each sweep cell. Resolve or block that cell before changing clients,
 messages, QoS, or issuer configuration.
 
-Exit gate: all 108 sweep invocations contain 32 reviewed scenario results, for
-1,530 contract-valid scenario runs in total.
+Exit gate: all Part 2 sweep invocations are reviewed per cohort (matrix: 22
+scenarios per cell; churn: 1 scenario per QoS 1/2 cell; fixed_qos: 3;
+fixed_clients_qos: 2; reauth: 2; issuer: 1 per kind/mode cell), for
+1,512 contract-valid scenario runs in total.
 
 ## Phase 8 — Final completeness and sign-off
 
 Goal: produce an auditable statement of exactly what can be used in analysis.
 
-1. Count results as described in `RUN.md`: 3,186 Part 1 scenario runs and 1,530
+1. Count results as described in `RUN.md`: 3,186 Part 1 scenario runs and 1,512
    Part 2 scenario runs.
 2. Compare result scenario IDs against the frozen Phase 0 inventory and the
    expected matrix cells. Detect missing, duplicate, stale, and extra files.

@@ -1944,6 +1944,19 @@ def _qos0_quiescence_targets(
     return {}
 
 
+#: Conservative per-request service allowance for HTTP-backed authorization
+#: drain, applied even when no PDP delay is configured. A zero-delay profile
+#: or hybrid-fallback authorization still costs a localhost HTTP round trip,
+#: rule evaluation, and single-threaded broker dispatch per publish; the
+#: c10/m10 qualification observed roughly 1 ms per authorization, so 0.5 s
+#: keeps more than two orders of magnitude of margin for complex profiles and
+#: loaded CI hardware. The plugin's own per-request HTTP failure timeout
+#: (default 2 s) is deliberately not reused here: hitting it means the
+#: authorizer is wedged rather than draining, and scaling a failure ceiling by
+#: the full message count would only delay reporting a genuinely broken run.
+_QOS0_QUIESCENCE_PER_REQUEST_ALLOWANCE_S = 0.5
+
+
 def _qos0_quiescence_timeout_seconds(
     scenario: ScenarioConfig, *, clients: int, expected_count: int
 ) -> int:
@@ -1951,18 +1964,21 @@ def _qos0_quiescence_timeout_seconds(
 
     Reuses the same delay sources as ``_publish_timeout_seconds`` (the
     measured ``http_expected_delay_ms`` variable or the explicit
-    ``http_timeout_budget_delay_ms`` metadata), but scales by the total
-    expected authorization count instead of the client count: after a QoS0
-    loadgen flush, the single-threaded broker may still have to drain every
-    already-issued publish through blocking HTTP authorization (for example
-    100 publishes x 1000 ms). The existing per-operation headroom and base
-    timeout are kept as a floor. The barrier returns as soon as the target is
-    reached; this budget only bounds genuine observation failures.
+    ``http_timeout_budget_delay_ms`` metadata), plus a conservative
+    per-request service allowance so zero-delay HTTP-backed cells scale with
+    the expected authorization count instead of inheriting a flat bound: after
+    a QoS0 loadgen flush, the single-threaded broker may still have to drain
+    on the order of the full expected publish count through blocking HTTP
+    authorization (for example 100 publishes x 1000 ms, or 20,000 zero-delay
+    profile authorizations at c200/m100). The existing per-operation headroom
+    and base timeout are kept as a floor. The barrier returns as soon as the
+    target is reached; this budget only bounds genuine observation failures.
     """
     delay_ms = scenario.get("http_expected_delay_ms") or 0
     if delay_ms <= 0:
         delay_ms = scenario.get("http_timeout_budget_delay_ms") or 0
-    drain_budget_s = math.ceil(expected_count * (float(delay_ms) / 1000.0))
+    per_request_s = (float(delay_ms) / 1000.0) + _QOS0_QUIESCENCE_PER_REQUEST_ALLOWANCE_S
+    drain_budget_s = math.ceil(expected_count * per_request_s)
     drain_budget_s += PUBLISH_TIMEOUT_HEADROOM_S
     return max(_publish_timeout_seconds(scenario, clients), drain_budget_s)
 
@@ -2012,9 +2028,12 @@ def _wait_for_qos0_authorization_quiescence(
     started_at = now()
     polls = 0
     observed: dict[str, int] = {}
+    started_observed: dict[str, int] | None = None
     while True:
         observed = _snapshot_quiescence_counters(read_stats(), targets)
         polls += 1
+        if started_observed is None:
+            started_observed = dict(observed)
         if all(observed[key] >= target for key, target in targets.items()):
             confirmed = _snapshot_quiescence_counters(read_stats(), targets)
             polls += 1
@@ -2022,6 +2041,7 @@ def _wait_for_qos0_authorization_quiescence(
                 return {
                     "scenario_id": scenario_id,
                     "targets": dict(targets),
+                    "started_observed": started_observed,
                     "observed": confirmed,
                     "polls": polls,
                     "elapsed_s": now() - started_at,
@@ -2038,6 +2058,7 @@ def _wait_for_qos0_authorization_quiescence(
             raise RuntimeError(
                 f"{scenario_id}: QoS0 authorization quiescence timeout: "
                 f"expected={targets} observed={observed} pending={pending} "
+                f"started={started_observed} "
                 f"elapsed_s={elapsed_s:.1f} timeout_s={timeout_seconds}"
             )
         remaining_s = timeout_seconds - elapsed_s
@@ -3599,6 +3620,18 @@ def _validate_credential_freshness(
     }
 
 
+def _unexpected_result_errors(scenario: ScenarioConfig, result: dict[str, Any]) -> list[str]:
+    """Loadgen errors not covered by the scenario's allowed-error prefixes.
+
+    Shared by the result contract and the QoS0 quiescence barrier entry check
+    so both apply the identical predicate: a run that would fail the contract
+    on loadgen errors must not burn the full downstream drain ceiling first.
+    """
+    errors = [str(error) for error in result.get("errors", [])]
+    allowed_prefixes = tuple(scenario.get("allowed_error_prefixes", []))
+    return [error for error in errors if not error.startswith(allowed_prefixes)]
+
+
 #: Expected Biscuit chain depth per chain_length complexity tier. Every
 #: registered chain_length scenario must declare one of these levels; an
 #: unknown or missing level is a definition error, never a silent default.
@@ -3615,9 +3648,7 @@ def _validate_result_contract(
     effective_qos_distribution: str | None = None,
 ) -> None:
     scenario_id = scenario["id"]
-    errors = [str(error) for error in result.get("errors", [])]
-    allowed_prefixes = tuple(scenario.get("allowed_error_prefixes", []))
-    unexpected_errors = [error for error in errors if not error.startswith(allowed_prefixes)]
+    unexpected_errors = _unexpected_result_errors(scenario, result)
     if unexpected_errors:
         raise RuntimeError(f"{scenario_id}: loadgen errors: {', '.join(unexpected_errors[:5])}")
 
@@ -3737,6 +3768,7 @@ def _validate_result_contract(
         allows = int(stats.get("policy_allows") or 0)
         denies = int(stats.get("policy_denies") or 0)
         expected_failures = math.floor(expected_publish_count * float(http_failure_rate) + 1e-12)
+        errors = [str(error) for error in result.get("errors", [])]
         publish_errors = [error for error in errors if error.startswith("publish_failed:")]
         if (
             requests != expected_publish_count
@@ -9480,6 +9512,20 @@ def main(
                         qos_distribution=scenario_qos_distribution,
                     )
                     if quiescence_targets:
+                        # Fail fast on loadgen-side shortfall: the merged result
+                        # already carries every worker error, and the contract
+                        # would reject unexpected ones right after the barrier.
+                        # Waiting out the full drain ceiling first would only
+                        # mask the true failure as a downstream timeout.
+                        quiescence_blockers = _unexpected_result_errors(s, res)
+                        if quiescence_blockers:
+                            raise RuntimeError(
+                                f"{s['id']}: loadgen reported "
+                                f"{len(quiescence_blockers)} unexpected error(s) "
+                                "before QoS0 quiescence barrier; skipping "
+                                "downstream wait: "
+                                f"{', '.join(quiescence_blockers[:5])}"
+                            )
                         quiescence_expected = _expected_publish_authorization_count(
                             s,
                             message_count=scenario_messages,

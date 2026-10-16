@@ -106,6 +106,11 @@ def test_qos0_barrier_waits_for_expected_target_before_snapshot() -> None:
     assert outcome["observed"]["profile:simple"] == 100
     assert outcome["observed"]["requests"] == 100
     assert outcome["observed"]["policy_allows"] == 100
+    assert outcome["started_observed"] == {
+        "requests": 32,
+        "profile:simple": 32,
+        "policy_allows": 32,
+    }
     assert outcome["targets"] == targets
     assert reader.reads == 6
 
@@ -177,6 +182,8 @@ def test_timeout_below_target_fails_with_clear_diagnostic() -> None:
     assert "HTTP-PROFILE-SIMPLE-BISCUIT" in message
     assert "expected" in message
     assert "observed" in message
+    assert "started=" in message
+    assert "'profile:simple': 66" in message
     assert "elapsed_s" in message
     assert "timeout_s=10" in message
     assert "66" in message
@@ -243,14 +250,72 @@ def test_http_latency_scenarios_use_correct_expected_target(scenario_id: str) ->
     }
 
 
+def _timeout(
+    scenario_id: str, *, clients: int, messages: int, expected_count: int | None = None
+) -> int:
+    scenario = _scenario_registry()[scenario_id]
+    return rs._qos0_quiescence_timeout_seconds(
+        scenario,
+        clients=clients,
+        expected_count=messages * clients if expected_count is None else expected_count,
+    )
+
+
+@pytest.mark.parametrize(
+    ("scenario_id", "clients", "messages", "expected_timeout"),
+    (
+        ("HTTP-PROFILE-SIMPLE-BISCUIT", 10, 10, 65),
+        ("HTTP-PROFILE-SIMPLE-BISCUIT", 10, 100, 515),
+        ("HTTP-PROFILE-SIMPLE-BISCUIT", 50, 10, 265),
+        ("HTTP-PROFILE-SIMPLE-BISCUIT", 50, 100, 2515),
+        ("HTTP-PROFILE-SIMPLE-BISCUIT", 200, 10, 1015),
+        ("HTTP-PROFILE-SIMPLE-BISCUIT", 200, 100, 10015),
+        ("HTTP-PROFILE-COMPLEX-JWT", 200, 100, 10015),
+        ("HTTP-LATENCY-200MS-JWT", 10, 10, 85),
+        ("HTTP-LATENCY-200MS-JWT", 200, 100, 14015),
+        ("HTTP-LATENCY-1000MS-JWT", 10, 10, 165),
+        ("HTTP-LATENCY-1000MS-JWT", 200, 100, 30015),
+        ("HYBRID-FALLBACK-AUTHZ-DOWN-JWT", 10, 10, 65),
+        ("HYBRID-FALLBACK-AUTHZ-DOWN-JWT", 200, 100, 10015),
+    ),
+)
+def test_qos0_timeout_scales_with_expected_downstream_work(
+    scenario_id: str, clients: int, messages: int, expected_timeout: int
+) -> None:
+    assert _timeout(scenario_id, clients=clients, messages=messages) == expected_timeout
+
+
+def test_qos0_timeout_grows_with_expected_work_not_clients_alone() -> None:
+    scenarios = _scenario_registry()
+    profile = scenarios["HTTP-PROFILE-SIMPLE-BISCUIT"]
+    small = rs._qos0_quiescence_timeout_seconds(profile, clients=10, expected_count=100)
+    large = rs._qos0_quiescence_timeout_seconds(profile, clients=200, expected_count=20000)
+    assert large > small
+    assert large > 15
+    assert small >= rs._publish_timeout_seconds(profile, 10)
+    assert large >= rs._publish_timeout_seconds(profile, 200)
+
+
+def test_qos0_timeout_configured_delay_contributes() -> None:
+    scenarios = _scenario_registry()
+    profile_timeout = rs._qos0_quiescence_timeout_seconds(
+        scenarios["HTTP-PROFILE-SIMPLE-JWT"], clients=10, expected_count=100
+    )
+    latency_timeout = rs._qos0_quiescence_timeout_seconds(
+        scenarios["HTTP-LATENCY-1000MS-JWT"], clients=10, expected_count=100
+    )
+    assert latency_timeout > profile_timeout
+    assert latency_timeout == 165
+
+
 def test_qos0_timeout_covers_full_blocking_http_drain() -> None:
     scenarios = _scenario_registry()
     latency_1000 = scenarios["HTTP-LATENCY-1000MS-JWT"]
     timeout_s = rs._qos0_quiescence_timeout_seconds(latency_1000, clients=10, expected_count=100)
-    assert timeout_s == 115
+    assert timeout_s == 165
     assert timeout_s >= rs._publish_timeout_seconds(latency_1000, 10)
     latency_200 = scenarios["HTTP-LATENCY-200MS-JWT"]
-    assert rs._qos0_quiescence_timeout_seconds(latency_200, clients=10, expected_count=100) == 35
+    assert rs._qos0_quiescence_timeout_seconds(latency_200, clients=10, expected_count=100) == 85
     profile = scenarios["HTTP-PROFILE-SIMPLE-BISCUIT"]
     assert rs._qos0_quiescence_timeout_seconds(
         profile, clients=10, expected_count=100
@@ -344,3 +409,34 @@ def test_no_expected_count_is_weakened() -> None:
 def test_part2_total_remains_1512() -> None:
     assert rs.part2_expected_slot_total() == 1512
     assert rs.part2_expected_slot_total(repetitions=3) == 1512
+
+
+def test_unexpected_result_errors_predicate() -> None:
+    assert rs._unexpected_result_errors({"id": "X"}, {"errors": []}) == []
+    assert rs._unexpected_result_errors({"id": "X"}, {"errors": ["boom", "bam"]}) == [
+        "boom",
+        "bam",
+    ]
+    scenario: rs.ScenarioConfig = {"id": "X", "allowed_error_prefixes": ["publish_failed:"]}
+    assert (
+        rs._unexpected_result_errors(scenario, {"errors": ["publish_failed:1", "publish_failed:2"]})
+        == []
+    )
+    assert rs._unexpected_result_errors(scenario, {"errors": ["publish_failed:1", "other"]}) == [
+        "other"
+    ]
+
+
+def test_barrier_entry_check_matches_contract_error_predicate() -> None:
+    scenario: rs.ScenarioConfig = {
+        "id": "HTTP-PROFILE-SIMPLE-BISCUIT",
+        "complexity_axis": "http_profile",
+        "complexity_level": "simple",
+    }
+    result = _converged_http_profile_result(100)
+    result["errors"] = ["loadgen_container_x_failed"]
+    assert rs._unexpected_result_errors(scenario, result) == ["loadgen_container_x_failed"]
+    with pytest.raises(RuntimeError, match="loadgen errors"):
+        rs._validate_result_contract(
+            scenario, result, message_count=10, client_count=10, effective_qos=0
+        )

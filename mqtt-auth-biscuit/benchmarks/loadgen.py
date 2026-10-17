@@ -112,6 +112,11 @@ def _rust_loadgen_cmd(
     sync_connect_participant_id: str | None = None,
     sync_connect_participants: int | None = None,
     sync_connect_barrier_timeout_seconds: int | None = None,
+    sync_connect_publish_barrier_url: str | None = None,
+    sync_connect_publish_run_id: str | None = None,
+    sync_connect_publish_participant_id: str | None = None,
+    sync_connect_publish_participants: int | None = None,
+    sync_connect_publish_barrier_timeout_seconds: int | None = None,
 ) -> list[str]:
     cmd = [
         *_resolve_rust_helper("mqtt-loadgen"),
@@ -167,6 +172,21 @@ def _rust_loadgen_cmd(
             [
                 "--sync-connect-barrier-timeout-seconds",
                 str(sync_connect_barrier_timeout_seconds),
+            ]
+        )
+    if sync_connect_publish_barrier_url:
+        cmd.extend(["--sync-connect-publish-barrier-url", sync_connect_publish_barrier_url])
+    if sync_connect_publish_run_id:
+        cmd.extend(["--sync-connect-publish-run-id", sync_connect_publish_run_id])
+    if sync_connect_publish_participant_id:
+        cmd.extend(["--sync-connect-publish-participant-id", sync_connect_publish_participant_id])
+    if sync_connect_publish_participants is not None:
+        cmd.extend(["--sync-connect-publish-participants", str(sync_connect_publish_participants)])
+    if sync_connect_publish_barrier_timeout_seconds is not None:
+        cmd.extend(
+            [
+                "--sync-connect-publish-barrier-timeout-seconds",
+                str(sync_connect_publish_barrier_timeout_seconds),
             ]
         )
     if fanout_publisher_username:

@@ -2670,6 +2670,38 @@ def _sync_barrier_run_id(scenario_id: str, run_index: int) -> str:
     return f"{scenario}-{run_index + 1}-{time.time_ns()}-{uuid.uuid4().hex[:8]}"
 
 
+def _sync_connect_publish_barrier_run_id(scenario_id: str, run_index: int) -> str:
+    # The publish phase reuses the connect barrier's identifiers but must be a
+    # distinct run id so the sync-barrier service tracks two independent
+    # readiness sets (connect-start vs. post-CONNACK publish release).
+    return f"{_sync_barrier_run_id(scenario_id, run_index)}-publish"
+
+
+def _append_sync_connect_publish_barrier_args(
+    args: list[str],
+    *,
+    run_id: str,
+    participant_id: str,
+    participants: int,
+) -> list[str]:
+    updated = list(args)
+    updated.extend(
+        [
+            "--sync-connect-publish-barrier-url",
+            SYNC_BARRIER_CONTAINER_URL,
+            "--sync-connect-publish-run-id",
+            run_id,
+            "--sync-connect-publish-participant-id",
+            participant_id,
+            "--sync-connect-publish-participants",
+            str(participants),
+            "--sync-connect-publish-barrier-timeout-seconds",
+            str(SYNC_BARRIER_TIMEOUT_SECONDS),
+        ]
+    )
+    return updated
+
+
 def _ensure_sync_barrier_service(
     *,
     compose_files: list[str] | None,
@@ -2714,12 +2746,38 @@ def _sync_barrier_status(run_id: str) -> dict[str, Any] | None:
         return None
 
 
+def _loadgen_errors_from_stdout(stdout: str) -> list[str]:
+    try:
+        payload = _loads_json_from_compose_stdout(stdout)
+    except RuntimeError:
+        return []
+    errors = payload.get("errors")
+    if not isinstance(errors, list):
+        return []
+    return [str(err) for err in errors]
+
+
+def _sync_barrier_participant_exit_message(phase: str, exited: list[dict[str, Any]]) -> str:
+    if phase == "publish":
+        detail = "; ".join(
+            f"{entry['container']} (exit {entry['returncode']}): "
+            f"{entry['errors'] or entry['stderr'].strip() or 'no diagnostics'}"
+            for entry in exited
+        )
+        return (
+            "sync_connect participant failed to reach the publish barrier after CONNACK; "
+            f"treating as a connect failure: {detail}"
+        )
+    return f"sync barrier participant exited before release: {exited}"
+
+
 def _wait_for_sync_barrier_ready(
     run_id: str,
     *,
     participants: int,
     processes: list[tuple[str, subprocess.Popen[str]]],
     timeout_seconds: float = float(SYNC_BARRIER_TIMEOUT_SECONDS),
+    phase: str = "connect",
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_seconds
     last_status: dict[str, Any] | None = None
@@ -2735,10 +2793,11 @@ def _wait_for_sync_barrier_ready(
                     "returncode": process.returncode,
                     "stdout": stdout[-4000:],
                     "stderr": stderr[-4000:],
+                    "errors": _loadgen_errors_from_stdout(stdout),
                 }
             )
         if exited:
-            raise RuntimeError(f"sync barrier participant exited before release: {exited}")
+            raise RuntimeError(_sync_barrier_participant_exit_message(phase, exited))
         status = _sync_barrier_status(run_id)
         if status is not None:
             last_status = status
@@ -2746,7 +2805,7 @@ def _wait_for_sync_barrier_ready(
                 return status
         time.sleep(0.1)
     raise RuntimeError(
-        f"timed out waiting for sync barrier readiness for run {run_id}: {last_status}"
+        f"timed out waiting for sync barrier {phase} readiness for run {run_id}: {last_status}"
     )
 
 
@@ -3037,6 +3096,7 @@ def _merge_per_client_loadgen_results(
         "control_response",
         "control_injection_delay",
         "sync_connect_barrier_wait",
+        "sync_publish_barrier_wait",
     ):
         merged[metric] = _merge_latency_summary(results, metric)
     merged["publish"] = _summary_from_values(publish_values)
@@ -3063,6 +3123,7 @@ def _merge_per_client_loadgen_results(
             "control_response",
             "control_injection_delay",
             "sync_connect_barrier_wait",
+            "sync_publish_barrier_wait",
         )
     }
     merged["errors"] = errors
@@ -3318,6 +3379,16 @@ def _validate_thundering_herd_result(
         or sync.get("errors")
     ):
         raise RuntimeError(f"{scenario_id}: synchronized connection barrier contract failed")
+    publish = sync.get("publish_barrier")
+    if (
+        not isinstance(publish, dict)
+        or publish.get("barrier") not in {"external", "in_process"}
+        or int(publish.get("participants") or 0) != client_count
+        or int(publish.get("ready_count") or 0) != client_count
+        or not isinstance(publish.get("max_ready_skew_ms"), int | float)
+        or publish.get("errors")
+    ):
+        raise RuntimeError(f"{scenario_id}: synchronized publish-release barrier contract failed")
     if require_restart and (
         not isinstance(restart, dict)
         or restart.get("completed") is not True
@@ -4441,12 +4512,19 @@ def _run_loadgen_container_per_client(
     env = os.environ.copy()
     env.update(extra_env)
     barrier_run_id = _sync_barrier_run_id(scenario_id, run_index) if sync_connect else None
+    publish_barrier_run_id = (
+        _sync_connect_publish_barrier_run_id(scenario_id, run_index) if sync_connect else None
+    )
     runtime_control_run_id = (
         _sync_barrier_run_id(f"{scenario_id}-runtime-control", run_index)
         if runtime_control is not None
         else None
     )
-    if barrier_run_id is not None or runtime_control_run_id is not None:
+    if (
+        barrier_run_id is not None
+        or publish_barrier_run_id is not None
+        or runtime_control_run_id is not None
+    ):
         _ensure_sync_barrier_service(
             compose_files=compose_files,
             compose_project_name=compose_project_name,
@@ -4505,6 +4583,13 @@ def _run_loadgen_container_per_client(
                 participant_id=f"client_{index + 1}",
                 participants=clients,
             )
+        if publish_barrier_run_id is not None:
+            args = _append_sync_connect_publish_barrier_args(
+                args,
+                run_id=publish_barrier_run_id,
+                participant_id=f"client_{index + 1}",
+                participants=clients,
+            )
         if runtime_control_run_id is not None:
             args = _append_runtime_control_barrier_args(
                 args,
@@ -4558,6 +4643,7 @@ def _run_loadgen_container_per_client(
     results: list[dict[str, Any]] = []
     completed: set[str] = set()
     barrier_status: dict[str, Any] | None = None
+    publish_barrier_status: dict[str, Any] | None = None
     runtime_control_status: dict[str, Any] | None = None
     controller_result: dict[str, Any] | None = None
     try:
@@ -4566,8 +4652,24 @@ def _run_loadgen_container_per_client(
                 barrier_run_id,
                 participants=clients,
                 processes=processes,
+                phase="connect",
             )
             barrier_status = _release_sync_barrier(barrier_run_id, participants=clients)
+        if publish_barrier_run_id is not None:
+            # Second phase: every participant has connected and is holding its
+            # publish workload. Wait until all report ready, then release so
+            # publishing starts concurrently instead of early connecters
+            # saturating the broker while slower participants still connect.
+            _wait_for_sync_barrier_ready(
+                publish_barrier_run_id,
+                participants=clients,
+                processes=processes,
+                phase="publish",
+            )
+            publish_barrier_status = _release_sync_barrier(
+                publish_barrier_run_id,
+                participants=clients,
+            )
         if runtime_control_run_id is not None and runtime_control is not None:
             _wait_for_sync_barrier_ready(
                 runtime_control_run_id,
@@ -4725,7 +4827,23 @@ def _run_loadgen_container_per_client(
             "released_at_unix_ms": (barrier_status or {}).get("released_at_unix_ms"),
             "max_ready_skew_ms": (barrier_status or {}).get("max_ready_skew_ms"),
             "client_wait": merged.get("sync_connect_barrier_wait", {}),
-            "errors": [err for err in merged.get("errors", []) if str(err).startswith("sync_")],
+            "errors": [
+                err for err in merged.get("errors", []) if str(err).startswith("sync_barrier_")
+            ],
+            "publish_barrier": {
+                "barrier": "external",
+                "run_id": publish_barrier_run_id,
+                "participants": clients,
+                "ready_count": int((publish_barrier_status or {}).get("ready_count") or 0),
+                "released_at_unix_ms": (publish_barrier_status or {}).get("released_at_unix_ms"),
+                "max_ready_skew_ms": (publish_barrier_status or {}).get("max_ready_skew_ms"),
+                "client_wait": merged.get("sync_publish_barrier_wait", {}),
+                "errors": [
+                    err
+                    for err in merged.get("errors", [])
+                    if str(err).startswith("sync_publish_barrier_")
+                ],
+            },
         }
     return merged
 

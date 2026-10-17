@@ -1003,27 +1003,38 @@ role attests the expected clock source and payload version.
 ### Synchronized Connect Bursts
 
 `TOKEN-THUNDERING-HERD-JWT` and `TOKEN-THUNDERING-HERD-BISCUIT` enable
-`sync_connect` so clients wait until the runner releases a shared start gate
-before connecting to Mosquitto.
+`sync_connect`, which is a two-phase barrier:
+
+1. **Connect phase** - every participant waits until all others are ready, then
+   all begin establishing MQTT connections together.
+2. **Publish phase** - each process holds its measured publish workload until
+   every participant has reported ready *after* its CONNACK(s). Only then does
+   the runner release the publish gate, so all participants publish
+   concurrently. This prevents early connecters from saturating the broker's
+   connection event loop while slower clients are still connecting.
 
 Topology behavior:
 
-- `container-single`: Rust `mqtt-loadgen` uses an in-process synchronization
-  gate across its worker tasks.
+- `container-single`: Rust `mqtt-loadgen` uses in-process gates across its
+  worker tasks for both phases; the publish gate releases only after every local
+  client has connected.
 - `container-per-client`: `run_scenarios.py` starts one loadgen container per
-  MQTT client, ensures the `sync-barrier` Compose service is running, waits
-  until all participants are ready, and then releases the external barrier.
-- `host`: uses the same in-process gate as direct local loadgen execution.
+  MQTT client, ensures the `sync-barrier` Compose service is running, and
+  coordinates both phases as distinct barrier runs (the publish phase reuses the
+  connect run id with a `-publish` suffix).
+- `host`: uses the same in-process gates as direct local loadgen execution.
 
 The external barrier is intentionally a runner-managed implementation detail.
 Operators normally select it only by choosing `--client-topology
 container-per-client`; direct loadgen barrier flags are reserved for diagnostics.
 
-Result JSON includes a `sync_connect` section with barrier mode, participant
-count, ready count, release timestamp, maximum ready skew, client wait summary,
-and any `sync_*` errors. Fan-out split-role runs, Biscuit delegation handoff, and
-reauth-storm runs have dedicated coordination paths and intentionally reject
-incompatible `sync_connect` combinations.
+Result JSON includes a `sync_connect` section with the connect-phase barrier
+mode, participant count, ready count, release timestamp, maximum ready skew,
+client wait summary, and any `sync_barrier_*` errors, plus a nested
+`publish_barrier` object with the same fields for the publish phase (and
+`sync_publish_barrier_*` errors). Fan-out split-role runs, Biscuit delegation
+handoff, and reauth-storm runs have dedicated coordination paths and
+intentionally reject incompatible `sync_connect` combinations.
 
 ### Reconnect-and-Publish Lifecycle Bursts
 

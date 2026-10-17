@@ -137,9 +137,12 @@ Load generation is driven by:
     control-plane, lifecycle, and delegation modes
   - `benchmarks/loadgen.py` is a compatibility wrapper that forwards to the
     Rust binary
-  - Supports `sync_connect` for thundering-herd style connection spikes; under
-    `container-per-client`, the runner coordinates one-client containers
-    through the external `sync-barrier` service
+  - Supports `sync_connect` for thundering-herd style connection spikes: a
+    two-phase barrier that first synchronizes CONNECT starts, then releases the
+    publish workload only after every participant has reported ready post-CONNACK
+  - Under `container-per-client`, the runner coordinates one-client containers
+    through the external `sync-barrier` service using distinct connect and
+    publish barrier runs
 
 MQTT v5 reauthentication microbenchmark:
 

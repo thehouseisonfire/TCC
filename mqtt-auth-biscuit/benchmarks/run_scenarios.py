@@ -5511,6 +5511,8 @@ def _make_http_parity_variants(
         if jwt_strict_token is not None:
             jwt_source = scenarios[jwt_source_id]
             jwt_variant = cast(ScenarioConfig, dict(jwt_source))
+            if jwt_source_id.startswith("HTTP-PROFILE-"):
+                jwt_variant.pop("sync_connect", None)
             jwt_variant["password"] = cast(str, jwt_strict_token)
             jwt_variant["client_count"] = 1
             jwt_variant["authz_config"] = _clone_authz_config(jwt_source.get("authz_config"))
@@ -5527,6 +5529,8 @@ def _make_http_parity_variants(
         if biscuit_strict_token is not None:
             biscuit_source = scenarios[biscuit_source_id]
             biscuit_variant = cast(ScenarioConfig, dict(biscuit_source))
+            if biscuit_source_id.startswith("HTTP-PROFILE-"):
+                biscuit_variant.pop("sync_connect", None)
             biscuit_variant["password"] = cast(str, biscuit_strict_token)
             biscuit_variant["client_count"] = 1
             biscuit_variant["authz_config"] = _clone_authz_config(
@@ -7638,6 +7642,7 @@ def _build_available_scenarios(
             "message_size": 0,
             "complexity_axis": "http_profile",
             "complexity_level": "simple",
+            "sync_connect": True,
         },
         "HTTP-AUTHZ-COMPLEXITY-SIMPLE-JWT": {
             "mosquitto_conf": "./mosquitto_http.conf",
@@ -7686,6 +7691,7 @@ def _build_available_scenarios(
             "message_size": 0,
             "complexity_axis": "http_profile",
             "complexity_level": "complex",
+            "sync_connect": True,
         },
         "HTTP-AUTHZ-COMPLEXITY-COMPLEX-JWT": {
             "mosquitto_conf": "./mosquitto_http.conf",
@@ -7765,6 +7771,7 @@ def _build_available_scenarios(
             "message_size": 0,
             "complexity_axis": "http_profile",
             "complexity_level": "simple",
+            "sync_connect": True,
         },
         "HTTP-AUTHZ-COMPLEXITY-SIMPLE-BISCUIT": {
             "mosquitto_conf": "./mosquitto_http.conf",
@@ -7813,6 +7820,7 @@ def _build_available_scenarios(
             "message_size": 0,
             "complexity_axis": "http_profile",
             "complexity_level": "complex",
+            "sync_connect": True,
         },
         "HTTP-AUTHZ-COMPLEXITY-COMPLEX-BISCUIT": {
             "mosquitto_conf": "./mosquitto_http.conf",

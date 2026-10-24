@@ -946,6 +946,7 @@ class _RunLoadgenKwargs(TypedDict):
     biscuit_delegate_handoff_ready_timeout_seconds: int | None
     publish_timeout_seconds: NotRequired[int | None]
     connect_timeout_seconds: NotRequired[int | None]
+    keepalive_seconds: NotRequired[int | None]
 
 
 def _minimal_run_loadgen_kwargs() -> _RunLoadgenKwargs:
@@ -1104,6 +1105,48 @@ def test_run_loadgen_forwards_publish_timeout_seconds(monkeypatch) -> None:
     assert compose_call[compose_call.index("--publish-timeout-seconds") + 1] == "20"
     assert "--connect-timeout-seconds" in compose_call
     assert compose_call[compose_call.index("--connect-timeout-seconds") + 1] == "20"
+
+
+def test_run_loadgen_forwards_keepalive_seconds_with_default_fallback(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    class Completed:
+        stdout = '{"errors":[],"raw_publish_ms":[]}'
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN202
+        calls.append(cmd)
+        return Completed()
+
+    monkeypatch.setattr(rs, "_resolve_rust_helper", lambda _binary: ["mqtt-loadgen"])
+    monkeypatch.setattr(rs.subprocess, "run", fake_run)
+
+    kwargs = _minimal_run_loadgen_kwargs()
+    kwargs["keepalive_seconds"] = 215
+    rs._run_loadgen(
+        **kwargs,
+        client_topology="container-single",
+        compose_files=["docker/docker-compose.yml"],
+        compose_project_name="bench",
+        scenario_id="HTTP-LATENCY-1000MS-JWT",
+    )
+
+    explicit_call = calls[-1]
+    assert "--keepalive-seconds" in explicit_call
+    assert explicit_call[explicit_call.index("--keepalive-seconds") + 1] == "215"
+
+    rs._run_loadgen(
+        **_minimal_run_loadgen_kwargs(),
+        client_topology="container-single",
+        compose_files=["docker/docker-compose.yml"],
+        compose_project_name="bench",
+        scenario_id="TOKEN-BASELINE-JWT",
+    )
+
+    default_call = calls[-1]
+    assert "--keepalive-seconds" in default_call
+    assert default_call[default_call.index("--keepalive-seconds") + 1] == str(
+        rs.DEFAULT_KEEPALIVE_SECONDS
+    )
 
 
 def test_container_single_passes_explicit_password_map_profiles(monkeypatch) -> None:

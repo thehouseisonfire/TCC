@@ -1055,9 +1055,17 @@ def test_publish_timeout_keeps_configured_delay_as_measured_variable() -> None:
     assert rs._publish_timeout_seconds(latency_200, 10) == 17
     assert rs._publish_timeout_seconds(latency_1000, 10) == 25
     assert rs._publish_timeout_seconds(latency_1000, 1) == 16
+    # Small queue rounds are already covered by the fixed 15 s headroom.
+    assert rs._publish_timeout_seconds(latency_200, 50) == 25
+    # Large matrix cohorts can wait an additional service round; reserve it.
+    assert rs._publish_timeout_seconds(latency_1000, 50) == 115
+    assert rs._publish_timeout_seconds(latency_200, 200) == 95
+    assert rs._publish_timeout_seconds(latency_1000, 200) == 415
     # Synthetic delay proves this is not an ID-specific exception.
     synthetic: rs.ScenarioConfig = {"id": "SYNTHETIC", "http_expected_delay_ms": 500}
     assert rs._publish_timeout_seconds(synthetic, 4) == 17
+    assert rs._publish_timeout_seconds(synthetic, 40) == 35
+    assert rs._publish_timeout_seconds(synthetic, 50) == 65
     # Failure-injection cells declare no http_expected_delay_ms (it would trip
     # the no-failure latency contract); the budget comes from the explicit
     # http_timeout_budget_delay_ms metadata instead: 25 clients * 200 ms +
@@ -1073,6 +1081,9 @@ def test_publish_timeout_keeps_configured_delay_as_measured_variable() -> None:
         },
     }
     assert rs._publish_timeout_seconds(failure_injection, 25) == 20
+    # Budget-only failure-injection cells never get the latency tail reserve,
+    # even at the large cohorts: 200 clients * 200 ms + 15 s = 55 s.
+    assert rs._publish_timeout_seconds(failure_injection, 200) == 55
     # Arbitrary authz_config.delay_ms alone must NOT inflate the budget: the
     # helper only honors explicit timeout metadata, so delayed scenarios
     # without such metadata (e.g. HTTP-LATENCY-200MS-BISCUIT, which declares
@@ -1095,11 +1106,69 @@ def test_publish_timeout_keeps_configured_delay_as_measured_variable() -> None:
         "http_timeout_budget_delay_ms": 1000,
     }
     assert rs._publish_timeout_seconds(both, 10) == 17
-    # The 1000 ms c10/m10 HOLD case: budget must exceed worst-case queued
-    # latency (clients * delay) plus headroom, not just a single delay.
-    budget = rs._publish_timeout_seconds(latency_1000, 10)
-    assert budget > 10
-    assert budget * 1000 > 10 * 1000 + rs.PUBLISH_TIMEOUT_HEADROOM_S * 1000 // 2
+    # The failing c50/LAT1000 case: the old 65 s budget was below the observed
+    # ~2x tail of the 50 s nominal queue round. The budget must cover that
+    # additional service round, not just one queue round plus fixed headroom.
+    budget = rs._publish_timeout_seconds(latency_1000, 50)
+    assert budget == 115
+    assert budget > 2 * 50
+    # Non-matrix latency probes remain on the frozen formula and must not drift.
+    assert rs._publish_timeout_seconds(latency_1000, 10) == 25
+    assert rs._publish_timeout_seconds(latency_1000, 25) == 40
+
+
+def test_keepalive_scales_with_expected_serialized_service_round() -> None:
+    base: rs.ScenarioConfig = {"id": "BASELINE-NO-AUTH"}
+    assert rs._mqtt_keepalive_seconds(base, 10) == rs.DEFAULT_KEEPALIVE_SECONDS
+    assert rs._mqtt_keepalive_seconds(base, 200) == rs.DEFAULT_KEEPALIVE_SECONDS
+
+    latency_200: rs.ScenarioConfig = {
+        "id": "HTTP-LATENCY-200MS-JWT",
+        "http_expected_delay_ms": 200,
+    }
+    latency_1000: rs.ScenarioConfig = {
+        "id": "HTTP-LATENCY-1000MS-JWT",
+        "http_expected_delay_ms": 1000,
+    }
+    assert rs._mqtt_keepalive_seconds(latency_200, 10) == 60
+    assert rs._mqtt_keepalive_seconds(latency_1000, 10) == 60
+    assert rs._mqtt_keepalive_seconds(latency_200, 50) == 60
+    assert rs._mqtt_keepalive_seconds(latency_1000, 50) == 65
+    assert rs._mqtt_keepalive_seconds(latency_200, 200) == 60
+    assert rs._mqtt_keepalive_seconds(latency_1000, 200) == 215
+
+    # Budget-only failure-injection metadata must not enlarge the generic
+    # connection watchdog; it is not a measured HTTP-LATENCY service round.
+    failure_injection: rs.ScenarioConfig = {
+        "id": "HTTP-FAILURE-INJECTION-200MS-1PCT-JWT",
+        "http_timeout_budget_delay_ms": 200,
+    }
+    assert rs._mqtt_keepalive_seconds(failure_injection, 200) == 60
+
+    # Measured latency takes precedence over the budget-only metadata.
+    both: rs.ScenarioConfig = {
+        "id": "SYNTHETIC-BOTH",
+        "http_expected_delay_ms": 1000,
+        "http_timeout_budget_delay_ms": 200,
+    }
+    assert rs._mqtt_keepalive_seconds(both, 50) == 65
+
+
+def test_watchdog_metadata_records_effective_keepalive() -> None:
+    latency_1000: rs.ScenarioConfig = {
+        "id": "HTTP-LATENCY-1000MS-JWT",
+        "http_expected_delay_ms": 1000,
+    }
+    metadata = rs._watchdog_metadata(latency_1000, 200)
+    assert metadata == {
+        "publish_timeout_seconds": 415,
+        "connect_timeout_seconds": 415,
+        "keepalive_seconds": 215,
+    }
+
+    default_metadata = rs._watchdog_metadata({"id": "BASELINE-NO-AUTH"}, 10)
+    assert default_metadata["keepalive_seconds"] == rs.DEFAULT_KEEPALIVE_SECONDS
+    assert default_metadata["publish_timeout_seconds"] == rs.BASE_PUBLISH_TIMEOUT_S
 
 
 # Frozen effective-behavior reference for the Part 1 HTTP failure-injection HOLD.
@@ -1116,6 +1185,15 @@ _FAILURE_INJECTION_HOLD_IDS = frozenset(
 
 _FROZEN_HOLD_PROBE_CLIENTS = (1, 10, 25, 50)
 
+# Latency cells whose large-queue per-publish budget intentionally exceeds the
+# frozen HEAD formula after the c50/LAT1000 tail-reserve correction.
+_LATENCY_TAIL_TIMEOUT_IDS = frozenset(
+    {
+        "HTTP-LATENCY-1000MS-JWT",
+        "HTTP-LATENCY-1000MS-JWT-TLS",
+    }
+)
+
 
 def _frozen_hold_timeout_seconds(scenario: rs.ScenarioConfig, clients: int) -> int:
     """Replica of ``_publish_timeout_seconds`` at frozen HEAD 234c2c4.
@@ -1131,13 +1209,15 @@ def _frozen_hold_timeout_seconds(scenario: rs.ScenarioConfig, clients: int) -> i
     return max(rs.BASE_PUBLISH_TIMEOUT_S, math.ceil(queued_s + rs.PUBLISH_TIMEOUT_HEADROOM_S))
 
 
-def test_failure_injection_hold_blast_radius_matches_frozen_head() -> None:
-    """Only the 4 failure-injection HOLD cells may change timeout/sync behavior.
+def test_frozen_head_blast_radius_matches_expected_timeout_changes() -> None:
+    """Only the failure-injection HOLD and large-queue latency cells may drift.
 
     Enumerates the full expanded registry and compares effective
     connect/publish timeout budgets (across representative client counts) and
-    ``sync_connect`` semantics against the frozen HEAD 234c2c4 reference. Any
-    other effective difference fails the test.
+    ``sync_connect`` semantics against the frozen HEAD 234c2c4 reference. The
+    failure-injection cells carry the Part 1 HOLD fix; the 1000 ms latency
+    cells carry the tail reserve that keeps c50 publishes above the observed
+    ~2x queue bound. Any other effective difference fails the test.
     """
     base = rs._build_available_scenarios(
         _placeholder_tokens(),
@@ -1164,7 +1244,7 @@ def test_failure_injection_hold_blast_radius_matches_frozen_head() -> None:
         if timeout_differs or sync_differs:
             differing.append(scenario_id)
 
-    assert set(differing) == _FAILURE_INJECTION_HOLD_IDS
+    assert set(differing) == _FAILURE_INJECTION_HOLD_IDS | _LATENCY_TAIL_TIMEOUT_IDS
 
     # Pin the exact HOLD effect: sync barrier on, no latency-contract key,
     # explicit 200 ms budget metadata, 20 s outer budget at c25.
@@ -1174,6 +1254,15 @@ def test_failure_injection_hold_blast_radius_matches_frozen_head() -> None:
         assert scenario.get("http_expected_delay_ms") is None
         assert scenario.get("http_timeout_budget_delay_ms") == 200
         assert rs._publish_timeout_seconds(scenario, 25) == 20
+
+    # Pin the intentional large-queue tail correction: the frozen formula gave
+    # 65 s at c50/LAT1000, below the observed ~100 s tail. Smaller client
+    # counts stay on the frozen budget.
+    for scenario_id in sorted(_LATENCY_TAIL_TIMEOUT_IDS):
+        scenario = expanded[scenario_id]
+        assert scenario.get("http_expected_delay_ms") == 1000
+        assert rs._publish_timeout_seconds(scenario, 10) == 25
+        assert rs._publish_timeout_seconds(scenario, 50) == 115
 
     # Pin the frozen cells that must not move: the BISCUIT latency cells
     # already have canonical fixed-client results, so any timeout drift here

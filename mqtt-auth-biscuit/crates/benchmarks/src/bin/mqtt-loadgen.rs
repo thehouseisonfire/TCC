@@ -7,8 +7,8 @@ use gen_tokens::biscuit_attenuation::{
     BiscuitAttenuationOptions, attenuate_biscuit_token, load_public_key_hex,
 };
 use gen_tokens::mqtt_helpers::{
-    ClientSpec, ConnectReport, MqttHelperError, Result, connect, decode_token_arg, poll_until,
-    puback_reason_code, qos,
+    ClientSpec, ConnectReport, DEFAULT_KEEPALIVE_SECONDS, MqttHelperError, Result, connect,
+    decode_token_arg, poll_until, puback_reason_code, qos,
 };
 use rand::Rng as _;
 use rumqttc::mqttbytes::v5::{AuthProperties, Packet};
@@ -276,6 +276,16 @@ struct Args {
     /// broker authorization path under injected PDP latency.
     #[arg(long, env = "MQTT_CONNECT_TIMEOUT_SECONDS", default_value_t = 10)]
     connect_timeout_seconds: u64,
+    /// MQTT keepalive interval. The runner raises this for HTTP-LATENCY
+    /// workloads whose serialized authorization round exceeds the default
+    /// 60 s, so the generic connection-liveness watchdog does not preempt
+    /// healthy queued work.
+    #[arg(
+        long,
+        env = "MQTT_KEEPALIVE_SECONDS",
+        default_value_t = DEFAULT_KEEPALIVE_SECONDS
+    )]
+    keepalive_seconds: u16,
     /// Continue the configured workload after a failed publish. The benchmark
     /// runner enables this only for scenarios whose result contract expects
     /// workload-visible publish failures.
@@ -2795,6 +2805,7 @@ fn inputs_json(
         "message_size": args.message_size,
         "publish_timeout_seconds": args.publish_timeout_seconds,
         "connect_timeout_seconds": args.connect_timeout_seconds,
+        "keepalive_seconds": args.keepalive_seconds,
         "protocol": "mqttv5",
         "sync_connect": args.sync_connect,
         "sync_connect_barrier_url": args.sync_connect_barrier_url,
@@ -2965,6 +2976,10 @@ fn connect_timeout(args: &Args) -> Duration {
     Duration::from_secs(args.connect_timeout_seconds.max(1))
 }
 
+fn keepalive(args: &Args) -> Duration {
+    Duration::from_secs(u64::from(args.keepalive_seconds.max(1)))
+}
+
 async fn publish_and_wait(
     client: &rumqttc::AsyncClient,
     eventloop: &mut rumqttc::EventLoop,
@@ -3108,6 +3123,7 @@ async fn subscribe_handoff_receiver(args: &Args, client_id: &str) -> Result<Hand
         client_id: format!("handoff_{client_id}"),
         username: args.username.clone(),
         password: handoff_password,
+        keep_alive: keepalive(args),
         tls: args.tls,
         tls_ca_file: args.tls_ca_file.clone(),
         tls_insecure: args.tls_insecure,
@@ -3265,6 +3281,7 @@ async fn publish_handoff_tokens(
         client_id: "delegation_handoff_master".to_string(),
         username: args.username.clone(),
         password,
+        keep_alive: keepalive(args),
         tls: args.tls,
         tls_ca_file: args.tls_ca_file.clone(),
         tls_insecure: args.tls_insecure,
@@ -3676,6 +3693,7 @@ async fn connect_fanout_subscriber(
         client_id: prepared.client_id.clone(),
         username: args.username.clone(),
         password: prepared.password,
+        keep_alive: keepalive(args),
         tls: args.tls,
         tls_ca_file: args.tls_ca_file.clone(),
         tls_insecure: args.tls_insecure,
@@ -4080,6 +4098,7 @@ async fn connect_fanout_publisher(
         client_id: "fanout_publisher".to_string(),
         username: publisher_username,
         password: publisher_password,
+        keep_alive: keepalive(args),
         tls: args.tls,
         tls_ca_file: args.tls_ca_file.clone(),
         tls_insecure: args.tls_insecure,
@@ -4624,6 +4643,7 @@ fn worker_specs(args: &Args, client_id: &str, password: Vec<u8>) -> ClientSpec {
             client_id: client_id.to_string(),
             username: String::new(),
             password: Vec::new(),
+            keep_alive: keepalive(args),
             tls: args.tls,
             tls_ca_file: args.tls_ca_file.clone(),
             tls_insecure: args.tls_insecure,
@@ -4637,6 +4657,7 @@ fn worker_specs(args: &Args, client_id: &str, password: Vec<u8>) -> ClientSpec {
         client_id: client_id.to_string(),
         username: args.username.clone(),
         password,
+        keep_alive: keepalive(args),
         tls: args.tls,
         tls_ca_file: args.tls_ca_file.clone(),
         tls_insecure: args.tls_insecure,
@@ -6097,6 +6118,7 @@ async fn spawn_runtime_control(
         client_id: "runtime-dynsec-controller".to_string(),
         username: username.to_string(),
         password: decode_token_arg(password)?,
+        keep_alive: keepalive(args),
         tls: args.tls,
         tls_ca_file: args.tls_ca_file.clone(),
         tls_insecure: args.tls_insecure,
@@ -7077,6 +7099,29 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn keepalive_defaults_to_sixty_seconds() {
+        let args = Args::parse_from(["mqtt-loadgen"]);
+        assert_eq!(args.keepalive_seconds, DEFAULT_KEEPALIVE_SECONDS);
+        assert_eq!(keepalive(&args), Duration::from_secs(60));
+        assert_eq!(
+            worker_specs(&args, "client_1", Vec::new()).keep_alive,
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn keepalive_cli_override_propagates_to_client_spec_and_inputs() {
+        let args = Args::parse_from(["mqtt-loadgen", "--keepalive-seconds", "215"]);
+        assert_eq!(keepalive(&args), Duration::from_secs(215));
+        assert_eq!(
+            worker_specs(&args, "client_1", Vec::new()).keep_alive,
+            Duration::from_secs(215)
+        );
+        let inputs = inputs_json(&args, "publish", None, &[], None);
+        assert_eq!(inputs["keepalive_seconds"], serde_json::json!(215));
     }
 
     #[test]

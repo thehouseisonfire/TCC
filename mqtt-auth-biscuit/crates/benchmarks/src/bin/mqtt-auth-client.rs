@@ -1,6 +1,8 @@
 use bytes::Bytes;
 use clap::Parser;
-use gen_tokens::mqtt_helpers::{ClientSpec, Result, connect, decode_token_arg, print_json};
+use gen_tokens::mqtt_helpers::{
+    ClientSpec, DEFAULT_KEEPALIVE_SECONDS, Result, connect, decode_token_arg, print_json,
+};
 use rumqttc::mqttbytes::QoS;
 use rumqttc::mqttbytes::v5::AuthProperties;
 use serde::Serialize;
@@ -95,6 +97,7 @@ async fn main() -> Result<()> {
         client_id: args.client_id,
         username: String::new(),
         password: Vec::new(),
+        keep_alive: Duration::from_secs(u64::from(DEFAULT_KEEPALIVE_SECONDS)),
         tls: args.tls,
         tls_ca_file: args.tls_ca_file,
         tls_insecure: args.tls_insecure,

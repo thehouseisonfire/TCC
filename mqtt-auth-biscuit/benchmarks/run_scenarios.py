@@ -1837,6 +1837,8 @@ def _wait_for_non_empty_resource_snapshot(
 
 BASE_PUBLISH_TIMEOUT_S = 10
 PUBLISH_TIMEOUT_HEADROOM_S = 15
+PUBLISH_TIMEOUT_TAIL_MIN_CLIENTS = 50
+DEFAULT_KEEPALIVE_SECONDS = 60
 
 
 def _publish_timeout_seconds(scenario: ScenarioConfig, clients: int) -> int:
@@ -1848,6 +1850,12 @@ def _publish_timeout_seconds(scenario: ScenarioConfig, clients: int) -> int:
     Mosquitto ACL path, concurrent publishers queue behind each delayed
     authorization, and later connections queue behind in-flight publishes, so
     worst-case per-operation latency scales with ``clients * delay``.
+    Retained latency runs also show a tail of roughly twice that nominal queue
+    bound: one publish can wait an additional service round. For measured-delay
+    scenarios at the large client cohorts, reserve one full extra round when the
+    nominal round exceeds the fixed headroom; the smaller cohorts and
+    budget-only failure-injection scenarios keep the frozen formula. This
+    remains measurement headroom, not a capacity contract.
     Scenarios that inject a PDP delay together with failures (where
     ``http_expected_delay_ms`` would trip the no-failure latency contract)
     size the same budget through the explicit ``http_timeout_budget_delay_ms``
@@ -1855,13 +1863,53 @@ def _publish_timeout_seconds(scenario: ScenarioConfig, clients: int) -> int:
     ``authz_config`` delay settings. Non-delayed scenarios keep the
     historical 10 s base.
     """
-    delay_ms = scenario.get("http_expected_delay_ms") or 0
-    if delay_ms <= 0:
-        delay_ms = scenario.get("http_timeout_budget_delay_ms") or 0
+    measured_delay_ms = scenario.get("http_expected_delay_ms") or 0
+    delay_ms = measured_delay_ms or scenario.get("http_timeout_budget_delay_ms") or 0
     if delay_ms <= 0:
         return BASE_PUBLISH_TIMEOUT_S
-    queued_s = (delay_ms / 1000.0) * max(clients, 1)
-    return max(BASE_PUBLISH_TIMEOUT_S, math.ceil(queued_s + PUBLISH_TIMEOUT_HEADROOM_S))
+    effective_clients = max(clients, 1)
+    queued_s = (delay_ms / 1000.0) * effective_clients
+    tail_s = 0.0
+    if (
+        measured_delay_ms > 0
+        and effective_clients >= PUBLISH_TIMEOUT_TAIL_MIN_CLIENTS
+        and queued_s > PUBLISH_TIMEOUT_HEADROOM_S
+    ):
+        tail_s = queued_s
+    return max(
+        BASE_PUBLISH_TIMEOUT_S,
+        math.ceil(queued_s + PUBLISH_TIMEOUT_HEADROOM_S + tail_s),
+    )
+
+
+def _mqtt_keepalive_seconds(scenario: ScenarioConfig, clients: int) -> int:
+    """Derive the MQTT keepalive from the expected serialized service round.
+
+    The default 60 s keepalive only covers workloads whose authorization path
+    does not serialize behind a measured PDP delay. For HTTP-LATENCY cells the
+    expected healthy round is ``clients * http_expected_delay_ms``; keep the
+    generic connection-liveness watchdog above that round with the benchmark's
+    established fixed watchdog reserve. The publish timeout remains the more
+    specific per-operation watchdog, so no ``2 * keepalive`` relation applies.
+    """
+    delay_ms = scenario.get("http_expected_delay_ms") or 0
+    if delay_ms <= 0:
+        return DEFAULT_KEEPALIVE_SECONDS
+    service_round_s = (delay_ms / 1000.0) * max(clients, 1)
+    return max(
+        DEFAULT_KEEPALIVE_SECONDS,
+        math.ceil(service_round_s + PUBLISH_TIMEOUT_HEADROOM_S),
+    )
+
+
+def _watchdog_metadata(scenario: ScenarioConfig, clients: int) -> dict[str, int]:
+    """Effective watchdog budgets recorded with each result."""
+    publish_timeout_s = _publish_timeout_seconds(scenario, clients)
+    return {
+        "publish_timeout_seconds": publish_timeout_s,
+        "connect_timeout_seconds": publish_timeout_s,
+        "keepalive_seconds": _mqtt_keepalive_seconds(scenario, clients),
+    }
 
 
 def _expected_publish_authorization_count(
@@ -2162,6 +2210,7 @@ def _run_loadgen(
     run_index: int = 0,
     publish_timeout_seconds: int | None = None,
     connect_timeout_seconds: int | None = None,
+    keepalive_seconds: int | None = None,
 ):
     helper_cmd = _resolve_rust_helper("mqtt-loadgen")
     cmd = [
@@ -2196,6 +2245,8 @@ def _run_loadgen(
             if connect_timeout_seconds is not None
             else BASE_PUBLISH_TIMEOUT_S
         ),
+        "--keepalive-seconds",
+        str(keepalive_seconds if keepalive_seconds is not None else DEFAULT_KEEPALIVE_SECONDS),
         "--json",
     ]
     if qos_distribution:
@@ -9195,8 +9246,7 @@ def main(
                     "fanout_churn_sqlite_subscribers": s.get("fanout_churn_sqlite_subscribers"),
                     "http_expected_delay_ms": s.get("http_expected_delay_ms"),
                     "http_timeout_budget_delay_ms": s.get("http_timeout_budget_delay_ms"),
-                    "publish_timeout_seconds": _publish_timeout_seconds(s, effective_client_count),
-                    "connect_timeout_seconds": _publish_timeout_seconds(s, effective_client_count),
+                    **_watchdog_metadata(s, effective_client_count),
                     "client_topology": {
                         "mode": client_topology_mode,
                         "effective_mode": client_topology_mode,
@@ -9597,6 +9647,7 @@ def main(
                             connect_timeout_seconds=_publish_timeout_seconds(
                                 s, effective_client_count
                             ),
+                            keepalive_seconds=_mqtt_keepalive_seconds(s, effective_client_count),
                             password_map_path=(
                                 "benchmarks/password-map.json"
                                 if credential_mode == "per_client"

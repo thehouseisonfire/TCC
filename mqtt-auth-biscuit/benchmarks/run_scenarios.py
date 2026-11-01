@@ -1347,6 +1347,152 @@ def _prom_query(base_url: str, query: str, ca_file: str | None, insecure: bool):
         return resp.json()
 
 
+PROM_RANGE_QUERY_STEP_SECONDS = 0.25
+PROM_RANGE_QUERY_MAX_INTERVALS = 10_000
+
+
+def _prom_range_query_chunk_bounds(start: float, end: float) -> list[tuple[float, float]]:
+    """Partition the original 250 ms evaluation grid into disjoint query ranges."""
+    step = PROM_RANGE_QUERY_STEP_SECONDS
+    interval_count = math.floor((end - start) / step + 1e-9)
+    if interval_count <= PROM_RANGE_QUERY_MAX_INTERVALS:
+        return [(start, end)]
+
+    bounds: list[tuple[float, float]] = []
+    first_index = 0
+    while first_index <= interval_count:
+        last_index = min(first_index + PROM_RANGE_QUERY_MAX_INTERVALS, interval_count)
+        # Derive every timestamp from the original start to avoid cumulative drift.
+        chunk_start = start + first_index * step
+        chunk_end = end if last_index == interval_count else start + last_index * step
+        bounds.append((chunk_start, chunk_end))
+        first_index = last_index + 1
+    return bounds
+
+
+def _prom_range_series_identity(series: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    metric = series.get("metric")
+    if not isinstance(metric, dict) or not all(
+        isinstance(name, str) and isinstance(value, str) for name, value in metric.items()
+    ):
+        raise RuntimeError("Prometheus range response has an invalid series label set")
+    return tuple(sorted(metric.items()))
+
+
+def _merge_prom_range_payloads(
+    chunks: list[tuple[float, float, dict[str, Any]]],
+    *,
+    query: str,
+    start: float,
+    end: float,
+) -> dict[str, Any]:
+    """Stitch disjoint chunk matrices by exact Prometheus label identity."""
+    if len(chunks) == 1:
+        return chunks[0][2]
+
+    first_payload = chunks[0][2]
+    first_data = first_payload.get("data")
+    if not isinstance(first_data, dict) or not isinstance(first_data.get("result"), list):
+        raise RuntimeError("Prometheus range response has no result matrix")
+    result_type = first_data.get("resultType")
+    merged_data = dict(first_data)
+    merged_series: dict[tuple[tuple[str, str], ...], dict[str, Any]] = {}
+    samples_by_series: dict[tuple[tuple[str, str], ...], dict[float, list[Any]]] = {}
+    sample_sources: dict[tuple[tuple[str, str], ...], dict[float, int]] = {}
+    series_order: list[tuple[tuple[str, str], ...]] = []
+    chunk_ranges = [(chunk_start, chunk_end) for chunk_start, chunk_end, _ in chunks]
+
+    for chunk_index, (chunk_start, _chunk_end, payload) in enumerate(chunks):
+        data = payload.get("data")
+        if (
+            payload.get("status") != "success"
+            or not isinstance(data, dict)
+            or data.get("resultType") != result_type
+            or not isinstance(data.get("result"), list)
+        ):
+            raise RuntimeError(
+                f"Prometheus range chunk {chunk_index + 1} has an invalid result matrix"
+            )
+
+        for series in data["result"]:
+            if not isinstance(series, dict) or not isinstance(series.get("values"), list):
+                raise RuntimeError(
+                    f"Prometheus range chunk {chunk_index + 1} has an invalid series"
+                )
+            identity = _prom_range_series_identity(series)
+            if identity not in merged_series:
+                merged_series[identity] = {
+                    key: value for key, value in series.items() if key != "values"
+                }
+                samples_by_series[identity] = {}
+                sample_sources[identity] = {}
+                series_order.append(identity)
+            elif {key: value for key, value in series.items() if key != "values"} != merged_series[
+                identity
+            ]:
+                raise RuntimeError("Prometheus range series metadata changed between chunks")
+
+            samples = samples_by_series[identity]
+            last_timestamp: float | None = None
+            for sample in series["values"]:
+                if not isinstance(sample, list) or len(sample) != 2:
+                    raise RuntimeError(
+                        f"Prometheus range chunk {chunk_index + 1} has an invalid sample"
+                    )
+                timestamp = float(sample[0])
+                if last_timestamp is not None and timestamp < last_timestamp:
+                    raise RuntimeError(
+                        "Prometheus range samples are not strictly ordered: "
+                        f"query={query!r}, original_range=[{start}, {end}], "
+                        f"chunk={chunk_index + 1}/{len(chunks)}, "
+                        f"chunk_range=[{chunk_start}, {_chunk_end}], "
+                        f"series={identity!r}, timestamp={timestamp}, "
+                        f"previous_timestamp={last_timestamp}"
+                    )
+                last_timestamp = timestamp
+                previous_sample = samples.get(timestamp)
+                if previous_sample is not None:
+                    previous_chunk_index = sample_sources[identity][timestamp]
+                    raise RuntimeError(
+                        "Prometheus range chunks contain an unexpected duplicate timestamp: "
+                        f"query={query!r}, original_range=[{start}, {end}], "
+                        f"chunk={chunk_index + 1}/{len(chunks)}, "
+                        f"chunk_ranges={chunk_ranges!r}, series={identity!r}, "
+                        f"timestamp={timestamp}, previous_value={previous_sample[1]!r}, "
+                        f"new_value={sample[1]!r}, "
+                        f"previous_chunk={previous_chunk_index + 1}/{len(chunks)}, "
+                        f"previous_chunk_range={chunk_ranges[previous_chunk_index]!r}, "
+                        f"new_chunk_range={chunk_ranges[chunk_index]!r}"
+                    )
+                samples[timestamp] = sample
+                sample_sources[identity][timestamp] = chunk_index
+
+    merged_data["result"] = []
+    for identity in series_order:
+        series = dict(merged_series[identity])
+        series["values"] = [
+            samples_by_series[identity][timestamp]
+            for timestamp in sorted(samples_by_series[identity])
+        ]
+        merged_data["result"].append(series)
+
+    merged_payload = dict(first_payload)
+    merged_payload["data"] = merged_data
+    for field in ("warnings", "infos"):
+        combined: list[Any] = []
+        for _start, _end, payload in chunks:
+            entries = payload.get(field, [])
+            if isinstance(entries, list):
+                for entry in entries:
+                    if entry not in combined:
+                        combined.append(entry)
+        if combined:
+            merged_payload[field] = combined
+        else:
+            merged_payload.pop(field, None)
+    return merged_payload
+
+
 def _prom_range_query(
     base_url: str,
     query: str,
@@ -1360,18 +1506,48 @@ def _prom_range_query(
         verify = False
     elif ca_file:
         verify = ca_file
-    with httpx.Client(verify=verify, timeout=10.0) as client:
-        resp = client.get(
-            base_url.rstrip("/") + "/api/v1/query_range",
-            # Prometheus accepts sub-second query_range steps as numeric seconds;
-            # duration strings only support integer units in the v1 API parser.
-            params={"query": query, "start": start, "end": end, "step": "0.25"},
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-    if payload.get("status") != "success":
-        raise RuntimeError(f"Prometheus range query failed: {payload}")
-    return cast(dict[str, Any], payload)
+    bounds = _prom_range_query_chunk_bounds(start, end)
+    chunks: list[tuple[float, float, dict[str, Any]]] = []
+    for chunk_index, (chunk_start, chunk_end) in enumerate(bounds):
+        try:
+            with httpx.Client(verify=verify, timeout=10.0) as client:
+                resp = client.get(
+                    base_url.rstrip("/") + "/api/v1/query_range",
+                    # Prometheus accepts sub-second query_range steps as numeric seconds;
+                    # duration strings only support integer units in the v1 API parser.
+                    params={
+                        "query": query,
+                        "start": chunk_start,
+                        "end": chunk_end,
+                        "step": str(PROM_RANGE_QUERY_STEP_SECONDS),
+                    },
+                )
+                try:
+                    resp.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    body = resp.text[:4096]
+                    raise RuntimeError(
+                        "Prometheus range query failed for "
+                        f"range [{start}, {end}], chunk {chunk_index + 1}/{len(bounds)} "
+                        f"[{chunk_start}, {chunk_end}]: HTTP {resp.status_code}: {body}"
+                    ) from exc
+                payload = resp.json()
+            if payload.get("status") != "success":
+                raise RuntimeError(
+                    "Prometheus range query returned a non-success payload for "
+                    f"range [{start}, {end}], chunk {chunk_index + 1}/{len(bounds)} "
+                    f"[{chunk_start}, {chunk_end}]: {payload}"
+                )
+            chunks.append((chunk_start, chunk_end, cast(dict[str, Any], payload)))
+        except Exception as exc:
+            if isinstance(exc, RuntimeError) and "Prometheus range query" in str(exc):
+                raise
+            raise RuntimeError(
+                "Prometheus range query failed for "
+                f"range [{start}, {end}], chunk {chunk_index + 1}/{len(bounds)} "
+                f"[{chunk_start}, {chunk_end}]"
+            ) from exc
+    return _merge_prom_range_payloads(chunks, query=query, start=start, end=end)
 
 
 def _range_values(payload: dict[str, Any], metric: str) -> list[tuple[float, float]]:

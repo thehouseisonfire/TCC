@@ -1260,11 +1260,13 @@ def test_requested_partial_fixture_parity_scenario_is_selectable(monkeypatch) ->
         jwt_identity_binding: rs.IdentityBindingMode,
         biscuit_identity_binding: rs.IdentityBindingMode,
         biscuit_client_id_fact: str,
+        cache_ttl_seconds: int | None = None,
     ) -> str:
         assert mosquitto_conf == "./mosquitto_http.conf"
         assert jwt_identity_binding == "strict"
         assert biscuit_identity_binding == "strict"
         assert biscuit_client_id_fact == "client_id"
+        assert cache_ttl_seconds is None
         raise _SelectedScenario
 
     monkeypatch.setattr(rs, "setup_logging", lambda _log_level: None)

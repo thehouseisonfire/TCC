@@ -1839,6 +1839,7 @@ BASE_PUBLISH_TIMEOUT_S = 10
 PUBLISH_TIMEOUT_HEADROOM_S = 15
 PUBLISH_TIMEOUT_TAIL_MIN_CLIENTS = 50
 DEFAULT_KEEPALIVE_SECONDS = 60
+DEFAULT_SESSION_CACHE_TTL_SECONDS = 3600
 
 
 def _publish_timeout_seconds(scenario: ScenarioConfig, clients: int) -> int:
@@ -2029,6 +2030,37 @@ def _qos0_quiescence_timeout_seconds(
     drain_budget_s = math.ceil(expected_count * per_request_s)
     drain_budget_s += PUBLISH_TIMEOUT_HEADROOM_S
     return max(_publish_timeout_seconds(scenario, clients), drain_budget_s)
+
+
+def _session_cache_ttl_seconds(
+    scenario: ScenarioConfig,
+    *,
+    clients: int,
+    messages: int,
+    default_ttl_seconds: int = DEFAULT_SESSION_CACHE_TTL_SECONDS,
+) -> int:
+    """Keep delayed HTTP-LATENCY sessions valid for their full workload.
+
+    Session-cache misses during PUBLISH remain fail-closed in the plugin. This
+    benchmark-side budget prevents those misses from occurring during a
+    deliberately long latency run. Other scenario families retain the
+    configured default TTL.
+    """
+    if not str(scenario.get("id", "")).startswith("HTTP-LATENCY-"):
+        return default_ttl_seconds
+    if (scenario.get("http_expected_delay_ms") or 0) <= 0:
+        return default_ttl_seconds
+    expected_requests = _expected_publish_authorization_count(
+        scenario,
+        message_count=messages,
+        client_count=clients,
+    )
+    whole_workload_budget = _qos0_quiescence_timeout_seconds(
+        scenario,
+        clients=clients,
+        expected_count=expected_requests,
+    )
+    return max(default_ttl_seconds, whole_workload_budget)
 
 
 def _read_quiescence_counter(stats: dict[str, Any], key: str) -> int:
@@ -5942,8 +5974,22 @@ def _render_mosquitto_runtime_conf(
     jwt_identity_binding: IdentityBindingMode,
     biscuit_identity_binding: IdentityBindingMode,
     biscuit_client_id_fact: str,
+    cache_ttl_seconds: int | None = None,
 ) -> str:
     lines = base_conf_text.splitlines()
+    if cache_ttl_seconds is not None:
+        if cache_ttl_seconds <= 0:
+            raise ValueError("Mosquitto session cache TTL must be positive")
+        cache_ttl_lines = [
+            idx
+            for idx, line in enumerate(lines)
+            if line.strip().startswith("plugin_opt_cache_ttl_seconds ")
+        ]
+        if len(cache_ttl_lines) != 1:
+            raise ValueError(
+                "Mosquitto config must contain exactly one plugin_opt_cache_ttl_seconds option"
+            )
+        lines[cache_ttl_lines[0]] = f"plugin_opt_cache_ttl_seconds {cache_ttl_seconds}"
     filtered_lines = [
         line
         for line in lines
@@ -5977,6 +6023,7 @@ def _materialize_mosquitto_runtime_conf(
     jwt_identity_binding: IdentityBindingMode,
     biscuit_identity_binding: IdentityBindingMode,
     biscuit_client_id_fact: str,
+    cache_ttl_seconds: int | None = None,
 ) -> str:
     base_conf_path = _resolve_compose_path(mosquitto_conf)
     rendered_conf = _render_mosquitto_runtime_conf(
@@ -5984,14 +6031,16 @@ def _materialize_mosquitto_runtime_conf(
         jwt_identity_binding=jwt_identity_binding,
         biscuit_identity_binding=biscuit_identity_binding,
         biscuit_client_id_fact=biscuit_client_id_fact,
+        cache_ttl_seconds=cache_ttl_seconds,
     )
 
     base_conf_relative = _compose_relative_path(mosquitto_conf)
     generated_relative_dir = base_conf_relative.parent / ".generated"
+    cache_ttl_suffix = f".cache-{cache_ttl_seconds}" if cache_ttl_seconds is not None else ""
     generated_name = (
         f"{base_conf_relative.stem}.jwt-{jwt_identity_binding}."
-        f"biscuit-{biscuit_identity_binding}."
-        f"fact-{biscuit_client_id_fact}{base_conf_relative.suffix}"
+        f"biscuit-{biscuit_identity_binding}.fact-{biscuit_client_id_fact}"
+        f"{cache_ttl_suffix}{base_conf_relative.suffix}"
     )
     generated_relative_path = generated_relative_dir / generated_name
     generated_conf_path = _resolve_compose_path(generated_relative_path)
@@ -6010,15 +6059,17 @@ def _effective_mosquitto_runtime_conf(
     jwt_identity_binding: IdentityBindingMode,
     biscuit_identity_binding: IdentityBindingMode,
     biscuit_client_id_fact: str,
+    cache_ttl_seconds: int | None = None,
 ) -> str:
     effective_conf_relative = _compose_relative_path(mosquitto_conf)
-    if effective_conf_relative in MOSQUITTO_BASE_CONFIGS:
+    if effective_conf_relative in MOSQUITTO_BASE_CONFIGS and cache_ttl_seconds is None:
         return mosquitto_conf
     return _materialize_mosquitto_runtime_conf(
         mosquitto_conf,
         jwt_identity_binding=jwt_identity_binding,
         biscuit_identity_binding=biscuit_identity_binding,
         biscuit_client_id_fact=biscuit_client_id_fact,
+        cache_ttl_seconds=cache_ttl_seconds,
     )
 
 
@@ -8823,6 +8874,21 @@ def main(
         mosq_conf = s["mosquitto_conf"]
         if scenario_tls:
             mosq_conf = mosq_conf.replace("./", "./tls/")
+        runtime_effective_client_count = (
+            reauth_storm_clients
+            if s.get("reauth_storm") and reauth_storm_clients is not None
+            else _effective_scenario_client_count(s, clients)
+        )
+        runtime_scenario_messages = _effective_scenario_message_count(
+            s,
+            messages,
+            effective_clients=runtime_effective_client_count,
+        )
+        cache_ttl_seconds = _session_cache_ttl_seconds(
+            s,
+            clients=runtime_effective_client_count,
+            messages=runtime_scenario_messages,
+        )
         runtime_mosq_conf = _effective_mosquitto_runtime_conf(
             mosq_conf,
             jwt_identity_binding=cast(
@@ -8834,6 +8900,9 @@ def main(
                 scenario_semantics["biscuit_identity_binding"],
             ),
             biscuit_client_id_fact=s.get("biscuit_client_id_fact", "client_id"),
+            cache_ttl_seconds=(
+                cache_ttl_seconds if cache_ttl_seconds > DEFAULT_SESSION_CACHE_TTL_SECONDS else None
+            ),
         )
         extra_env = {"MOSQUITTO_CONF": runtime_mosq_conf}
         endpoints = _scenario_endpoint_config(
@@ -9263,7 +9332,7 @@ def main(
                     },
                     "cache_context": {
                         "acl_read_enforcement_expected": acl_read_enforcement,
-                        "cache_ttl_seconds": 3600,
+                        "cache_ttl_seconds": cache_ttl_seconds,
                         "note": (
                             "strict ACL_READ scenarios should enforce policy changes on fan-out "
                             "delivery; cache must not mask runtime authorization changes"

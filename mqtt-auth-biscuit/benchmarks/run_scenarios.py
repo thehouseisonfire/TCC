@@ -8014,6 +8014,7 @@ def _build_available_scenarios(
             "netem": {"clear": True},
             "message_size": 0,
             "hybrid_fallback_required": True,
+            "sync_connect": True,
         },
         "NETWORK-MTU-200-JWT": {
             "mosquitto_conf": "./mosquitto.conf",

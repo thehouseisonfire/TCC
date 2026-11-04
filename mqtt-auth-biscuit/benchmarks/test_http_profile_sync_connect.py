@@ -113,7 +113,7 @@ def test_only_the_four_http_profile_matrix_cells_enable_the_barrier() -> None:
         assert scenarios[scenario_id].get("sync_connect") is not True
 
 
-def test_sync_connect_cohort_is_the_existing_barriers_plus_the_four_profiles() -> None:
+def test_sync_connect_cohort_includes_only_qualified_scenarios() -> None:
     scenarios = _scenario_registry()
     enabled = {
         scenario_id
@@ -121,7 +121,11 @@ def test_sync_connect_cohort_is_the_existing_barriers_plus_the_four_profiles() -
         if scenario.get("sync_connect") is True
     }
 
-    assert enabled == EXISTING_SYNC_CONNECT_SCENARIOS | set(HTTP_PROFILE_SYNC_SCENARIOS)
+    assert enabled == (
+        EXISTING_SYNC_CONNECT_SCENARIOS
+        | set(HTTP_PROFILE_SYNC_SCENARIOS)
+        | {"HYBRID-FALLBACK-AUTHZ-DOWN-JWT"}
+    )
 
 
 def test_http_latency_barrier_semantics_remain_unchanged() -> None:

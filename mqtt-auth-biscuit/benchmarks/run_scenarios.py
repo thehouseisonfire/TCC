@@ -6467,11 +6467,17 @@ def _expand_tls_matrix(
     return expanded
 
 
-def _write_result(out_dir: str, name: str, payload: dict):
+def _claim_exclusive_output(out_dir: str) -> None:
+    path = Path(out_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.mkdir()
+
+
+def _write_result(out_dir: str, name: str, payload: dict, *, exclusive: bool = False):
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     path = out_path / f"{name}.json"
-    with path.open("w", encoding="utf-8") as f:
+    with path.open("x" if exclusive else "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
     return str(path)
 
@@ -8777,6 +8783,7 @@ def _build_available_scenarios(
 def main(
     tokens_path: str = "benchmarks/tokens.json",
     out: str = "benchmarks/results",
+    exclusive_out: bool = False,
     clients: int = 50,
     messages: int = 20,
     qos: int = 1,
@@ -9028,6 +9035,22 @@ def main(
             logger.info("%s", scenario_id)
         logger.info("Append -TLS to any scenario id for TLS variants.")
         return
+
+    if exclusive_out:
+        if not scenarios:
+            raise typer.BadParameter("exclusive output requires at least one selected scenario")
+        for summary_name in (summary_json, *(() if no_summary_csv else (summary_csv,))):
+            if Path(summary_name).name != summary_name or summary_name in {"", ".", ".."}:
+                raise typer.BadParameter(
+                    "exclusive summaries must be names within the output directory"
+                )
+        for scenario in scenarios:
+            _validate_scenario_credentials(scenario["id"], scenario)
+        try:
+            _claim_exclusive_output(out)
+        except FileExistsError:
+            logger.error("Exclusive output destination already exists: %s", out)
+            raise typer.Exit(code=73) from None
 
     for s in scenarios:
         _validate_scenario_credentials(s["id"], s)
@@ -10216,7 +10239,7 @@ def main(
         # Add packet analysis result to output payload
         out_payload["packet_analysis_result"] = packet_analysis_result
 
-        path = _write_result(out, s["id"], out_payload)
+        path = _write_result(out, s["id"], out_payload, exclusive=exclusive_out)
         logger.info("Wrote %s", path)
 
     summary_json_path = Path(summary_json)
@@ -10240,6 +10263,8 @@ def main(
         agg_cmd.append("--no-csv")
     else:
         agg_cmd.extend(["--out-csv", str(summary_csv_path)])
+    if exclusive_out:
+        agg_cmd.append("--exclusive-out")
     try:
         subprocess.check_call(
             agg_cmd,
@@ -10247,6 +10272,8 @@ def main(
             env=_python_subprocess_env(),
         )
     except subprocess.CalledProcessError as exc:
+        if exclusive_out:
+            raise
         logger.warning(
             "Aggregation failed (%s); scenario results preserved",
             exc,

@@ -3,6 +3,16 @@
 This guide explains how to run the benchmarks for the JWT and Biscuit
 authentication plugin.
 
+For append-only targeted collection, the repository wrapper accepts `--out PATH`
+and `--exclusive-out`. Exclusive mode atomically claims a new output directory;
+an existing directory fails before workload, and a failed attempt remains in
+place for investigation or quarantine. Scenario and summary files are created
+without overwriting. Use a dedicated directory per slot, for example
+`benchmarks/results-p2-model-b-replacements-FREEZE/c10-m10-q0-r1`.
+Logical repetition is external provenance, not an internal run index: record
+the slot coordinate, invocation, destination, source freeze, and result SHA256.
+The one-scenario summary is not a complete matrix repetition.
+
 **Important Note**: This implementation supports **MQTT v5 only**.
 MQTT v3.1 is not implemented and is out of scope for these benchmarks.
 

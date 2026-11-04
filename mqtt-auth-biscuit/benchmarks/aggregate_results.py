@@ -348,6 +348,7 @@ def main(
     out_json: str = "summary.json",
     out_csv: str = "summary.csv",
     no_csv: bool = False,
+    exclusive_out: bool = False,
     log_level: str = typer.Option("INFO", "--log-level"),
 ):
     setup_logging(log_level)
@@ -357,14 +358,18 @@ def main(
     out_json_path = Path(out_json)
     if not out_json_path.is_absolute():
         out_json_path = input_dir / out_json_path
-    with out_json_path.open("w", encoding="utf-8") as f:
+    with out_json_path.open("x" if exclusive_out else "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
 
     if not no_csv:
         out_csv_path = Path(out_csv)
         if not out_csv_path.is_absolute():
             out_csv_path = input_dir / out_csv_path
-        _write_csv(summary, out_csv_path)
+        if exclusive_out:
+            with out_csv_path.open("x", encoding="utf-8", newline="") as f:
+                _write_csv(summary, f)
+        else:
+            _write_csv(summary, out_csv_path)
     logger.info("Summary written to %s", out_json_path)
 
 

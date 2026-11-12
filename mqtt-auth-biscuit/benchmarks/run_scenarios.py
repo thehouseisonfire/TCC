@@ -2018,7 +2018,7 @@ DEFAULT_KEEPALIVE_SECONDS = 60
 DEFAULT_SESSION_CACHE_TTL_SECONDS = 3600
 
 
-def _publish_timeout_seconds(scenario: ScenarioConfig, clients: int) -> int:
+def _connect_timeout_seconds(scenario: ScenarioConfig, clients: int) -> int:
     """Derive the per-operation MQTT completion budget from the PDP delay.
 
     The configured ``http_expected_delay_ms`` remains the measured independent
@@ -2059,6 +2059,51 @@ def _publish_timeout_seconds(scenario: ScenarioConfig, clients: int) -> int:
     )
 
 
+# Packet-qualified whole HTTP exchange envelope: 49.185 ms rounded up to 50 ms.
+# This budgets the measured transport cost; it does not inject a policy delay.
+HTTP_SERVICE_ROUND_BUDGET_MS = 50
+HTTP_COMPLETION_HEADROOM_S = 5
+
+
+def _publish_timeout_seconds(
+    scenario: ScenarioConfig,
+    clients: int,
+    qos: int | None = None,
+    qos_distribution: str | None = None,
+) -> int:
+    """Allow serialized HTTP work to complete without changing measured behavior.
+
+    A packet arriving after the broker's readiness snapshot can wait for
+    the current batch and the next batch: QoS1 traces show 397 intervening
+    HTTP requests at c200 before PUBACK (16.426 s). QoS2 also needs two
+    service rounds across PUBLISH authorization and PUBREL processing;
+    its observed handshake took 15.643 s. One ACK is not one reactor round.
+    Both acknowledged QoS levels therefore reserve two HTTP service rounds.
+    QoS0 completes on the client and retains its separate exact broker drain.
+    Local policy paths and single-publisher fan-out retain their old budgets.
+    Existing measured/injected-delay budgets remain lower bounds.
+    """
+    existing = _connect_timeout_seconds(scenario, clients)
+    policy_source = scenario.get("policy_source") or _infer_policy_source(scenario)
+    if policy_source not in {"http", "hybrid"} or scenario.get("traffic_pattern") == "fanout":
+        return existing
+    selected_qos = scenario.get("qos", 0) if qos is None else qos
+    distribution = (
+        scenario.get("qos_distribution") if qos_distribution is None else qos_distribution
+    )
+    if distribution:
+        selected_qos = max(
+            int(part.split(":")[0])
+            for part in distribution.split(",")
+            if float(part.split(":")[1]) > 0
+        )
+    if selected_qos not in {1, 2}:
+        return existing
+    # Integer milliseconds avoid rounding a boundary up due to float error.
+    queued_ms = 2 * max(clients, 1) * HTTP_SERVICE_ROUND_BUDGET_MS
+    return max(existing, (queued_ms + 999) // 1000 + HTTP_COMPLETION_HEADROOM_S)
+
+
 def _mqtt_keepalive_seconds(scenario: ScenarioConfig, clients: int) -> int:
     """Derive the MQTT keepalive from the expected serialized service round.
 
@@ -2079,12 +2124,17 @@ def _mqtt_keepalive_seconds(scenario: ScenarioConfig, clients: int) -> int:
     )
 
 
-def _watchdog_metadata(scenario: ScenarioConfig, clients: int) -> dict[str, int]:
+def _watchdog_metadata(
+    scenario: ScenarioConfig,
+    clients: int,
+    qos: int | None = None,
+    qos_distribution: str | None = None,
+) -> dict[str, int]:
     """Effective watchdog budgets recorded with each result."""
-    publish_timeout_s = _publish_timeout_seconds(scenario, clients)
+    publish_timeout_s = _publish_timeout_seconds(scenario, clients, qos, qos_distribution)
     return {
         "publish_timeout_seconds": publish_timeout_s,
-        "connect_timeout_seconds": publish_timeout_s,
+        "connect_timeout_seconds": _connect_timeout_seconds(scenario, clients),
         "keepalive_seconds": _mqtt_keepalive_seconds(scenario, clients),
     }
 
@@ -9515,7 +9565,9 @@ def main(
                     "fanout_churn_sqlite_subscribers": s.get("fanout_churn_sqlite_subscribers"),
                     "http_expected_delay_ms": s.get("http_expected_delay_ms"),
                     "http_timeout_budget_delay_ms": s.get("http_timeout_budget_delay_ms"),
-                    **_watchdog_metadata(s, effective_client_count),
+                    **_watchdog_metadata(
+                        s, effective_client_count, scenario_qos, scenario_qos_distribution
+                    ),
                     "client_topology": {
                         "mode": client_topology_mode,
                         "effective_mode": client_topology_mode,
@@ -9911,9 +9963,9 @@ def main(
                             scenario_id=s["id"],
                             run_index=idx,
                             publish_timeout_seconds=_publish_timeout_seconds(
-                                s, effective_client_count
+                                s, effective_client_count, scenario_qos, scenario_qos_distribution
                             ),
-                            connect_timeout_seconds=_publish_timeout_seconds(
+                            connect_timeout_seconds=_connect_timeout_seconds(
                                 s, effective_client_count
                             ),
                             keepalive_seconds=_mqtt_keepalive_seconds(s, effective_client_count),

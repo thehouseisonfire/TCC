@@ -52,11 +52,11 @@ def test_workload_interval_coverage_counts_only_packets_inside_each_run() -> Non
         mqtt_times=[0.5, 1.1, 1.5, 2.1, 3.2],
         payload_times=[1.5, 3.2],
         client_events=[
-            (0.5, "readiness", 40000),
-            (1.1, "client-a", 40001),
-            (1.2, "client-a", 40001),
-            (1.5, "client-b", 40002),
-            (3.2, "client-a", 40003),
+            (0.5, "readiness", 40000, 0),
+            (1.1, "client-a", 40001, 0),
+            (1.2, "client-a", 40001, 0),
+            (1.5, "client-b", 40002, 0),
+            (3.2, "client-a", 40003, 0),
         ],
         intervals=[(1.0, 2.0), (3.0, 4.0)],
     )
@@ -90,8 +90,8 @@ def test_workload_interval_coverage_counts_recycled_container_ips_separately() -
         mqtt_times=[0.5, 5.5],
         payload_times=[0.5, 5.5],
         client_events=[
-            (0.5, "172.22.0.8", 57256),
-            (5.5, "172.22.0.8", 60112),
+            (0.5, "172.22.0.8", 57256, 0),
+            (5.5, "172.22.0.8", 60112, 0),
         ],
         intervals=[(0.0, 6.0)],
     )
@@ -360,3 +360,39 @@ def test_parse_pcap_with_dpkt_real():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_reused_tcp_endpoint_counts_new_syn_not_retransmission(tmp_path: Path) -> None:
+    import socket
+
+    import dpkt
+
+    pcap = tmp_path / "reused-endpoint.pcap"
+    with pcap.open("wb") as stream:
+        writer = dpkt.pcap.Writer(stream)
+        for timestamp, sequence, flags, payload in [
+            (1.0, 100, dpkt.tcp.TH_SYN, b""),
+            (1.1, 100, dpkt.tcp.TH_SYN, b""),  # retransmission, same session
+            (1.2, 101, dpkt.tcp.TH_ACK, b"mqtt"),
+            (5.0, 900, dpkt.tcp.TH_SYN, b""),  # same IP AND port, new session
+            (5.1, 901, dpkt.tcp.TH_ACK, b"mqtt"),
+        ]:
+            tcp = dpkt.tcp.TCP(sport=36588, dport=1883, seq=sequence, flags=flags)
+            tcp.data = payload
+            ip = dpkt.ip.IP(
+                src=socket.inet_aton("172.18.0.14"),
+                dst=socket.inet_aton("172.18.0.4"),
+                p=6,
+                data=tcp,
+            )
+            ip.len = len(ip)
+            eth = dpkt.ethernet.Ethernet(
+                src=b"\x01" * 6, dst=b"\x02" * 6, type=dpkt.ethernet.ETH_TYPE_IP, data=ip
+            )
+            writer.writepkt(bytes(eth), timestamp)
+    result = analyze_pcap(pcap, workload_intervals=[(0.0, 6.0), (0.0, 2.0), (7.0, 8.0)])
+    coverage = result["workload_interval_coverage"]
+    assert coverage[0]["mqtt_client_connections"] == 2
+    assert coverage[1]["mqtt_client_connections"] == 1
+    assert coverage[2]["mqtt_client_connections"] == 0
+    assert coverage[2]["mqtt_packets"] == coverage[2]["mqtt_payload_packets"] == 0

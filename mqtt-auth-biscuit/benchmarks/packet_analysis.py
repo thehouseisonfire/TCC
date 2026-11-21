@@ -52,10 +52,9 @@ class PacketMetrics:
     packet_times: list[float] = field(default_factory=list)
     mqtt_packet_times: list[float] = field(default_factory=list)
     mqtt_payload_times: list[float] = field(default_factory=list)
-    # (timestamp, client ip, client source port). The source port
-    # distinguishes sequential clients sharing a recycled container IP, which
-    # Docker IPAM can reassign while a capture is running.
-    mqtt_client_events: list[tuple[float, str, int]] = field(default_factory=list)
+    # (timestamp, client ip, source port, TCP connection incarnation).
+    # Docker can recycle both IP and source port within the same capture.
+    mqtt_client_events: list[tuple[float, str, int, int]] = field(default_factory=list)
     tcp_streams: dict[str, StreamMetrics] = field(default_factory=dict)
     mqtt_connections: set[tuple[tuple[str, int], tuple[str, int]]] = field(default_factory=set)
 
@@ -107,22 +106,23 @@ def _canonical_connection(
 def _workload_interval_coverage(
     mqtt_times: list[float],
     payload_times: list[float],
-    client_events: list[tuple[float, str, int]],
+    client_events: list[tuple[float, str, int, int]],
     intervals: list[tuple[float, float]],
 ) -> list[dict[str, float | int]]:
     """Count captured MQTT traffic occurring inside each measured interval.
 
-    Client presence is counted per (ip, source port) endpoint rather than per
-    IP so that sequential clients sharing a recycled container IP are each
-    observed. `mqtt_client_ips` is retained alongside for diagnostics.
+    Client presence uses TCP connection incarnations, not just endpoints:
+    a fresh SYN with a different initial sequence number distinguishes a new
+    connection even when Docker recycles both IP and source port. Retransmitted
+    SYNs do not create new incarnations. Interval boundaries remain unchanged.
     """
     mqtt_times = sorted(mqtt_times)
     payload_times = sorted(payload_times)
     coverage = []
     for started_at, finished_at in intervals:
         endpoints = {
-            (client_ip, client_port)
-            for timestamp, client_ip, client_port in client_events
+            (client_ip, client_port, incarnation)
+            for timestamp, client_ip, client_port, incarnation in client_events
             if started_at <= timestamp <= finished_at
         }
         coverage.append(
@@ -133,7 +133,7 @@ def _workload_interval_coverage(
                 - bisect_left(mqtt_times, started_at),
                 "mqtt_payload_packets": bisect_right(payload_times, finished_at)
                 - bisect_left(payload_times, started_at),
-                "mqtt_client_ips": len({client_ip for client_ip, _ in endpoints}),
+                "mqtt_client_ips": len({client_ip for client_ip, _, _ in endpoints}),
                 "mqtt_client_connections": len(endpoints),
             }
         )
@@ -163,6 +163,9 @@ def parse_pcap_with_dpkt(pcap_path: str | Path) -> PacketMetrics:
     stream_map: dict[str, StreamMetrics] = {}
     # Track seen sequence numbers per stream to detect retransmissions
     seen_seqs: dict[str, set[str]] = {}
+    # Endpoint -> (last SYN initial sequence, incarnation). Missing SYNs remain
+    # in incarnation zero; only an observed fresh SYN can split an endpoint.
+    client_sessions: dict[tuple[str, int], tuple[int | None, int]] = {}
 
     with open(pcap_path, "rb") as f:
         reader = dpkt.pcap.Reader(f)
@@ -199,7 +202,14 @@ def parse_pcap_with_dpkt(pcap_path: str | Path) -> PacketMetrics:
             metrics.mqtt_tcp_packets += 1
             metrics.mqtt_packet_times.append(timestamp)
             if tcp.dport in {1883, 8883}:
-                metrics.mqtt_client_events.append((timestamp, _ip_to_str(ip.src), tcp.sport))
+                endpoint = (_ip_to_str(ip.src), tcp.sport)
+                initial_seq, incarnation = client_sessions.get(endpoint, (None, 0))
+                if tcp.flags & dpkt.tcp.TH_SYN and not tcp.flags & dpkt.tcp.TH_ACK:
+                    if initial_seq is not None and tcp.seq != initial_seq:
+                        incarnation += 1
+                    initial_seq = tcp.seq
+                client_sessions[endpoint] = (initial_seq, incarnation)
+                metrics.mqtt_client_events.append((timestamp, *endpoint, incarnation))
             tcp_payload_len = len(tcp.data)
             if tcp_payload_len:
                 metrics.mqtt_payload_packets += 1

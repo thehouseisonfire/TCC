@@ -38,8 +38,8 @@ Academically, this work fills a gap in the literature on distributed systems by 
 
 # Research Notes
 
-This chapter exists to prevent coding LLMs from filling in gaps with assumptions that would change the implementation semantics or invalidate the experimental comparison.
-All points below are **hard constraints** for implementation and must be treated as non-negotiable.
+These implementation constraints preserve the intended authorization semantics
+and experimental comparisons.
 
 ## Mosquitto Plugin API Constraints (FFI + Callbacks)
 
@@ -67,7 +67,7 @@ All points below are **hard constraints** for implementation and must be treated
 ## Experimental Reproducibility Guardrails (Docker)
 
 - The experimental harness must use Docker resource controls to reduce run-to-run variance by deterministic allocation of compute and memory resources (e.g., `--memory`, `--cpus`).
-- CPU pinning must be supported/used where applicable (e.g., `--cpuset-cpus`) to keep broker and load generator on stable cores across scenarios.
+- Record CPU quotas and CPU affinity separately. A quota limits CPU time, while a CPU set restricts which logical CPUs a container may use.
 - If disk I/O becomes a confounder, the Docker `blkio` controller is the normative mechanism to constrain disk I/O bandwidth for controlled experiments.
 - Known limitation: Docker has limitations for direct measurement of container energy consumption, so energy metrics are out-of-scope for this harness unless external measurement is added.
 
@@ -127,15 +127,18 @@ For issuance and verification, the module will integrate the `jsonwebtoken` and 
 The connection flow will follow MQTT 5.0 specifications:
 1. Clients will send their tokens through the `password` field of the `CONNECT` packet. The 65kB limit (defined by the protocol) is sufficient to accommodate both token types.
 2. The *broker* will initiate the session after validating the cryptographic signature.
-3. To manage expiration without disconnecting the client, a reauthentication flow will be implemented via `AUTH` packets. Upon expiration, the client will request a new token and send it to Mosquitto via another `AUTH` packet, allowing transparent session renewal.
+3. To manage expiration without disconnecting the client, a reauthentication flow will be implemented via `AUTH` packets. In the reauthentication scenarios, the client presents a fresh token in an `AUTH` packet before expiry to renew the session.
 
 For continuous authorization, the solution will optimize Biscuit performance, avoiding complete cryptographic reverification at each message and performing only policy evaluation (Datalog). If viable, *caching* will be employed for static rules, reevaluating only contextual rules at each message. The use of `AUTH` packets will also allow specific rejection reasons to be communicated, facilitating debugging.
 
 ## Proposed Environment
 
-The implemented experimental environment uses Docker 29.x, Rust 1.93.1, `biscuit-auth` 6.0.0, `jsonwebtoken` 10.4.0, and bundled SQLite through `rusqlite` 0.39.0. Mosquitto is built from the repository-pinned upstream commit into the `mosquitto:2.1.3-custom` image because the plugin requires the `MOSQ_EVT_BASIC_AUTH` password-length ABI fix and the official `2.1.3-alpine` image is not yet available.
+The implemented experimental environment uses Docker 29.x, Rust 1.93.1, `biscuit-auth` 6.0.0, `jsonwebtoken` 10.4.0, and bundled SQLite through `rusqlite` 0.39.0. The [custom Mosquitto build](BUILD-MOSQUITTO.md) pins the broker source revision that supplies the password-length ABI for binary CONNECT credentials.
 
-To ensure test integrity and minimize neighborhood noise, Docker's `--cpuset` option will be used to pin the *broker* and load generator processes to distinct and consistent physical cores of the host machine.
+The final campaign's frozen Compose configuration restricted Mosquitto and the
+token issuer to logical CPUs `0-1`. Each load-generator container had a
+one-CPU quota and a 96 MiB memory limit, with no client CPU set specified in
+the recorded campaign settings. Reauthentication storms used host processes.
 
 The current harness uses `iperf3` to measure nominal channel capacity and `tc`/`netem` to introduce controlled latency, packet loss, bandwidth limits, and MTU changes. Mininet or Containernet remain possible future extensions for experiments that require topologies beyond the implemented Docker modes; they are not part of the current runnable harness.
 
@@ -149,7 +152,7 @@ Highlighted scenarios include:
 
 **Fragmentation and MTU (*Maximum Transmission Unit*):** MTU manipulation via `tc` (200B, 500B, 1500B, 9000B) to identify the inflection point at which token size (especially attenuated Biscuits with multiple blocks) causes excessive TCP fragmentation and degrades performance.
 
-**Thundering Herd Problem:** Simulation of *broker* restart with simultaneous reconnection of a large number of clients. The objective is to evaluate whether the computational cost of Biscuit signature verification prevents rapid system recovery compared to JWT.
+**Thundering Herd:** A synchronized CONNECT burst measures authentication under concurrent session establishment. A second barrier starts publishing after every client has connected.
 
 **Policy Complexity:** Progressive increase of blocks and logical rules in Biscuit (1, 5, 25 blocks) against constant requests by the JWT mechanism to external services for new tokens. The goal is to validate the efficiency of local Biscuit verification against the latency of multiple calls.
 
@@ -159,11 +162,15 @@ Highlighted scenarios include:
 
 **Revocation and Lifecycle:** Comparison between revocation list verification (long-lived tokens) *versus* short-lived tokens (5, 15, 60 min) with frequent renewal via `AUTH` flow.
 
-**Delegation:** Simulation of flow in which "master" clients issue attenuated tokens to "worker" clients with permissions strictly limited to the task, exploring the decentralized delegation capabilities unique to Biscuit, as speculated by.
+**Delegation:** Simulation of flow in which "master" clients issue attenuated tokens to "worker" clients with permissions strictly limited to the task, to exercise Biscuit delegation.
 
 ## Data Collection and Analysis
 
-Data collection will be automated through real-time telemetry, extracting metrics from the Mosquitto module, simulated clients, and system tools (`perf`, `tcpdump`). An exporter component will persist time series in appropriate databases, such as InfluxDB or Prometheus.
+The runner records workload timings and counters from the clients, CPU and
+memory snapshots from Prometheus/cAdvisor, and packet analysis from tcpdump
+for MTU scenarios. The completed campaign used a prospectively reduced scope.
+The accepted workload coordinates, source provenance, and analysis inputs are
+recorded in the [final dataset documentation](SEMANTIC-VERIFIED.md#final-dataset-and-provenance).
 
 Statistical treatment will include calculation of the median, standard deviation, and tail percentiles (p50, p95, p99) to identify latency spikes (*tail latency*) that simple averages would obscure.
 

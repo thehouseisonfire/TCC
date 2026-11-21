@@ -25,6 +25,13 @@ static RUSTLS_PROVIDER: Once = Once::new();
 /// preempting it.
 pub const CONNECT_TIMEOUT_MARGIN: Duration = Duration::from_secs(5);
 
+/// Default MQTT keepalive interval for benchmark clients.
+///
+/// The runner raises this for HTTP-LATENCY workloads whose serialized
+/// authorization round exceeds the default so the generic connection
+/// liveness watchdog does not preempt healthy queued work.
+pub const DEFAULT_KEEPALIVE_SECONDS: u16 = 60;
+
 #[derive(Debug, thiserror::Error)]
 pub enum MqttHelperError {
     #[error("{0}")]
@@ -48,6 +55,7 @@ pub struct ClientSpec {
     pub client_id: String,
     pub username: String,
     pub password: Vec<u8>,
+    pub keep_alive: Duration,
     pub tls: bool,
     pub tls_ca_file: Option<String>,
     pub tls_insecure: bool,
@@ -227,6 +235,8 @@ fn tls_config(ca_file: Option<&str>, insecure: bool) -> Result<TlsConfiguration>
 /// `connect_timeout` is the caller-provided CONNACK budget. It is propagated
 /// into rumqttc's internal CONNACK timer (plus [`CONNECT_TIMEOUT_MARGIN`])
 /// so the library default cannot terminate a queued CONNECT first.
+/// The client's `keep_alive` is applied directly so latency-derived watchdog
+/// budgets reach rumqttc rather than relying on its library default.
 ///
 /// # Errors
 ///
@@ -234,6 +244,7 @@ fn tls_config(ca_file: Option<&str>, insecure: bool) -> Result<TlsConfiguration>
 pub fn mqtt_options(spec: &ClientSpec, connect_timeout: Duration) -> Result<MqttOptions> {
     let mut options = MqttOptions::new(spec.client_id.clone(), (spec.host.as_str(), spec.port));
     options.set_connect_timeout(connect_timeout.saturating_add(CONNECT_TIMEOUT_MARGIN));
+    options.set_keep_alive(u16::try_from(spec.keep_alive.as_secs()).unwrap_or(u16::MAX));
     let mut network_options = NetworkOptions::new();
     network_options.set_connection_timeout(30);
     options.set_network_options(network_options);
@@ -342,6 +353,7 @@ mod tests {
             client_id: "client".to_string(),
             username: username.to_string(),
             password: password.to_vec(),
+            keep_alive: Duration::from_secs(u64::from(DEFAULT_KEEPALIVE_SECONDS)),
             tls: false,
             tls_ca_file: None,
             tls_insecure: false,
@@ -368,6 +380,24 @@ mod tests {
             Duration::from_secs(25) + CONNECT_TIMEOUT_MARGIN
         );
         assert_ne!(options.connect_timeout(), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn mqtt_options_uses_default_keepalive_when_not_overridden() {
+        let options = mqtt_options(&client_spec("user", b"secret"), Duration::from_secs(10))
+            .expect("options");
+        assert_eq!(
+            options.keep_alive(),
+            Duration::from_secs(u64::from(DEFAULT_KEEPALIVE_SECONDS))
+        );
+    }
+
+    #[test]
+    fn mqtt_options_applies_explicit_keepalive() {
+        let mut spec = client_spec("user", b"secret");
+        spec.keep_alive = Duration::from_secs(215);
+        let options = mqtt_options(&spec, Duration::from_secs(10)).expect("options");
+        assert_eq!(options.keep_alive(), Duration::from_secs(215));
     }
 
     #[test]

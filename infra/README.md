@@ -1,44 +1,15 @@
 # Benchmark Host Infrastructure
 
-This directory is the canonical repo-local entrypoint for preparing and smoke
-verifying the final benchmark host on a paid Debian/Ubuntu server.
-
-The current stage-1 split is:
-
-- Terraform for VM creation and network-facing infrastructure state
-- Ansible for host convergence after SSH access exists
-- apt snapshots for reproducible host package resolution
-- Packer deferred until repeated image rebuilds justify the extra maintenance
-
-The staged roadmap is now reflected in the current boundary below and the
-project status tracker at [`../PROGRESS.md`](../PROGRESS.md).
+Terraform provisions the benchmark VM. Ansible configures the host and runs
+smoke checks using pinned Ubuntu package snapshots. The benchmark checkout,
+build, and execution steps are documented in the [run plan](../RUN.md).
 
 ## Layout
 
-The benchmark-host path is intentionally small and explicit:
-
-- `infra/terraform/`: pinned Terraform root for creating the benchmark VM
-- `infra/ansible/`: host convergence for the already-created benchmark VM
-- `scripts/`: operator-facing launchers for benchmark-host tooling
-- `tools/`: Rust implementation crates for benchmark-host tools
-
-## Current Boundary
-
-This repo state implements the first six steps in the staged host path:
-
-- the path contract, docs, helper, and regression test
-- a minimal Hetzner Terraform root for one Ubuntu 24.04 benchmark host
-- Ansible convergence for the Terraform-created Ubuntu 24.04 host
-- Ubuntu snapshot pinning plus exact apt package locks for the host baseline
-- a smoke path that proves a fresh host reaches the expected baseline
-- benchmark prerequisite installation plus verification coverage
-
-It does **not** yet implement:
-
-- repo checkout on the host
-- plugin or token builds on the host
-- benchmark execution on the host
-- Packer image baking
+- `infra/terraform/` provisions one Ubuntu 24.04 benchmark VM on Hetzner.
+- `infra/ansible/` configures and verifies the host over SSH.
+- The repository's `scripts/` launch the benchmark-host tools implemented in
+  `tools/`.
 
 ## Terraform Scope
 

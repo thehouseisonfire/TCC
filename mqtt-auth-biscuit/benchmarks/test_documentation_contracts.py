@@ -24,4 +24,6 @@ def test_documented_scenario_inventory_matches_registry() -> None:
         assert "222" in content, relative_path
 
     assert "3,186" in (REPO_ROOT / "RUN.md").read_text(encoding="utf-8")
-    assert "1,530" in (REPO_ROOT / "RUN.md").read_text(encoding="utf-8")
+    assert "1,512" in (REPO_ROOT / "RUN.md").read_text(encoding="utf-8")
+    assert "1,530" not in (REPO_ROOT / "RUN.md").read_text(encoding="utf-8")
+    assert rs.part2_expected_slot_total() == 1512

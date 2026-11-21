@@ -9,7 +9,7 @@ import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Generator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -186,6 +186,15 @@ STRICT_FANOUT_PARITY_POLICY_SOURCES = frozenset({"http", "hybrid"})
 # Part 2 is intentionally split by effective workload axes.  Keep this inventory
 # executable: RUN.md obtains the comma-separated groups from this mapping instead
 # of maintaining a second, easily-stale list.
+#
+# DYNAMIC-SECURITY-CHURN is intentionally NOT in ``matrix``.  Its
+# ``runtime_control_expect_denial`` contract is only client-observable at
+# QoS 1 (PUBACK rc135) and QoS 2 (PUBREC rc135); at QoS 0 Mosquitto denies
+# the PUBLISH server-side but there is no acknowledgement carrying the
+# denial, so the frozen result contract is impossible to satisfy.  The
+# dedicated ``churn`` cohort below is the only executable home for that
+# scenario and its allowed QoS subset is machine-readable in
+# ``PART2_SWEEP_COHORT_QOS``.
 PART2_SWEEP_COHORTS: dict[str, tuple[str, ...]] = {
     "matrix": (
         "TOKEN-BASELINE-JWT",
@@ -193,7 +202,6 @@ PART2_SWEEP_COHORTS: dict[str, tuple[str, ...]] = {
         "STATIC-ACL-PUBLISH-JWT",
         "STATIC-ACL-PUBLISH-BISCUIT",
         "DYNAMIC-SECURITY-BASELINE",
-        "DYNAMIC-SECURITY-CHURN",
         "HTTP-PROFILE-SIMPLE-JWT",
         "HTTP-PROFILE-SIMPLE-BISCUIT",
         "HTTP-PROFILE-COMPLEX-JWT",
@@ -212,16 +220,77 @@ PART2_SWEEP_COHORTS: dict[str, tuple[str, ...]] = {
         "TOKEN-THUNDERING-HERD-JWT",
         "TOKEN-THUNDERING-HERD-BISCUIT",
     ),
+    "churn": ("DYNAMIC-SECURITY-CHURN",),
     "fixed_qos": ("BASELINE-NO-AUTH", "TOKEN-QOS2-JWT", "TOKEN-QOS2-BISCUIT"),
     "fixed_clients_qos": ("TOKEN-DENY-READ-JWT", "TOKEN-ATTENUATED-DENY-BISCUIT"),
     "reauth": ("TOKEN-MQTT5-REAUTH-JWT", "TOKEN-MQTT5-REAUTH-BISCUIT"),
     "issuer": ("TOKEN-ISSUER-BASELINE-JWT", "TOKEN-ISSUER-BASELINE-BISCUIT"),
 }
 
+# Explicit allowed QoS subset per executable Part 2 cohort.  This is the
+# machine-readable sweep contract: RUN.md derives its QoS loops from this
+# mapping instead of hard-coding ``0 1 2`` for every cohort, so the invalid
+# CHURN+q0 combination cannot be produced by the documented commands.
+PART2_SWEEP_COHORT_QOS: dict[str, tuple[int, ...]] = {
+    "matrix": (0, 1, 2),
+    "churn": (1, 2),
+    "fixed_qos": (1,),
+    "fixed_clients_qos": (1,),
+    "reauth": (1,),
+    "issuer": (0, 1, 2),
+}
+
+# Explicit client/message sweep levels per executable Part 2 cohort.  The
+# issuer cohort has an additional default/stripped issuance axis (factor 2)
+# applied by RUN.md; see ``part2_expected_slot_total``.
+PART2_SWEEP_COHORT_AXES: dict[str, dict[str, tuple[int, ...]]] = {
+    "matrix": {"clients": (10, 50, 200), "messages": (10, 100), "qos": (0, 1, 2)},
+    "churn": {"clients": (10, 50, 200), "messages": (10, 100), "qos": (1, 2)},
+    "fixed_qos": {"clients": (10, 50, 200), "messages": (10, 100), "qos": (1,)},
+    "fixed_clients_qos": {"clients": (10,), "messages": (10, 100), "qos": (1,)},
+    "reauth": {"clients": (1,), "messages": (1,), "qos": (1,)},
+    "issuer": {"clients": (10, 50, 200), "messages": (10, 100), "qos": (0, 1, 2)},
+}
+
+PART2_ISSUER_MODES_PER_CELL = 2
+
+
+def part2_allowed_qos(cohort: str) -> tuple[int, ...]:
+    """Return the executable QoS levels for a Part 2 cohort."""
+    try:
+        return PART2_SWEEP_COHORT_QOS[cohort]
+    except KeyError as exc:
+        raise ValueError(f"Unknown Part 2 cohort: {cohort}") from exc
+
+
+def part2_expected_slot_total(*, repetitions: int = 3) -> int:
+    """Mechanically validated Part 2 slot count (scenario-runs per repetition set)."""
+    total = 0
+    for cohort, scenario_ids in PART2_SWEEP_COHORTS.items():
+        axes = PART2_SWEEP_COHORT_AXES[cohort]
+        cells = len(scenario_ids) * len(axes["clients"]) * len(axes["messages"]) * len(axes["qos"])
+        if cohort == "issuer":
+            cells *= PART2_ISSUER_MODES_PER_CELL
+        total += cells
+    return total * repetitions
+
+
+def _validate_part2_qos_for_scenario(scenario_id: str, scenario: ScenarioConfig, qos: int) -> None:
+    """Reject the structurally invalid CHURN+q0 combination at execution time."""
+    if scenario.get("runtime_control_expect_denial") and qos == 0:
+        raise RuntimeError(
+            f"{scenario_id}: runtime_control_expect_denial is not client-observable "
+            "at QoS 0 (no PUBACK/PUBREC carries the denial); use QoS 1 or 2"
+        )
+
 
 def _validate_part2_sweep_inventory(scenarios: dict[str, ScenarioConfig]) -> None:
     seen: set[str] = set()
     for cohort, scenario_ids in PART2_SWEEP_COHORTS.items():
+        if cohort not in PART2_SWEEP_COHORT_QOS:
+            raise ValueError(f"Part 2 cohort has no allowed QoS metadata: {cohort}")
+        if cohort not in PART2_SWEEP_COHORT_AXES:
+            raise ValueError(f"Part 2 cohort has no sweep axes metadata: {cohort}")
         for scenario_id in scenario_ids:
             if scenario_id in seen:
                 raise ValueError(f"Part 2 scenario is duplicated: {scenario_id}")
@@ -231,8 +300,20 @@ def _validate_part2_sweep_inventory(scenarios: dict[str, ScenarioConfig]) -> Non
                 raise ValueError(f"Part 2 {cohort} scenario is not registered: {scenario_id}")
             fixed_qos = "qos" in scenario or scenario.get("mqtt5_auth") is not None
             fixed_clients = "client_count" in scenario or "subscriber_count" in scenario
+            expect_denial = bool(scenario.get("runtime_control_expect_denial"))
+            if expect_denial and cohort != "churn":
+                raise ValueError(
+                    f"Part 2 {cohort} scenario requires the dedicated churn cohort: {scenario_id}"
+                )
             if cohort in {"matrix", "issuer"} and (fixed_qos or fixed_clients):
                 raise ValueError(f"Part 2 {cohort} scenario has a fixed sweep axis: {scenario_id}")
+            if cohort == "churn":
+                if fixed_qos or fixed_clients:
+                    raise ValueError(f"Part 2 churn scenario has a fixed sweep axis: {scenario_id}")
+                if not expect_denial:
+                    raise ValueError(f"Part 2 churn scenario does not expect denial: {scenario_id}")
+                if PART2_SWEEP_COHORT_QOS[cohort] != (1, 2):
+                    raise ValueError("Part 2 churn cohort must allow exactly QoS {1, 2}")
             if cohort == "fixed_qos" and (not fixed_qos or fixed_clients):
                 raise ValueError(f"Part 2 fixed_qos scenario has the wrong shape: {scenario_id}")
             if cohort == "fixed_clients_qos" and (not fixed_qos or not fixed_clients):
@@ -1266,6 +1347,152 @@ def _prom_query(base_url: str, query: str, ca_file: str | None, insecure: bool):
         return resp.json()
 
 
+PROM_RANGE_QUERY_STEP_SECONDS = 0.25
+PROM_RANGE_QUERY_MAX_INTERVALS = 10_000
+
+
+def _prom_range_query_chunk_bounds(start: float, end: float) -> list[tuple[float, float]]:
+    """Partition the original 250 ms evaluation grid into disjoint query ranges."""
+    step = PROM_RANGE_QUERY_STEP_SECONDS
+    interval_count = math.floor((end - start) / step + 1e-9)
+    if interval_count <= PROM_RANGE_QUERY_MAX_INTERVALS:
+        return [(start, end)]
+
+    bounds: list[tuple[float, float]] = []
+    first_index = 0
+    while first_index <= interval_count:
+        last_index = min(first_index + PROM_RANGE_QUERY_MAX_INTERVALS, interval_count)
+        # Derive every timestamp from the original start to avoid cumulative drift.
+        chunk_start = start + first_index * step
+        chunk_end = end if last_index == interval_count else start + last_index * step
+        bounds.append((chunk_start, chunk_end))
+        first_index = last_index + 1
+    return bounds
+
+
+def _prom_range_series_identity(series: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    metric = series.get("metric")
+    if not isinstance(metric, dict) or not all(
+        isinstance(name, str) and isinstance(value, str) for name, value in metric.items()
+    ):
+        raise RuntimeError("Prometheus range response has an invalid series label set")
+    return tuple(sorted(metric.items()))
+
+
+def _merge_prom_range_payloads(
+    chunks: list[tuple[float, float, dict[str, Any]]],
+    *,
+    query: str,
+    start: float,
+    end: float,
+) -> dict[str, Any]:
+    """Stitch disjoint chunk matrices by exact Prometheus label identity."""
+    if len(chunks) == 1:
+        return chunks[0][2]
+
+    first_payload = chunks[0][2]
+    first_data = first_payload.get("data")
+    if not isinstance(first_data, dict) or not isinstance(first_data.get("result"), list):
+        raise RuntimeError("Prometheus range response has no result matrix")
+    result_type = first_data.get("resultType")
+    merged_data = dict(first_data)
+    merged_series: dict[tuple[tuple[str, str], ...], dict[str, Any]] = {}
+    samples_by_series: dict[tuple[tuple[str, str], ...], dict[float, list[Any]]] = {}
+    sample_sources: dict[tuple[tuple[str, str], ...], dict[float, int]] = {}
+    series_order: list[tuple[tuple[str, str], ...]] = []
+    chunk_ranges = [(chunk_start, chunk_end) for chunk_start, chunk_end, _ in chunks]
+
+    for chunk_index, (chunk_start, _chunk_end, payload) in enumerate(chunks):
+        data = payload.get("data")
+        if (
+            payload.get("status") != "success"
+            or not isinstance(data, dict)
+            or data.get("resultType") != result_type
+            or not isinstance(data.get("result"), list)
+        ):
+            raise RuntimeError(
+                f"Prometheus range chunk {chunk_index + 1} has an invalid result matrix"
+            )
+
+        for series in data["result"]:
+            if not isinstance(series, dict) or not isinstance(series.get("values"), list):
+                raise RuntimeError(
+                    f"Prometheus range chunk {chunk_index + 1} has an invalid series"
+                )
+            identity = _prom_range_series_identity(series)
+            if identity not in merged_series:
+                merged_series[identity] = {
+                    key: value for key, value in series.items() if key != "values"
+                }
+                samples_by_series[identity] = {}
+                sample_sources[identity] = {}
+                series_order.append(identity)
+            elif {key: value for key, value in series.items() if key != "values"} != merged_series[
+                identity
+            ]:
+                raise RuntimeError("Prometheus range series metadata changed between chunks")
+
+            samples = samples_by_series[identity]
+            last_timestamp: float | None = None
+            for sample in series["values"]:
+                if not isinstance(sample, list) or len(sample) != 2:
+                    raise RuntimeError(
+                        f"Prometheus range chunk {chunk_index + 1} has an invalid sample"
+                    )
+                timestamp = float(sample[0])
+                if last_timestamp is not None and timestamp < last_timestamp:
+                    raise RuntimeError(
+                        "Prometheus range samples are not strictly ordered: "
+                        f"query={query!r}, original_range=[{start}, {end}], "
+                        f"chunk={chunk_index + 1}/{len(chunks)}, "
+                        f"chunk_range=[{chunk_start}, {_chunk_end}], "
+                        f"series={identity!r}, timestamp={timestamp}, "
+                        f"previous_timestamp={last_timestamp}"
+                    )
+                last_timestamp = timestamp
+                previous_sample = samples.get(timestamp)
+                if previous_sample is not None:
+                    previous_chunk_index = sample_sources[identity][timestamp]
+                    raise RuntimeError(
+                        "Prometheus range chunks contain an unexpected duplicate timestamp: "
+                        f"query={query!r}, original_range=[{start}, {end}], "
+                        f"chunk={chunk_index + 1}/{len(chunks)}, "
+                        f"chunk_ranges={chunk_ranges!r}, series={identity!r}, "
+                        f"timestamp={timestamp}, previous_value={previous_sample[1]!r}, "
+                        f"new_value={sample[1]!r}, "
+                        f"previous_chunk={previous_chunk_index + 1}/{len(chunks)}, "
+                        f"previous_chunk_range={chunk_ranges[previous_chunk_index]!r}, "
+                        f"new_chunk_range={chunk_ranges[chunk_index]!r}"
+                    )
+                samples[timestamp] = sample
+                sample_sources[identity][timestamp] = chunk_index
+
+    merged_data["result"] = []
+    for identity in series_order:
+        series = dict(merged_series[identity])
+        series["values"] = [
+            samples_by_series[identity][timestamp]
+            for timestamp in sorted(samples_by_series[identity])
+        ]
+        merged_data["result"].append(series)
+
+    merged_payload = dict(first_payload)
+    merged_payload["data"] = merged_data
+    for field in ("warnings", "infos"):
+        combined: list[Any] = []
+        for _start, _end, payload in chunks:
+            entries = payload.get(field, [])
+            if isinstance(entries, list):
+                for entry in entries:
+                    if entry not in combined:
+                        combined.append(entry)
+        if combined:
+            merged_payload[field] = combined
+        else:
+            merged_payload.pop(field, None)
+    return merged_payload
+
+
 def _prom_range_query(
     base_url: str,
     query: str,
@@ -1279,18 +1506,48 @@ def _prom_range_query(
         verify = False
     elif ca_file:
         verify = ca_file
-    with httpx.Client(verify=verify, timeout=10.0) as client:
-        resp = client.get(
-            base_url.rstrip("/") + "/api/v1/query_range",
-            # Prometheus accepts sub-second query_range steps as numeric seconds;
-            # duration strings only support integer units in the v1 API parser.
-            params={"query": query, "start": start, "end": end, "step": "0.25"},
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-    if payload.get("status") != "success":
-        raise RuntimeError(f"Prometheus range query failed: {payload}")
-    return cast(dict[str, Any], payload)
+    bounds = _prom_range_query_chunk_bounds(start, end)
+    chunks: list[tuple[float, float, dict[str, Any]]] = []
+    for chunk_index, (chunk_start, chunk_end) in enumerate(bounds):
+        try:
+            with httpx.Client(verify=verify, timeout=10.0) as client:
+                resp = client.get(
+                    base_url.rstrip("/") + "/api/v1/query_range",
+                    # Prometheus accepts sub-second query_range steps as numeric seconds;
+                    # duration strings only support integer units in the v1 API parser.
+                    params={
+                        "query": query,
+                        "start": chunk_start,
+                        "end": chunk_end,
+                        "step": str(PROM_RANGE_QUERY_STEP_SECONDS),
+                    },
+                )
+                try:
+                    resp.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    body = resp.text[:4096]
+                    raise RuntimeError(
+                        "Prometheus range query failed for "
+                        f"range [{start}, {end}], chunk {chunk_index + 1}/{len(bounds)} "
+                        f"[{chunk_start}, {chunk_end}]: HTTP {resp.status_code}: {body}"
+                    ) from exc
+                payload = resp.json()
+            if payload.get("status") != "success":
+                raise RuntimeError(
+                    "Prometheus range query returned a non-success payload for "
+                    f"range [{start}, {end}], chunk {chunk_index + 1}/{len(bounds)} "
+                    f"[{chunk_start}, {chunk_end}]: {payload}"
+                )
+            chunks.append((chunk_start, chunk_end, cast(dict[str, Any], payload)))
+        except Exception as exc:
+            if isinstance(exc, RuntimeError) and "Prometheus range query" in str(exc):
+                raise
+            raise RuntimeError(
+                "Prometheus range query failed for "
+                f"range [{start}, {end}], chunk {chunk_index + 1}/{len(bounds)} "
+                f"[{chunk_start}, {chunk_end}]"
+            ) from exc
+    return _merge_prom_range_payloads(chunks, query=query, start=start, end=end)
 
 
 def _range_values(payload: dict[str, Any], metric: str) -> list[tuple[float, float]]:
@@ -1756,9 +2013,12 @@ def _wait_for_non_empty_resource_snapshot(
 
 BASE_PUBLISH_TIMEOUT_S = 10
 PUBLISH_TIMEOUT_HEADROOM_S = 15
+PUBLISH_TIMEOUT_TAIL_MIN_CLIENTS = 50
+DEFAULT_KEEPALIVE_SECONDS = 60
+DEFAULT_SESSION_CACHE_TTL_SECONDS = 3600
 
 
-def _publish_timeout_seconds(scenario: ScenarioConfig, clients: int) -> int:
+def _connect_timeout_seconds(scenario: ScenarioConfig, clients: int) -> int:
     """Derive the per-operation MQTT completion budget from the PDP delay.
 
     The configured ``http_expected_delay_ms`` remains the measured independent
@@ -1767,6 +2027,12 @@ def _publish_timeout_seconds(scenario: ScenarioConfig, clients: int) -> int:
     Mosquitto ACL path, concurrent publishers queue behind each delayed
     authorization, and later connections queue behind in-flight publishes, so
     worst-case per-operation latency scales with ``clients * delay``.
+    Retained latency runs also show a tail of roughly twice that nominal queue
+    bound: one publish can wait an additional service round. For measured-delay
+    scenarios at the large client cohorts, reserve one full extra round when the
+    nominal round exceeds the fixed headroom; the smaller cohorts and
+    budget-only failure-injection scenarios keep the frozen formula. This
+    remains measurement headroom, not a capacity contract.
     Scenarios that inject a PDP delay together with failures (where
     ``http_expected_delay_ms`` would trip the no-failure latency contract)
     size the same budget through the explicit ``http_timeout_budget_delay_ms``
@@ -1774,13 +2040,335 @@ def _publish_timeout_seconds(scenario: ScenarioConfig, clients: int) -> int:
     ``authz_config`` delay settings. Non-delayed scenarios keep the
     historical 10 s base.
     """
+    measured_delay_ms = scenario.get("http_expected_delay_ms") or 0
+    delay_ms = measured_delay_ms or scenario.get("http_timeout_budget_delay_ms") or 0
+    if delay_ms <= 0:
+        return BASE_PUBLISH_TIMEOUT_S
+    effective_clients = max(clients, 1)
+    queued_s = (delay_ms / 1000.0) * effective_clients
+    tail_s = 0.0
+    if (
+        measured_delay_ms > 0
+        and effective_clients >= PUBLISH_TIMEOUT_TAIL_MIN_CLIENTS
+        and queued_s > PUBLISH_TIMEOUT_HEADROOM_S
+    ):
+        tail_s = queued_s
+    return max(
+        BASE_PUBLISH_TIMEOUT_S,
+        math.ceil(queued_s + PUBLISH_TIMEOUT_HEADROOM_S + tail_s),
+    )
+
+
+# Packet-qualified whole HTTP exchange envelope: 49.185 ms rounded up to 50 ms.
+# This budgets the measured transport cost; it does not inject a policy delay.
+HTTP_SERVICE_ROUND_BUDGET_MS = 50
+HTTP_COMPLETION_HEADROOM_S = 5
+
+
+def _publish_timeout_seconds(
+    scenario: ScenarioConfig,
+    clients: int,
+    qos: int | None = None,
+    qos_distribution: str | None = None,
+) -> int:
+    """Allow serialized HTTP work to complete without changing measured behavior.
+
+    A packet arriving after the broker's readiness snapshot can wait for
+    the current batch and the next batch: QoS1 traces show 397 intervening
+    HTTP requests at c200 before PUBACK (16.426 s). QoS2 also needs two
+    service rounds across PUBLISH authorization and PUBREL processing;
+    its observed handshake took 15.643 s. One ACK is not one reactor round.
+    Both acknowledged QoS levels therefore reserve two HTTP service rounds.
+    QoS0 completes on the client and retains its separate exact broker drain.
+    Local policy paths and single-publisher fan-out retain their old budgets.
+    Existing measured/injected-delay budgets remain lower bounds.
+    """
+    existing = _connect_timeout_seconds(scenario, clients)
+    policy_source = scenario.get("policy_source") or _infer_policy_source(scenario)
+    if policy_source not in {"http", "hybrid"} or scenario.get("traffic_pattern") == "fanout":
+        return existing
+    selected_qos = scenario.get("qos", 0) if qos is None else qos
+    distribution = (
+        scenario.get("qos_distribution") if qos_distribution is None else qos_distribution
+    )
+    if distribution:
+        selected_qos = max(
+            int(part.split(":")[0])
+            for part in distribution.split(",")
+            if float(part.split(":")[1]) > 0
+        )
+    if selected_qos not in {1, 2}:
+        return existing
+    # Integer milliseconds avoid rounding a boundary up due to float error.
+    queued_ms = 2 * max(clients, 1) * HTTP_SERVICE_ROUND_BUDGET_MS
+    return max(existing, (queued_ms + 999) // 1000 + HTTP_COMPLETION_HEADROOM_S)
+
+
+def _mqtt_keepalive_seconds(scenario: ScenarioConfig, clients: int) -> int:
+    """Derive the MQTT keepalive from the expected serialized service round.
+
+    The default 60 s keepalive only covers workloads whose authorization path
+    does not serialize behind a measured PDP delay. For HTTP-LATENCY cells the
+    expected healthy round is ``clients * http_expected_delay_ms``; keep the
+    generic connection-liveness watchdog above that round with the benchmark's
+    established fixed watchdog reserve. The publish timeout remains the more
+    specific per-operation watchdog, so no ``2 * keepalive`` relation applies.
+    """
+    delay_ms = scenario.get("http_expected_delay_ms") or 0
+    if delay_ms <= 0:
+        return DEFAULT_KEEPALIVE_SECONDS
+    service_round_s = (delay_ms / 1000.0) * max(clients, 1)
+    return max(
+        DEFAULT_KEEPALIVE_SECONDS,
+        math.ceil(service_round_s + PUBLISH_TIMEOUT_HEADROOM_S),
+    )
+
+
+def _watchdog_metadata(
+    scenario: ScenarioConfig,
+    clients: int,
+    qos: int | None = None,
+    qos_distribution: str | None = None,
+) -> dict[str, int]:
+    """Effective watchdog budgets recorded with each result."""
+    publish_timeout_s = _publish_timeout_seconds(scenario, clients, qos, qos_distribution)
+    return {
+        "publish_timeout_seconds": publish_timeout_s,
+        "connect_timeout_seconds": _connect_timeout_seconds(scenario, clients),
+        "keepalive_seconds": _mqtt_keepalive_seconds(scenario, clients),
+    }
+
+
+def _expected_publish_authorization_count(
+    scenario: ScenarioConfig, *, message_count: int, client_count: int
+) -> int:
+    """Shared terminal publish count used by result contracts and barriers.
+
+    This is the same formula ``_validate_result_contract`` enforces: fan-out
+    workloads publish ``message_count`` total messages, all other workloads
+    publish ``message_count`` per client.
+    """
+    if scenario.get("traffic_pattern") == "fanout":
+        return message_count
+    return message_count * client_count
+
+
+#: Poll interval for the QoS0 post-workload authorization quiescence barrier.
+_QOS0_QUIESCENCE_POLL_INTERVAL_S = 0.2
+
+
+def _qos0_quiescence_targets(
+    scenario: ScenarioConfig,
+    *,
+    message_count: int,
+    client_count: int,
+    qos: int,
+    qos_distribution: str | None,
+) -> dict[str, int]:
+    """Deterministic downstream counter targets for the QoS0 quiescence barrier.
+
+    At QoS 0, loadgen completion only means the publishes were flushed to TCP;
+    the single-threaded broker may still be draining queued PUBLISHes through
+    blocking HTTP authorization. Sampling cumulative counters immediately would
+    race that drain, so QoS0 scenarios whose result contracts validate
+    broker-side/HTTP-authorizer counters must wait for the expected terminal
+    target before snapshotting.
+
+    Keys name cumulative authorizer counters (``requests``, ``policy_allows``,
+    ``injected_failures``, or ``profile:<tier>``); values are the exact
+    terminal counts the result contract requires. Profile-scoped counters are
+    preferred over raw ingress totals because they increment only for the
+    publish authorizations relevant to the contract. Token kind (JWT/Biscuit)
+    does not change the targets: both exercise the same profile path.
+
+    Returns an empty mapping when no barrier applies: QoS 1/2 workloads carry
+    a broker-processing barrier already (PUBACK/PUBREC), mixed QoS
+    distributions are not pure QoS0 drains, MQTT5 AUTH scenarios validate no
+    publish-authorization counters, and non-HTTP scenarios have no downstream
+    authorization accounting to wait for.
+    """
+    if qos != 0 or qos_distribution is not None:
+        return {}
+    if scenario.get("mqtt5_auth") is not None:
+        return {}
+    expected = _expected_publish_authorization_count(
+        scenario, message_count=message_count, client_count=client_count
+    )
+    if scenario.get("complexity_axis") == "http_profile":
+        profile = scenario.get("complexity_level")
+        if not isinstance(profile, str) or not profile:
+            return {}
+        return {
+            "requests": expected,
+            f"profile:{profile}": expected,
+            "policy_allows": expected,
+        }
+    if scenario.get("http_expected_delay_ms") is not None:
+        return {
+            "requests": expected,
+            "profile:simple": expected,
+            "policy_allows": expected,
+        }
+    if scenario.get("hybrid_fallback_required"):
+        return {
+            "requests": expected,
+            "injected_failures": expected,
+        }
+    if scenario.get("http_failure_rate") is not None:
+        return {"requests": expected}
+    return {}
+
+
+#: Conservative per-request service allowance for HTTP-backed authorization
+#: drain, applied even when no PDP delay is configured. A zero-delay profile
+#: or hybrid-fallback authorization still costs a localhost HTTP round trip,
+#: rule evaluation, and single-threaded broker dispatch per publish; the
+#: c10/m10 qualification observed roughly 1 ms per authorization, so 0.5 s
+#: keeps more than two orders of magnitude of margin for complex profiles and
+#: loaded CI hardware. The plugin's own per-request HTTP failure timeout
+#: (default 2 s) is deliberately not reused here: hitting it means the
+#: authorizer is wedged rather than draining, and scaling a failure ceiling by
+#: the full message count would only delay reporting a genuinely broken run.
+_QOS0_QUIESCENCE_PER_REQUEST_ALLOWANCE_S = 0.5
+
+
+def _qos0_quiescence_timeout_seconds(
+    scenario: ScenarioConfig, *, clients: int, expected_count: int
+) -> int:
+    """Bounded drain budget for the QoS0 quiescence barrier.
+
+    Reuses the same delay sources as ``_publish_timeout_seconds`` (the
+    measured ``http_expected_delay_ms`` variable or the explicit
+    ``http_timeout_budget_delay_ms`` metadata), plus a conservative
+    per-request service allowance so zero-delay HTTP-backed cells scale with
+    the expected authorization count instead of inheriting a flat bound: after
+    a QoS0 loadgen flush, the single-threaded broker may still have to drain
+    on the order of the full expected publish count through blocking HTTP
+    authorization (for example 100 publishes x 1000 ms, or 20,000 zero-delay
+    profile authorizations at c200/m100). The existing per-operation headroom
+    and base timeout are kept as a floor. The barrier returns as soon as the
+    target is reached; this budget only bounds genuine observation failures.
+    """
     delay_ms = scenario.get("http_expected_delay_ms") or 0
     if delay_ms <= 0:
         delay_ms = scenario.get("http_timeout_budget_delay_ms") or 0
-    if delay_ms <= 0:
-        return BASE_PUBLISH_TIMEOUT_S
-    queued_s = (delay_ms / 1000.0) * max(clients, 1)
-    return max(BASE_PUBLISH_TIMEOUT_S, math.ceil(queued_s + PUBLISH_TIMEOUT_HEADROOM_S))
+    per_request_s = (float(delay_ms) / 1000.0) + _QOS0_QUIESCENCE_PER_REQUEST_ALLOWANCE_S
+    drain_budget_s = math.ceil(expected_count * per_request_s)
+    drain_budget_s += PUBLISH_TIMEOUT_HEADROOM_S
+    return max(_publish_timeout_seconds(scenario, clients), drain_budget_s)
+
+
+def _session_cache_ttl_seconds(
+    scenario: ScenarioConfig,
+    *,
+    clients: int,
+    messages: int,
+    default_ttl_seconds: int = DEFAULT_SESSION_CACHE_TTL_SECONDS,
+) -> int:
+    """Keep delayed HTTP-LATENCY sessions valid for their full workload.
+
+    Session-cache misses during PUBLISH remain fail-closed in the plugin. This
+    benchmark-side budget prevents those misses from occurring during a
+    deliberately long latency run. Other scenario families retain the
+    configured default TTL.
+    """
+    if not str(scenario.get("id", "")).startswith("HTTP-LATENCY-"):
+        return default_ttl_seconds
+    if (scenario.get("http_expected_delay_ms") or 0) <= 0:
+        return default_ttl_seconds
+    expected_requests = _expected_publish_authorization_count(
+        scenario,
+        message_count=messages,
+        client_count=clients,
+    )
+    whole_workload_budget = _qos0_quiescence_timeout_seconds(
+        scenario,
+        clients=clients,
+        expected_count=expected_requests,
+    )
+    return max(default_ttl_seconds, whole_workload_budget)
+
+
+def _read_quiescence_counter(stats: dict[str, Any], key: str) -> int:
+    if key == "requests":
+        return int(stats.get("requests") or 0)
+    if key == "policy_allows":
+        return int(stats.get("policy_allows") or 0)
+    if key == "injected_failures":
+        return int(stats.get("injected_failures") or 0)
+    if key.startswith("profile:"):
+        tier = key.split(":", 1)[1]
+        profiles = stats.get("profile_requests")
+        if isinstance(profiles, dict):
+            return int(profiles.get(tier) or 0)
+        return 0
+    raise ValueError(f"unknown QoS0 quiescence counter: {key!r}")
+
+
+def _snapshot_quiescence_counters(stats: dict[str, Any], targets: dict[str, int]) -> dict[str, int]:
+    return {key: _read_quiescence_counter(stats, key) for key in targets}
+
+
+def _wait_for_qos0_authorization_quiescence(
+    scenario_id: str,
+    targets: dict[str, int],
+    *,
+    timeout_seconds: int,
+    read_stats: Callable[[], dict[str, Any]],
+    poll_interval_s: float = _QOS0_QUIESCENCE_POLL_INTERVAL_S,
+    now: Callable[[], float] = time.time,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    """Wait until cumulative authorizer counters reach their expected targets.
+
+    Polls the downstream authorizer until every ``targets`` counter has reached
+    (``>=``) its expected terminal value. A temporarily stable partial backlog
+    (for example 66, 66, 66 while 100 are expected) never counts as
+    quiescence: only reaching the expected target does. Once the target is
+    observed, one immediate confirmatory re-read guards against a torn
+    snapshot; cumulative counters cannot decrease, so a confirmed target is
+    terminal. There are no fixed sleeps and no workload retries: if the target
+    is not reached within ``timeout_seconds``, an explicit diagnostic error is
+    raised.
+    """
+    started_at = now()
+    polls = 0
+    observed: dict[str, int] = {}
+    started_observed: dict[str, int] | None = None
+    while True:
+        observed = _snapshot_quiescence_counters(read_stats(), targets)
+        polls += 1
+        if started_observed is None:
+            started_observed = dict(observed)
+        if all(observed[key] >= target for key, target in targets.items()):
+            confirmed = _snapshot_quiescence_counters(read_stats(), targets)
+            polls += 1
+            if all(confirmed[key] >= target for key, target in targets.items()):
+                return {
+                    "scenario_id": scenario_id,
+                    "targets": dict(targets),
+                    "started_observed": started_observed,
+                    "observed": confirmed,
+                    "polls": polls,
+                    "elapsed_s": now() - started_at,
+                    "timeout_s": timeout_seconds,
+                }
+            observed = confirmed
+        elapsed_s = now() - started_at
+        if elapsed_s >= timeout_seconds:
+            pending = {
+                key: {"expected": target, "observed": observed.get(key, 0)}
+                for key, target in targets.items()
+                if observed.get(key, 0) < target
+            }
+            raise RuntimeError(
+                f"{scenario_id}: QoS0 authorization quiescence timeout: "
+                f"expected={targets} observed={observed} pending={pending} "
+                f"started={started_observed} "
+                f"elapsed_s={elapsed_s:.1f} timeout_s={timeout_seconds}"
+            )
+        remaining_s = timeout_seconds - elapsed_s
+        sleep(min(poll_interval_s, remaining_s))
 
 
 def _run_loadgen(
@@ -1880,6 +2468,7 @@ def _run_loadgen(
     run_index: int = 0,
     publish_timeout_seconds: int | None = None,
     connect_timeout_seconds: int | None = None,
+    keepalive_seconds: int | None = None,
 ):
     helper_cmd = _resolve_rust_helper("mqtt-loadgen")
     cmd = [
@@ -1914,6 +2503,8 @@ def _run_loadgen(
             if connect_timeout_seconds is not None
             else BASE_PUBLISH_TIMEOUT_S
         ),
+        "--keepalive-seconds",
+        str(keepalive_seconds if keepalive_seconds is not None else DEFAULT_KEEPALIVE_SECONDS),
         "--json",
     ]
     if qos_distribution:
@@ -2388,6 +2979,38 @@ def _sync_barrier_run_id(scenario_id: str, run_index: int) -> str:
     return f"{scenario}-{run_index + 1}-{time.time_ns()}-{uuid.uuid4().hex[:8]}"
 
 
+def _sync_connect_publish_barrier_run_id(scenario_id: str, run_index: int) -> str:
+    # The publish phase reuses the connect barrier's identifiers but must be a
+    # distinct run id so the sync-barrier service tracks two independent
+    # readiness sets (connect-start vs. post-CONNACK publish release).
+    return f"{_sync_barrier_run_id(scenario_id, run_index)}-publish"
+
+
+def _append_sync_connect_publish_barrier_args(
+    args: list[str],
+    *,
+    run_id: str,
+    participant_id: str,
+    participants: int,
+) -> list[str]:
+    updated = list(args)
+    updated.extend(
+        [
+            "--sync-connect-publish-barrier-url",
+            SYNC_BARRIER_CONTAINER_URL,
+            "--sync-connect-publish-run-id",
+            run_id,
+            "--sync-connect-publish-participant-id",
+            participant_id,
+            "--sync-connect-publish-participants",
+            str(participants),
+            "--sync-connect-publish-barrier-timeout-seconds",
+            str(SYNC_BARRIER_TIMEOUT_SECONDS),
+        ]
+    )
+    return updated
+
+
 def _ensure_sync_barrier_service(
     *,
     compose_files: list[str] | None,
@@ -2432,12 +3055,38 @@ def _sync_barrier_status(run_id: str) -> dict[str, Any] | None:
         return None
 
 
+def _loadgen_errors_from_stdout(stdout: str) -> list[str]:
+    try:
+        payload = _loads_json_from_compose_stdout(stdout)
+    except RuntimeError:
+        return []
+    errors = payload.get("errors")
+    if not isinstance(errors, list):
+        return []
+    return [str(err) for err in errors]
+
+
+def _sync_barrier_participant_exit_message(phase: str, exited: list[dict[str, Any]]) -> str:
+    if phase == "publish":
+        detail = "; ".join(
+            f"{entry['container']} (exit {entry['returncode']}): "
+            f"{entry['errors'] or entry['stderr'].strip() or 'no diagnostics'}"
+            for entry in exited
+        )
+        return (
+            "sync_connect participant failed to reach the publish barrier after CONNACK; "
+            f"treating as a connect failure: {detail}"
+        )
+    return f"sync barrier participant exited before release: {exited}"
+
+
 def _wait_for_sync_barrier_ready(
     run_id: str,
     *,
     participants: int,
     processes: list[tuple[str, subprocess.Popen[str]]],
     timeout_seconds: float = float(SYNC_BARRIER_TIMEOUT_SECONDS),
+    phase: str = "connect",
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_seconds
     last_status: dict[str, Any] | None = None
@@ -2453,10 +3102,11 @@ def _wait_for_sync_barrier_ready(
                     "returncode": process.returncode,
                     "stdout": stdout[-4000:],
                     "stderr": stderr[-4000:],
+                    "errors": _loadgen_errors_from_stdout(stdout),
                 }
             )
         if exited:
-            raise RuntimeError(f"sync barrier participant exited before release: {exited}")
+            raise RuntimeError(_sync_barrier_participant_exit_message(phase, exited))
         status = _sync_barrier_status(run_id)
         if status is not None:
             last_status = status
@@ -2464,7 +3114,7 @@ def _wait_for_sync_barrier_ready(
                 return status
         time.sleep(0.1)
     raise RuntimeError(
-        f"timed out waiting for sync barrier readiness for run {run_id}: {last_status}"
+        f"timed out waiting for sync barrier {phase} readiness for run {run_id}: {last_status}"
     )
 
 
@@ -2755,6 +3405,7 @@ def _merge_per_client_loadgen_results(
         "control_response",
         "control_injection_delay",
         "sync_connect_barrier_wait",
+        "sync_publish_barrier_wait",
     ):
         merged[metric] = _merge_latency_summary(results, metric)
     merged["publish"] = _summary_from_values(publish_values)
@@ -2781,6 +3432,7 @@ def _merge_per_client_loadgen_results(
             "control_response",
             "control_injection_delay",
             "sync_connect_barrier_wait",
+            "sync_publish_barrier_wait",
         )
     }
     merged["errors"] = errors
@@ -3036,6 +3688,16 @@ def _validate_thundering_herd_result(
         or sync.get("errors")
     ):
         raise RuntimeError(f"{scenario_id}: synchronized connection barrier contract failed")
+    publish = sync.get("publish_barrier")
+    if (
+        not isinstance(publish, dict)
+        or publish.get("barrier") not in {"external", "in_process"}
+        or int(publish.get("participants") or 0) != client_count
+        or int(publish.get("ready_count") or 0) != client_count
+        or not isinstance(publish.get("max_ready_skew_ms"), int | float)
+        or publish.get("errors")
+    ):
+        raise RuntimeError(f"{scenario_id}: synchronized publish-release barrier contract failed")
     if require_restart and (
         not isinstance(restart, dict)
         or restart.get("completed") is not True
@@ -3338,6 +4000,18 @@ def _validate_credential_freshness(
     }
 
 
+def _unexpected_result_errors(scenario: ScenarioConfig, result: dict[str, Any]) -> list[str]:
+    """Loadgen errors not covered by the scenario's allowed-error prefixes.
+
+    Shared by the result contract and the QoS0 quiescence barrier entry check
+    so both apply the identical predicate: a run that would fail the contract
+    on loadgen errors must not burn the full downstream drain ceiling first.
+    """
+    errors = [str(error) for error in result.get("errors", [])]
+    allowed_prefixes = tuple(scenario.get("allowed_error_prefixes", []))
+    return [error for error in errors if not error.startswith(allowed_prefixes)]
+
+
 #: Expected Biscuit chain depth per chain_length complexity tier. Every
 #: registered chain_length scenario must declare one of these levels; an
 #: unknown or missing level is a definition error, never a silent default.
@@ -3354,9 +4028,7 @@ def _validate_result_contract(
     effective_qos_distribution: str | None = None,
 ) -> None:
     scenario_id = scenario["id"]
-    errors = [str(error) for error in result.get("errors", [])]
-    allowed_prefixes = tuple(scenario.get("allowed_error_prefixes", []))
-    unexpected_errors = [error for error in errors if not error.startswith(allowed_prefixes)]
+    unexpected_errors = _unexpected_result_errors(scenario, result)
     if unexpected_errors:
         raise RuntimeError(f"{scenario_id}: loadgen errors: {', '.join(unexpected_errors[:5])}")
 
@@ -3391,10 +4063,8 @@ def _validate_result_contract(
 
     publish = result.get("publish")
     publish_count = int(publish.get("count") or 0) if isinstance(publish, dict) else 0
-    expected_publish_count = (
-        message_count
-        if scenario.get("traffic_pattern") == "fanout"
-        else message_count * client_count
+    expected_publish_count = _expected_publish_authorization_count(
+        scenario, message_count=message_count, client_count=client_count
     )
     http_failure_rate = scenario.get("http_failure_rate")
     outcomes_object = result.get("publish_outcomes")
@@ -3478,6 +4148,7 @@ def _validate_result_contract(
         allows = int(stats.get("policy_allows") or 0)
         denies = int(stats.get("policy_denies") or 0)
         expected_failures = math.floor(expected_publish_count * float(http_failure_rate) + 1e-12)
+        errors = [str(error) for error in result.get("errors", [])]
         publish_errors = [error for error in errors if error.startswith("publish_failed:")]
         if (
             requests != expected_publish_count
@@ -4150,12 +4821,19 @@ def _run_loadgen_container_per_client(
     env = os.environ.copy()
     env.update(extra_env)
     barrier_run_id = _sync_barrier_run_id(scenario_id, run_index) if sync_connect else None
+    publish_barrier_run_id = (
+        _sync_connect_publish_barrier_run_id(scenario_id, run_index) if sync_connect else None
+    )
     runtime_control_run_id = (
         _sync_barrier_run_id(f"{scenario_id}-runtime-control", run_index)
         if runtime_control is not None
         else None
     )
-    if barrier_run_id is not None or runtime_control_run_id is not None:
+    if (
+        barrier_run_id is not None
+        or publish_barrier_run_id is not None
+        or runtime_control_run_id is not None
+    ):
         _ensure_sync_barrier_service(
             compose_files=compose_files,
             compose_project_name=compose_project_name,
@@ -4214,6 +4892,13 @@ def _run_loadgen_container_per_client(
                 participant_id=f"client_{index + 1}",
                 participants=clients,
             )
+        if publish_barrier_run_id is not None:
+            args = _append_sync_connect_publish_barrier_args(
+                args,
+                run_id=publish_barrier_run_id,
+                participant_id=f"client_{index + 1}",
+                participants=clients,
+            )
         if runtime_control_run_id is not None:
             args = _append_runtime_control_barrier_args(
                 args,
@@ -4267,6 +4952,7 @@ def _run_loadgen_container_per_client(
     results: list[dict[str, Any]] = []
     completed: set[str] = set()
     barrier_status: dict[str, Any] | None = None
+    publish_barrier_status: dict[str, Any] | None = None
     runtime_control_status: dict[str, Any] | None = None
     controller_result: dict[str, Any] | None = None
     try:
@@ -4275,8 +4961,24 @@ def _run_loadgen_container_per_client(
                 barrier_run_id,
                 participants=clients,
                 processes=processes,
+                phase="connect",
             )
             barrier_status = _release_sync_barrier(barrier_run_id, participants=clients)
+        if publish_barrier_run_id is not None:
+            # Second phase: every participant has connected and is holding its
+            # publish workload. Wait until all report ready, then release so
+            # publishing starts concurrently instead of early connecters
+            # saturating the broker while slower participants still connect.
+            _wait_for_sync_barrier_ready(
+                publish_barrier_run_id,
+                participants=clients,
+                processes=processes,
+                phase="publish",
+            )
+            publish_barrier_status = _release_sync_barrier(
+                publish_barrier_run_id,
+                participants=clients,
+            )
         if runtime_control_run_id is not None and runtime_control is not None:
             _wait_for_sync_barrier_ready(
                 runtime_control_run_id,
@@ -4434,7 +5136,23 @@ def _run_loadgen_container_per_client(
             "released_at_unix_ms": (barrier_status or {}).get("released_at_unix_ms"),
             "max_ready_skew_ms": (barrier_status or {}).get("max_ready_skew_ms"),
             "client_wait": merged.get("sync_connect_barrier_wait", {}),
-            "errors": [err for err in merged.get("errors", []) if str(err).startswith("sync_")],
+            "errors": [
+                err for err in merged.get("errors", []) if str(err).startswith("sync_barrier_")
+            ],
+            "publish_barrier": {
+                "barrier": "external",
+                "run_id": publish_barrier_run_id,
+                "participants": clients,
+                "ready_count": int((publish_barrier_status or {}).get("ready_count") or 0),
+                "released_at_unix_ms": (publish_barrier_status or {}).get("released_at_unix_ms"),
+                "max_ready_skew_ms": (publish_barrier_status or {}).get("max_ready_skew_ms"),
+                "client_wait": merged.get("sync_publish_barrier_wait", {}),
+                "errors": [
+                    err
+                    for err in merged.get("errors", [])
+                    if str(err).startswith("sync_publish_barrier_")
+                ],
+            },
         }
     return merged
 
@@ -5102,6 +5820,8 @@ def _make_http_parity_variants(
         if jwt_strict_token is not None:
             jwt_source = scenarios[jwt_source_id]
             jwt_variant = cast(ScenarioConfig, dict(jwt_source))
+            if jwt_source_id.startswith("HTTP-PROFILE-"):
+                jwt_variant.pop("sync_connect", None)
             jwt_variant["password"] = cast(str, jwt_strict_token)
             jwt_variant["client_count"] = 1
             jwt_variant["authz_config"] = _clone_authz_config(jwt_source.get("authz_config"))
@@ -5118,6 +5838,8 @@ def _make_http_parity_variants(
         if biscuit_strict_token is not None:
             biscuit_source = scenarios[biscuit_source_id]
             biscuit_variant = cast(ScenarioConfig, dict(biscuit_source))
+            if biscuit_source_id.startswith("HTTP-PROFILE-"):
+                biscuit_variant.pop("sync_connect", None)
             biscuit_variant["password"] = cast(str, biscuit_strict_token)
             biscuit_variant["client_count"] = 1
             biscuit_variant["authz_config"] = _clone_authz_config(
@@ -5478,8 +6200,22 @@ def _render_mosquitto_runtime_conf(
     jwt_identity_binding: IdentityBindingMode,
     biscuit_identity_binding: IdentityBindingMode,
     biscuit_client_id_fact: str,
+    cache_ttl_seconds: int | None = None,
 ) -> str:
     lines = base_conf_text.splitlines()
+    if cache_ttl_seconds is not None:
+        if cache_ttl_seconds <= 0:
+            raise ValueError("Mosquitto session cache TTL must be positive")
+        cache_ttl_lines = [
+            idx
+            for idx, line in enumerate(lines)
+            if line.strip().startswith("plugin_opt_cache_ttl_seconds ")
+        ]
+        if len(cache_ttl_lines) != 1:
+            raise ValueError(
+                "Mosquitto config must contain exactly one plugin_opt_cache_ttl_seconds option"
+            )
+        lines[cache_ttl_lines[0]] = f"plugin_opt_cache_ttl_seconds {cache_ttl_seconds}"
     filtered_lines = [
         line
         for line in lines
@@ -5513,6 +6249,7 @@ def _materialize_mosquitto_runtime_conf(
     jwt_identity_binding: IdentityBindingMode,
     biscuit_identity_binding: IdentityBindingMode,
     biscuit_client_id_fact: str,
+    cache_ttl_seconds: int | None = None,
 ) -> str:
     base_conf_path = _resolve_compose_path(mosquitto_conf)
     rendered_conf = _render_mosquitto_runtime_conf(
@@ -5520,14 +6257,16 @@ def _materialize_mosquitto_runtime_conf(
         jwt_identity_binding=jwt_identity_binding,
         biscuit_identity_binding=biscuit_identity_binding,
         biscuit_client_id_fact=biscuit_client_id_fact,
+        cache_ttl_seconds=cache_ttl_seconds,
     )
 
     base_conf_relative = _compose_relative_path(mosquitto_conf)
     generated_relative_dir = base_conf_relative.parent / ".generated"
+    cache_ttl_suffix = f".cache-{cache_ttl_seconds}" if cache_ttl_seconds is not None else ""
     generated_name = (
         f"{base_conf_relative.stem}.jwt-{jwt_identity_binding}."
-        f"biscuit-{biscuit_identity_binding}."
-        f"fact-{biscuit_client_id_fact}{base_conf_relative.suffix}"
+        f"biscuit-{biscuit_identity_binding}.fact-{biscuit_client_id_fact}"
+        f"{cache_ttl_suffix}{base_conf_relative.suffix}"
     )
     generated_relative_path = generated_relative_dir / generated_name
     generated_conf_path = _resolve_compose_path(generated_relative_path)
@@ -5546,15 +6285,17 @@ def _effective_mosquitto_runtime_conf(
     jwt_identity_binding: IdentityBindingMode,
     biscuit_identity_binding: IdentityBindingMode,
     biscuit_client_id_fact: str,
+    cache_ttl_seconds: int | None = None,
 ) -> str:
     effective_conf_relative = _compose_relative_path(mosquitto_conf)
-    if effective_conf_relative in MOSQUITTO_BASE_CONFIGS:
+    if effective_conf_relative in MOSQUITTO_BASE_CONFIGS and cache_ttl_seconds is None:
         return mosquitto_conf
     return _materialize_mosquitto_runtime_conf(
         mosquitto_conf,
         jwt_identity_binding=jwt_identity_binding,
         biscuit_identity_binding=biscuit_identity_binding,
         biscuit_client_id_fact=biscuit_client_id_fact,
+        cache_ttl_seconds=cache_ttl_seconds,
     )
 
 
@@ -5776,11 +6517,17 @@ def _expand_tls_matrix(
     return expanded
 
 
-def _write_result(out_dir: str, name: str, payload: dict):
+def _claim_exclusive_output(out_dir: str) -> None:
+    path = Path(out_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.mkdir()
+
+
+def _write_result(out_dir: str, name: str, payload: dict, *, exclusive: bool = False):
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
     path = out_path / f"{name}.json"
-    with path.open("w", encoding="utf-8") as f:
+    with path.open("x" if exclusive else "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
     return str(path)
 
@@ -7229,6 +7976,7 @@ def _build_available_scenarios(
             "message_size": 0,
             "complexity_axis": "http_profile",
             "complexity_level": "simple",
+            "sync_connect": True,
         },
         "HTTP-AUTHZ-COMPLEXITY-SIMPLE-JWT": {
             "mosquitto_conf": "./mosquitto_http.conf",
@@ -7277,6 +8025,7 @@ def _build_available_scenarios(
             "message_size": 0,
             "complexity_axis": "http_profile",
             "complexity_level": "complex",
+            "sync_connect": True,
         },
         "HTTP-AUTHZ-COMPLEXITY-COMPLEX-JWT": {
             "mosquitto_conf": "./mosquitto_http.conf",
@@ -7321,6 +8070,7 @@ def _build_available_scenarios(
             "netem": {"clear": True},
             "message_size": 0,
             "hybrid_fallback_required": True,
+            "sync_connect": True,
         },
         "NETWORK-MTU-200-JWT": {
             "mosquitto_conf": "./mosquitto.conf",
@@ -7356,6 +8106,7 @@ def _build_available_scenarios(
             "message_size": 0,
             "complexity_axis": "http_profile",
             "complexity_level": "simple",
+            "sync_connect": True,
         },
         "HTTP-AUTHZ-COMPLEXITY-SIMPLE-BISCUIT": {
             "mosquitto_conf": "./mosquitto_http.conf",
@@ -7404,6 +8155,7 @@ def _build_available_scenarios(
             "message_size": 0,
             "complexity_axis": "http_profile",
             "complexity_level": "complex",
+            "sync_connect": True,
         },
         "HTTP-AUTHZ-COMPLEXITY-COMPLEX-BISCUIT": {
             "mosquitto_conf": "./mosquitto_http.conf",
@@ -8081,6 +8833,7 @@ def _build_available_scenarios(
 def main(
     tokens_path: str = "benchmarks/tokens.json",
     out: str = "benchmarks/results",
+    exclusive_out: bool = False,
     clients: int = 50,
     messages: int = 20,
     qos: int = 1,
@@ -8333,6 +9086,22 @@ def main(
         logger.info("Append -TLS to any scenario id for TLS variants.")
         return
 
+    if exclusive_out:
+        if not scenarios:
+            raise typer.BadParameter("exclusive output requires at least one selected scenario")
+        for summary_name in (summary_json, *(() if no_summary_csv else (summary_csv,))):
+            if Path(summary_name).name != summary_name or summary_name in {"", ".", ".."}:
+                raise typer.BadParameter(
+                    "exclusive summaries must be names within the output directory"
+                )
+        for scenario in scenarios:
+            _validate_scenario_credentials(scenario["id"], scenario)
+        try:
+            _claim_exclusive_output(out)
+        except FileExistsError:
+            logger.error("Exclusive output destination already exists: %s", out)
+            raise typer.Exit(code=73) from None
+
     for s in scenarios:
         _validate_scenario_credentials(s["id"], s)
         scenario_semantics = _scenario_semantics_metadata(
@@ -8355,6 +9124,21 @@ def main(
         mosq_conf = s["mosquitto_conf"]
         if scenario_tls:
             mosq_conf = mosq_conf.replace("./", "./tls/")
+        runtime_effective_client_count = (
+            reauth_storm_clients
+            if s.get("reauth_storm") and reauth_storm_clients is not None
+            else _effective_scenario_client_count(s, clients)
+        )
+        runtime_scenario_messages = _effective_scenario_message_count(
+            s,
+            messages,
+            effective_clients=runtime_effective_client_count,
+        )
+        cache_ttl_seconds = _session_cache_ttl_seconds(
+            s,
+            clients=runtime_effective_client_count,
+            messages=runtime_scenario_messages,
+        )
         runtime_mosq_conf = _effective_mosquitto_runtime_conf(
             mosq_conf,
             jwt_identity_binding=cast(
@@ -8366,6 +9150,9 @@ def main(
                 scenario_semantics["biscuit_identity_binding"],
             ),
             biscuit_client_id_fact=s.get("biscuit_client_id_fact", "client_id"),
+            cache_ttl_seconds=(
+                cache_ttl_seconds if cache_ttl_seconds > DEFAULT_SESSION_CACHE_TTL_SECONDS else None
+            ),
         )
         extra_env = {"MOSQUITTO_CONF": runtime_mosq_conf}
         endpoints = _scenario_endpoint_config(
@@ -8682,6 +9469,7 @@ def main(
             )
             scenario_qos = s.get("qos", qos)
             scenario_qos_distribution = s.get("qos_distribution", qos_distribution)
+            _validate_part2_qos_for_scenario(s["id"], s, scenario_qos)
             scenario_workload_shape = _scenario_workload_shape(s)
             if scenario_messages > configured_messages:
                 logger.info(
@@ -8777,8 +9565,9 @@ def main(
                     "fanout_churn_sqlite_subscribers": s.get("fanout_churn_sqlite_subscribers"),
                     "http_expected_delay_ms": s.get("http_expected_delay_ms"),
                     "http_timeout_budget_delay_ms": s.get("http_timeout_budget_delay_ms"),
-                    "publish_timeout_seconds": _publish_timeout_seconds(s, effective_client_count),
-                    "connect_timeout_seconds": _publish_timeout_seconds(s, effective_client_count),
+                    **_watchdog_metadata(
+                        s, effective_client_count, scenario_qos, scenario_qos_distribution
+                    ),
                     "client_topology": {
                         "mode": client_topology_mode,
                         "effective_mode": client_topology_mode,
@@ -8795,7 +9584,7 @@ def main(
                     },
                     "cache_context": {
                         "acl_read_enforcement_expected": acl_read_enforcement,
-                        "cache_ttl_seconds": 3600,
+                        "cache_ttl_seconds": cache_ttl_seconds,
                         "note": (
                             "strict ACL_READ scenarios should enforce policy changes on fan-out "
                             "delivery; cache must not mask runtime authorization changes"
@@ -9174,11 +9963,12 @@ def main(
                             scenario_id=s["id"],
                             run_index=idx,
                             publish_timeout_seconds=_publish_timeout_seconds(
+                                s, effective_client_count, scenario_qos, scenario_qos_distribution
+                            ),
+                            connect_timeout_seconds=_connect_timeout_seconds(
                                 s, effective_client_count
                             ),
-                            connect_timeout_seconds=_publish_timeout_seconds(
-                                s, effective_client_count
-                            ),
+                            keepalive_seconds=_mqtt_keepalive_seconds(s, effective_client_count),
                             password_map_path=(
                                 "benchmarks/password-map.json"
                                 if credential_mode == "per_client"
@@ -9201,6 +9991,67 @@ def main(
                         "started_at": workload_started_at,
                         "finished_at": time.time(),
                     }
+                    # QoS0 post-workload quiescence barrier: at QoS 0 the
+                    # loadgen only flushed publishes to TCP, while the
+                    # single-threaded broker may still be draining them
+                    # through blocking HTTP authorization. Wait for the exact
+                    # downstream terminal targets before snapshotting any
+                    # cumulative broker/authorizer counters. QoS 1/2 carry a
+                    # PUBACK/PUBREC processing barrier already and skip this.
+                    # The resource window intentionally stays [started_at,
+                    # finished_at]: the drain is observation overhead, not
+                    # workload, so benchmark duration/throughput semantics are
+                    # unchanged.
+                    quiescence_targets = _qos0_quiescence_targets(
+                        s,
+                        message_count=scenario_messages,
+                        client_count=effective_client_count,
+                        qos=scenario_qos,
+                        qos_distribution=scenario_qos_distribution,
+                    )
+                    if quiescence_targets:
+                        # Fail fast on loadgen-side shortfall: the merged result
+                        # already carries every worker error, and the contract
+                        # would reject unexpected ones right after the barrier.
+                        # Waiting out the full drain ceiling first would only
+                        # mask the true failure as a downstream timeout.
+                        quiescence_blockers = _unexpected_result_errors(s, res)
+                        if quiescence_blockers:
+                            raise RuntimeError(
+                                f"{s['id']}: loadgen reported "
+                                f"{len(quiescence_blockers)} unexpected error(s) "
+                                "before QoS0 quiescence barrier; skipping "
+                                "downstream wait: "
+                                f"{', '.join(quiescence_blockers[:5])}"
+                            )
+                        quiescence_expected = _expected_publish_authorization_count(
+                            s,
+                            message_count=scenario_messages,
+                            client_count=effective_client_count,
+                        )
+                        quiescence_timeout_s = _qos0_quiescence_timeout_seconds(
+                            s,
+                            clients=effective_client_count,
+                            expected_count=quiescence_expected,
+                        )
+
+                        def _read_quiescence_stats(
+                            _authz_base: str = authz_base,
+                            _ca_file: str | None = scenario_tls_ca,
+                            _insecure: bool = tls_insecure,
+                        ) -> dict[str, Any]:
+                            return _authz_stats(
+                                _authz_base,
+                                ca_file=_ca_file,
+                                insecure=_insecure,
+                            )
+
+                        res["qos0_quiescence"] = _wait_for_qos0_authorization_quiescence(
+                            s["id"],
+                            quiescence_targets,
+                            timeout_seconds=quiescence_timeout_s,
+                            read_stats=_read_quiescence_stats,
+                        )
                     if attest_broker_auth:
                         broker_diagnostics_after = _broker_diagnostic_snapshot(
                             compose_files=compose_files,
@@ -9440,7 +10291,7 @@ def main(
         # Add packet analysis result to output payload
         out_payload["packet_analysis_result"] = packet_analysis_result
 
-        path = _write_result(out, s["id"], out_payload)
+        path = _write_result(out, s["id"], out_payload, exclusive=exclusive_out)
         logger.info("Wrote %s", path)
 
     summary_json_path = Path(summary_json)
@@ -9464,6 +10315,8 @@ def main(
         agg_cmd.append("--no-csv")
     else:
         agg_cmd.extend(["--out-csv", str(summary_csv_path)])
+    if exclusive_out:
+        agg_cmd.append("--exclusive-out")
     try:
         subprocess.check_call(
             agg_cmd,
@@ -9471,6 +10324,8 @@ def main(
             env=_python_subprocess_env(),
         )
     except subprocess.CalledProcessError as exc:
+        if exclusive_out:
+            raise
         logger.warning(
             "Aggregation failed (%s); scenario results preserved",
             exc,

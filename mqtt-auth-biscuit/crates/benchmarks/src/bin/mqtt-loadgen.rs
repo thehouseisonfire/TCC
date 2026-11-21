@@ -7,8 +7,8 @@ use gen_tokens::biscuit_attenuation::{
     BiscuitAttenuationOptions, attenuate_biscuit_token, load_public_key_hex,
 };
 use gen_tokens::mqtt_helpers::{
-    ClientSpec, ConnectReport, MqttHelperError, Result, connect, decode_token_arg, poll_until,
-    puback_reason_code, qos,
+    ClientSpec, ConnectReport, DEFAULT_KEEPALIVE_SECONDS, MqttHelperError, Result, connect,
+    decode_token_arg, poll_until, puback_reason_code, qos,
 };
 use rand::Rng as _;
 use rumqttc::mqttbytes::v5::{AuthProperties, Packet};
@@ -29,6 +29,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{Notify, mpsc};
 
 const SYNC_CONNECT_RELEASE_DELAY: Duration = Duration::from_millis(200);
+// Safety-net bound for the in-process publish-release gate: if a local client
+// never reports ready (and never fails), release publishes rather than block
+// the whole run forever. Mirrors the external barrier's default timeout.
+const PUBLISH_RELEASE_READY_TIMEOUT: Duration = Duration::from_secs(120);
 const DEFAULT_CONTROL_TOPIC: &str = "$CONTROL/dynamic-security/v1";
 const CLIENT_ID_PLACEHOLDER: &str = "{client_id}";
 const FANOUT_PAYLOAD_VERSION: &str = "v3";
@@ -272,6 +276,16 @@ struct Args {
     /// broker authorization path under injected PDP latency.
     #[arg(long, env = "MQTT_CONNECT_TIMEOUT_SECONDS", default_value_t = 10)]
     connect_timeout_seconds: u64,
+    /// MQTT keepalive interval. The runner raises this for HTTP-LATENCY
+    /// workloads whose serialized authorization round exceeds the default
+    /// 60 s, so the generic connection-liveness watchdog does not preempt
+    /// healthy queued work.
+    #[arg(
+        long,
+        env = "MQTT_KEEPALIVE_SECONDS",
+        default_value_t = DEFAULT_KEEPALIVE_SECONDS
+    )]
+    keepalive_seconds: u16,
     /// Continue the configured workload after a failed publish. The benchmark
     /// runner enables this only for scenarios whose result contract expects
     /// workload-visible publish failures.
@@ -293,6 +307,26 @@ struct Args {
         default_value_t = 120
     )]
     sync_connect_barrier_timeout_seconds: u64,
+    /// Post-CONNACK publish-release phase of the two-phase `sync_connect`
+    /// barrier. The connect-start barrier (`sync_connect_*`) aligns when every
+    /// participant begins CONNECT; this second barrier aligns when every
+    /// participant may begin the measured publish workload, once all of them
+    /// have successfully connected. Distinct run identifiers keep the two
+    /// phases from being confused.
+    #[arg(long, env = "MQTT_SYNC_CONNECT_PUBLISH_BARRIER_URL")]
+    sync_connect_publish_barrier_url: Option<String>,
+    #[arg(long, env = "MQTT_SYNC_CONNECT_PUBLISH_RUN_ID")]
+    sync_connect_publish_run_id: Option<String>,
+    #[arg(long, env = "MQTT_SYNC_CONNECT_PUBLISH_PARTICIPANT_ID")]
+    sync_connect_publish_participant_id: Option<String>,
+    #[arg(long, env = "MQTT_SYNC_CONNECT_PUBLISH_PARTICIPANTS")]
+    sync_connect_publish_participants: Option<usize>,
+    #[arg(
+        long,
+        env = "MQTT_SYNC_CONNECT_PUBLISH_BARRIER_TIMEOUT_SECONDS",
+        default_value_t = 120
+    )]
+    sync_connect_publish_barrier_timeout_seconds: u64,
     #[arg(long, env = "MQTT_MODE", default_value = "publish")]
     mode: String,
     #[arg(long, env = "MQTT_FANOUT_TOPIC", default_value = "fanout/broadcast")]
@@ -611,6 +645,9 @@ struct WorkerResult {
     sync_barrier_wait_ms: Option<f64>,
     sync_barrier_released_at_unix_ms: Option<u128>,
     sync_barrier_max_ready_skew_ms: Option<f64>,
+    sync_publish_barrier_wait_ms: Option<f64>,
+    sync_publish_barrier_released_at_unix_ms: Option<u128>,
+    sync_publish_barrier_max_ready_skew_ms: Option<f64>,
     errors: Vec<String>,
     credential_issuance: Vec<CredentialIssuance>,
 }
@@ -673,6 +710,9 @@ struct StandardMetrics {
     sync_barrier_wait: Vec<f64>,
     sync_barrier_released_at_unix_ms: Vec<u128>,
     sync_barrier_max_ready_skew_ms: Option<f64>,
+    sync_publish_barrier_wait: Vec<f64>,
+    sync_publish_barrier_released_at_unix_ms: Vec<u128>,
+    sync_publish_barrier_max_ready_skew_ms: Option<f64>,
     errors: Vec<String>,
     publish_throughput_mps: f64,
     receive_throughput_mps: f64,
@@ -990,6 +1030,59 @@ fn external_sync_barrier(args: &Args) -> Result<Option<ExternalSyncBarrier>> {
     }))
 }
 
+/// Resolve the post-CONNACK publish-release phase of the external two-phase
+/// `sync_connect` barrier. Mirrors [`external_sync_barrier`] so the same
+/// `sync-barrier` service and wire protocol back both phases, but with an
+/// independent run identifier so the phases cannot be confused.
+fn external_sync_connect_publish_barrier(args: &Args) -> Result<Option<ExternalSyncBarrier>> {
+    let fields_set = [
+        args.sync_connect_publish_barrier_url.is_some(),
+        args.sync_connect_publish_run_id.is_some(),
+        args.sync_connect_publish_participant_id.is_some(),
+        args.sync_connect_publish_participants.is_some(),
+    ];
+    if fields_set.iter().all(|set| !set) {
+        return Ok(None);
+    }
+    if !args.sync_connect {
+        return Err(MqttHelperError::Message(
+            "sync_connect publish barrier options require --sync-connect".to_string(),
+        ));
+    }
+    if fields_set.iter().any(|set| !set) {
+        return Err(MqttHelperError::Message(
+            "sync_connect publish barrier requires url, run_id, participant_id, and participants"
+                .to_string(),
+        ));
+    }
+    let participants = args.sync_connect_publish_participants.unwrap_or_default();
+    if participants == 0 {
+        return Err(MqttHelperError::Message(
+            "sync_connect_publish_participants must be greater than zero".to_string(),
+        ));
+    }
+    if args.clients != 1 {
+        return Err(MqttHelperError::Message(
+            "external sync_connect publish barrier requires --clients 1".to_string(),
+        ));
+    }
+    Ok(Some(ExternalSyncBarrier {
+        url: args
+            .sync_connect_publish_barrier_url
+            .clone()
+            .unwrap_or_default()
+            .trim_end_matches('/')
+            .to_string(),
+        run_id: args.sync_connect_publish_run_id.clone().unwrap_or_default(),
+        participant_id: args
+            .sync_connect_publish_participant_id
+            .clone()
+            .unwrap_or_default(),
+        participants,
+        timeout: Duration::from_secs(args.sync_connect_publish_barrier_timeout_seconds.max(1)),
+    }))
+}
+
 fn external_runtime_control_barrier(args: &Args) -> Result<Option<(ExternalSyncBarrier, usize)>> {
     let fields_set = [
         args.runtime_control_barrier_url.is_some(),
@@ -1110,11 +1203,15 @@ async fn wait_external_sync_barrier(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sync_connect_json(
     args: &Args,
     barrier_wait: &[f64],
     released_at: &[u128],
     max_ready_skew_ms: Option<f64>,
+    publish_barrier_wait: &[f64],
+    publish_released_at: &[u128],
+    publish_max_ready_skew_ms: Option<f64>,
     errors: &[String],
 ) -> Value {
     if !args.sync_connect {
@@ -1125,18 +1222,26 @@ fn sync_connect_json(
     } else {
         "in_process"
     };
-    let first_release = released_at.iter().min().copied();
-    // The sync_connect result schema is topology-independent: every successful
-    // synchronized connect reports max_ready_skew_ms. The in-process gate
-    // releases all workers atomically in one process, so cross-container
-    // readiness skew is definitionally 0.0. External barriers report the
-    // server-observed ready skew passed through from the wait report.
-    let skew = if barrier == "in_process" {
-        serde_json::json!(0.0)
+    let publish_barrier = if args.sync_connect_publish_barrier_url.is_some() {
+        "external"
     } else {
-        match max_ready_skew_ms {
-            Some(value) => serde_json::json!(value),
-            None => serde_json::Value::Null,
+        "in_process"
+    };
+    let first_release = released_at.iter().min().copied();
+    let publish_release = publish_released_at.iter().min().copied();
+    // The sync_connect result schema is topology-independent: every successful
+    // synchronized phase reports max_ready_skew_ms. In-process gates release
+    // all workers within one process, so cross-container readiness skew is
+    // definitionally 0.0. External barriers report the server-observed ready
+    // skew passed through from the wait report.
+    let skew_for = |kind: &str, value: Option<f64>| {
+        if kind == "in_process" {
+            serde_json::json!(0.0)
+        } else {
+            match value {
+                Some(value) => serde_json::json!(value),
+                None => serde_json::Value::Null,
+            }
         }
     };
     serde_json::json!({
@@ -1146,13 +1251,31 @@ fn sync_connect_json(
         "participants": args.sync_connect_participants.unwrap_or(args.clients),
         "ready_count": if barrier == "external" { barrier_wait.len() } else { args.clients },
         "released_at_unix_ms": first_release,
-        "max_ready_skew_ms": skew,
+        "max_ready_skew_ms": skew_for(barrier, max_ready_skew_ms),
         "client_wait": summarize(barrier_wait),
         "errors": errors
             .iter()
             .filter(|err| err.starts_with("sync_barrier_"))
             .cloned()
             .collect::<Vec<_>>(),
+        "publish_barrier": {
+            "barrier": publish_barrier,
+            "run_id": args.sync_connect_publish_run_id,
+            "participants": args.sync_connect_publish_participants.unwrap_or(args.clients),
+            "ready_count": if publish_barrier == "external" {
+                publish_barrier_wait.len()
+            } else {
+                args.clients
+            },
+            "released_at_unix_ms": publish_release,
+            "max_ready_skew_ms": skew_for(publish_barrier, publish_max_ready_skew_ms),
+            "client_wait": summarize(publish_barrier_wait),
+            "errors": errors
+                .iter()
+                .filter(|err| err.starts_with("sync_publish_barrier_"))
+                .cloned()
+                .collect::<Vec<_>>(),
+        },
     })
 }
 
@@ -1188,16 +1311,23 @@ impl PublishStartGate {
         self.ready_notify.notify_waiters();
     }
 
-    async fn wait_until_ready_or_unavailable(&self) {
-        loop {
-            let notified = self.ready_notify.notified();
-            let accounted =
-                self.ready.load(Ordering::Acquire) + self.unavailable.load(Ordering::Acquire);
-            if accounted >= self.expected {
-                break;
+    /// Wait until every expected local client has either reported ready (after
+    /// CONNACK) or become unavailable (connect failure / early return). Returns
+    /// `false` if the bound elapsed first, so the caller can release publishes
+    /// and surface a clear timeout diagnostic instead of deadlocking.
+    async fn wait_until_ready_or_unavailable(&self, timeout: Duration) -> bool {
+        let ready = async {
+            loop {
+                let notified = self.ready_notify.notified();
+                let accounted =
+                    self.ready.load(Ordering::Acquire) + self.unavailable.load(Ordering::Acquire);
+                if accounted >= self.expected {
+                    break;
+                }
+                notified.await;
             }
-            notified.await;
-        }
+        };
+        tokio::time::timeout(timeout, ready).await.is_ok()
     }
 
     async fn wait_released(&self) {
@@ -1422,6 +1552,7 @@ fn validate_startup_provisioning(args: &Args) -> Result<()> {
         ));
     }
     external_sync_barrier(args)?;
+    external_sync_connect_publish_barrier(args)?;
     external_runtime_control_barrier(args)?;
     if !matches!(
         args.fanout_role.as_str(),
@@ -2674,6 +2805,7 @@ fn inputs_json(
         "message_size": args.message_size,
         "publish_timeout_seconds": args.publish_timeout_seconds,
         "connect_timeout_seconds": args.connect_timeout_seconds,
+        "keepalive_seconds": args.keepalive_seconds,
         "protocol": "mqttv5",
         "sync_connect": args.sync_connect,
         "sync_connect_barrier_url": args.sync_connect_barrier_url,
@@ -2681,6 +2813,12 @@ fn inputs_json(
         "sync_connect_participant_id": args.sync_connect_participant_id,
         "sync_connect_participants": args.sync_connect_participants,
         "sync_connect_barrier_timeout_seconds": args.sync_connect_barrier_timeout_seconds,
+        "sync_connect_publish_barrier_url": args.sync_connect_publish_barrier_url,
+        "sync_connect_publish_run_id": args.sync_connect_publish_run_id,
+        "sync_connect_publish_participant_id": args.sync_connect_publish_participant_id,
+        "sync_connect_publish_participants": args.sync_connect_publish_participants,
+        "sync_connect_publish_barrier_timeout_seconds":
+            args.sync_connect_publish_barrier_timeout_seconds,
         "token_issuer_url": args.token_issuer_url,
         "token_issuer_kind": resolved_token_issuer_kind(args),
         "token_issuer_no_default_roles": args.token_issuer_no_default_roles,
@@ -2838,6 +2976,10 @@ fn connect_timeout(args: &Args) -> Duration {
     Duration::from_secs(args.connect_timeout_seconds.max(1))
 }
 
+fn keepalive(args: &Args) -> Duration {
+    Duration::from_secs(u64::from(args.keepalive_seconds.max(1)))
+}
+
 async fn publish_and_wait(
     client: &rumqttc::AsyncClient,
     eventloop: &mut rumqttc::EventLoop,
@@ -2981,6 +3123,7 @@ async fn subscribe_handoff_receiver(args: &Args, client_id: &str) -> Result<Hand
         client_id: format!("handoff_{client_id}"),
         username: args.username.clone(),
         password: handoff_password,
+        keep_alive: keepalive(args),
         tls: args.tls,
         tls_ca_file: args.tls_ca_file.clone(),
         tls_insecure: args.tls_insecure,
@@ -3138,6 +3281,7 @@ async fn publish_handoff_tokens(
         client_id: "delegation_handoff_master".to_string(),
         username: args.username.clone(),
         password,
+        keep_alive: keepalive(args),
         tls: args.tls,
         tls_ca_file: args.tls_ca_file.clone(),
         tls_insecure: args.tls_insecure,
@@ -3549,6 +3693,7 @@ async fn connect_fanout_subscriber(
         client_id: prepared.client_id.clone(),
         username: args.username.clone(),
         password: prepared.password,
+        keep_alive: keepalive(args),
         tls: args.tls,
         tls_ca_file: args.tls_ca_file.clone(),
         tls_insecure: args.tls_insecure,
@@ -3953,6 +4098,7 @@ async fn connect_fanout_publisher(
         client_id: "fanout_publisher".to_string(),
         username: publisher_username,
         password: publisher_password,
+        keep_alive: keepalive(args),
         tls: args.tls,
         tls_ca_file: args.tls_ca_file.clone(),
         tls_insecure: args.tls_insecure,
@@ -4089,7 +4235,16 @@ fn fanout_output(args: &Args, parts: FanoutOutputParts<'_>) -> Output {
             metrics.received_by_phase.as_deref(),
             parts.phase_events,
         ),
-        sync_connect: sync_connect_json(args, &[], &[], None, &parts.runtime.errors),
+        sync_connect: sync_connect_json(
+            args,
+            &[],
+            &[],
+            None,
+            &[],
+            &[],
+            None,
+            &parts.runtime.errors,
+        ),
         reauth_storm: serde_json::json!({"enabled": false}),
         raw_publish_ms: parts.fanout_publish_ms,
         raw_metrics,
@@ -4488,6 +4643,7 @@ fn worker_specs(args: &Args, client_id: &str, password: Vec<u8>) -> ClientSpec {
             client_id: client_id.to_string(),
             username: String::new(),
             password: Vec::new(),
+            keep_alive: keepalive(args),
             tls: args.tls,
             tls_ca_file: args.tls_ca_file.clone(),
             tls_insecure: args.tls_insecure,
@@ -4501,6 +4657,7 @@ fn worker_specs(args: &Args, client_id: &str, password: Vec<u8>) -> ClientSpec {
         client_id: client_id.to_string(),
         username: args.username.clone(),
         password,
+        keep_alive: keepalive(args),
         tls: args.tls,
         tls_ca_file: args.tls_ca_file.clone(),
         tls_insecure: args.tls_insecure,
@@ -5479,8 +5636,35 @@ async fn run_worker(job: WorkerInvocation) -> WorkerResult {
         }
     }
 
-    if let Some(gate) = publish_gate_participant.mark_ready() {
-        gate.wait_released().await;
+    // Phase 2 of the two-phase `sync_connect` barrier: hold the measured
+    // publish workload until every participant has connected. This is either
+    // an external cross-container barrier (container-per-client) or the
+    // in-process gate that waits for all local clients to report ready.
+    match external_sync_connect_publish_barrier(&args) {
+        Ok(Some(barrier)) => match wait_external_sync_barrier(&barrier).await {
+            Ok(report) => {
+                result.sync_publish_barrier_wait_ms = Some(report.wait_ms);
+                result.sync_publish_barrier_released_at_unix_ms = report.status.released_at_unix_ms;
+                result.sync_publish_barrier_max_ready_skew_ms = report.status.max_ready_skew_ms;
+            }
+            Err(err) => {
+                result
+                    .errors
+                    .push(format!("sync_publish_barrier_failed:{err}"));
+                return result;
+            }
+        },
+        Ok(None) => {
+            if let Some(gate) = publish_gate_participant.mark_ready() {
+                gate.wait_released().await;
+            }
+        }
+        Err(err) => {
+            result
+                .errors
+                .push(format!("sync_publish_barrier_config_failed:{err}"));
+            return result;
+        }
     }
 
     let shutdown = Arc::new(Notify::new());
@@ -5651,6 +5835,20 @@ fn standard_metrics(
         .fold(None, |max: Option<f64>, value| {
             Some(max.map_or(value, |current: f64| current.max(value)))
         });
+    let sync_publish_barrier_wait = results
+        .iter()
+        .filter_map(|r| r.sync_publish_barrier_wait_ms)
+        .collect();
+    let sync_publish_barrier_released_at_unix_ms = results
+        .iter()
+        .filter_map(|r| r.sync_publish_barrier_released_at_unix_ms)
+        .collect();
+    let sync_publish_barrier_max_ready_skew_ms = results
+        .iter()
+        .filter_map(|r| r.sync_publish_barrier_max_ready_skew_ms)
+        .fold(None, |max: Option<f64>, value| {
+            Some(max.map_or(value, |current: f64| current.max(value)))
+        });
     let credential_issuance = results
         .iter()
         .flat_map(|r| r.credential_issuance.clone())
@@ -5699,6 +5897,9 @@ fn standard_metrics(
         sync_barrier_wait,
         sync_barrier_released_at_unix_ms,
         sync_barrier_max_ready_skew_ms,
+        sync_publish_barrier_wait,
+        sync_publish_barrier_released_at_unix_ms,
+        sync_publish_barrier_max_ready_skew_ms,
         errors,
     }
 }
@@ -5774,12 +5975,16 @@ fn standard_output(
         "control_response": metrics.control_response.clone(),
         "control_injection_delay": metrics.control_injection.clone(),
         "sync_connect_barrier_wait": metrics.sync_barrier_wait.clone(),
+        "sync_publish_barrier_wait": metrics.sync_publish_barrier_wait.clone(),
     });
     let sync_connect = sync_connect_json(
         args,
         &metrics.sync_barrier_wait,
         &metrics.sync_barrier_released_at_unix_ms,
         metrics.sync_barrier_max_ready_skew_ms,
+        &metrics.sync_publish_barrier_wait,
+        &metrics.sync_publish_barrier_released_at_unix_ms,
+        metrics.sync_publish_barrier_max_ready_skew_ms,
         &metrics.errors,
     );
     Output {
@@ -5913,6 +6118,7 @@ async fn spawn_runtime_control(
         client_id: "runtime-dynsec-controller".to_string(),
         username: username.to_string(),
         password: decode_token_arg(password)?,
+        keep_alive: keepalive(args),
         tls: args.tls,
         tls_ca_file: args.tls_ca_file.clone(),
         tls_insecure: args.tls_insecure,
@@ -6019,7 +6225,16 @@ async fn run_standard_mode(
     }
     let mut tasks = Vec::new();
     let sync_connect = args.sync_connect.then(|| Arc::new(SyncConnectGate::new()));
-    let publish_gate = (!args.sync_connect).then(|| Arc::new(PublishStartGate::new(args.clients)));
+    // Phase 2 publish-release gate. When an external publish barrier is
+    // configured (container-per-client), the runner owns the cross-container
+    // release and each single-client process reports ready through it instead
+    // of this in-process gate. Otherwise the in-process gate coordinates all
+    // local clients: publishes are held until every local client has
+    // connected, so an early CONNACK cannot start publishing while a slower
+    // local client is still connecting.
+    let has_external_publish_barrier = external_sync_connect_publish_barrier(&args)?.is_some();
+    let publish_gate =
+        (!has_external_publish_barrier).then(|| Arc::new(PublishStartGate::new(args.clients)));
     let reauth_storm = args
         .reauth_storm
         .then(|| Arc::new(ReauthStormGate::new(args.clients)));
@@ -6057,7 +6272,20 @@ async fn run_standard_mode(
     }
 
     let start = if let Some(publish_gate) = &publish_gate {
-        publish_gate.wait_until_ready_or_unavailable().await;
+        if let Some(sync_connect) = &sync_connect {
+            tokio::time::sleep(SYNC_CONNECT_RELEASE_DELAY).await;
+            sync_connect.release();
+        }
+        if !publish_gate
+            .wait_until_ready_or_unavailable(PUBLISH_RELEASE_READY_TIMEOUT)
+            .await
+        {
+            eprintln!(
+                "sync_connect publish-release gate timed out after {PUBLISH_RELEASE_READY_TIMEOUT:?} \
+                 waiting for {} local client(s) to connect; releasing publishes to avoid deadlock",
+                publish_gate.expected
+            );
+        }
         let start = Instant::now();
         publish_gate.release();
         start
@@ -6143,6 +6371,9 @@ fn empty_standard_metrics() -> StandardMetrics {
         sync_barrier_wait: Vec::new(),
         sync_barrier_released_at_unix_ms: Vec::new(),
         sync_barrier_max_ready_skew_ms: None,
+        sync_publish_barrier_wait: Vec::new(),
+        sync_publish_barrier_released_at_unix_ms: Vec::new(),
+        sync_publish_barrier_max_ready_skew_ms: None,
         errors: Vec::new(),
         publish_throughput_mps: 0.0,
         receive_throughput_mps: 0.0,
@@ -6488,6 +6719,9 @@ mod tests {
             sync_barrier_wait: Vec::new(),
             sync_barrier_released_at_unix_ms: Vec::new(),
             sync_barrier_max_ready_skew_ms: None,
+            sync_publish_barrier_wait: Vec::new(),
+            sync_publish_barrier_released_at_unix_ms: Vec::new(),
+            sync_publish_barrier_max_ready_skew_ms: None,
             errors: Vec::new(),
             publish_throughput_mps: 0.0,
             receive_throughput_mps: 0.0,
@@ -6804,9 +7038,96 @@ mod tests {
     }
 
     #[test]
+    fn external_sync_connect_publish_barrier_requires_sync_connect_and_complete_config() {
+        let no_sync = Args::parse_from([
+            "mqtt-loadgen",
+            "--clients",
+            "1",
+            "--sync-connect-publish-barrier-url",
+            "http://sync-barrier:8083",
+            "--sync-connect-publish-run-id",
+            "run-1-publish-0",
+            "--sync-connect-publish-participant-id",
+            "client_1",
+            "--sync-connect-publish-participants",
+            "2",
+        ]);
+        assert!(external_sync_connect_publish_barrier(&no_sync).is_err());
+
+        let incomplete = Args::parse_from([
+            "mqtt-loadgen",
+            "--sync-connect",
+            "--clients",
+            "1",
+            "--sync-connect-publish-barrier-url",
+            "http://sync-barrier:8083",
+        ]);
+        assert!(external_sync_connect_publish_barrier(&incomplete).is_err());
+
+        let multi_client = Args::parse_from([
+            "mqtt-loadgen",
+            "--sync-connect",
+            "--clients",
+            "2",
+            "--sync-connect-publish-barrier-url",
+            "http://sync-barrier:8083",
+            "--sync-connect-publish-run-id",
+            "run-1-publish-0",
+            "--sync-connect-publish-participant-id",
+            "client_1",
+            "--sync-connect-publish-participants",
+            "2",
+        ]);
+        assert!(external_sync_connect_publish_barrier(&multi_client).is_err());
+
+        let valid = Args::parse_from([
+            "mqtt-loadgen",
+            "--sync-connect",
+            "--clients",
+            "1",
+            "--sync-connect-publish-barrier-url",
+            "http://sync-barrier:8083",
+            "--sync-connect-publish-run-id",
+            "run-1-publish-0",
+            "--sync-connect-publish-participant-id",
+            "client_1",
+            "--sync-connect-publish-participants",
+            "2",
+        ]);
+        assert!(
+            external_sync_connect_publish_barrier(&valid)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn keepalive_defaults_to_sixty_seconds() {
+        let args = Args::parse_from(["mqtt-loadgen"]);
+        assert_eq!(args.keepalive_seconds, DEFAULT_KEEPALIVE_SECONDS);
+        assert_eq!(keepalive(&args), Duration::from_secs(60));
+        assert_eq!(
+            worker_specs(&args, "client_1", Vec::new()).keep_alive,
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn keepalive_cli_override_propagates_to_client_spec_and_inputs() {
+        let args = Args::parse_from(["mqtt-loadgen", "--keepalive-seconds", "215"]);
+        assert_eq!(keepalive(&args), Duration::from_secs(215));
+        assert_eq!(
+            worker_specs(&args, "client_1", Vec::new()).keep_alive,
+            Duration::from_secs(215)
+        );
+        let inputs = inputs_json(&args, "publish", None, &[], None);
+        assert_eq!(inputs["keepalive_seconds"], serde_json::json!(215));
+    }
+
+    #[test]
     fn sync_connect_json_is_topology_independent() {
         let in_process = Args::parse_from(["mqtt-loadgen", "--sync-connect", "--clients", "1"]);
-        let rendered = sync_connect_json(&in_process, &[], &[], None, &[]);
+        let rendered = sync_connect_json(&in_process, &[], &[], None, &[], &[], None, &[]);
         assert_eq!(rendered["enabled"], serde_json::json!(true));
         assert_eq!(rendered["barrier"], serde_json::json!("in_process"));
         assert_eq!(rendered["participants"], serde_json::json!(1));
@@ -6827,7 +7148,16 @@ mod tests {
             "--sync-connect-participants",
             "2",
         ]);
-        let rendered = sync_connect_json(&external, &[5.0], &[1_760_000_000_000], Some(12.4), &[]);
+        let rendered = sync_connect_json(
+            &external,
+            &[5.0],
+            &[1_760_000_000_000],
+            Some(12.4),
+            &[],
+            &[],
+            None,
+            &[],
+        );
         assert_eq!(rendered["barrier"], serde_json::json!("external"));
         assert_eq!(
             rendered["max_ready_skew_ms"],
@@ -6837,8 +7167,95 @@ mod tests {
 
         let disabled = Args::parse_from(["mqtt-loadgen"]);
         assert_eq!(
-            sync_connect_json(&disabled, &[], &[], None, &[]),
+            sync_connect_json(&disabled, &[], &[], None, &[], &[], None, &[]),
             serde_json::json!({"enabled": false})
+        );
+    }
+
+    #[test]
+    fn sync_connect_json_reports_two_phases() {
+        let external_publish = Args::parse_from([
+            "mqtt-loadgen",
+            "--sync-connect",
+            "--clients",
+            "1",
+            "--sync-connect-barrier-url",
+            "http://sync-barrier:8083",
+            "--sync-connect-run-id",
+            "run-1",
+            "--sync-connect-participant-id",
+            "client_1",
+            "--sync-connect-participants",
+            "3",
+            "--sync-connect-publish-barrier-url",
+            "http://sync-barrier:8083",
+            "--sync-connect-publish-run-id",
+            "run-1-publish-0",
+            "--sync-connect-publish-participant-id",
+            "client_1",
+            "--sync-connect-publish-participants",
+            "3",
+        ]);
+        let rendered = sync_connect_json(
+            &external_publish,
+            &[5.0; 3],
+            &[1_760_000_000_000],
+            Some(12.4),
+            &[7.0; 3],
+            &[1_760_000_000_500],
+            Some(9.1),
+            &[],
+        );
+        assert_eq!(rendered["barrier"], serde_json::json!("external"));
+        assert_eq!(
+            rendered["publish_barrier"]["barrier"],
+            serde_json::json!("external"),
+            "the second phase must be reported separately from the connect phase"
+        );
+        assert_eq!(
+            rendered["publish_barrier"]["run_id"],
+            serde_json::json!("run-1-publish-0"),
+            "the publish phase must use a distinct barrier run id"
+        );
+        assert_eq!(
+            rendered["publish_barrier"]["ready_count"],
+            serde_json::json!(3)
+        );
+        assert_eq!(
+            rendered["publish_barrier"]["max_ready_skew_ms"],
+            serde_json::json!(9.1)
+        );
+
+        let in_process_publish =
+            Args::parse_from(["mqtt-loadgen", "--sync-connect", "--clients", "2"]);
+        let rendered = sync_connect_json(&in_process_publish, &[], &[], None, &[], &[], None, &[]);
+        assert_eq!(
+            rendered["publish_barrier"]["barrier"],
+            serde_json::json!("in_process")
+        );
+        assert_eq!(
+            rendered["publish_barrier"]["max_ready_skew_ms"],
+            serde_json::json!(0.0)
+        );
+    }
+
+    #[test]
+    fn sync_connect_json_routes_phase_errors_to_their_barrier() {
+        let args = Args::parse_from(["mqtt-loadgen", "--sync-connect", "--clients", "1"]);
+        let errors = vec![
+            "sync_barrier_failed:connect".to_string(),
+            "sync_publish_barrier_failed:publish".to_string(),
+            "connect_failed:connect_timeout".to_string(),
+        ];
+        let rendered = sync_connect_json(&args, &[], &[], None, &[], &[], None, &errors);
+        assert_eq!(
+            rendered["errors"],
+            serde_json::json!(["sync_barrier_failed:connect"])
+        );
+        assert_eq!(
+            rendered["publish_barrier"]["errors"],
+            serde_json::json!(["sync_publish_barrier_failed:publish"]),
+            "publish-phase failures must not be reported as connect-phase failures"
         );
     }
 
@@ -7054,19 +7471,31 @@ mod tests {
         assert!(
             tokio::time::timeout(
                 Duration::from_millis(10),
-                gate.wait_until_ready_or_unavailable()
+                gate.wait_until_ready_or_unavailable(Duration::from_secs(5))
             )
             .await
-            .is_err()
+            .is_err(),
+            "gate must keep waiting while a local client has neither connected nor failed"
         );
 
         gate.mark_unavailable();
-        tokio::time::timeout(
-            Duration::from_millis(10),
-            gate.wait_until_ready_or_unavailable(),
-        )
-        .await
-        .expect("gate should account for workers that cannot publish");
+        assert!(
+            gate.wait_until_ready_or_unavailable(Duration::from_secs(5))
+                .await,
+            "gate should account for local clients that cannot connect"
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_start_gate_times_out_when_a_local_client_never_connects() {
+        let gate = PublishStartGate::new(2);
+        gate.mark_ready();
+        assert!(
+            !gate
+                .wait_until_ready_or_unavailable(Duration::from_millis(10))
+                .await,
+            "a stalled local client must surface a bounded timeout, not deadlock the run"
+        );
     }
 
     #[test]

@@ -174,6 +174,11 @@ def test_rust_loadgen_command_forwards_programmatic_transition_options(monkeypat
         sync_connect_participant_id="client_1",
         sync_connect_participants=3,
         sync_connect_barrier_timeout_seconds=30,
+        sync_connect_publish_barrier_url="http://sync-barrier:8083",
+        sync_connect_publish_run_id="run-1-publish",
+        sync_connect_publish_participant_id="client_1",
+        sync_connect_publish_participants=3,
+        sync_connect_publish_barrier_timeout_seconds=30,
     )
 
     assert argv[0] == "mqtt-loadgen"
@@ -186,6 +191,11 @@ def test_rust_loadgen_command_forwards_programmatic_transition_options(monkeypat
     assert _argv_value(argv, "--sync-connect-participant-id") == "client_1"
     assert _argv_value(argv, "--sync-connect-participants") == "3"
     assert _argv_value(argv, "--sync-connect-barrier-timeout-seconds") == "30"
+    assert _argv_value(argv, "--sync-connect-publish-barrier-url") == "http://sync-barrier:8083"
+    assert _argv_value(argv, "--sync-connect-publish-run-id") == "run-1-publish"
+    assert _argv_value(argv, "--sync-connect-publish-participant-id") == "client_1"
+    assert _argv_value(argv, "--sync-connect-publish-participants") == "3"
+    assert _argv_value(argv, "--sync-connect-publish-barrier-timeout-seconds") == "30"
     assert _argv_value(argv, "--token-issuer-url") == "http://issuer"
     assert _argv_value(argv, "--token-issuer-kind") == "jwt"
     assert _argv_value(argv, "--token-issuer-ttl") == "60"

@@ -1,14 +1,9 @@
 # Scenario testing and result-verification plan
 
-This document defines the gates for testing every benchmark scenario and
-reviewing every result for semantic errors or suspicious measurements.
-[`RUN.md`](RUN.md) remains the canonical source for the complete execution
-matrix and commands. [`SEMANTIC-VERIFIED.md`](SEMANTIC-VERIFIED.md) records what
-has actually been verified.
-
-Terminology: *Phases* are verification stages in this document; *Parts* are the
-execution matrices defined in [`RUN.md`](RUN.md). Phases 6 and 7 execute
-Part 1 and Part 2, respectively; the two numbering schemes are unrelated.
+Use this checklist when qualifying new benchmark runs or reviewing their
+measurements. [RUN.md](RUN.md) defines the nominal full matrix. The
+[final audit record](SEMANTIC-VERIFIED.md#final-dataset-and-provenance) records
+the completed campaign's approved scope and analysis inputs.
 
 The process deliberately separates three questions:
 
@@ -26,9 +21,8 @@ resolved, rerun, or explicitly documented as an expected outcome.
 - Build and generate credentials once for a batch. Use `--skip-build` and
   `--skip-tokens` only after recording the commit and confirming that the
   generated artifacts match it.
-- Never reuse `mqtt-auth-biscuit/benchmarks/results` across invocations. Move it
-  to a directory whose name records every varied dimension, as shown in
-  `RUN.md`.
+- Give each invocation its own output directory. Use the full-matrix batch
+  helper in [RUN.md](RUN.md) or the [exclusive output options](mqtt-auth-biscuit/benchmarks/RUNNING_BENCHMARKS.md#result-directories).
 - Preserve the scenario JSON, `summary.json`, `summary.csv`, runner log, Docker
   diagnostics, packet captures, and profiling output produced by the run.
 - Record the Git commit, worktree status, Rust/Python/Docker versions, host,
@@ -40,8 +34,7 @@ resolved, rerun, or explicitly documented as an expected outcome.
 
 ## Mandatory test-review-fix loop
 
-Apply this loop after **every invocation or small batch**, not after completing a
-phase:
+Apply this loop after every invocation or small batch.
 
 1. **Test:** run the smallest currently planned batch and preserve its raw
    output.
@@ -400,12 +393,18 @@ an explicit exclusion record.
 
 ## Phase 7 — Part 2 parameter sweep
 
-Goal: execute and verify all 1,530 scenario runs in the axis-aware Part 2 sweep.
+Goal: execute and verify all 1,512 scenario runs in the axis-aware Part 2 sweep.
 
-Execute Step 3 of `RUN.md`: three client levels × two message levels × three QoS
-levels × two issuer configurations × three repetitions. Remember that
+Execute Step 3 of `RUN.md`: the full matrix cohort runs three client levels ×
+two message levels × three QoS levels; the dedicated churn cohort runs the same
+client/message levels at QoS 1 and QoS 2 only; fixed-axis cohorts run only over
+axes they do not define; the issuer cohort adds default/stripped issuance
+modes; all × three repetitions. Remember that
 `BASELINE-NO-AUTH` pins QoS 0 and `TOKEN-QOS2-{JWT|BISCUIT}` pins QoS 2; verify
-their other axes but do not describe them as QoS sweeps.
+their other axes but do not describe them as QoS sweeps. Remember that
+`DYNAMIC-SECURITY-CHURN` is excluded from QoS 0 by executable sweep metadata
+(`PART2_SWEEP_COHORT_QOS`) and by a runner guard: its post-control denial is
+only client-observable at QoS 1/2.
 
 For every cell, confirm:
 
@@ -418,21 +417,23 @@ For every cell, confirm:
 - only performance/resource measurements—not the selected path or policy
   result—change with load.
 
-Review/fix gate: review all 32 raw results and their available repetitions at
+Review/fix gate: review every cohort result and its available repetitions at
 the end of each sweep cell. Resolve or block that cell before changing clients,
 messages, QoS, or issuer configuration.
 
-Exit gate: all 108 sweep invocations contain 32 reviewed scenario results, for
-1,530 contract-valid scenario runs in total.
+Exit gate: all Part 2 sweep invocations are reviewed per cohort (matrix: 22
+scenarios per cell; churn: 1 scenario per QoS 1/2 cell; fixed_qos: 3;
+fixed_clients_qos: 2; reauth: 2; issuer: 1 per kind/mode cell), for
+1,512 contract-valid scenario runs in total.
 
 ## Phase 8 — Final completeness and sign-off
 
 Goal: produce an auditable statement of exactly what can be used in analysis.
 
-1. Count results as described in `RUN.md`: 3,186 Part 1 scenario runs and 1,530
-   Part 2 scenario runs.
-2. Compare result scenario IDs against the frozen Phase 0 inventory and the
-   expected matrix cells. Detect missing, duplicate, stale, and extra files.
+1. Reconcile the accepted results with the frozen scope and expected workload
+   coordinates, including repetition. A full reproduction expects 3,186 Part 1
+   and 1,512 Part 2 results. Use the locked scope for an approved subset.
+2. Check for missing, duplicate, stale, and extra results.
 3. Regenerate summaries only from accepted raw results.
 4. Sample summary rows back to source JSON and verify counts, percentiles,
    credential attestations, and scenario configuration survived aggregation.
@@ -444,8 +445,8 @@ Goal: produce an auditable statement of exactly what can be used in analysis.
    - reruns or exclusions with reasons;
    - blocked scenarios with no usable evidence.
 
-6. Update `SEMANTIC-VERIFIED.md` with the commit, matrix coverage, accepted
-   scenario families, retired/blocked cases, and interpretation boundaries.
+6. Record the commit, matrix coverage, accepted scenario families, exclusions,
+   and interpretation limits in the run's verification report.
 
 Final gate: every planned cell is accounted for, every accepted result passed
 its semantic contract and suspicious-number review, and no aggregate contains a

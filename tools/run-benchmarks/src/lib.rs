@@ -18,6 +18,12 @@ pub struct Cli {
     #[arg(long)]
     pub scenarios: Option<String>,
 
+    #[arg(long)]
+    pub out: Option<String>,
+
+    #[arg(long)]
+    pub exclusive_out: bool,
+
     #[arg(
         long,
         value_parser = ["all", "matrix", "fixed-clients", "fixed-messages", "fixed"],
@@ -192,6 +198,13 @@ pub fn scenario_args(cli: &Cli) -> Vec<String> {
     if let Some(scenarios) = &cli.scenarios {
         args.push("--scenarios-arg".to_owned());
         args.push(scenarios.clone());
+    }
+    if let Some(out) = &cli.out {
+        args.push("--out".to_owned());
+        args.push(out.clone());
+    }
+    if cli.exclusive_out {
+        args.push("--exclusive-out".to_owned());
     }
     args.push("--workload-shape".to_owned());
     args.push(cli.workload_shape.clone());
@@ -411,7 +424,7 @@ pub fn run(cli: &Cli) -> Result<()> {
     eprintln!("Using docker compose: {}", compose_cmd.join(" "));
 
     let plan = build_runtime_plan(cli, unix_time_secs()?, &compose_cmd);
-    let _cleanup = CleanupGuard::new(plan.cleanup.clone(), !cli.no_cleanup);
+    let mut cleanup = CleanupGuard::new(plan.cleanup.clone(), !cli.no_cleanup);
 
     if let Some(build) = &plan.build {
         eprintln!("Building plugin...");
@@ -428,7 +441,21 @@ pub fn run(cli: &Cli) -> Result<()> {
     }
 
     eprintln!("Running scenarios...");
-    plan.run_scenarios.status()
+    let status = Command::new(&plan.run_scenarios.program)
+        .args(&plan.run_scenarios.args)
+        .current_dir(&plan.run_scenarios.cwd)
+        .envs(&plan.run_scenarios.env)
+        .status()
+        .context("failed to start scenario runner")?;
+    // Exit 73 means the runner did not claim an existing exclusive destination.
+    // It must not tear down a concurrent owner's services.
+    if cli.exclusive_out && status.code() == Some(73) {
+        cleanup.cleanup = None;
+    }
+    if !status.success() {
+        bail!("scenario runner exited with {status}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -487,6 +514,8 @@ mod tests {
             skip_build: false,
             skip_tokens: false,
             scenarios: Some("TOKEN-BASELINE-JWT".to_owned()),
+            out: None,
+            exclusive_out: false,
             workload_shape: "matrix".to_owned(),
             clients: Some("10".to_owned()),
             messages: Some("25".to_owned()),
@@ -550,11 +579,50 @@ mod tests {
     }
 
     #[test]
+    fn exclusive_output_and_frozen_options_are_forwarded() {
+        let cli = Cli::try_parse_from([
+            "run-benchmarks",
+            "--out",
+            "directory with spaces/result",
+            "--exclusive-out",
+            "--scenarios",
+            "HYBRID-FALLBACK-AUTHZ-DOWN-JWT",
+            "--clients",
+            "10",
+            "--messages",
+            "10",
+            "--qos",
+            "0",
+            "--skip-build",
+            "--skip-tokens",
+            "--no-build-images",
+        ])
+        .expect("parse options");
+        let plan = build_runtime_plan(&cli, 0, &["compose-wrapper".to_owned()]);
+        assert!(plan.build.is_none());
+        assert!(plan.generate_tokens.is_none());
+        let args = plan.run_scenarios.args;
+        for pair in [
+            ("--out", "directory with spaces/result"),
+            ("--scenarios-arg", "HYBRID-FALLBACK-AUTHZ-DOWN-JWT"),
+            ("--clients", "10"),
+            ("--messages", "10"),
+            ("--qos", "0"),
+        ] {
+            assert!(args.windows(2).any(|w| w[0] == pair.0 && w[1] == pair.1));
+        }
+        assert!(args.iter().any(|arg| arg == "--exclusive-out"));
+        assert!(args.iter().any(|arg| arg == "--no-build-images"));
+    }
+
+    #[test]
     fn runtime_plan_matches_previous_python_flow() {
         let cli = Cli {
             skip_build: true,
             skip_tokens: false,
             scenarios: Some("TOKEN-BASELINE-JWT".to_owned()),
+            out: None,
+            exclusive_out: false,
             workload_shape: "all".to_owned(),
             clients: None,
             messages: None,

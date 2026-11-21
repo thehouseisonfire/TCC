@@ -946,6 +946,7 @@ class _RunLoadgenKwargs(TypedDict):
     biscuit_delegate_handoff_ready_timeout_seconds: int | None
     publish_timeout_seconds: NotRequired[int | None]
     connect_timeout_seconds: NotRequired[int | None]
+    keepalive_seconds: NotRequired[int | None]
 
 
 def _minimal_run_loadgen_kwargs() -> _RunLoadgenKwargs:
@@ -1104,6 +1105,48 @@ def test_run_loadgen_forwards_publish_timeout_seconds(monkeypatch) -> None:
     assert compose_call[compose_call.index("--publish-timeout-seconds") + 1] == "20"
     assert "--connect-timeout-seconds" in compose_call
     assert compose_call[compose_call.index("--connect-timeout-seconds") + 1] == "20"
+
+
+def test_run_loadgen_forwards_keepalive_seconds_with_default_fallback(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    class Completed:
+        stdout = '{"errors":[],"raw_publish_ms":[]}'
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001, ANN202
+        calls.append(cmd)
+        return Completed()
+
+    monkeypatch.setattr(rs, "_resolve_rust_helper", lambda _binary: ["mqtt-loadgen"])
+    monkeypatch.setattr(rs.subprocess, "run", fake_run)
+
+    kwargs = _minimal_run_loadgen_kwargs()
+    kwargs["keepalive_seconds"] = 215
+    rs._run_loadgen(
+        **kwargs,
+        client_topology="container-single",
+        compose_files=["docker/docker-compose.yml"],
+        compose_project_name="bench",
+        scenario_id="HTTP-LATENCY-1000MS-JWT",
+    )
+
+    explicit_call = calls[-1]
+    assert "--keepalive-seconds" in explicit_call
+    assert explicit_call[explicit_call.index("--keepalive-seconds") + 1] == "215"
+
+    rs._run_loadgen(
+        **_minimal_run_loadgen_kwargs(),
+        client_topology="container-single",
+        compose_files=["docker/docker-compose.yml"],
+        compose_project_name="bench",
+        scenario_id="TOKEN-BASELINE-JWT",
+    )
+
+    default_call = calls[-1]
+    assert "--keepalive-seconds" in default_call
+    assert default_call[default_call.index("--keepalive-seconds") + 1] == str(
+        rs.DEFAULT_KEEPALIVE_SECONDS
+    )
 
 
 def test_container_single_passes_explicit_password_map_profiles(monkeypatch) -> None:
@@ -2133,7 +2176,12 @@ def test_container_per_client_sync_connect_uses_cross_container_barrier(
 
     assert len(observed) == 2
     assert all("--sync-connect-barrier-url" in cmd for cmd in observed)
+    assert all("--sync-connect-publish-barrier-url" in cmd for cmd in observed)
     assert {cmd[cmd.index("--sync-connect-participant-id") + 1] for cmd in observed} == {
+        "client_1",
+        "client_2",
+    }
+    assert {cmd[cmd.index("--sync-connect-publish-participant-id") + 1] for cmd in observed} == {
         "client_1",
         "client_2",
     }
@@ -2141,6 +2189,11 @@ def test_container_per_client_sync_connect_uses_cross_container_barrier(
     assert result["sync_connect"]["ready_count"] == 2
     assert result["sync_connect"]["max_ready_skew_ms"] == pytest.approx(12.4)
     assert result["sync_connect"]["client_wait"]["count"] == 2
+    publish = result["sync_connect"]["publish_barrier"]
+    assert publish["barrier"] == "external"
+    assert publish["run_id"] == "run-1-publish"
+    assert publish["ready_count"] == 2
+    assert publish["max_ready_skew_ms"] == pytest.approx(12.4)
 
 
 def test_sync_barrier_validation_distinguishes_herd_restart_from_latency_cells() -> None:
@@ -2161,6 +2214,13 @@ def test_sync_barrier_validation_distinguishes_herd_restart_from_latency_cells()
             "ready_count": 10,
             "max_ready_skew_ms": 8.0,
             "errors": [],
+            "publish_barrier": {
+                "barrier": "external",
+                "participants": 10,
+                "ready_count": 10,
+                "max_ready_skew_ms": 8.0,
+                "errors": [],
+            },
         },
         "connect": {"count": 10},
     }
@@ -2186,6 +2246,23 @@ def test_sync_barrier_validation_distinguishes_herd_restart_from_latency_cells()
         rs._validate_thundering_herd_result(
             "HTTP-LATENCY-1000MS-JWT", bad_barrier, client_count=10, require_restart=False
         )
+    bad_publish_barrier = {
+        **latency,
+        "sync_connect": {
+            **barrier_ok["sync_connect"],
+            "publish_barrier": {
+                **barrier_ok["sync_connect"]["publish_barrier"],
+                "ready_count": 9,
+            },
+        },
+    }
+    with pytest.raises(RuntimeError, match="synchronized publish-release barrier contract failed"):
+        rs._validate_thundering_herd_result(
+            "HTTP-LATENCY-1000MS-JWT",
+            bad_publish_barrier,
+            client_count=10,
+            require_restart=False,
+        )
 
 
 def test_sync_barrier_contract_is_topology_independent() -> None:
@@ -2199,6 +2276,16 @@ def test_sync_barrier_contract_is_topology_independent() -> None:
     single-client HTTP latency parity runs in run_python_tests.sh, which
     execute with the default host topology.
     """
+
+    def publish_barrier(barrier: str) -> dict[str, Any]:
+        return {
+            "barrier": barrier,
+            "participants": 1,
+            "ready_count": 1,
+            "max_ready_skew_ms": 0.0,
+            "errors": [],
+        }
+
     in_process = {
         "sync_connect": {
             "enabled": True,
@@ -2207,6 +2294,7 @@ def test_sync_barrier_contract_is_topology_independent() -> None:
             "ready_count": 1,
             "max_ready_skew_ms": 0.0,
             "errors": [],
+            "publish_barrier": publish_barrier("in_process"),
         },
         "connect": {"count": 1},
     }
@@ -2222,6 +2310,7 @@ def test_sync_barrier_contract_is_topology_independent() -> None:
             "ready_count": 1,
             "max_ready_skew_ms": 0.0,
             "errors": [],
+            "publish_barrier": publish_barrier("external"),
         },
         "connect": {"count": 1},
     }
@@ -2239,6 +2328,7 @@ def test_sync_barrier_contract_is_topology_independent() -> None:
             "participants": 1,
             "ready_count": 1,
             "errors": [],
+            "publish_barrier": publish_barrier("in_process"),
         },
         "connect": {"count": 1},
     }

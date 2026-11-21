@@ -1,42 +1,33 @@
 # Full Benchmark Run Plan
 
-This document describes how to execute the complete MQTT authorization benchmark
-suite for the TCC2 project. It covers every scenario, exercises every parameter
-lever, and produces a reproducible dataset for analysis.
-
-Use [`TESTING.md`](TESTING.md) for the phased semantic-verification and
-suspicious-result review procedure, and
-[`SEMANTIC-VERIFIED.md`](SEMANTIC-VERIFIED.md) for recorded verification status.
-
-Terminology: *Parts* are the execution matrices defined in this document;
-*Phases* are verification stages in [`TESTING.md`](TESTING.md). The two
-numbering schemes are unrelated: `TESTING.md` Phase 2 is an infrastructure
-preflight, not Part 2 of this plan.
+This plan describes how to reproduce the nominal full benchmark matrix.
+The completed campaign used a prospectively reduced scope. See the
+[final dataset and provenance](SEMANTIC-VERIFIED.md#final-dataset-and-provenance)
+for the 4,101 accepted results and their analysis index. Use the
+[verification procedure](TESTING.md) to qualify and review a new run.
 
 ## Overview
 
 The benchmark suite currently has **444 scenarios** (222 base + 222 TLS variants) across
 multiple functional categories. The run plan has two parts:
 
-| Part | What | Runs | Est. time |
-|------|------|------|-----------|
-| 1 | All 444 scenarios, varying every non-fixed workload axis, × 3 runs | 3,186 | ~3–5 days |
-| 2 | Axis-aware representative cohorts × 3 runs | 1,530 | ~2–4 days |
-| **Total** | | **4,716** | **~5–9 days** |
+| Part | What | Runs |
+| --- | --- | ---: |
+| 1 | All 444 scenarios, varying every non-fixed workload axis, × 3 runs | 3,186 |
+| 2 | Axis-aware representative cohorts × 3 runs | 1,512 |
+| **Total** | | **4,698** |
 
 ## Research Dimensions
-
-Every lever below is pulled at least twice across the full plan.
 
 | Dimension | Part 1 levels | Part 2 levels | Source |
 |-----------|--------------|---------------|--------|
 | Auth mechanism | None, JWT, Biscuit | None, JWT, Biscuit | Scenario ID |
 | Policy backend | Static ACL, DynSec, HTTP, SQLite, Hybrid | (same) | Scenario ID |
 | Token complexity | Baseline, Chain-1/5/25, Datalog-low/med/high | (same) | Scenario ID |
-| TLS | Off, On | Off, On | `-TLS` suffix |
+| TLS | Off, On | Off | `-TLS` suffix |
 | Client count | 10, 200 | 10, 50, 200 | `--clients` |
 | Message volume | 10, 100 | 10, 100 | `--messages` |
-| QoS | 1 (default) | 0, 1, 2 | `--qos` |
+| QoS | 1 (default) | 0, 1, 2 (churn cohort: 1, 2 only) | `--qos` |
 | Token issuer | Default | Default, Stripped | issuer cohort with roles/grants controls |
 
 Part 1 runs every scenario three times and varies each workload axis that the
@@ -44,20 +35,24 @@ scenario does not define itself. Thus an ordinary scenario uses the full 2×2
 client/message matrix, a fan-out scenario with a fixed subscriber slice still
 uses both message levels, and a fully fixed stress workload runs once per
 repetition. Part 2 deepens representative workloads only along axes that change
-their effective execution. Issuer configuration uses a dedicated issuer-backed
-cohort rather than being recorded against fixture credentials.
+their effective execution. A dedicated issuer-backed cohort varies the
+issuer configuration.
 
 ## Sweep Scenarios (Part 2)
 
 The executable `PART2_SWEEP_COHORTS` inventory is the source of truth. It contains
-32 registered scenarios partitioned by their effective workload axes:
+32 registered scenarios partitioned by their effective workload axes.
+`PART2_SWEEP_COHORT_QOS` and `PART2_SWEEP_COHORT_AXES` are the executable
+QoS/client/message contract. The commands below read the variable QoS levels
+from that metadata.
 
 | # | Category | Scenario 1 | Scenario 2 |
 |---|----------|------------|------------|
 | 1 | Baseline no-auth | `BASELINE-NO-AUTH` | — |
 | 2 | Token baseline | `TOKEN-BASELINE-JWT` | `TOKEN-BASELINE-BISCUIT` |
 | 3 | Static ACL | `STATIC-ACL-PUBLISH-JWT` | `STATIC-ACL-PUBLISH-BISCUIT` |
-| 4 | DynSec baseline | `DYNAMIC-SECURITY-BASELINE` | `DYNAMIC-SECURITY-CHURN` |
+| 4 | DynSec baseline | `DYNAMIC-SECURITY-BASELINE` | — |
+| 4b | DynSec churn (dedicated QoS 1/2 cohort) | `DYNAMIC-SECURITY-CHURN` | — |
 | 5 | HTTP profile simple | `HTTP-PROFILE-SIMPLE-JWT` | `HTTP-PROFILE-SIMPLE-BISCUIT` |
 | 6 | HTTP profile complex | `HTTP-PROFILE-COMPLEX-JWT` | `HTTP-PROFILE-COMPLEX-BISCUIT` |
 | 7 | HTTP latency | `HTTP-LATENCY-200MS-JWT` | `HTTP-LATENCY-1000MS-JWT` |
@@ -72,53 +67,44 @@ The executable `PART2_SWEEP_COHORTS` inventory is the source of truth. It contai
 | 16 | Thundering herd | `TOKEN-THUNDERING-HERD-JWT` | `TOKEN-THUNDERING-HERD-BISCUIT` |
 | 17 | Issuer-backed baseline | `TOKEN-ISSUER-BASELINE-JWT` | `TOKEN-ISSUER-BASELINE-BISCUIT` |
 
-The following fixed-workload scenarios are intentionally excluded from Part 2
-because they hard-code their own client/message counts and would not participate
-meaningfully in the `--clients` / `--messages` matrix:
-
-- `TOKEN-PUBLISH-STRESS-JWT`
-- `TOKEN-PUBLISH-STRESS-BISCUIT`
-- `TOKEN-PUBLISH-STRESS-RECONNECT-JWT`
-- `TOKEN-PUBLISH-STRESS-RECONNECT-BISCUIT`
-- `TOKEN-DATALOG-STRESS-LOW-BISCUIT`
-- `TOKEN-DATALOG-STRESS-MED-BISCUIT`
-- `TOKEN-DATALOG-STRESS-HIGH-BISCUIT`
-- `TOKEN-COMPOSABILITY-ATTENUATED-DATALOG-MED-BISCUIT`
-- `TOKEN-COMPOSABILITY-ATTENUATED-DATALOG-HIGH-BISCUIT`
-- `TOKEN-COMPOSABILITY-DELEGATED-DATALOG-MED-BISCUIT`
-- `TOKEN-COMPOSABILITY-DELEGATED-DATALOG-HIGH-BISCUIT`
-- `HTTP-AUTHZ-COMPLEXITY-SIMPLE-JWT`
-- `HTTP-AUTHZ-COMPLEXITY-SIMPLE-BISCUIT`
-- `HTTP-AUTHZ-COMPLEXITY-MED-JWT`
-- `HTTP-AUTHZ-COMPLEXITY-MED-BISCUIT`
-- `HTTP-AUTHZ-COMPLEXITY-COMPLEX-JWT`
-- `HTTP-AUTHZ-COMPLEXITY-COMPLEX-BISCUIT`
-
-Run those as targeted scenarios instead of mixing them into the parameter
-sweep.
-
-The following scenario families are also excluded from Part 2 because their
-primary workload axis is already scenario-defined, so the generic matrix would
-blur the point of the experiment:
-
-- `TOKEN-LIFECYCLE-REAUTH-STORM-{JWT,BISCUIT}`
-- `TOKEN-LIFECYCLE-PROACTIVE-REAUTH-{JWT,BISCUIT}`
-- `TOKEN-LIFECYCLE-RECONNECT-PUBLISH-{JWT,BISCUIT}`
-- `CONTROL-ENFORCEMENT-KICK-{JWT,BISCUIT}`
-- `CONTROL-ENFORCEMENT-ACL-READ-NOTIFY-{JWT,BISCUIT}`
-- `CONTROL-CHURN-ACL-MODIFY-{JWT,BISCUIT}`
-- `CONTROL-CHURN-GROUP-CLIENT-{JWT,BISCUIT}`
-- `SQLITE-RBAC-CHURN-{JWT,BISCUIT}`
-
-Run those as targeted slices with their scenario-defined workload shape.
+Part 1 covers the fixed-workload stress, lifecycle, control, and fanout families
+outside the Part 2 inventory. Use the [benchmark runbook](mqtt-auth-biscuit/benchmarks/RUNNING_BENCHMARKS.md)
+to rerun individual scenarios.
 
 Part 2 omits axes that do not affect a scenario:
 
 - `BASELINE-NO-AUTH` and `TOKEN-QOS2-{JWT,BISCUIT}` omit the QoS loop.
 - `TOKEN-DENY-READ-JWT` and `TOKEN-ATTENUATED-DENY-BISCUIT` omit client and QoS loops.
 - `TOKEN-MQTT5-REAUTH-{JWT,BISCUIT}` run once per repetition.
+- `DYNAMIC-SECURITY-CHURN` runs only at QoS 1 and QoS 2 in its dedicated
+  `churn` cohort. Its `runtime_control_expect_denial` contract is only
+  client-observable at QoS 1 (PUBACK rc135 / NotAuthorized) and QoS 2 (PUBREC
+  rc135 / NotAuthorized). At QoS 0 Mosquitto denies the PUBLISH server-side
+  but there is no acknowledgement carrying the denial, so the result contract
+  is impossible to satisfy. The runner rejects `DYNAMIC-SECURITY-CHURN` with
+  `--qos 0` explicitly (`_validate_part2_qos_for_scenario`), and
+  `_validate_part2_sweep_inventory` rejects any placement of a
+  `runtime_control_expect_denial` scenario outside the `churn` cohort.
 
 The dedicated issuer cohort is the only cohort with a default/stripped issuance axis.
+
+Part 2 slot arithmetic (× 3 repetitions):
+
+- full matrix: 22 × 3 × 2 × 3 × 3 = 1,188
+- churn QoS 1/2: 1 × 3 × 2 × 2 × 3 = 36
+- fixed_qos: 3 × 3 × 2 × 1 × 3 = 54
+- fixed_clients_qos: 2 × 1 × 2 × 1 × 3 = 12
+- reauth: 2 × 1 × 1 × 1 × 3 = 6
+- issuer (× 2 default/stripped modes): 2 × 3 × 2 × 3 × 2 × 3 = 216
+- **Part 2 total = 1,512**
+
+Verify mechanically with:
+
+```bash
+cd mqtt-auth-biscuit && uv run --locked python -c \
+  'from benchmarks.run_scenarios import part2_expected_slot_total; print(part2_expected_slot_total())'
+# expected: 1512
+```
 
 ## Prerequisites
 
@@ -128,38 +114,69 @@ rustc --version
 
 # Python environment
 uv sync --locked
-python --version  # 3.14.2
+uv run --locked python --version  # 3.14.2
 
 # Docker
 docker --version
 docker compose version
 
-# iperf3 (client binary, server runs in Docker)
-iperf3 --version  # sudo apt-get install iperf3
+# iperf3 (host client) and OpenSSL (TLS certificates)
+iperf3 --version
+openssl version
 ```
 
 ## Step-by-Step Execution
 
-All commands run from the repository root (`TCC2/`).
+Run the examples from the repository root in a dedicated Bash shell. The full plan uses
+`container-per-client` with a 96 MiB memory limit per client, except for the
+reauthentication storms, which use host topology. Check the
+[host limits for jumbo MTU scenarios](SEMANTIC-VERIFIED.md#known-interpretation-boundaries)
+before attempting the full plan.
 
-**Default client topology:** run every scenario with `--client-topology container-per-client` unless a step explicitly requires a different mode.
-
-**Default client memory:** keep every `container-per-client` run at `--client-memory 96m` because the previous 512 MB default is not feasible at high client counts.
-
-### Step 1: Build the plugin and generate tokens
-
-Build once and reuse across all iterations:
+### Step 1: Prepare credentials and batch output
 
 ```bash
 cd mqtt-auth-biscuit
 cargo build --locked --release -p mosquitto-auth-biscuit
 cargo run --locked -p gen-tokens --bin gen-tokens
+bash docker/tls/generate_certs.sh
 cd ..
+```
+
+For frozen Docker images, follow the [image-freeze procedure](mqtt-auth-biscuit/benchmarks/RUNNING_BENCHMARKS.md#frozen-docker-images)
+and run this in the same Bash shell before starting batches:
+
+```bash
+export MQTT_NO_BUILD_IMAGES=1
+```
+
+Define this helper once. The wrapper writes to its default output directory,
+including the default pcap subdirectory. The helper moves the whole output
+directory only after a successful run. On failure it leaves partial output
+available for review and the loop stops. The move changes the capture's
+location. Resolve recorded pcap names under the archived batch's `pcap/`
+directory when inspecting results.
+
+```bash
+run_full_batch() {
+  local batch_dir="mqtt-auth-biscuit/benchmarks/results-$1"
+  local work_dir="mqtt-auth-biscuit/benchmarks/results"
+  shift
+  if [[ -e "$work_dir" || -L "$work_dir" || -e "$batch_dir" || -L "$batch_dir" ]]; then
+    printf 'Preserve existing output before running: %s or %s\n' "$work_dir" "$batch_dir" >&2
+    return 1
+  fi
+  ./scripts/run-benchmarks --skip-build --skip-tokens --exclusive-out "$@" &&
+    mv -T --no-clobber -- "$work_dir" "$batch_dir" &&
+    [[ ! -e "$work_dir" ]]
+}
 ```
 
 ### Step 2: Part 1 — Full baseline
 
-Generate the full scenario list (444 total scenarios across 112 matrix, 282 fixed-client, 46 fixed, and 4 reauth-storm, totaling 3,186 runs across their respective cells and 3 repetitions):
+Generate the scenario groups. The three repetitions cover 112 matrix scenarios,
+282 fixed-client scenarios, 46 fully fixed scenarios, and four reauthentication
+storms, for 3,186 results.
 
 ```bash
 readarray -t SCENARIO_GROUPS < <(cd mqtt-auth-biscuit && uv run --locked python -c "
@@ -175,7 +192,7 @@ for shape in ('matrix', 'fixed-clients', 'fixed-messages', 'fixed'):
     print(','.join(sorted(name for name, scenario in regular.items()
                           if _scenario_workload_shape(scenario) == shape)))
 print(','.join(reauth))
-" 2>/dev/null)
+")
 MATRIX_SCENARIOS=${SCENARIO_GROUPS[0]}
 FIXED_CLIENT_SCENARIOS=${SCENARIO_GROUPS[1]}
 FIXED_MESSAGE_SCENARIOS=${SCENARIO_GROUPS[2]}
@@ -190,19 +207,13 @@ for clients in 10 200; do
   for messages in 10 100; do
     for run in 1 2 3; do
       echo "=== Part 1: clients=$clients messages=$messages run=$run ==="
-      ./scripts/run-benchmarks \
+      run_full_batch "p1-c${clients}-m${messages}-r${run}" \
         --scenarios "$MATRIX_SCENARIOS" \
         --workload-shape matrix \
         --clients "$clients" \
         --messages "$messages" \
         --client-topology container-per-client \
-        --client-memory 96m \
-        --skip-build \
-        --skip-tokens
-
-      # Preserve results to avoid stale data in aggregator
-      mv mqtt-auth-biscuit/benchmarks/results \
-         mqtt-auth-biscuit/benchmarks/results-p1-c${clients}-m${messages}-r${run}
+        --client-memory 96m || exit 1
     done
   done
 done
@@ -213,15 +224,12 @@ Run partially fixed workloads over the axis they do not define:
 ```bash
 for messages in 10 100; do
   for run in 1 2 3; do
-    ./scripts/run-benchmarks \
+    run_full_batch "p1-fixed-clients-m${messages}-r${run}" \
       --scenarios "$FIXED_CLIENT_SCENARIOS" \
       --workload-shape fixed-clients \
       --messages "$messages" \
       --client-topology container-per-client \
-      --client-memory 96m \
-      --skip-build --skip-tokens
-    mv mqtt-auth-biscuit/benchmarks/results \
-       mqtt-auth-biscuit/benchmarks/results-p1-fixed-clients-m${messages}-r${run}
+      --client-memory 96m || exit 1
   done
 done
 
@@ -230,15 +238,12 @@ done
 if [[ -n "$FIXED_MESSAGE_SCENARIOS" ]]; then
   for clients in 10 200; do
     for run in 1 2 3; do
-      ./scripts/run-benchmarks \
+      run_full_batch "p1-fixed-messages-c${clients}-r${run}" \
         --scenarios "$FIXED_MESSAGE_SCENARIOS" \
         --workload-shape fixed-messages \
         --clients "$clients" \
         --client-topology container-per-client \
-        --client-memory 96m \
-        --skip-build --skip-tokens
-      mv mqtt-auth-biscuit/benchmarks/results \
-         mqtt-auth-biscuit/benchmarks/results-p1-fixed-messages-c${clients}-r${run}
+        --client-memory 96m || exit 1
     done
   done
 fi
@@ -249,115 +254,71 @@ host topology because they are incompatible with container-per-client.
 
 ```bash
 for run in 1 2 3; do
-  ./scripts/run-benchmarks \
+  run_full_batch "p1-fixed-r${run}" \
     --scenarios "$FIXED_SCENARIOS" \
     --workload-shape fixed \
     --client-topology container-per-client \
-    --client-memory 96m \
-    --skip-build --skip-tokens
-  mv mqtt-auth-biscuit/benchmarks/results \
-     mqtt-auth-biscuit/benchmarks/results-p1-fixed-r${run}
+    --client-memory 96m || exit 1
 
-  ./scripts/run-benchmarks \
+  run_full_batch "p1-reauth-r${run}" \
     --scenarios "$REAUTH_STORM_SCENARIOS" \
     --workload-shape fixed \
-    --client-topology host \
-    --skip-build --skip-tokens
-  mv mqtt-auth-biscuit/benchmarks/results \
-     mqtt-auth-biscuit/benchmarks/results-p1-reauth-r${run}
+    --client-topology host || exit 1
 done
 ```
 
 Every result records both requested and effective clients, messages, and QoS,
 plus whether each workload axis came from the CLI matrix or the scenario.
 
-### Step 3: Part 2 — Axis-aware parameter sweep (1,530 runs)
+### Step 3: Part 2 — Axis-aware parameter sweep (1,512 runs)
 
-Load the validated executable cohorts:
+Load the validated executable cohorts (including the dedicated `churn` cohort
+and its machine-readable QoS levels):
 
 ```bash
 readarray -t PART2_COHORTS < <(cd mqtt-auth-biscuit && uv run --locked python -c '
 from benchmarks.run_scenarios import PART2_SWEEP_COHORTS
-for name in ("matrix", "fixed_qos", "fixed_clients_qos", "reauth", "issuer"):
+for name in ("matrix", "churn", "fixed_qos", "fixed_clients_qos", "reauth", "issuer"):
     print(",".join(PART2_SWEEP_COHORTS[name]))
 ')
 MATRIX_SCENARIOS=${PART2_COHORTS[0]}
-FIXED_QOS_SCENARIOS=${PART2_COHORTS[1]}
-FIXED_CLIENTS_QOS_SCENARIOS=${PART2_COHORTS[2]}
-REAUTH_SCENARIOS=${PART2_COHORTS[3]}
-ISSUER_SCENARIOS=${PART2_COHORTS[4]}
-```
-
-Run the fixed-workload stress scenarios separately with explicit targeted
-invocations:
-
-```bash
-./scripts/run-benchmarks \
-  --scenarios TOKEN-PUBLISH-STRESS-JWT,TOKEN-PUBLISH-STRESS-BISCUIT,\
-TOKEN-DATALOG-STRESS-LOW-BISCUIT,TOKEN-DATALOG-STRESS-MED-BISCUIT,\
-TOKEN-DATALOG-STRESS-HIGH-BISCUIT,\
-TOKEN-COMPOSABILITY-ATTENUATED-DATALOG-MED-BISCUIT,\
-TOKEN-COMPOSABILITY-ATTENUATED-DATALOG-HIGH-BISCUIT,\
-TOKEN-COMPOSABILITY-DELEGATED-DATALOG-MED-BISCUIT,\
-TOKEN-COMPOSABILITY-DELEGATED-DATALOG-HIGH-BISCUIT,\
-HTTP-AUTHZ-COMPLEXITY-SIMPLE-JWT,HTTP-AUTHZ-COMPLEXITY-SIMPLE-BISCUIT,\
-HTTP-AUTHZ-COMPLEXITY-MED-JWT,HTTP-AUTHZ-COMPLEXITY-MED-BISCUIT,\
-HTTP-AUTHZ-COMPLEXITY-COMPLEX-JWT,HTTP-AUTHZ-COMPLEXITY-COMPLEX-BISCUIT \
-  --client-topology container-per-client \
-  --client-memory 96m \
-  --skip-build \
-  --skip-tokens
-
-./scripts/run-benchmarks \
-  --scenarios TOKEN-PUBLISH-STRESS-RECONNECT-JWT,TOKEN-PUBLISH-STRESS-RECONNECT-BISCUIT \
-  --client-topology container-per-client \
-  --client-memory 96m \
-  --skip-build \
-  --skip-tokens
-```
-
-Run the excluded lifecycle/control/fan-out targeted scenarios separately:
-
-```bash
-./scripts/run-benchmarks \
-  --scenarios TOKEN-LIFECYCLE-PROACTIVE-REAUTH-JWT,TOKEN-LIFECYCLE-PROACTIVE-REAUTH-BISCUIT,\
-TOKEN-LIFECYCLE-RECONNECT-PUBLISH-JWT,TOKEN-LIFECYCLE-RECONNECT-PUBLISH-BISCUIT,\
-CONTROL-ENFORCEMENT-KICK-JWT,CONTROL-ENFORCEMENT-KICK-BISCUIT,\
-CONTROL-ENFORCEMENT-ACL-READ-NOTIFY-JWT,CONTROL-ENFORCEMENT-ACL-READ-NOTIFY-BISCUIT,\
-CONTROL-CHURN-ACL-MODIFY-JWT,CONTROL-CHURN-ACL-MODIFY-BISCUIT,\
-CONTROL-CHURN-GROUP-CLIENT-JWT,CONTROL-CHURN-GROUP-CLIENT-BISCUIT,\
-SQLITE-RBAC-CHURN-JWT,SQLITE-RBAC-CHURN-BISCUIT \
-  --client-topology container-per-client \
-  --client-memory 96m \
-  --skip-build \
-  --skip-tokens
-
-./scripts/run-benchmarks \
-  --scenarios TOKEN-LIFECYCLE-REAUTH-STORM-JWT,TOKEN-LIFECYCLE-REAUTH-STORM-BISCUIT \
-  --client-topology host \
-  --skip-build \
-  --skip-tokens
+CHURN_SCENARIOS=${PART2_COHORTS[1]}
+FIXED_QOS_SCENARIOS=${PART2_COHORTS[2]}
+FIXED_CLIENTS_QOS_SCENARIOS=${PART2_COHORTS[3]}
+REAUTH_SCENARIOS=${PART2_COHORTS[4]}
+ISSUER_SCENARIOS=${PART2_COHORTS[5]}
+readarray -t PART2_QOS_LEVELS < <(cd mqtt-auth-biscuit && uv run --locked python -c '
+from benchmarks.run_scenarios import PART2_SWEEP_COHORT_QOS
+for name in ("matrix", "churn", "fixed_qos", "fixed_clients_qos", "reauth", "issuer"):
+    print(" ".join(map(str, PART2_SWEEP_COHORT_QOS[name])))
+')
+MATRIX_QOS=${PART2_QOS_LEVELS[0]}
+CHURN_QOS=${PART2_QOS_LEVELS[1]}
+ISSUER_QOS=${PART2_QOS_LEVELS[5]}
 ```
 
 Run each cohort only across its effective axes. The ordinary cohorts contribute
-1,314 runs and the issuer-backed default/stripped cohort contributes 216 runs:
+1,296 runs and the issuer-backed default/stripped cohort contributes 216 runs:
 
 ```bash
 run_p2() {
-  label=$1 scenarios=$2 clients=$3 messages=$4 qos=$5
+  local label=$1 scenarios=$2 clients=$3 messages=$4 qos=$5
   shift 5
-  ./scripts/run-benchmarks --scenarios "$scenarios" --clients "$clients" \
+  run_full_batch "p2-${label}" --scenarios "$scenarios" --clients "$clients" \
     --messages "$messages" --qos "$qos" --client-topology container-per-client \
-    --client-memory 96m --skip-build --skip-tokens "$@"
-  mv mqtt-auth-biscuit/benchmarks/results "mqtt-auth-biscuit/benchmarks/results-p2-${label}"
+    --client-memory 96m "$@" || exit 1
 }
 
 for run in 1 2 3; do
   for clients in 10 50 200; do
     for messages in 10 100; do
-      for qos in 0 1 2; do
+      for qos in $MATRIX_QOS; do
         run_p2 "matrix-c${clients}-m${messages}-q${qos}-r${run}" \
           "$MATRIX_SCENARIOS" "$clients" "$messages" "$qos"
+      done
+      for qos in $CHURN_QOS; do
+        run_p2 "churn-c${clients}-m${messages}-q${qos}-r${run}" \
+          "$CHURN_SCENARIOS" "$clients" "$messages" "$qos"
       done
       run_p2 "fixed-qos-c${clients}-m${messages}-r${run}" \
         "$FIXED_QOS_SCENARIOS" "$clients" "$messages" 1
@@ -369,9 +330,9 @@ for run in 1 2 3; do
   done
   run_p2 "reauth-r${run}" "$REAUTH_SCENARIOS" 1 1 1
 
-  for kind in JWT BISCUIT; do
-    scenario="TOKEN-ISSUER-BASELINE-${kind}"
-    for clients in 10 50 200; do for messages in 10 100; do for qos in 0 1 2; do
+  for scenario in ${ISSUER_SCENARIOS//,/ }; do
+    kind=${scenario##*-}
+    for clients in 10 50 200; do for messages in 10 100; do for qos in $ISSUER_QOS; do
       run_p2 "issuer-${kind}-default-c${clients}-m${messages}-q${qos}-r${run}" \
         "$scenario" "$clients" "$messages" "$qos"
       if [ "$kind" = JWT ]; then
@@ -387,118 +348,52 @@ for run in 1 2 3; do
 done
 ```
 
-**Note**: `--token-issuer-no-default-grants` is now forwarded by the Rust wrapper, but if you need to invoke the Python module directly for other lower-level flags, use:
-
-```bash
-cd mqtt-auth-biscuit
-uv run --locked python -m benchmarks.run_scenarios \
-  --scenarios-arg "$SWEEP_SCENARIOS" \
-  --clients "$clients" \
-  --messages "$messages" \
-  --qos "$qos" \
-  --client-topology container-per-client \
-  --client-memory 96m \
-  --token-issuer-no-default-roles \
-  --token-issuer-no-default-grants
-cd ..
-```
-
 ### Step 4: Collect results
 
 All results land in `mqtt-auth-biscuit/benchmarks/results-p{1,2}-*/`.
 
-Each directory contains:
+Each directory contains these outputs when applicable.
 
 | File | Content |
 |------|---------|
 | `<SCENARIO_ID>.json` | Per-scenario metrics (latency, throughput, resource snapshots) |
 | `summary.json` | Aggregated metrics across all scenarios in that run |
 | `summary.csv` | Same as CSV |
-| `pcap/<SCENARIO_ID>.pcap` | Packet captures (if tcpdump enabled) |
-| `perf/perf-*.json` | CPU profiling data (if `--perf` enabled) |
+| `pcap/<SCENARIO_ID>.pcap` | Packet captures for MTU scenarios |
 
-## Runtime Estimates
+## Verifying completeness
 
-The workload-shape split means Part 1 is no longer four invocations of every
-scenario. Matrix scenarios run for all four client/message combinations,
-partially fixed scenarios run only over their free axis, and fully fixed
-scenarios run once per repetition.
+For a new full reproduction, reconcile each batch with the registry inventory,
+workload coordinates, and repetition before reviewing the measurements. Expect
+3,186 Part 1 and 1,512 Part 2 scenario JSONs. A Part 2 batch contains 22 matrix
+results, one churn result, three fixed-QoS results, two fixed-client/QoS results,
+two reauth results, or one result per issuer kind and mode. Use the
+[verification procedure](TESTING.md#phase-8--final-completeness-and-sign-off)
+to check uniqueness, result contracts, and exclusions. A file count alone
+cannot establish completeness.
 
-| Component | Planned scenario-runs | Estimated time |
-|-----------|----------------------:|---------------:|
-| Part 1 | 3,186 | ~3–5 days |
-| Part 2 | 1,530 | ~2–4 days |
-| **Total** | **4,716** | **~5–9 days** |
+## Analyzing results
 
-These are planning estimates, not performance results. Plan for overnight and
-weekend runs and preserve each invocation's output separately.
+For the completed campaign, start with the
+[final analysis index](SEMANTIC-VERIFIED.md#final-dataset-and-provenance).
 
-## Verifying Completeness
-
-After all runs, count result files:
-
-```bash
-# Part 1: each directory contains only its workload-shape group. Across all
-# Part 1 directories, expect 3,186 non-summary scenario JSON files.
-total=0
-for d in mqtt-auth-biscuit/benchmarks/results-p1-*/; do
-  count=$(find "$d" -maxdepth 1 -type f -name '*.json' \
-    ! -name 'summary.json' | wc -l)
-  echo "$d: $count scenarios"
-  total=$((total + count))
-done
-echo "Part 1 total: $total / 3186"
-
-# Part 2: expect 32 JSON files per sweep run
-for d in mqtt-auth-biscuit/benchmarks/results-p2-*/; do
-  count=$(find "$d" -maxdepth 1 -type f -name '*.json' \
-    ! -name 'summary.json' | wc -l)
-  echo "$d: $count scenarios"
-done
-```
-
-## Analyzing Results
-
-Use the aggregation script on any results directory:
+For a new invocation, inspect its raw scenario JSONs and generated summaries.
+You can regenerate the summaries for an individual batch:
 
 ```bash
 cd mqtt-auth-biscuit
+batch=benchmarks/results-p1-c10-m10-r1
 uv run --locked python -m benchmarks.aggregate_results \
-  --input benchmarks/results-p1-c10-m10-r1 \
-  --out-json summary.json \
-  --out-csv summary.csv
+  --input "$batch" \
+  --out-json "$PWD/${batch}-summary-review.json" \
+  --out-csv "$PWD/${batch}-summary-review.csv"
 cd ..
 ```
 
-Or aggregate across all Part 1 runs for a combined view:
-
-```bash
-cd mqtt-auth-biscuit
-mkdir -p benchmarks/combined-part1
-for d in benchmarks/results-p1-*/; do
-  cp "$d"/*.json benchmarks/combined-part1/ 2>/dev/null
-done
-uv run --locked python -m benchmarks.aggregate_results \
-  --input benchmarks/combined-part1 \
-  --out-json benchmarks/combined-part1/summary.json \
-  --out-csv benchmarks/combined-part1/summary.csv
-cd ..
-```
-
-## Notes
-
-- The `--skip-build` and `--skip-tokens` flags avoid rebuilding the plugin and
-  regenerating tokens on every iteration. Build once in Step 1.
-- Docker is brought up and torn down by each `run-benchmarks` invocation. No
-  stale container state leaks between runs.
-- The results directory is **not** cleaned between runs. The `mv` after each
-  invocation preserves results and prevents the aggregator from picking up
-  stale data.
-- MTU scenarios (`NETWORK-MTU-*`) use `netem` for traffic shaping. These
-  require `NET_ADMIN` capability on the mosquitto container (already configured
-  in `docker-compose.yml`).
-- Every compatible command in this run plan uses `--client-topology container-per-client` because the research environment expects one independent container per MQTT client. REAUTH-STORM scenarios explicitly use `host` because the runner does not support them with `container-per-client`.
-- Every command in this run plan also uses `--client-memory 96m` for `container-per-client` runs because the default 512 MB loadgen limit is not feasible at high client counts. Keep this explicit memory override unless the documented step intentionally changes the limit.
-- REAUTH-STORM, RECONNECT-PUBLISH, and THUNDERING-HERD scenarios have internal
-  client counts that override `--clients`. The `--clients` flag still affects
-  other scenarios in the same batch.
+The aggregator resolves relative output paths inside the input batch and
+reads every top-level JSON except `summary.json`. Use absolute paths to write
+review summaries beside the batch. Keep each result tied to
+its batch coordinates and repetition when pooling data for analysis. Filenames
+repeat across batches, so copying them into one directory can overwrite
+results. Per-run latency percentiles summarize different samples and cannot
+be pooled by treating their average as a sample-level percentile.

@@ -1,17 +1,12 @@
 # Running MQTT Auth Benchmarks
 
-This guide explains how to run the benchmarks for the JWT and Biscuit
-authentication plugin.
+Run selected MQTT 5 scenarios with the repository wrapper or the Python
+scenario runner. See the [full run plan](../../RUN.md) for the nominal
+matrices and the [final dataset](../../SEMANTIC-VERIFIED.md#final-dataset-and-provenance)
+for the completed campaign.
 
-**Important Note**: This implementation supports **MQTT v5 only**.
-MQTT v3.1 is not implemented and is out of scope for these benchmarks.
-
-Policy semantics, parity constraints, and scenario meaning are documented in:
-- `../../SCENARIO_POLICIES.md`
-- `../../PROGRESS.md` (gap tracking and implementation status)
-
-For paid-server benchmark host preparation, use the canonical infra path in
-`../../infra/README.md`.
+- [Scenario policies and comparison classes](../../SCENARIO_POLICIES.md)
+- [Benchmark host provisioning](../../infra/README.md)
 
 ## Authz Baseline
 
@@ -22,9 +17,7 @@ neutral:
 - empty `rules`
 - default deny
 
-This means benchmark semantics must be applied explicitly per scenario after
-`/config/reset`. The harness no longer relies on an implicit prefix-based allow
-mode at startup or reset time.
+Each scenario applies its profile or custom rules after `/config/reset`.
 
 ## Scenario Semantics
 
@@ -104,74 +97,62 @@ The full family-to-class mapping is the source-of-truth table in
 - **iperf3**: For network baseline measurement (client-side). The server runs in Docker; the `iperf3` binary must be installed on the host. Install with `sudo apt-get install iperf3`.
 - **openssl**: Required for TLS certificate generation (needed when running TLS-enabled scenarios). Install with `sudo apt-get install openssl`.
 
-## One-Command Run (Recommended)
+## Run selected scenarios
 
-From the repository root, you can run the full workflow (build, token generation,
-scenario run, cleanup) with:
-
-```bash
-./scripts/run-benchmarks
-```
-
-The wrapper intentionally exposes a stable subset of the scenario-runner flags.
-For example:
+From the repository root, the wrapper builds the plugin, generates tokens,
+runs the selected scenarios, and cleans up Compose services.
 
 ```bash
-./scripts/run-benchmarks --scenarios TOKEN-BASELINE-JWT,TOKEN-BASELINE-BISCUIT
-./scripts/run-benchmarks --tls
+./scripts/run-benchmarks --scenarios TOKEN-BASELINE-JWT,TOKEN-BASELINE-BISCUIT \
+  --out benchmarks/results-token-baseline --exclusive-out
 ```
 
-The `scripts/run-benchmarks` launcher is a thin bash wrapper around the Rust
-crate `tools/run-benchmarks`. It keeps the repo-local command surface stable
-while the orchestration logic lives in Rust. The scenario harness it invokes
-remains `benchmarks.run_scenarios`.
+Use `./scripts/run-benchmarks --help` for the wrapper's options. Running
+without `--scenarios` lists the available IDs after setup. The direct runner
+can list IDs without the wrapper's build and token generation.
 
-Supported wrapper pass-through flags are currently `--scenarios`, `--clients`,
-`--messages`, `--qos`, `--workload-shape`, `--tls`, `--tls-insecure`, `--tls-ca-file`,
-`--token-issuer-no-default-roles`, `--token-issuer-no-default-grants`,
-`--biscuit-base64url`, `--token-refresh-codes`, `--client-topology`,
-`--client-memory`, and `--client-cpus`. Use the direct module entrypoint for
-lower-level runner options such as `--perf`, `--iperf3-*`, `--tcpdump-*`,
-or `--out`.
-
-`--workload-shape` accepts `matrix`, `fixed-clients`, `fixed-messages`, or
-`fixed` (and defaults to `all`). The partial shapes retain the CLI matrix level
-for the axis not supplied by the scenario definition; for example, a fan-out
-subscriber slice is `fixed-clients` and still varies `--messages`.
-
-## Step 1: Build the Plugin
-
-The Mosquitto plugin must be built in release mode:
+Except for repository-root wrapper commands, run the examples below from
+`mqtt-auth-biscuit/`. The direct runner exposes options for perf, iperf3,
+and tcpdump. Use `--help` for the full list.
 
 ```bash
-cargo build --release -p mosquitto-auth-biscuit
+uv run --locked python -m benchmarks.run_scenarios --help
 ```
 
-This generates `target/release/libmosquitto_auth_biscuit.so`.
+`--workload-shape` accepts `matrix`, `fixed-clients`, `fixed-messages`,
+`fixed`, or `all` (default). A fixed-client workload still varies
+`--messages` when the scenario leaves that axis open.
 
-> [!IMPORTANT]
-> Current benchmark runs require a Mosquitto build that includes
-> `MOSQ_EVT_BASIC_AUTH.password_len` for binary `CONNECT` passwords. Older
-> brokers are unsupported with the current plugin and may fail later as
-> misleading password-authentication errors instead of failing cleanly at
-> startup. Use the custom source-build path documented in
-> [`../../BUILD-MOSQUITTO.md`](../../BUILD-MOSQUITTO.md) when the official
-> image does not yet contain the required commit.
+## Result directories
 
-## Step 2: Generate Tokens
+The wrapper resolves relative `--out` paths from `mqtt-auth-biscuit/`.
+`--exclusive-out` claims a new directory before workloads begin and preserves
+partial results if the run fails. Record the batch coordinates, repetition,
+command, source freeze, and hashes outside the fresh destination. The runner
+writes one JSON per scenario and JSON/CSV summaries for the invocation.
 
-The benchmarking suite uses predefined tokens. Generate them with:
+Capture and profiling paths default to `benchmarks/results/pcap` and
+`benchmarks/results/perf`. With a custom `--out`, set
+`--tcpdump-output-dir` or `--perf-output-dir` on the direct runner to give
+those artifacts a distinct path for each batch. The default capture mode
+captures MTU scenarios, which require both capture and analysis.
 
-```bash
-cargo run -p gen-tokens
-```
+## Frozen Docker images
 
-This creates/updates `benchmarks/tokens.json`, the full
-`benchmarks/password-map.json` credential-profile bundle, and
-`docker/biscuit_public.key` for the Mosquitto plugin.
+From the repository root, use `COMPOSE_PROFILES='*' ./scripts/freeze-images`
+to build and record the image IDs and Compose hashes in
+`mqtt-auth-biscuit/docker/image-freeze.json`. Use `./scripts/save-images`
+to archive the images and `./scripts/check-images` to verify the local IDs.
+For reproduction from an existing freeze, restore its manifest and load its
+image archive. Pass `--no-build-images` to the wrapper or direct runner to
+use the verified local images. `--skip-build` skips only the wrapper's
+host-side Rust build.
 
-The Docker Mosquitto configuration is pre-wired to the deterministic keys used
-by `gen-tokens` (see `docker/mosquitto.conf`).
+## Generate benchmark credentials
+
+The [plugin setup](../README.md) describes the build and deterministic fixture
+generation steps. The generator writes `benchmarks/tokens.json`,
+`benchmarks/password-map.json`, and the broker's public keys under `docker/`.
 
 ### Token Policy Note
 
@@ -349,34 +330,11 @@ generated JWTs.
 The bundle also includes `jwt_deny` and `biscuit_deny` deterministic tokens to
 exercise deny-over-allow behavior in a controlled way.
 
-## Step 3: Start the Environment
+## Scenario configuration
 
-Start the Mosquitto broker and metrics collector (Prometheus) using Docker
-Compose:
-
-```bash
-docker compose -f docker/docker-compose.yml up --build -d
-```
-
-> [!NOTE]
-> The `--build` flag ensures that the plugin is copied into the Docker image
-> correctly.
->
-> Resource snapshots in `benchmarks/run_scenarios.py` now fail fast if
-> Prometheus returns empty CPU or memory vectors. Keep `mosquitto`,
-> `metrics-collector`, and `cadvisor` running for benchmark executions that
-> collect resource telemetry.
-
-## Step 4: Run Benchmarks
-
-Use the scenario harness for reproducible latency and throughput runs:
-
-```bash
-uv run --locked python -m benchmarks.run_scenarios --scenarios-arg TOKEN-BASELINE-JWT,TOKEN-BASELINE-BISCUIT
-```
-
-`benchmarks/metrics_collector.py` remains available only for legacy/manual
-single-run spot checks.
+The scenario runner starts the Compose services for each workload. It uses
+Prometheus and cAdvisor to collect CPU and memory metrics and rejects missing
+required resource snapshots.
 
 ### Static ACL Scenarios (Compound Gate with Two Authorization Sources)
 
@@ -598,102 +556,21 @@ bash docker/tls/generate_certs.sh
 uv run --locked python benchmarks/smoke_test.py --tls
 ```
 
-### Issue 39 Broker Integration Assertions
+### Broker integration tests
 
-Issue 39 adds a dedicated `pytest` integration suite that validates runtime
-enforcement against a real Mosquitto process with the Rust plugin loaded.
-
-Test location:
-- `tests/integration/test_runtime_enforcement.py`
-
-Marker:
-- `broker_integration`
-- `ci_heavy`
-
-Run the fast local suite (matches PR/push CI runtime coverage):
+From the repository root, run the broker integration tests against a real
+Mosquitto process with the plugin loaded:
 
 ```bash
-cd mqtt-auth-biscuit
-pytest -m "broker_integration and not ci_heavy" \
-  tests/integration/test_runtime_enforcement.py -vv -s
+uv run --locked --group dev pytest -m "broker_integration and not ci_heavy" \
+  mqtt-auth-biscuit/tests/integration -vv
 ```
 
-Run all Issue 39 broker integration assertions:
-
-```bash
-cd mqtt-auth-biscuit
-pytest -m broker_integration tests/integration/test_runtime_enforcement.py -vv -s
-```
-
-Run only the benchmark flow unit tests used by CI:
-
-```bash
-cd mqtt-auth-biscuit
-pytest \
-  benchmarks/test_loadgen_wrapper.py \
-  benchmarks/test_acl_read_fanout_churn_coverage.py \
-  benchmarks/test_static_acl_coverage.py \
-  benchmarks/test_authz_config_state.py \
-  benchmarks/test_policy_churn.py -q
-```
-
-CI-compatible invocations:
-
-```bash
-cd mqtt-auth-biscuit
-DOCKER_COMPOSE_BIN="docker compose" \
-pytest -m "broker_integration and not ci_heavy" tests/integration -vv -s
-
-DOCKER_COMPOSE_BIN="docker compose" \
-pytest -m broker_integration tests/integration -vv -s
-```
-
-What this suite asserts:
-- Expiry enforcement in `ACL_CHECK` for JWT and Biscuit with both
-  `acl_read_full_authz=false` and `acl_read_full_authz=true`
-- No false disconnect on non-expired deny paths (`ACL_READ`, `ACL_WRITE`,
-  `ACL_SUBSCRIBE`) and connected allow paths
-- Reconnect with a fresh token after forced expiry disconnect
-- Broker log evidence for `with_will=false` kick semantics
-- Basic auth and MQTT v5 enhanced auth entrypoints
-- Plain TCP and TLS broker modes
-- Control-triggered `disableClient` kick enforcement with reconnect + denied
-  post-change subscribe lifecycle (Issue 31)
-- Fan-out churn runtime enforcement under strict `ACL_READ` dynamic-security
-  configuration
-
-CI split and expected runtime:
-- `pull_request`/`push` runs:
-  - benchmark flow unit tests above
-  - `pytest -m "broker_integration and not ci_heavy" ...`
-- Nightly (`schedule`) and manual (`workflow_dispatch`) runs:
-  - `pytest -m broker_integration ...` (full suite including heavy cases)
-- Typical timing on GitHub-hosted runners:
-  - Benchmark flow unit tests: usually < 1 minute
-  - Fast runtime suite: usually single-digit to low-teens minutes (cache-sensitive)
-  - Full runtime suite: often higher teens to 30+ minutes (cache/load-sensitive)
-
-Failure artifact capture:
-- Set `RUNTIME_ENFORCEMENT_ARTIFACT_DIR=/path/to/out` when running locally to persist:
-  - `mosquitto.log`, `authz.log`, `token-issuer.log`
-  - `docker-compose-ps.txt`, `docker-compose-config.txt`
-  - `context.json` and failed test node IDs
-- CI uploads this artifact directory on broker-integration failures.
-
-Timing bounds and flake-control strategy:
-- Docker bring-up + service readiness bounded to `60s`
-- Client connect/reauth waits bounded to `10s`
-- Expiry disconnect assertion bounded to `8s`
-- Message delivery assertions bounded to `4-5s`
-- Dynamic policy churn settle window uses `1.4s` before post-churn assertions
-- If host load is high, rerun the marker suite once before classifying as a
-  regression
-
-You can also run the full scenario battery from `ARTICLE.md` (MTU sweep, thundering herd, policy complexity, HTTP introspection latency/loss, hybrid contingency, and MQTT reauthentication):
-
-```bash
-uv run --locked python -m benchmarks.run_scenarios
-```
+Use `-m broker_integration` to include heavier cases. The suite checks
+authentication, expiry, policy enforcement, and fanout over TCP and TLS.
+Set `RUNTIME_ENFORCEMENT_ARTIFACT_DIR` to retain failure logs and Compose
+diagnostics. See the [CI workflow](../../.github/workflows/ci-benchmarks.yml)
+for the current test selection.
 
 ### TLS-Enabled Runs
 
@@ -702,8 +579,9 @@ issuer, authz HTTP, and the Prometheus query API):
 
 ```bash
 bash docker/tls/generate_certs.sh
-docker compose -f docker/docker-compose.yml -f docker/docker-compose.tls.yml up --build -d
-uv run --locked python -m benchmarks.run_scenarios --tls
+uv run --locked python -m benchmarks.run_scenarios \
+  --scenarios-arg TOKEN-BASELINE-JWT-TLS,TOKEN-BASELINE-BISCUIT-TLS \
+  --out benchmarks/results-token-baseline-tls --exclusive-out
 ```
 
 Optional TLS flags:
@@ -725,12 +603,6 @@ For the microbenchmark or single-run metrics collector over TLS:
 ```bash
 uv run --locked python benchmarks/mqtt_auth_client.py --token1 "<token>" --token2 "<token>" --token1-topic "sensors/<client_id>/before" --token2-topic "sensors/<client_id>/after" --tls
 uv run --locked python benchmarks/metrics_collector.py --tls --port 8883
-```
-
-To select a different Mosquitto configuration for a run (e.g. HTTP policy or hybrid policy), set `MOSQUITTO_CONF`:
-
-```bash
-MOSQUITTO_CONF=docker/mosquitto_http.conf uv run --locked python -m benchmarks.run_scenarios
 ```
 
 ### HTTP Policy Backend Schema (HTTP/Hybrid Modes)
@@ -835,12 +707,12 @@ uv run --locked python -m benchmarks.run_scenarios --scenarios-arg BASELINE-NO-A
 
 Disable iperf3 baseline (faster startup, no network validation):
 ```bash
-uv run --locked python -m benchmarks.run_scenarios --no-iperf3
+uv run --locked python -m benchmarks.run_scenarios --scenarios-arg TOKEN-BASELINE-JWT --no-iperf3
 ```
 
 Adjust minimum expected throughput for constrained environments:
 ```bash
-uv run --locked python -m benchmarks.run_scenarios --iperf3-min-mbps 10.0
+uv run --locked python -m benchmarks.run_scenarios --scenarios-arg TOKEN-BASELINE-JWT --iperf3-min-mbps 10.0
 ```
 
 ### Result Structure
@@ -1003,27 +875,38 @@ role attests the expected clock source and payload version.
 ### Synchronized Connect Bursts
 
 `TOKEN-THUNDERING-HERD-JWT` and `TOKEN-THUNDERING-HERD-BISCUIT` enable
-`sync_connect` so clients wait until the runner releases a shared start gate
-before connecting to Mosquitto.
+`sync_connect`, which is a two-phase barrier:
+
+1. **Connect phase** - every participant waits until all others are ready, then
+   all begin establishing MQTT connections together.
+2. **Publish phase** - each process holds its measured publish workload until
+   every participant has reported ready *after* its CONNACK(s). Only then does
+   the runner release the publish gate, so all participants publish
+   concurrently. This prevents early connecters from saturating the broker's
+   connection event loop while slower clients are still connecting.
 
 Topology behavior:
 
-- `container-single`: Rust `mqtt-loadgen` uses an in-process synchronization
-  gate across its worker tasks.
+- `container-single`: Rust `mqtt-loadgen` uses in-process gates across its
+  worker tasks for both phases; the publish gate releases only after every local
+  client has connected.
 - `container-per-client`: `run_scenarios.py` starts one loadgen container per
-  MQTT client, ensures the `sync-barrier` Compose service is running, waits
-  until all participants are ready, and then releases the external barrier.
-- `host`: uses the same in-process gate as direct local loadgen execution.
+  MQTT client, ensures the `sync-barrier` Compose service is running, and
+  coordinates both phases as distinct barrier runs (the publish phase reuses the
+  connect run id with a `-publish` suffix).
+- `host`: uses the same in-process gates as direct local loadgen execution.
 
 The external barrier is intentionally a runner-managed implementation detail.
 Operators normally select it only by choosing `--client-topology
 container-per-client`; direct loadgen barrier flags are reserved for diagnostics.
 
-Result JSON includes a `sync_connect` section with barrier mode, participant
-count, ready count, release timestamp, maximum ready skew, client wait summary,
-and any `sync_*` errors. Fan-out split-role runs, Biscuit delegation handoff, and
-reauth-storm runs have dedicated coordination paths and intentionally reject
-incompatible `sync_connect` combinations.
+Result JSON includes a `sync_connect` section with the connect-phase barrier
+mode, participant count, ready count, release timestamp, maximum ready skew,
+client wait summary, and any `sync_barrier_*` errors, plus a nested
+`publish_barrier` object with the same fields for the publish phase (and
+`sync_publish_barrier_*` errors). Fan-out split-role runs, Biscuit delegation
+handoff, and reauth-storm runs have dedicated coordination paths and
+intentionally reject incompatible `sync_connect` combinations.
 
 ### Reconnect-and-Publish Lifecycle Bursts
 
@@ -1122,7 +1005,7 @@ cargo run --locked -p gen-tokens --bin mqtt-loadgen -- \
 - **Data impact**: Compare `publish.mean_ms` between baseline (`TOKEN-BASELINE-JWT`, `TOKEN-BASELINE-BISCUIT`) and interleaved scenarios to quantify data plane degradation
 - **Injection efficiency**: `control_injection_delay` should remain low (<5ms); high values indicate broker contention
 
-## Step 5: Cleanup
+## Manual Compose cleanup
 
 When finished, stop the environment:
 
@@ -1158,84 +1041,27 @@ Run with default tcpdump capture (auto-enabled for MTU scenarios):
 uv run --locked python -m benchmarks.run_scenarios --scenarios-arg NETWORK-MTU-200-JWT,NETWORK-MTU-500-BISCUIT-CHAIN-25
 ```
 
-Disable packet capture entirely:
-```bash
-uv run --locked python -m benchmarks.run_scenarios --no-tcpdump
-```
+MTU scenarios require capture and analysis. Use `--tcpdump-filter` to
+adjust the filter while retaining the MQTT traffic needed for validation.
 
-Capture only, skip analysis (faster for bulk captures):
-```bash
-uv run --locked python -m benchmarks.run_scenarios --no-tcpdump-analyze
-```
+### Capture validation and metrics
 
-Custom filter to capture all traffic:
-```bash
-uv run --locked python -m benchmarks.run_scenarios --tcpdump-filter "tcp"
-```
+The result JSON stores packet analysis under `packet_analysis_result`:
 
-### Metrics Captured
+| Field | Meaning |
+| --- | --- |
+| `metrics` | Packet and byte counts, fragment and retransmission counts, maximum observed IP packet size, and capture timestamps |
+| `workload_interval_coverage` | MQTT packet, payload, and TCP session counts for each measured interval |
+| `tcp_streams` | Statistics by TCP endpoint pair |
+| `fragmentation_stats`, `token_size_correlation` | Fragment counts and MTU/token-size estimates |
 
-Packet analysis results are included in scenario output JSON under `packet_analysis_result`:
+The runner checks that each measured interval contains MQTT payload traffic
+and covers the expected number of client connections. The interval counter
+distinguishes successive TCP sessions that reuse an endpoint pair and
+deduplicates retransmitted SYN packets. The maximum observed IP packet size
+must fit the effective MTU.
 
-```json
-{
-  "packet_analysis_result": {
-    "enabled": true,
-    "pcap_file": "benchmarks/results/pcap/NETWORK-MTU-200-JWT.pcap",
-    "metrics": {
-      "total_packets": 1250,
-      "total_bytes": 456780,
-      "fragment_count": 42,
-      "retransmission_count": 3,
-      "tcp_packets": 1200,
-      "ip_packets": 1250
-    },
-    "inter_packet_deltas_ms": {
-      "p50_ms": 1.234,
-      "p95_ms": 5.678,
-      "p99_ms": 12.345,
-      "mean_ms": 2.345,
-      "max_ms": 45.678,
-      "min_ms": 0.123
-    },
-    "tcp_streams": {
-      "192.168.1.10:54321-192.168.1.20:1883": {
-        "src_ip": "192.168.1.10",
-        "src_port": 54321,
-        "dst_ip": "192.168.1.20",
-        "dst_port": 1883,
-        "packets": 625,
-        "bytes": 228390,
-        "fragments": 21,
-        "retransmissions": 1
-      }
-    },
-    "fragmentation_stats": {
-      "fragments_detected": 42,
-      "fragmented_packets": 28,
-      "max_fragment_chain": 3,
-      "avg_fragment_size": 180.5,
-      "min_fragment_size": 150,
-      "max_fragment_size": 200,
-      "token_size_bytes": 1256,
-      "expected_fragments": 7
-    },
-    "token_size_correlation": {
-      "token_bytes": 1256,
-      "mtu_configured": 200,
-      "fragmentation_ratio": 0.0336,
-      "bytes_per_fragment": 29.9,
-      "packets_per_token_estimate": 9.42
-    }
-  }
-}
-```
-
-### Research Interpretation
-
-- **Fragmentation ratio**: Higher ratios indicate more network overhead from token transmission
-- **Bytes per fragment**: Lower values suggest inefficient fragmentation (more headers per data)
-- **Retransmissions**: Under MTU stress, retransmissions indicate network congestion or packet loss
-- **Token size correlation**: Directly relates token size to network fragmentation costs
-
-This data supports `ARTICLE.md`'s fragmentation hypothesis (H₂/H₃ validation) by quantifying the network-level impact of token size under varying MTU constraints.
+IP fragment counts and TCP retransmissions describe the capture. The
+token-size estimates approximate network overhead, while TLS and concurrent
+traffic can also contribute packets. Use the scenario's workload and transport
+settings when comparing captures.

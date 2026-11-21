@@ -2,8 +2,8 @@ use base64::{Engine as _, engine::general_purpose};
 use bytes::Bytes;
 use clap::Parser;
 use gen_tokens::mqtt_helpers::{
-    ClientSpec, MqttHelperError, Result, connect_reason_code, mqtt_options, puback_reason_code,
-    qos, subscribe_reason_code,
+    ClientSpec, DEFAULT_KEEPALIVE_SECONDS, MqttHelperError, Result, connect_reason_code,
+    mqtt_options, puback_reason_code, qos, subscribe_reason_code,
 };
 use rumqttc::mqttbytes::v5::{DisconnectReasonCode, LastWill, Packet};
 use rumqttc::{AsyncClient, Event, PublishResult};
@@ -140,6 +140,7 @@ async fn handle(cmd: Command, state: &mut Option<ClientState>) -> Result<Respons
                 client_id,
                 username,
                 password: decode_b64(password_b64.as_deref())?,
+                keep_alive: Duration::from_secs(u64::from(DEFAULT_KEEPALIVE_SECONDS)),
                 tls,
                 tls_ca_file,
                 tls_insecure,

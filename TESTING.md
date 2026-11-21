@@ -1,14 +1,9 @@
 # Scenario testing and result-verification plan
 
-This document defines the gates for testing every benchmark scenario and
-reviewing every result for semantic errors or suspicious measurements.
-[`RUN.md`](RUN.md) remains the canonical source for the complete execution
-matrix and commands. [`SEMANTIC-VERIFIED.md`](SEMANTIC-VERIFIED.md) records what
-has actually been verified.
-
-Terminology: *Phases* are verification stages in this document; *Parts* are the
-execution matrices defined in [`RUN.md`](RUN.md). Phases 6 and 7 execute
-Part 1 and Part 2, respectively; the two numbering schemes are unrelated.
+Use this checklist when qualifying new benchmark runs or reviewing their
+measurements. [RUN.md](RUN.md) defines the nominal full matrix. The
+[final audit record](SEMANTIC-VERIFIED.md#final-dataset-and-provenance) records
+the completed campaign's approved scope and analysis inputs.
 
 The process deliberately separates three questions:
 
@@ -26,9 +21,8 @@ resolved, rerun, or explicitly documented as an expected outcome.
 - Build and generate credentials once for a batch. Use `--skip-build` and
   `--skip-tokens` only after recording the commit and confirming that the
   generated artifacts match it.
-- Never reuse `mqtt-auth-biscuit/benchmarks/results` across invocations. Move it
-  to a directory whose name records every varied dimension, as shown in
-  `RUN.md`.
+- Give each invocation its own output directory. Use the full-matrix batch
+  helper in [RUN.md](RUN.md) or the [exclusive output options](mqtt-auth-biscuit/benchmarks/RUNNING_BENCHMARKS.md#result-directories).
 - Preserve the scenario JSON, `summary.json`, `summary.csv`, runner log, Docker
   diagnostics, packet captures, and profiling output produced by the run.
 - Record the Git commit, worktree status, Rust/Python/Docker versions, host,
@@ -40,8 +34,7 @@ resolved, rerun, or explicitly documented as an expected outcome.
 
 ## Mandatory test-review-fix loop
 
-Apply this loop after **every invocation or small batch**, not after completing a
-phase:
+Apply this loop after every invocation or small batch.
 
 1. **Test:** run the smallest currently planned batch and preserve its raw
    output.
@@ -437,10 +430,10 @@ fixed_clients_qos: 2; reauth: 2; issuer: 1 per kind/mode cell), for
 
 Goal: produce an auditable statement of exactly what can be used in analysis.
 
-1. Count results as described in `RUN.md`: 3,186 Part 1 scenario runs and 1,512
-   Part 2 scenario runs.
-2. Compare result scenario IDs against the frozen Phase 0 inventory and the
-   expected matrix cells. Detect missing, duplicate, stale, and extra files.
+1. Reconcile the accepted results with the frozen scope and expected workload
+   coordinates, including repetition. A full reproduction expects 3,186 Part 1
+   and 1,512 Part 2 results. Use the locked scope for an approved subset.
+2. Check for missing, duplicate, stale, and extra results.
 3. Regenerate summaries only from accepted raw results.
 4. Sample summary rows back to source JSON and verify counts, percentiles,
    credential attestations, and scenario configuration survived aggregation.
@@ -452,8 +445,8 @@ Goal: produce an auditable statement of exactly what can be used in analysis.
    - reruns or exclusions with reasons;
    - blocked scenarios with no usable evidence.
 
-6. Update `SEMANTIC-VERIFIED.md` with the commit, matrix coverage, accepted
-   scenario families, retired/blocked cases, and interpretation boundaries.
+6. Record the commit, matrix coverage, accepted scenario families, exclusions,
+   and interpretation limits in the run's verification report.
 
 Final gate: every planned cell is accounted for, every accepted result passed
 its semantic contract and suspicious-number review, and no aggregate contains a

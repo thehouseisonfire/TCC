@@ -1,19 +1,7 @@
 # Perf Profiling Guide
 
-This document is the perf-specific companion to
-`RUNNING_BENCHMARKS.md`.
-
-- Benchmark execution workflow and scenario orchestration: `RUNNING_BENCHMARKS.md`
-- Project status and issue tracking: `../../PROGRESS.md`
-
-## Scope
-
-Use this file for host-level perf concerns only:
-
-- Linux perf prerequisites and permissions
-- perf-specific CLI flags and output layout
-- CPU-counter interpretation (CPI/cache behavior)
-- perf troubleshooting
+This guide covers host prerequisites, perf options, and interpretation of CPU
+counters. For scenario execution, see the [benchmark runbook](RUNNING_BENCHMARKS.md).
 
 ## Host Prerequisites
 
@@ -150,10 +138,3 @@ No Mosquitto PID / empty samples:
 - Keep CPU pinning stable for broker/load generator.
 - Prefer fixed CPU governor during measurement windows.
 - Repeat runs and compare distributions, not single values.
-
-## References
-
-- `RUNNING_BENCHMARKS.md`
-- `../../PROGRESS.md`
-- `../../ARTICLE.md`
-- `man perf`

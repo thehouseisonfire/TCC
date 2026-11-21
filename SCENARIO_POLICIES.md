@@ -1,4 +1,4 @@
-# Scenario Policies (Issue 9)
+# Scenario Policies
 
 This document enumerates the **authorization policies** used across benchmark scenarios and
 analyzes parity between JWT and Biscuit enforcement. It is intended to keep the experimental
@@ -441,16 +441,12 @@ Research alignment:
 - DYNAMIC-SECURITY-ANONYMOUS-BASELINE validates functional handling of unauthenticated clients with policy enforcement.
 - Compare with `BASELINE-NO-AUTH` (no authz) and token scenarios (`TOKEN-BASELINE-JWT`, `TOKEN-BASELINE-BISCUIT`) to estimate overhead.
 
-## 3) Fairness And Alignment Tracking
+## 3) Fairness and alignment
 
-To avoid duplicated backlog text, parity gaps and action items are tracked in:
-`PROGRESS.md#7-policy-parity-gaps-tracking` and `PROGRESS.md#8-open-issues`.
-
-This file remains the source of truth for:
-
-1. Policy source definitions and semantics (`## 1`).
-2. Scenario-to-policy mapping (`## 2`).
-3. Implementation references (`## 4`).
+Use the scenario's semantic class and policy path when selecting comparators.
+Keep workload shape, credential roles, and access outcomes aligned for matched
+comparisons. The [semantic verification record](SEMANTIC-VERIFIED.md) describes
+the coverage and interpretation limits.
 
 ## 4) Reference File Index
 

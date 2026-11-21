@@ -6,7 +6,9 @@ authorization plugin for Eclipse Mosquitto, a scenario-driven benchmark suite,
 MQTT load-generation clients, Docker fixtures, and infrastructure for preparing
 a controlled benchmark host.
 
-The plugin is a research prototype and currently supports MQTT 5 only.
+The plugin is a research prototype for MQTT 5. The final campaign closed with
+**4,101 accepted results**. The [semantic verification record](SEMANTIC-VERIFIED.md)
+points to the analysis index and explains the scope of the completed campaign.
 
 ## Repository layout
 
@@ -36,43 +38,19 @@ Install the pinned Python dependencies from the repository root:
 uv sync --locked
 ```
 
-Build the plugin and generate the benchmark token fixtures:
+Run a small JWT/Biscuit comparison with the repository wrapper:
 
 ```bash
-cargo build \
-  --locked \
-  --release \
-  --manifest-path mqtt-auth-biscuit/Cargo.toml \
-  -p mosquitto-auth-biscuit
-
-cargo run \
-  --locked \
-  --manifest-path mqtt-auth-biscuit/Cargo.toml \
-  -p gen-tokens \
-  --bin gen-tokens
+./scripts/run-benchmarks --scenarios TOKEN-BASELINE-JWT,TOKEN-BASELINE-BISCUIT \
+  --clients 2 --messages 10 \
+  --out benchmarks/results-quickstart --exclusive-out
 ```
 
-The plugin library is written to
-`mqtt-auth-biscuit/target/release/libmosquitto_auth_biscuit.so`.
-
-Start the local broker and supporting services:
-
-```bash
-docker compose \
-  -f mqtt-auth-biscuit/docker/docker-compose.yml \
-  up --build
-```
-
-For benchmark execution, use the repository-level wrapper:
-
-```bash
-./scripts/run-benchmarks --help
-```
-
-See the
-[benchmark runbook](mqtt-auth-biscuit/benchmarks/RUNNING_BENCHMARKS.md) before
-starting a scenario run; it documents scenario selection, topology, output,
-packet capture, and performance-measurement options.
+The wrapper builds the plugin, generates benchmark credentials, manages the
+Docker services, and writes the scenario JSON and summaries to
+`mqtt-auth-biscuit/benchmarks/results-quickstart/`. Use a fresh output path
+for each run. See the [benchmark runbook](mqtt-auth-biscuit/benchmarks/RUNNING_BENCHMARKS.md)
+for TLS, topology, packet capture, and profiling.
 
 ## Development
 
@@ -111,14 +89,8 @@ uv run --locked --group dev mypy mqtt-auth-biscuit
 
 ## Documentation
 
-- [Plugin overview and local Docker setup](mqtt-auth-biscuit/README.md)
-- [Benchmark execution guide](mqtt-auth-biscuit/benchmarks/RUNNING_BENCHMARKS.md)
-- [Scenario policy semantics](SCENARIO_POLICIES.md)
-- [Full benchmark run plan](RUN.md)
-- [Benchmark host infrastructure](infra/README.md)
-- [Custom Mosquitto build](BUILD-MOSQUITTO.md)
-- [Research context](ARTICLE.md)
-- [Project status](PROGRESS.md)
+See the [documentation index](DOCUMENTATION.md) for plugin setup, research
+methodology, host provisioning, and verification.
 
 Generated tokens, private key material, local benchmark results, live
 inventories, and environment-specific Docker state should remain local and must

@@ -1,24 +1,12 @@
-# Documentation Hub
+# Documentation index
 
-Use this page as the entry point for maintained project documentation.
-
-## Start Here
-
-- [Workspace overview and quick start](README.md)
-- [Plugin overview and local Docker setup](mqtt-auth-biscuit/README.md)
-- [Benchmark execution runbook](mqtt-auth-biscuit/benchmarks/RUNNING_BENCHMARKS.md)
-- [Full benchmark run plan](RUN.md)
-- [Testing and semantic-verification plan](TESTING.md)
-- [Recorded semantic-verification evidence](SEMANTIC-VERIFIED.md)
-
-## Design and Status
-
-- [Scenario policy semantics and parity](SCENARIO_POLICIES.md)
-- [Project status and backlog](PROGRESS.md)
-- [Research context and methodology](ARTICLE.md)
-- [Perf-specific operator guide](mqtt-auth-biscuit/benchmarks/PERF_PROFILING.md)
-
-## Build and Infrastructure
-
-- [Benchmark host infrastructure](infra/README.md)
-- [Custom Mosquitto source build](BUILD-MOSQUITTO.md)
+| Task | Guide |
+| --- | --- |
+| Start with a small benchmark | [Workspace quick start](README.md#quick-start) |
+| Build the plugin or start the local broker | [Plugin setup](mqtt-auth-biscuit/README.md) |
+| Run and profile selected scenarios | [Benchmark runbook](mqtt-auth-biscuit/benchmarks/RUNNING_BENCHMARKS.md), [perf guide](mqtt-auth-biscuit/benchmarks/PERF_PROFILING.md) |
+| Reproduce the benchmark matrices | [Full run plan](RUN.md) |
+| Review run evidence and acceptance criteria | [Semantic verification record](SEMANTIC-VERIFIED.md), [verification procedure](TESTING.md) |
+| Interpret policy behavior and comparison limits | [Scenario policies](SCENARIO_POLICIES.md), [implementation notes](PROGRESS.md) |
+| Read the research objectives and methodology | [Research notes](ARTICLE.md) |
+| Provision a host or rebuild Mosquitto | [Host infrastructure](infra/README.md), [custom broker build](BUILD-MOSQUITTO.md) |

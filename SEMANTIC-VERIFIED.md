@@ -1,33 +1,63 @@
 # Benchmark semantic verification status
 
-This file records semantic-verification evidence for the benchmark suite. It is
-not the execution plan: [`RUN.md`](RUN.md) is canonical for the current scenario
-count, workload matrices, commands, and time estimates.
+The final campaign closed on **2026-11-17**. The final audit reconciled
+**4,101 accepted scenario results across 486 execution units** with the
+prospectively locked scope, with zero missing, duplicate, unexpected, or
+unvalidated accepted results. Collection took 126 hours and 7 minutes
+of wall-clock time, including interruptions.
 
-“Passed” below means that the observed workload and policy outcome matched the
-scenario contract. A process exiting successfully is not, by itself, semantic
-verification. Historical smoke runs performed before the current result
-contracts are identified separately and must not be treated as completed
-benchmark datasets.
+| Part | Full reproduction plan | Accepted final results |
+| --- | ---: | ---: |
+| Part 1 | 3,186 | 2,763 |
+| Part 2 | 1,512 | 1,338 |
+| Total | 4,698 | 4,101 |
 
-## Current suite status
+Use the **4,101 accepted results** in the sealed analysis index as the final
+dataset for analysis. The final scope omitted 621 slots from the full
+reproduction plan and added a 24-result TLS panel to Part 2, for a net
+reduction of 597 results.
 
-- The suite contains **444 scenarios**: 222 base scenarios and 222 TLS variants.
-- Part 1 contains **3,222 planned runs**. It varies only workload axes that a
-  scenario does not define itself.
-- Part 2 is the **axis-aware 32-scenario sweep**, comprising **1,512 planned
-  runs** across client count, message count, effective QoS, token-issuer
-  configuration, and repetitions. Fixed-axis cohorts are run only over axes they
-  do not define themselves. The full matrix holds 22 scenarios at QoS 0/1/2;
-  `DYNAMIC-SECURITY-CHURN` runs in a dedicated 1-scenario cohort at QoS 1/2
-  only (QoS 0 denial is not client-observable).
-- The complete Part 1 and Part 2 matrices have **not** been run and semantically
-  verified. Earlier minimal executions established startup and basic workload
-  viability only.
-- TLS scenarios still require a TLS-capable execution environment and a complete
-  run before their results can be relied upon.
-- Earlier 440-scenario / 3,456-run records describe the superseded pre-issuer
-  architecture and are historical evidence only.
+The full registry contains 444 scenarios (222 base scenarios and 222 TLS
+variants). The final campaign used the amended BALANCED design for runtime
+feasibility. Both general matrices omit the 200-client/100-message interaction.
+Dedicated cohorts retain their scheduled coordinates, including some at
+200 clients and 100 messages. Part 1 retained the documented host and
+capacity exclusions, with six delegation-handoff slots restored before
+collection. The locked scope has three campaign repetitions per selected
+workload coordinate.
+
+## Final dataset and provenance
+
+Use `ANALYSIS-INDEX.csv` or its JSONL equivalent in the external artifact
+package, `../tcc2-benchmark-artifacts/final-audit-20261117/` on the benchmark
+host. Each row identifies one accepted result and points to its immutable
+scenario JSON and unit summary. Use `slot_id` or the full
+part/cohort/scenario/clients/messages/QoS/mode/repetition key. The index records
+effective workload axes. Campaign repetition comes from the scope and
+invocation, and the raw JSON can contain multiple internal runs.
+
+Read `FINAL-AUDIT-REPORT.md` for acceptance and incident details and
+`PROVENANCE-INDEX.jsonl` for each unit's invocation, source freeze, and
+acceptance record. From the audit directory, run
+`sha256sum -c FINAL-DATASET-SHA256SUMS` to check the sealed dataset. For a
+relocated copy, preserve the artifact directory layout and place the matching
+`TCC2/` checkout alongside `tcc2-benchmark-artifacts/`. The checksum manifest
+references files in that checkout, including the campaign's generated
+`mqtt-auth-biscuit/docker/image-freeze.json`. Resolve the index's absolute
+paths against the relocated package. Use the index for
+dataset membership because the campaign and recovery directories also contain
+failed attempts and diagnostics.
+
+The campaign started at `61cb4b9` and continued at `249d2b0` after a
+packet-validator correction for reused TCP endpoint pairs. Workload execution,
+measurement windows, and acceptance thresholds stayed the same. The audit
+replayed all 189 accepted MTU captures, including the 67 collected before the
+correction. The earlier accepted results and captures retained their original
+hashes. The audit verified collection and provenance. Statistical analysis is
+a subsequent step.
+
+The targeted evidence below records earlier, configuration-specific
+verification. A passing workload matches its declared scenario contract.
 
 ## Validation enforced by the current harness
 
@@ -66,9 +96,9 @@ These checks establish that the declared path was exercised to the extent stated
 by each scenario contract. They do not replace the need to execute the full
 matrix after semantic or architectural changes.
 
-## Strict fanout and churn verification
+## Historical strict fanout and churn verification
 
-A targeted Part 1 rerun exercised 25 fanout/control candidates with 10 messages,
+Before the final campaign, a targeted Part 1 rerun exercised 25 fanout/control candidates with 10 messages,
 container-per-client topology, and explicit result inspection. Of those
 candidates, **24 currently registered scenarios have targeted run evidence whose
 observed outcomes matched their declared designs**. Some of that evidence
@@ -163,9 +193,8 @@ continued after churn. Strict read-churn coverage is provided by the
   metadata and a runner guard. Its post-control denial is client-observable
   as PUBACK rc135 (QoS 1) / PUBREC rc135 (QoS 2); at QoS 0 the denial has no
   client-visible acknowledgement.
-- Fixed-workload stress and lifecycle/control scenarios intentionally define
-  their own client or message axes and must be run as targeted slices described
-  in `RUN.md`.
+- Fixed-workload stress and lifecycle/control scenarios use scenario-defined
+  axes. Use the effective axes in the analysis index when comparing them.
 - Removed `acl_read_cost_per_subscriber_ms` values must not be used. They were
   derived from an invalid interpretation of cross-process timing. Current
   fanout scaling uses publish-side timing and validated delivery counts; receive
@@ -173,3 +202,14 @@ continued after churn. Strict read-churn coverage is provided by the
 - Local result files are evidence for the recorded configuration only. They do
   not imply that another QoS, topology, issuer mode, TLS mode, or workload axis
   has been verified.
+
+## Historical incident records
+
+These records describe earlier freezes and explain why their affected results
+were held. Final dataset membership comes from the analysis index.
+
+- [Part 1 Batch B provenance decision](mqtt-auth-biscuit/benchmarks/PROVENANCE-p1-b23eb22-c10-m100-batchB-r2-HOLD.md)
+- [Part 1 HTTP latency CONNECT diagnosis](mqtt-auth-biscuit/benchmarks/DIAGNOSIS-p1-b23eb22-c10-m100-lat1000-connect-race.md)
+- The early Part 2 freeze `770a096` retained `results-p2-fixed-qos-c10-m10-r1`
+  for that historical dataset. Its c10/m10/q0/r1 matrix attempt and subsequent
+  churn qualification outputs were diagnostic evidence.
